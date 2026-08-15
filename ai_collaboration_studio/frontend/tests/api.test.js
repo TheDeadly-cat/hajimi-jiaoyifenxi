@@ -1,0 +1,422 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { api } from "../src/api.js";
+
+function jsonResponse(payload = { ok: true }) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => payload,
+  };
+}
+
+test("room plugin registry uses the encoded read-only route", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (path, options) => {
+    request = { path, options };
+    return jsonResponse({ ok: true, plugin_registry: {} });
+  };
+  try {
+    await api.roomPluginRegistry("room/一");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(request.path, "/api/rooms/room%2F%E4%B8%80/plugin-registry");
+  assert.equal(request.options.method, undefined);
+});
+
+test("project readiness uses the encoded exact-version GET and forwards cancellation", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  const controller = new AbortController();
+  globalThis.fetch = async (path, options) => {
+    request = { path, options };
+    return jsonResponse({ ok: true, projection: {} });
+  };
+  try {
+    await api.projectReadiness("room/一", "artifact/二", 7, controller.signal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(
+    request.path,
+    "/api/rooms/room%2F%E4%B8%80/artifacts/artifact%2F%E4%BA%8C/versions/7/project-readiness",
+  );
+  assert.equal(request.options.method, undefined);
+  assert.equal(request.options.body, undefined);
+  assert.equal(request.options.signal, controller.signal);
+});
+
+test("project round focus preview and frozen record use encoded read-only routes", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const controller = new AbortController();
+  globalThis.fetch = async (path, options) => {
+    requests.push({ path, options });
+    return jsonResponse({ ok: true, project_round_focus: {} });
+  };
+  try {
+    await api.projectRoundFocus("room/一", controller.signal);
+    await api.projectRoundFocusRecord("room/一", "round/二", controller.signal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(requests[0].path, "/api/rooms/room%2F%E4%B8%80/project-round-focus");
+  assert.equal(requests[1].path, "/api/rooms/room%2F%E4%B8%80/rounds/round%2F%E4%BA%8C/project-round-focus");
+  for (const request of requests) {
+    assert.equal(request.options.method, undefined);
+    assert.equal(request.options.body, undefined);
+    assert.equal(request.options.signal, controller.signal);
+  }
+});
+
+test("action desk GET and transition POST use encoded room routes and forward cancellation", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const controller = new AbortController();
+  const payload = {
+    version: "artifact_action_transition_v1",
+    client_request_id: "artifact_action_transition_test0001",
+    artifact_id: "artifact/二",
+    artifact_version: 3,
+    action_id: "action/一",
+    expected_action_snapshot_sha256: "a".repeat(64),
+    expected_revision: 1,
+    transition: "update",
+    patch: { owner: "张三", due: "周五", state: "open", note: "" },
+    user_confirmed: true,
+  };
+  globalThis.fetch = async (path, options) => {
+    requests.push({ path, options });
+    return jsonResponse({ ok: true, action_desk: {} });
+  };
+  try {
+    await api.actionDesk("room/一", controller.signal);
+    await api.transitionActionDesk("room/一", payload, controller.signal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(requests[0].path, "/api/rooms/room%2F%E4%B8%80/action-desk");
+  assert.equal(requests[0].options.method, undefined);
+  assert.equal(requests[0].options.signal, controller.signal);
+  assert.equal(requests[1].path, "/api/rooms/room%2F%E4%B8%80/action-desk/transitions");
+  assert.equal(requests[1].options.method, "POST");
+  assert.equal(requests[1].options.signal, controller.signal);
+  assert.deepEqual(JSON.parse(requests[1].options.body), payload);
+});
+
+test("cross-room action overview is a query-free read-only GET with cancellation", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  const controller = new AbortController();
+  globalThis.fetch = async (path, options) => {
+    request = { path, options };
+    return jsonResponse({ ok: true, action_desk_overview: {} });
+  };
+  try {
+    await api.actionDeskOverview(controller.signal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(request.path, "/api/action-desk/overview");
+  assert.equal(request.options.method, undefined);
+  assert.equal(request.options.body, undefined);
+  assert.equal(request.options.signal, controller.signal);
+});
+
+test("action continuation uses an encoded read route and explicit POST only", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const controller = new AbortController();
+  const payload = {
+    version: "artifact_action_continuation_v1",
+    client_request_id: "artifact_action_continuation_test0001",
+    source_artifact_id: "artifact/old",
+    source_artifact_version: 2,
+    source_action_id: "action/old",
+    source_action_snapshot_sha256: "a".repeat(64),
+    source_expected_revision: 1,
+    target_artifact_id: "artifact/old",
+    target_artifact_version: 4,
+    target_action_id: "action/new",
+    target_action_snapshot_sha256: "b".repeat(64),
+    reason: "same follow-up",
+    user_confirmed: true,
+  };
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    return jsonResponse({ ok: true, continuations: {} });
+  };
+  try {
+    await api.actionDeskContinuations("room/一", controller.signal);
+    await api.continueActionDesk("room/一", payload, controller.signal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(requests[0].path, "/api/rooms/room%2F%E4%B8%80/action-desk/continuations");
+  assert.equal(requests[0].options.method, undefined);
+  assert.equal(requests[0].options.signal, controller.signal);
+  assert.equal(requests[1].options.method, "POST");
+  assert.equal(requests[1].options.signal, controller.signal);
+  assert.deepEqual(JSON.parse(requests[1].options.body), payload);
+});
+
+test("plugin lifecycle catalog uses the dedicated read-only route", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (path, options) => {
+    request = { path, options };
+    return jsonResponse({ ok: true, plugin_lifecycle: {} });
+  };
+  try {
+    await api.pluginLifecycle();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(request.path, "/api/plugin-registry/lifecycle");
+  assert.equal(request.options.method, undefined);
+});
+
+test("plugin lifecycle preview and transition keep their exact global routes", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const controller = new AbortController();
+  globalThis.fetch = async (path, options) => {
+    requests.push({ path, options });
+    return jsonResponse(path.endsWith("/preview")
+      ? { ok: true, preview: {} }
+      : { ok: true, transition: {} });
+  };
+  const previewPayload = { version: "plugin_lifecycle_preview_request_v1" };
+  const transitionPayload = { version: "plugin_lifecycle_transition_request_v1" };
+  try {
+    await api.previewPluginLifecycle(previewPayload, controller.signal);
+    await api.transitionPluginLifecycle(transitionPayload, controller.signal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(requests[0].path, "/api/plugin-registry/lifecycle-events/preview");
+  assert.equal(requests[0].options.method, "POST");
+  assert.equal(requests[0].options.signal, controller.signal);
+  assert.deepEqual(JSON.parse(requests[0].options.body), previewPayload);
+  assert.equal(requests[1].path, "/api/plugin-registry/lifecycle-events");
+  assert.equal(requests[1].options.method, "POST");
+  assert.equal(requests[1].options.signal, controller.signal);
+  assert.deepEqual(JSON.parse(requests[1].options.body), transitionPayload);
+});
+
+test("storage readiness includes the active room without changing the global default", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (path, options) => {
+    requests.push({ path, options });
+    return jsonResponse({ ok: true, readiness: {} });
+  };
+  try {
+    await api.storageReadiness(true, undefined, "room storage/一");
+    await api.storageReadiness(false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(requests[0].path, "/api/market/storage/readiness?force=1&room=room+storage%2F%E4%B8%80");
+  assert.equal(requests[1].path, "/api/market/storage/readiness");
+});
+
+test("official attestation confirmation posts only to the material-scoped route", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (path, options) => {
+    request = { path, options };
+    return jsonResponse({ ok: true, material: {} });
+  };
+  const payload = {
+    attestation_id: "attestation_123",
+    expected_version: 2,
+    source_sha256: "a".repeat(64),
+    content_sha256: "b".repeat(64),
+    material_snapshot_sha256: "c".repeat(64),
+    user_confirmed: true,
+  };
+  try {
+    await api.confirmOfficialAttestation("room/一", "material/二", payload);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(request.path, "/api/rooms/room%2F%E4%B8%80/materials/material%2F%E4%BA%8C/official-attestation/confirm");
+  assert.equal(request.options.method, "POST");
+  assert.deepEqual(JSON.parse(request.options.body), payload);
+});
+
+test("round execution trace uses the encoded read-only route and forwards cancellation", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  const controller = new AbortController();
+  globalThis.fetch = async (path, options) => {
+    request = { path, options };
+    return jsonResponse({ ok: true, trace: {} });
+  };
+  try {
+    await api.roundExecutionTrace("room/一", "round/二", {
+      limit: 200,
+      cursor: "opaque cursor",
+      signal: controller.signal,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(
+    request.path,
+    "/api/rooms/room%2F%E4%B8%80/rounds/round%2F%E4%BA%8C/audit-trace?limit=200&cursor=opaque+cursor",
+  );
+  assert.equal(request.options.signal, controller.signal);
+  assert.equal(request.options.method, undefined);
+});
+
+test("discussion audit uses the encoded read-only route and forwards independent cancellation", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  const controller = new AbortController();
+  globalThis.fetch = async (path, options) => {
+    request = { path, options };
+    return jsonResponse({ ok: true, discussion_audit: {} });
+  };
+  try {
+    await api.discussionAudit("room/one", "round/two", controller.signal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(
+    request.path,
+    "/api/rooms/room%2Fone/rounds/round%2Ftwo/discussion-audit",
+  );
+  assert.equal(request.options.signal, controller.signal);
+  assert.equal(request.options.method, undefined);
+});
+
+test("artifact evidence graph uses the encoded read-only route and forwards cancellation", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  const controller = new AbortController();
+  globalThis.fetch = async (path, options) => {
+    request = { path, options };
+    return jsonResponse({ ok: true, nodes: [], edges: [] });
+  };
+  try {
+    await api.artifactEvidenceGraph("room/one", "artifact/two", controller.signal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(
+    request.path,
+    "/api/rooms/room%2Fone/artifacts/artifact%2Ftwo/evidence-graph",
+  );
+  assert.equal(request.options.signal, controller.signal);
+  assert.equal(request.options.method, undefined);
+});
+
+test("candidate comparison preview posts to the encoded room route and forwards cancellation", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  const controller = new AbortController();
+  const payload = {
+    version: "candidate_comparison_request_v1",
+    run_ids: ["run/一", "run/二"],
+    user_confirmed_historical_only: true,
+  };
+  globalThis.fetch = async (path, options) => {
+    request = { path, options };
+    return jsonResponse({ ok: true, comparison: {} });
+  };
+  try {
+    await api.previewCandidateComparison("room/一", payload, controller.signal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(request.path, "/api/rooms/room%2F%E4%B8%80/candidate-comparisons/preview");
+  assert.equal(request.options.method, "POST");
+  assert.equal(request.options.signal, controller.signal);
+  assert.deepEqual(JSON.parse(request.options.body), payload);
+});
+
+
+test("candidate experiment creation posts the exact payload and forwards cancellation", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  const controller = new AbortController();
+  const payload = {
+    version: "candidate_experiment_request_v1",
+    client_request_id: "candidate_experiment_request_12345678",
+    artifact_id: "artifact/二",
+    expected_artifact_version: 4,
+    expected_governance_attestation_sha256: "a".repeat(64),
+    candidate_selections: [
+      {
+        candidate_id: "candidate/一",
+        expected_candidate_revision: 2,
+        expected_candidate_origin_message_id: "message_origin",
+        expected_candidate_latest_message_id: "message_latest",
+        expected_candidate_snapshot_sha256: "b".repeat(64),
+      },
+      {
+        candidate_id: "candidate/二",
+        expected_candidate_revision: 3,
+        expected_candidate_origin_message_id: "message_origin_2",
+        expected_candidate_latest_message_id: "message_latest_2",
+        expected_candidate_snapshot_sha256: "c".repeat(64),
+      },
+    ],
+    user_authorized_historical_comparison: true,
+  };
+  globalThis.fetch = async (path, options) => {
+    request = { path, options };
+    return jsonResponse({ ok: true, experiment: { id: "cohort/三" } });
+  };
+  try {
+    await api.createCandidateExperiment("room/一", payload, controller.signal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(request.path, "/api/rooms/room%2F%E4%B8%80/candidate-experiments");
+  assert.equal(request.options.method, "POST");
+  assert.equal(request.options.signal, controller.signal);
+  assert.deepEqual(JSON.parse(request.options.body), payload);
+});
+
+
+test("candidate experiment reread uses the encoded cohort route and forwards cancellation", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  const controller = new AbortController();
+  globalThis.fetch = async (path, options) => {
+    request = { path, options };
+    return jsonResponse({ ok: true, experiment: {} });
+  };
+  try {
+    await api.candidateExperiment("room/一", "cohort/二", controller.signal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(
+    request.path,
+    "/api/rooms/room%2F%E4%B8%80/candidate-experiments/cohort%2F%E4%BA%8C",
+  );
+  assert.equal(request.options.method, undefined);
+  assert.equal(request.options.signal, controller.signal);
+});

@@ -1,0 +1,42 @@
+.reflection-dialog { width: min(720px, 100%); }
+.reflection-dialog header > span { display: inline-flex; align-items: center; gap: 7px; }
+.reflection-status { padding: 2px 5px; border-radius: 3px; color: #8a620c; background: #fff5d9; font-size: 9px; }
+.reflection-status.confirmed { color: #14754a; background: #e9f7ef; }
+
+.reflection-source {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 16px;
+  padding: 10px;
+  border: 1px solid #dbe2ea;
+  border-radius: 5px;
+  background: #f8fafc;
+}
+
+.reflection-source span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.reflection-source small { color: var(--muted); font-size: 9px; }
+.reflection-source strong { overflow: hidden; color: #334155; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.dialog footer.reflection-dialog-footer { justify-content: space-between; }
+.reflection-dialog-footer > span { display: inline-flex; gap: 8px; }
+.reflection-dialog-footer button { display: inline-flex; align-items: center; gap: 5px; }
+
+@media (max-width: 620px) {
+  .reflection-source { grid-template-columns: 1fr; }
+
+  .dialog footer.reflection-dialog-footer,
+  .reflection-dialog-footer > span {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .reflection-dialog-footer > span,
+  .reflection-dialog-footer button {
+    width: 100%;
+  }
+
+  .reflection-dialog-footer button {
+    min-height: 44px;
+    justify-content: center;
+  }
+}

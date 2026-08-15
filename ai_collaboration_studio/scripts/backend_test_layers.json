@@ -1,0 +1,82 @@
+{
+  "version": "backend_test_layers_v1",
+  "layers": [
+    {
+      "id": "migration",
+      "description": "P0 SQLite startup, preview, backup, authorization, apply, recovery, and ownership gates.",
+      "selection": "modules",
+      "tests": [
+        "tests.test_database_migration",
+        "tests.test_database_migration_commit",
+        "tests.test_database_migration_hard_gate_edges",
+        "tests.test_database_migration_recovery",
+        "tests.test_instance_ownership",
+        "tests.test_store_import_isolation",
+        "tests.test_store_startup_hardening"
+      ],
+      "start_directory": "",
+      "pattern": ""
+    },
+    {
+      "id": "core",
+      "description": "Fast host-kernel, protocol, launch, ledger, safety, local HTTP, and source-backup gates.",
+      "selection": "modules",
+      "tests": [
+        "tests.test_backend_test_layers",
+        "tests.test_checkpoints",
+        "tests.test_execution_boundary",
+        "tests.test_http_security",
+        "tests.test_no_live_execution_capabilities",
+        "tests.test_plugin_registry",
+        "tests.test_provider_call_ledger",
+        "tests.test_provider_output",
+        "tests.test_provider_policy",
+        "tests.test_round_launch_http",
+        "tests.test_round_launch_plan",
+        "tests.test_round_objective_validation",
+        "tests.test_server_pause",
+        "tests.test_source_backup",
+        "tests.test_turn_contract",
+        "tests.test_turn_envelope",
+        "tests.test_workflow_policy",
+        "tests.test_write_preconditions"
+      ],
+      "start_directory": "",
+      "pattern": ""
+    },
+    {
+      "id": "domains",
+      "description": "Football, stock, candidate research, domain adapter, and generic round-context gates.",
+      "selection": "modules",
+      "tests": [
+        "tests.test_candidate_comparison",
+        "tests.test_candidate_experiment",
+        "tests.test_candidate_experiment_http",
+        "tests.test_candidate_lineage_scheduling",
+        "tests.test_candidate_risk_review_protocol",
+        "tests.test_candidate_simulation_contract",
+        "tests.test_domain_adapters",
+        "tests.test_football_research",
+        "tests.test_football_research_http",
+        "tests.test_football_research_service",
+        "tests.test_football_round_context_e2e",
+        "tests.test_round_contexts",
+        "tests.test_stock_research",
+        "tests.test_stock_research_http",
+        "tests.test_stock_research_service",
+        "tests.test_stock_room_scope",
+        "tests.test_stock_round_context_e2e"
+      ],
+      "start_directory": "",
+      "pattern": ""
+    },
+    {
+      "id": "full",
+      "description": "Full unittest discovery across every tests/test_*.py module.",
+      "selection": "discover",
+      "tests": [],
+      "start_directory": "tests",
+      "pattern": "test_*.py"
+    }
+  ]
+}

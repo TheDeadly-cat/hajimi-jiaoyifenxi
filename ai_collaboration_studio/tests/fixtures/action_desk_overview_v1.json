@@ -1,0 +1,114 @@
+{
+  "ok": true,
+  "action_desk_overview": {
+    "version": "artifact_action_desk_overview_v1",
+    "integrity_ok": true,
+    "rooms": [
+      {
+        "version": "artifact_action_room_summary_v1",
+        "room_id": "room_sports",
+        "room_title": "体育赛事研究",
+        "integrity_ok": true,
+        "items": [],
+        "counts": {
+          "candidate_count": 0,
+          "item_count": 0,
+          "open_count": 0,
+          "in_progress_count": 0,
+          "blocked_count": 0,
+          "done_count": 0,
+          "cancelled_count": 0
+        },
+        "issues": []
+      },
+      {
+        "version": "artifact_action_room_summary_v1",
+        "room_id": "room_plan",
+        "room_title": "方案共创会",
+        "integrity_ok": true,
+        "items": [],
+        "counts": {
+          "candidate_count": 0,
+          "item_count": 0,
+          "open_count": 0,
+          "in_progress_count": 0,
+          "blocked_count": 0,
+          "done_count": 0,
+          "cancelled_count": 0
+        },
+        "issues": []
+      },
+      {
+        "version": "artifact_action_room_summary_v1",
+        "room_id": "room_storage",
+        "room_title": "美国存储产业投资委员会",
+        "integrity_ok": true,
+        "items": [],
+        "counts": {
+          "candidate_count": 0,
+          "item_count": 0,
+          "open_count": 0,
+          "in_progress_count": 0,
+          "blocked_count": 0,
+          "done_count": 0,
+          "cancelled_count": 0
+        },
+        "issues": []
+      },
+      {
+        "version": "artifact_action_room_summary_v1",
+        "room_id": "room_market",
+        "room_title": "股票观察组",
+        "integrity_ok": true,
+        "items": [],
+        "counts": {
+          "candidate_count": 0,
+          "item_count": 0,
+          "open_count": 0,
+          "in_progress_count": 0,
+          "blocked_count": 0,
+          "done_count": 0,
+          "cancelled_count": 0
+        },
+        "issues": []
+      },
+      {
+        "version": "artifact_action_room_summary_v1",
+        "room_id": "room_project",
+        "room_title": "项目可行性讨论",
+        "integrity_ok": true,
+        "items": [],
+        "counts": {
+          "candidate_count": 0,
+          "item_count": 0,
+          "open_count": 0,
+          "in_progress_count": 0,
+          "blocked_count": 0,
+          "done_count": 0,
+          "cancelled_count": 0
+        },
+        "issues": []
+      }
+    ],
+    "counts": {
+      "room_count": 5,
+      "healthy_room_count": 5,
+      "failed_room_count": 0,
+      "candidate_count": 0,
+      "item_count": 0,
+      "open_count": 0,
+      "in_progress_count": 0,
+      "blocked_count": 0,
+      "done_count": 0,
+      "cancelled_count": 0
+    },
+    "issues": [],
+    "execution_capability": "none",
+    "external_write": false,
+    "can_autonomously_decide": false,
+    "can_replace_user_decision": false,
+    "ranking_produced": false,
+    "winner_claim": false,
+    "user_final_decision_required": true
+  }
+}
