@@ -1,16 +1,19 @@
 import { AlertTriangle, CheckCircle2, CircleDashed, Scale, ShieldCheck } from "lucide-react";
+import { memo } from "react";
 import { candidateGovernanceRows } from "../candidateGovernance";
 import { convergenceAnnouncementText } from "../liveRegionAnnouncements";
+import "../styles/convergence-polish.css";
 
-const USER_DECISION_STATES = {
+const EMPTY_LIST = Object.freeze([]);
+const USER_DECISION_STATES = Object.freeze({
   user_supported: { label: "用户已支持", tone: "support" },
   user_held: { label: "用户已保留", tone: "hold" },
   returned_for_revision: { label: "用户已退回", tone: "return" },
   awaiting_user_decision: { label: "等待用户最终决定", tone: "pending" },
   artifact_required: { label: "等待用户最终决定", tone: "pending" },
-};
+});
 
-function ConvergenceAnnouncer({ convergence }) {
+const ConvergenceAnnouncer = memo(function ConvergenceAnnouncer({ convergence }) {
   return (
     <div
       className="screen-reader-announcer"
@@ -21,19 +24,19 @@ function ConvergenceAnnouncer({ convergence }) {
       {convergenceAnnouncementText(convergence)}
     </div>
   );
-}
+});
 
-function GateRow({ ready, label, detail }) {
+const GateRow = memo(function GateRow({ ready, label, detail }) {
   const Icon = ready ? CheckCircle2 : CircleDashed;
   return (
-    <div className={ready ? "convergence-gate ready" : "convergence-gate"}>
-      <Icon size={13} />
+    <div className={ready ? "convergence-gate ready" : "convergence-gate"} role="listitem">
+      <Icon aria-hidden="true" size={13} />
       <span><strong>{label}</strong><small>{detail}</small></span>
     </div>
   );
-}
+});
 
-function UserDecisionGateRow({ gate }) {
+const UserDecisionGateRow = memo(function UserDecisionGateRow({ gate }) {
   const state = USER_DECISION_STATES[gate.status] || USER_DECISION_STATES.awaiting_user_decision;
   const version = Number(gate.artifact_version || 0);
   const versionDetail = version > 0 ? `绑定产物 v${version}` : "尚无可绑定产物版本";
@@ -43,8 +46,8 @@ function UserDecisionGateRow({ gate }) {
   const Icon = gate.ready ? CheckCircle2 : CircleDashed;
 
   return (
-    <div className={`convergence-gate user-decision-gate ${state.tone}`}>
-      <Icon size={13} />
+    <div className={`convergence-gate user-decision-gate ${state.tone}`} role="group" aria-label="用户最终决定门">
+      <Icon aria-hidden="true" size={13} />
       <span>
         <strong>{state.label}</strong>
         <small>
@@ -55,21 +58,24 @@ function UserDecisionGateRow({ gate }) {
       </span>
     </div>
   );
-}
+});
 
-export function ConvergenceCard({ convergence, running }) {
+export const ConvergenceCard = memo(function ConvergenceCard({ convergence, running }) {
   if (!convergence) {
     return (
-      <section className="inspector-section convergence-section">
+      <section id="inspector-convergence" tabIndex={-1} className="inspector-section convergence-section" data-convergence-tone="loading" aria-label="收敛与决策门">
         <ConvergenceAnnouncer convergence={null} />
-        <div className="section-heading"><strong><Scale size={15} />收敛与决策门</strong><span>正在计算</span></div>
+        <div className="section-heading"><strong><Scale aria-hidden="true" size={15} />收敛与决策门</strong><span>正在计算</span></div>
       </section>
     );
   }
 
   const discussion = convergence.discussion_gate || {};
   const counter = convergence.counterargument_gate || {};
-  const candidateGovernance = candidateGovernanceRows(convergence);
+  const candidateGovernanceProjection = candidateGovernanceRows(convergence);
+  const candidateGovernance = Array.isArray(candidateGovernanceProjection)
+    ? candidateGovernanceProjection
+    : EMPTY_LIST;
   const projectWorkspace = convergence.project_workspace || {};
   const evidence = convergence.evidence_gate || {};
   const decision = convergence.decision_gate || {};
@@ -77,37 +83,72 @@ export function ConvergenceCard({ convergence, running }) {
   const data = convergence.data_gate || {};
   const simulation = convergence.simulation_gate || {};
   const portfolio = convergence.portfolio_gate || {};
-  const blockers = convergence.blockers || [];
-  const nextAction = convergence.next_actions?.[0] || "等待本轮目标。";
-  const technicalGateCount = 4
-    + candidateGovernance.length
-    + (projectWorkspace.applicable ? 1 : 0)
-    + (decision.applicable ? 1 : 0)
-    + (simulation.applicable ? 1 : 0)
-    + (portfolio.applicable ? 1 : 0);
+  const blockers = Array.isArray(convergence.blockers) ? convergence.blockers : EMPTY_LIST;
+  const nextActions = Array.isArray(convergence.next_actions) ? convergence.next_actions : EMPTY_LIST;
+  const nextAction = nextActions[0] || "等待本轮目标。";
+  const marketSymbols = Array.isArray(data.market_symbols) ? data.market_symbols : EMPTY_LIST;
+  const technicalGateStates = [
+    Boolean(discussion.ready),
+    Boolean(counter.ready),
+    ...candidateGovernance.map((gate) => Boolean(gate.ready)),
+    ...(projectWorkspace.applicable ? [Boolean(projectWorkspace.ready)] : EMPTY_LIST),
+    Boolean(evidence.ready),
+    ...(decision.applicable ? [Boolean(decision.ready)] : EMPTY_LIST),
+    Boolean(data.ready),
+    ...(simulation.applicable ? [Boolean(simulation.statistical_claim_allowed)] : EMPTY_LIST),
+    ...(portfolio.applicable ? [Boolean(portfolio.ready)] : EMPTY_LIST),
+  ];
+  const technicalGateCount = technicalGateStates.length;
+  const satisfiedTechnicalGateCount = technicalGateStates.filter(Boolean).length;
+  const remainingTechnicalGateCount = technicalGateCount - satisfiedTechnicalGateCount;
   const tone = convergence.can_present_candidate_best
-    ? "ready"
+    ? "candidate"
     : convergence.can_host_finish ? "review" : "blocked";
+  const badgeLabel = running
+    ? "动态检查"
+    : tone === "candidate"
+      ? "条件候选可展示"
+      : tone === "review" ? "等待用户复核" : "门禁未通过";
+  const OverviewIcon = convergence.can_host_finish ? ShieldCheck : CircleDashed;
 
   return (
-    <section className="inspector-section convergence-section">
+    <section id="inspector-convergence" tabIndex={-1} className="inspector-section convergence-section" data-convergence-tone={tone} aria-label="收敛与决策门">
       <ConvergenceAnnouncer convergence={convergence} />
       <div className="section-heading">
-        <strong><Scale size={15} />收敛与决策门</strong>
-        <span className={`convergence-badge ${tone}`}>{running ? "动态检查" : convergence.label}</span>
+        <strong><Scale aria-hidden="true" size={15} />收敛与决策门</strong>
+        <span className={`convergence-badge ${tone}`}>{badgeLabel}</span>
       </div>
 
-      <div className="convergence-overview">
-        <ShieldCheck size={17} />
+      <div className={`convergence-overview ${tone}`}>
+        <OverviewIcon aria-hidden="true" size={17} />
         <div>
           <strong>{convergence.can_host_finish ? "讨论可结束，仍需用户复核" : "主持人不能提前宣布收敛"}</strong>
-          <small>{convergence.can_present_candidate_best ? "证据与数据门已通过，可展示候选最优方案。" : "当前只能补齐角色、证据或数据缺口。"}</small>
+          <small>{convergence.can_present_candidate_best ? "证据与数据门已通过，可展示条件化候选首选，仍待用户复核。" : "当前只能补齐角色、证据或数据缺口。"}</small>
         </div>
+      </div>
+
+      <div className="convergence-progress" aria-label="技术门禁证据进度">
+        <div>
+          <span>技术门禁证据</span>
+          <data value={satisfiedTechnicalGateCount}>
+            {satisfiedTechnicalGateCount} / {technicalGateCount}
+          </data>
+        </div>
+        <progress
+          max={technicalGateCount}
+          value={satisfiedTechnicalGateCount}
+          aria-label={`已满足 ${satisfiedTechnicalGateCount} / ${technicalGateCount} 项技术门禁`}
+        />
+        <small>
+          {remainingTechnicalGateCount > 0
+            ? `尚有 ${remainingTechnicalGateCount} 项技术门未满足；进度仅表示证据条件。`
+            : "技术门均已满足；仍需用户复核，不产生执行授权。"}
+        </small>
       </div>
 
       {blockers[0] ? (
         <div className="convergence-primary-blocker" role="note">
-          <AlertTriangle size={14} />
+          <AlertTriangle aria-hidden="true" size={14} />
           <span>
             <em>首要阻断</em>
             <strong>{blockers[0].title}</strong>
@@ -142,12 +183,12 @@ export function ConvergenceCard({ convergence, running }) {
         <div className="convergence-details-body">
           {blockers.length > 1 ? (
             <div className="convergence-blockers">
-              {blockers.slice(1).map((blocker) => (
-                <div key={blocker.code}><AlertTriangle size={12} /><span><strong>{blocker.title}</strong><small>{blocker.detail}</small></span></div>
+              {blockers.slice(1).map((blocker, blockerIndex) => (
+                <div key={`${blocker.code || "blocker"}:${blockerIndex}`}><AlertTriangle aria-hidden="true" size={12} /><span><strong>{blocker.title}</strong><small>{blocker.detail}</small></span></div>
               ))}
             </div>
           ) : null}
-          <div className="convergence-gates">
+          <div className="convergence-gates" role="list" aria-label="收敛技术门禁">
             <GateRow
               ready={Boolean(discussion.ready)}
               label="讨论覆盖"
@@ -195,7 +236,7 @@ export function ConvergenceCard({ convergence, running }) {
             <GateRow
               ready={Boolean(data.ready)}
               label="统一数据截面"
-              detail={data.market_snapshot_required ? `${(data.market_symbols || []).length} / 4 个目标标的` : `${data.active_material_count || 0} 份共享资料`}
+              detail={data.market_snapshot_required ? `${marketSymbols.length} / 4 个目标标的` : `${data.active_material_count || 0} 份共享资料`}
             />
             {simulation.applicable ? (
               <GateRow
@@ -217,7 +258,7 @@ export function ConvergenceCard({ convergence, running }) {
         </div>
       </details>
 
-      <p className="convergence-boundary">{convergence.boundary}</p>
+      <p className="convergence-boundary">{convergence.boundary || "技术门通过不等于用户批准，也不授予任何外部执行权限。"}</p>
     </section>
   );
-}
+});

@@ -15,9 +15,10 @@ import {
   UserCheck,
   X,
 } from "lucide-react";
-import { useEffect, useId, useRef } from "react";
+import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import { DiscussionAuditSection } from "./DiscussionAuditSection";
 import "../styles/round-execution-trace.css";
+import { useModalFocus } from "../useModalFocus";
 import {
   candidateProjectionViewModel,
   roundExecutionDirectorBudget,
@@ -25,6 +26,13 @@ import {
   roundExecutionStatusMeta,
   roundExecutionTraceAnchorState,
 } from "../roundExecutionTrace";
+import {
+  ROUND_TRACE_INITIAL_EVENT_WINDOW,
+  roundTraceDialogProjection,
+  roundTraceDisplayText,
+  roundTraceErrorMessage,
+  roundTraceEventWindow,
+} from "../roundExecutionTraceDialogUi";
 
 const PAYLOAD_LABELS = Object.freeze({
   action: "动作",
@@ -99,19 +107,32 @@ const GROUP_ICONS = Object.freeze({
   user: UserCheck,
   other: CircleDot,
 });
+const TRACE_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
+const INTEGRITY_STATUS_LABELS = Object.freeze({
+  verified: "已核验",
+  invalid: "未通过",
+  partial: "部分记录",
+});
 
 function timestampLabel(value) {
   const timestamp = Number(value);
   if (!Number.isFinite(timestamp) || timestamp <= 0) return "时间未记录";
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return "时间未记录";
-  return date.toLocaleString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  return TRACE_TIMESTAMP_FORMATTER.format(date);
+}
+
+function timestampDateTime(value) {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
+  const date = new Date(timestamp);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
 function compactValue(value) {
@@ -164,7 +185,7 @@ function eventDetailRows(event) {
     if (display) rows.push([label, display]);
   }
   if (event.integrity?.status && event.integrity.status !== "unknown") {
-    rows.push(["步骤完整性", event.integrity.status]);
+    rows.push(["步骤完整性", INTEGRITY_STATUS_LABELS[event.integrity.status] || "状态未知"]);
   }
   if (event.integrity?.issues?.length) {
     rows.push(["完整性问题", event.integrity.issues.join("；")]);
@@ -172,11 +193,12 @@ function eventDetailRows(event) {
   return rows;
 }
 
-function TraceEvent({ event }) {
+const TraceEvent = memo(function TraceEvent({ event }) {
   const typeMeta = roundExecutionEventMeta(event.type);
   const statusMeta = roundExecutionStatusMeta(event.status);
   const Icon = GROUP_ICONS[typeMeta.group] || GROUP_ICONS.other;
   const details = eventDetailRows(event);
+  const occurredAt = timestampDateTime(event.occurred_at);
   return (
     <li className={`round-trace-event ${typeMeta.group}`}>
       <span className="round-trace-event-marker"><Icon size={14} aria-hidden="true" /></span>
@@ -191,7 +213,7 @@ function TraceEvent({ event }) {
         <p>{eventDescription(event)}</p>
         <div className="round-trace-event-meta">
           <span>步骤 {event.ordinal}</span>
-          <time>{timestampLabel(event.occurred_at)}</time>
+          <time dateTime={occurredAt || undefined}>{timestampLabel(event.occurred_at)}</time>
           {event.actor?.name ? <span>{event.actor.name}</span> : null}
         </div>
         {details.length ? (
@@ -207,9 +229,9 @@ function TraceEvent({ event }) {
       </article>
     </li>
   );
-}
+});
 
-function TraceSummary({ trace }) {
+const TraceSummary = memo(function TraceSummary({ trace }) {
   const summary = trace.summary;
   const calls = summary.provider_calls;
   const callValue = calls.max > 0 ? `${calls.completed} / ${calls.max}` : "0";
@@ -230,13 +252,32 @@ function TraceSummary({ trace }) {
       <span><small>复核意见</small><strong>{summary.risk_review_count}</strong></span>
     </div>
   );
-}
+});
 
 function shortHash(value) {
-  return value ? `${value.slice(0, 8)}…${value.slice(-8)}` : "未记录";
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) return "未记录";
+  if (normalized.length <= 18) return normalized;
+  return `${normalized.slice(0, 8)}…${normalized.slice(-8)}`;
 }
 
-function CandidateProjectionSection({ projection }) {
+function compactRoundId(value) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized ? normalized.slice(-10) : "未记录";
+}
+
+function invalidTraceMessage(trace) {
+  const errors = Array.isArray(trace?.errors)
+    ? trace.errors
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter(Boolean)
+    : [];
+  return errors.length
+    ? errors.join("；")
+    : "轨迹响应未通过本地只读校验，且未返回可展示原因。";
+}
+
+const CandidateProjectionSection = memo(function CandidateProjectionSection({ projection }) {
   const view = candidateProjectionViewModel(projection);
   const decisionHeading = view.decision.ready
     ? `当前条件化首选：${view.decision.preferredTitle}`
@@ -351,7 +392,7 @@ function CandidateProjectionSection({ projection }) {
       <p className="round-trace-candidate-boundary">{view.boundary} 风控意见也不等于批准、否决或执行授权。</p>
     </section>
   );
-}
+});
 
 function ledgerStatusLabel(value) {
   if (value === true) return { label: "已核验", tone: "verified" };
@@ -359,7 +400,7 @@ function ledgerStatusLabel(value) {
   return { label: "未记录", tone: "partial" };
 }
 
-export function RoundExecutionTraceDialog({
+export const RoundExecutionTraceDialog = memo(function RoundExecutionTraceDialog({
   open,
   trace,
   loading = false,
@@ -376,19 +417,23 @@ export function RoundExecutionTraceDialog({
   const descriptionId = useId();
   const dialogRef = useRef(null);
   const closeButtonRef = useRef(null);
+  const projection = useMemo(() => roundTraceDialogProjection(trace), [trace]);
+  trace = projection.trace;
+  error = roundTraceErrorMessage(error, "执行轨迹读取失败，未提供可展示原因。");
+  const [visibleEventCount, setVisibleEventCount] = useState(ROUND_TRACE_INITIAL_EVENT_WINDOW);
 
+  useModalFocus({
+    open,
+    containerRef: dialogRef,
+    initialFocusRef: closeButtonRef,
+    onClose,
+  });
   useEffect(() => {
-    if (!open) return undefined;
-    const previousFocus = document.activeElement;
-    const frame = requestAnimationFrame(() => closeButtonRef.current?.focus());
-    return () => {
-      cancelAnimationFrame(frame);
-      if (previousFocus instanceof HTMLElement) previousFocus.focus();
-    };
-  }, [open]);
+    setVisibleEventCount(ROUND_TRACE_INITIAL_EVENT_WINDOW);
+  }, [open, trace?.trace_hash]);
 
   if (!open) return null;
-  const traceReady = Boolean(trace?.valid);
+  const traceReady = projection.ready;
   const integrityTone = trace?.integrity?.status === "verified" && trace?.integrity?.ok
     ? "verified"
     : trace?.integrity?.status === "invalid" || trace?.valid === false
@@ -396,28 +441,7 @@ export function RoundExecutionTraceDialog({
       : "partial";
   const directorBudget = traceReady ? roundExecutionDirectorBudget(trace) : null;
   const anchorState = traceReady ? roundExecutionTraceAnchorState(trace) : null;
-  const handleKeyDown = (event) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      onClose?.();
-      return;
-    }
-    if (event.key !== "Tab" || !dialogRef.current) return;
-    const focusable = [...dialogRef.current.querySelectorAll(
-      "button:not([disabled]), summary, [href], input:not([disabled]), [tabindex]:not([tabindex='-1'])",
-    )].filter((element) => element instanceof HTMLElement && element.offsetParent !== null);
-    if (!focusable.length) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
+  const eventWindow = roundTraceEventWindow(trace?.events, visibleEventCount);
 
   return (
     <div
@@ -430,12 +454,13 @@ export function RoundExecutionTraceDialog({
       <section
         ref={dialogRef}
         className="dialog round-trace-dialog"
+        data-trace-state={traceReady ? "ready" : trace?.valid === false ? "invalid" : loading ? "loading" : "empty"}
+        data-rendered-event-count={eventWindow.visibleCount}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={descriptionId}
         aria-busy={loading || loadingMore || discussionAuditState?.loading === true}
-        onKeyDown={handleKeyDown}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header>
@@ -443,7 +468,7 @@ export function RoundExecutionTraceDialog({
             <Activity size={18} aria-hidden="true" />
             <span><strong id={titleId}>本轮执行轨迹</strong><small id={descriptionId}>调用、调度、发言与决策链的只读记录</small></span>
           </span>
-          <button ref={closeButtonRef} type="button" className="icon-button" aria-label="关闭执行轨迹" onClick={onClose}><X size={18} /></button>
+          <button ref={closeButtonRef} type="button" className="icon-button" aria-label="关闭执行轨迹" onClick={() => onClose?.()}><X size={18} aria-hidden="true" /></button>
         </header>
 
         <div className="round-trace-body">
@@ -458,22 +483,22 @@ export function RoundExecutionTraceDialog({
               <AlertTriangle size={20} aria-hidden="true" />
               <strong>执行轨迹读取失败</strong>
               <p>{error}</p>
-              <button type="button" className="secondary" onClick={onRetry}><RefreshCw size={14} />重试</button>
+              <button type="button" className="secondary" onClick={() => onRetry?.()} disabled={typeof onRetry !== "function"}><RefreshCw size={14} aria-hidden="true" />重试</button>
             </div>
           ) : trace && !trace.valid ? (
             <div className="round-trace-error" role="alert">
               <AlertTriangle size={20} aria-hidden="true" />
               <strong>执行轨迹校验未通过</strong>
-              <p>{trace.errors.join("；")}</p>
-              <button type="button" className="secondary" onClick={onRetry}><RefreshCw size={14} />重新读取</button>
+              <p>{invalidTraceMessage(trace)}</p>
+              <button type="button" className="secondary" onClick={() => onRetry?.()} disabled={typeof onRetry !== "function"}><RefreshCw size={14} aria-hidden="true" />重新读取</button>
             </div>
           ) : traceReady ? (
             <>
               <section className="round-trace-overview">
                 <div className="round-trace-round-copy">
-                  <span><Bot size={14} aria-hidden="true" />轮次 {trace.round_id.slice(-10)}</span>
-                  <strong>{trace.round?.objective || "本轮目标未记录"}</strong>
-                  <small>状态 {trace.round?.status || "未记录"} · 当前已载入 {trace.events.length} / {trace.page.total} 步</small>
+                  <span><Bot size={14} aria-hidden="true" />轮次 {compactRoundId(trace.round_id)}</span>
+                  <strong>{roundTraceDisplayText(trace.round?.objective, "本轮目标未记录")}</strong>
+                  <small>状态 {roundTraceDisplayText(trace.round?.status, "未记录")} · 当前已载入 {trace.events.length} / {trace.page.total} 步</small>
                 </div>
                 <span className={`round-trace-integrity ${integrityTone}`}>
                   <ShieldCheck size={13} aria-hidden="true" />
@@ -534,7 +559,7 @@ export function RoundExecutionTraceDialog({
               {stale ? (
                 <div className="round-trace-stale" role="status">
                   <span>本轮产生了新记录，当前列表可能不是最新状态。</span>
-                  <button type="button" onClick={onRetry} disabled={loading}><RefreshCw size={13} />刷新</button>
+                  <button type="button" onClick={() => onRetry?.()} disabled={loading || typeof onRetry !== "function"}><RefreshCw size={13} aria-hidden="true" />刷新</button>
                 </div>
               ) : null}
               {error ? <div className="round-trace-inline-error" role="alert">刷新失败：{error}</div> : null}
@@ -551,15 +576,23 @@ export function RoundExecutionTraceDialog({
                 </div>
               ) : null}
 
-              {trace.events.length ? (
-                <ol className="round-trace-events">
-                  {trace.events.map((event) => <TraceEvent event={event} key={event.event_id} />)}
-                </ol>
+              {eventWindow.totalCount ? (
+                <>
+                  <p className="round-trace-window-status" role="status">当前渲染 {eventWindow.visibleCount} / {eventWindow.totalCount} 个已载入步骤；汇总仍覆盖全部已载入记录。</p>
+                  <ol className="round-trace-events">
+                    {eventWindow.rows.map((event) => <TraceEvent event={event} key={event.event_id} />)}
+                  </ol>
+                  {eventWindow.canExpand ? (
+                    <button type="button" className="secondary round-trace-reveal" onClick={() => setVisibleEventCount(eventWindow.nextCount)}>
+                      显示更多已载入步骤（剩余 {eventWindow.hiddenCount}）
+                    </button>
+                  ) : null}
+                </>
               ) : <div className="round-trace-empty">本轮尚无可展示的执行步骤。</div>}
 
               {trace.page.has_more ? (
-                <button type="button" className="secondary round-trace-more" onClick={onLoadMore} disabled={loadingMore}>
-                  {loadingMore ? <LoaderCircle className="spin" size={14} /> : null}
+                <button type="button" className="secondary round-trace-more" onClick={() => onLoadMore?.()} disabled={loadingMore || typeof onLoadMore !== "function"}>
+                  {loadingMore ? <LoaderCircle className="spin" size={14} aria-hidden="true" /> : null}
                   {loadingMore ? "正在加载…" : "加载更多记录"}
                 </button>
               ) : null}
@@ -569,9 +602,9 @@ export function RoundExecutionTraceDialog({
 
         <footer>
           <span><ShieldCheck size={13} aria-hidden="true" />只读审计 · 0 次 Provider 调用 · 无执行能力</span>
-          <button type="button" className="secondary" onClick={onClose}>关闭</button>
+          <button type="button" className="secondary" onClick={() => onClose?.()}>关闭</button>
         </footer>
       </section>
     </div>
   );
-}
+});

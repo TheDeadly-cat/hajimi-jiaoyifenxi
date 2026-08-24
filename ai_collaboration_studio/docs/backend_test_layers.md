@@ -7,14 +7,16 @@ python scripts\run_backend_tests_isolated.py --list-layers
 python scripts\run_backend_tests_isolated.py --layer migration --verbosity 2
 python scripts\run_backend_tests_isolated.py --layer core
 python scripts\run_backend_tests_isolated.py --layer domains
+python scripts\run_backend_tests_isolated.py --layer delivery --verbosity 2
 python scripts\run_backend_tests_isolated.py --layer full --durations 30
 ```
 
 层定义由 `scripts/backend_test_layers.json` 唯一管理：
 
 - `migration`：P0 SQLite 启动、预检、备份、授权、提交、恢复和 owner 门。
-- `core`：快速宿主内核、协议、启动计划、账本、安全、本地 HTTP 与源码备份门。
+- `core`：快速宿主内核、协议、启动计划、账本、安全与本地 HTTP 门。
 - `domains`：football、stock、candidate 及通用 domain adapter/round context 门。
+- `delivery`：bootstrap、宿主交付、CI 合同、源码备份、静态安全、结构化日志与 release lifecycle 门。
 - `full`：发现全部 `tests/test_*.py`。
 
 manifest 是 closed/versioned 合同。未知字段、未知版本、缺失模块、非规范模块名、跨层重复或层顺序漂移都会在导入测试模块前失败关闭。`--layer` 不能与显式 dotted tests 或 discovery 覆盖参数混用。

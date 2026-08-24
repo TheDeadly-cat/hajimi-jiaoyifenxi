@@ -46,7 +46,8 @@ const CAPABILITY_ORDER = Object.keys(CAPABILITY_LABELS);
 const STANCE_ORDER = Object.keys(STANCE_LABELS);
 
 function uniqueStrings(values) {
-  return [...new Set((values || []).map((value) => String(value || "").trim()).filter(Boolean))];
+  const source = Array.isArray(values) ? values : [];
+  return [...new Set(source.map((value) => String(value || "").trim()).filter(Boolean))];
 }
 
 function positiveInteger(value, fallback, minimum = 1, maximum = 100) {
@@ -89,7 +90,7 @@ export function normalizeWorkflowPolicy(policy) {
         stances: uniqueStrings(requirement?.any_of?.stances).map((value) => value.toLowerCase()),
         capabilities: uniqueStrings(requirement?.any_of?.capabilities).map((value) => value.toLowerCase()),
       },
-      is_counterargument: Boolean(requirement?.is_counterargument),
+      is_counterargument: requirement?.is_counterargument === true,
     }))
     : [];
   return {
@@ -112,17 +113,19 @@ export function policiesEqual(left, right) {
 }
 
 export function memberMatchesWorkflowRequirement(member, requirement) {
-  const stances = requirement?.any_of?.stances || [];
-  const capabilities = requirement?.any_of?.capabilities || [];
-  return stances.includes(String(member?.stance || "").toLowerCase())
-    || (member?.capabilities || []).some(
+  const stances = uniqueStrings(requirement?.any_of?.stances).map((value) => value.toLowerCase());
+  const capabilities = uniqueStrings(requirement?.any_of?.capabilities).map((value) => value.toLowerCase());
+  const memberCapabilities = Array.isArray(member?.capabilities) ? member.capabilities : [];
+  return stances.includes(String(member?.stance || "").trim().toLowerCase())
+    || memberCapabilities.some(
       (capability) => capabilities.includes(String(capability || "").toLowerCase()),
     );
 }
 
 export function workflowConfigurationGate(policy, members = []) {
   const normalized = normalizeWorkflowPolicy(policy);
-  const enabled = (members || []).filter((member) => member?.enabled);
+  const memberRows = Array.isArray(members) ? members : [];
+  const enabled = memberRows.filter((member) => member?.enabled === true);
   const blockers = [];
   if (enabled.length < normalized.minimum_successful_members) {
     blockers.push({
@@ -166,18 +169,20 @@ export function workflowConfigurationGate(policy, members = []) {
 
 export function collectCapabilityOptions(members = [], policy = null) {
   const discovered = [];
-  for (const member of members || []) discovered.push(...(member.capabilities || []));
-  for (const requirement of policy?.required_coverage || []) {
-    discovered.push(...(requirement?.any_of?.capabilities || []));
+  for (const member of Array.isArray(members) ? members : []) {
+    discovered.push(...(Array.isArray(member?.capabilities) ? member.capabilities : []));
+  }
+  for (const requirement of Array.isArray(policy?.required_coverage) ? policy.required_coverage : []) {
+    discovered.push(...(Array.isArray(requirement?.any_of?.capabilities) ? requirement.any_of.capabilities : []));
   }
   const all = uniqueStrings([...CAPABILITY_ORDER, ...discovered]);
   return all.map((id) => ({ id, label: capabilityLabel(id) }));
 }
 
 export function collectStanceOptions(members = [], policy = null) {
-  const discovered = (members || []).map((member) => member.stance);
-  for (const requirement of policy?.required_coverage || []) {
-    discovered.push(...(requirement?.any_of?.stances || []));
+  const discovered = (Array.isArray(members) ? members : []).map((member) => member?.stance);
+  for (const requirement of Array.isArray(policy?.required_coverage) ? policy.required_coverage : []) {
+    discovered.push(...(Array.isArray(requirement?.any_of?.stances) ? requirement.any_of.stances : []));
   }
   const all = uniqueStrings([...STANCE_ORDER, ...discovered]);
   return all.map((id) => ({ id, label: stanceLabel(id) }));

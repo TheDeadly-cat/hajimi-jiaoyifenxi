@@ -75,6 +75,19 @@ function stringList(value, maximum = 100) {
   return value.slice(0, maximum).map((item) => text(item, 240)).filter(Boolean);
 }
 
+function withProjectionKeys(records, prefix, identityParts) {
+  const occurrences = new Map();
+  return records.map((record) => {
+    const identity = JSON.stringify([prefix, ...identityParts(record)]);
+    const occurrence = occurrences.get(identity) || 0;
+    occurrences.set(identity, occurrence + 1);
+    return {
+      ...record,
+      projectionKey: JSON.stringify([identity, occurrence]),
+    };
+  });
+}
+
 function normalizeFinding(value) {
   const source = record(value);
   return {
@@ -357,7 +370,42 @@ export function discussionAuditViewModel(value, options = {}) {
   const dynamic = DYNAMIC_STATUS_META[audit.structural.dynamic_status]
     || DYNAMIC_STATUS_META.not_recorded;
   const checkpointMeta = checkpointStatusMeta(audit.candidate_checkpoint);
-  const findings = audit.findings.map((finding) => ({
+  const selections = withProjectionKeys(
+    audit.structural.selections,
+    "selection",
+    (selection) => [selection],
+  ).map((selection) => ({
+    ...selection,
+    statusMeta: selectionStatusMeta(selection.structural_status),
+    memberLabel: selection.action === "finish"
+      ? "主持人建议结束"
+      : selection.selected_member_id || "成员未记录",
+    sourceLabel: selection.fallback
+      ? "安全回退"
+      : selection.decision_authority === "moderator_model"
+        && selection.moderator_model_call_recorded
+        ? "主持模型"
+        : "规则或未记录",
+  }));
+  const responseEdges = withProjectionKeys(
+    audit.structural.response_edges,
+    "response-edge",
+    (edge) => [edge],
+  ).map((edge) => ({
+    ...edge,
+    relationLabel: edge.persisted_reply_target ? "持久化回复目标" : "契约回应目标",
+    scopeLabel: edge.target_within_formal_bundle ? "本轮正式消息" : "本轮外目标",
+  }));
+  const candidates = withProjectionKeys(
+    audit.candidate_checkpoint.candidates,
+    "checkpoint-candidate",
+    (candidate) => [candidate],
+  );
+  const findings = withProjectionKeys(
+    audit.findings,
+    "finding",
+    (finding) => [finding],
+  ).map((finding) => ({
     ...finding,
     label: FINDING_LABELS[finding.code] || finding.code,
     tone: finding.severity === "warning" || finding.severity === "error"
@@ -377,33 +425,18 @@ export function discussionAuditViewModel(value, options = {}) {
       dynamicSelectionCount: audit.structural.dynamic_selection_count,
       fallbackCount: audit.structural.fallback_count,
     },
-    selections: audit.structural.selections.map((selection) => ({
-      ...selection,
-      statusMeta: selectionStatusMeta(selection.structural_status),
-      memberLabel: selection.action === "finish"
-        ? "主持人建议结束"
-        : selection.selected_member_id || "成员未记录",
-      sourceLabel: selection.fallback
-        ? "安全回退"
-        : selection.decision_authority === "moderator_model"
-          && selection.moderator_model_call_recorded
-          ? "主持模型"
-          : "规则或未记录",
-    })),
+    selections,
     semantic: {
       status: "unknown",
       label: "语义因果关系未知",
       reasonCode: audit.semantic_causality.reason_code,
       detail: "只能确认回应目标与结构化记录相连，无法证明模型实际读取、理解或因该内容作答。",
     },
-    responseEdges: audit.structural.response_edges.map((edge) => ({
-      ...edge,
-      relationLabel: edge.persisted_reply_target ? "持久化回复目标" : "契约回应目标",
-      scopeLabel: edge.target_within_formal_bundle ? "本轮正式消息" : "本轮外目标",
-    })),
+    responseEdges,
     checkpoint: {
       ...audit.candidate_checkpoint,
       ...checkpointMeta,
+      candidates,
       countLabel: `${audit.candidate_checkpoint.candidate_count} / ${audit.candidate_checkpoint.minimum_comparison_count}`,
       decisionLabel: audit.candidate_checkpoint.decision.preferred_option_id
         ? `条件化首选 ${audit.candidate_checkpoint.decision.preferred_option_id}`

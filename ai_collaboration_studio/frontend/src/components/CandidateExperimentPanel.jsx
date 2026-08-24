@@ -4,16 +4,20 @@ import {
   FlaskConical,
   ShieldCheck,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import {
   buildCandidateExperimentRequest,
   candidateExperimentAuthorizationGate,
+  candidateExperimentControlState,
+  candidateExperimentErrorMessage,
   candidateExperimentRequestIdentity,
   candidateExperimentSelectionFingerprint,
   candidateExperimentView,
 } from "../candidateExperiment";
 import { createLatestRequestCoordinator } from "../latestRequest";
+import "../styles/candidate-experiment.css";
+import "../styles/candidate-experiment-refinement.css";
 
 
 const SCENARIO_LABELS = Object.freeze({
@@ -21,6 +25,10 @@ const SCENARIO_LABELS = Object.freeze({
   stressed: "压力摩擦",
   severe: "极端摩擦",
 });
+const SCENARIO_ENTRIES = Object.freeze(Object.entries(SCENARIO_LABELS));
+const CANDIDATE_SELECTOR_PAGE_SIZE = 24;
+const TABLE_ROW_HEADER_WIDTH = 148;
+const TABLE_ARM_WIDTH = 210;
 
 
 function percent(value, digits = 1) {
@@ -38,21 +46,41 @@ function ratioPercent(value) {
 
 
 function shortHash(value) {
-  const normalized = String(value || "");
-  return normalized.length === 64
+  const normalized = String(value || "").trim();
+  return /^[0-9a-f]{64}$/i.test(normalized)
     ? `${normalized.slice(0, 8)}…${normalized.slice(-6)}`
     : "—";
 }
 
 
-function displayValue(value) {
+function formatSymbol(value) {
+  const normalized = typeof value === "string" ? value.trim().slice(0, 48) : "";
+  return normalized ? normalized.replace(/^US\./, "") : "—";
+}
+
+
+function displayValue(value, depth = 0) {
   if (value === null || value === undefined || value === "") return "—";
-  if (Array.isArray(value)) return value.map(displayValue).filter((item) => item !== "—").join(" / ") || "—";
+  if (depth > 1) return "—";
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, 8)
+      .map((item) => displayValue(item, depth + 1))
+      .filter((item) => item !== "—")
+      .join(" / ") || "—";
+  }
   if (typeof value === "object") {
-    return String(value.label || value.name || value.id || value.version || "—");
+    for (const key of ["label", "name", "id", "version"]) {
+      const candidate = value?.[key];
+      if (typeof candidate === "string" || typeof candidate === "number") {
+        return displayValue(candidate, depth + 1);
+      }
+    }
+    return "—";
   }
   if (typeof value === "boolean") return value ? "是" : "否";
-  return String(value);
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "—";
+  return typeof value === "string" ? value.trim().slice(0, 400) || "—" : "—";
 }
 
 
@@ -105,7 +133,7 @@ function blockerText(blocker) {
 }
 
 
-function ScenarioMetrics({ scenario }) {
+const ScenarioMetrics = memo(function ScenarioMetrics({ scenario }) {
   if (!scenario) return <span className="candidate-experiment-missing">未返回</span>;
   if (scenario.blocked) {
     return (
@@ -130,10 +158,10 @@ function ScenarioMetrics({ scenario }) {
       <small>最差窗口收益 <strong>{percent(scenario.worstWindowReturnPct)}</strong></small>
     </span>
   );
-}
+});
 
 
-function EvidenceList({ items, emptyLabel }) {
+const EvidenceList = memo(function EvidenceList({ items, emptyLabel }) {
   if (!items.length) return <span className="candidate-experiment-missing">{emptyLabel}</span>;
   return (
     <ul className="candidate-experiment-evidence-list">
@@ -145,14 +173,14 @@ function EvidenceList({ items, emptyLabel }) {
       ))}
     </ul>
   );
-}
+});
 
 
-function expectedContext(roomId, artifact, payload) {
+function expectedContext(roomId, payload) {
   return {
     roomId,
-    artifactId: artifact.id,
-    artifactVersion: artifact.version,
+    artifactId: payload.artifact_id,
+    artifactVersion: payload.expected_artifact_version,
     clientRequestId: payload.client_request_id,
     attestationSha256: payload.expected_governance_attestation_sha256,
     candidateSelections: payload.candidate_selections,
@@ -160,17 +188,35 @@ function expectedContext(roomId, artifact, payload) {
 }
 
 
-export function CandidateExperimentPanel({ room, artifact, readOnly = false, readOnlyReason = "" }) {
-  const roomId = String(room?.id || "");
+export const CandidateExperimentPanel = memo(function CandidateExperimentPanel({
+  room,
+  artifact,
+  readOnly = false,
+  readOnlyReason = "",
+}) {
+  const titleId = useId();
+  const instructionId = useId();
+  const tableHintId = useId();
+  const resultTitleId = useId();
+  const roomId = typeof room?.id === "string" ? room.id.trim().slice(0, 240) : "";
   const gate = useMemo(
     () => candidateExperimentAuthorizationGate(artifact),
     [artifact],
   );
-  const candidateContext = gate.candidates.map((candidate) => (
-    `${candidate.id}:${candidate.revision}:${candidate.snapshotSha256}`
-  )).join("|");
-  const exactContext = `${roomId}|${gate.artifactId}|${gate.artifactVersion}|${gate.attestationSha256}|${candidateContext}`;
+  const runtimeGateReady = gate.ready && Boolean(roomId);
+  const exactContext = useMemo(() => JSON.stringify([
+      roomId,
+      gate.artifactId,
+      gate.artifactVersion,
+      gate.attestationSha256,
+      gate.candidates.map((candidate) => [
+        candidate.id,
+        candidate.revision,
+        candidate.snapshotSha256,
+      ]),
+    ]), [gate, roomId]);
   const [selectedCandidateIds, setSelectedCandidateIds] = useState([]);
+  const [candidateLimit, setCandidateLimit] = useState(CANDIDATE_SELECTOR_PAGE_SIZE);
   const [acknowledged, setAcknowledged] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -181,20 +227,52 @@ export function CandidateExperimentPanel({ room, artifact, readOnly = false, rea
   const requestIdentityRef = useRef({ fingerprint: "", clientRequestId: "" });
   if (!coordinatorRef.current) coordinatorRef.current = createLatestRequestCoordinator();
   contextRef.current = exactContext;
-  const selectionFingerprint = candidateExperimentSelectionFingerprint(
-    artifact,
-    selectedCandidateIds,
+  const selectionFingerprint = useMemo(
+    () => candidateExperimentSelectionFingerprint(artifact, selectedCandidateIds),
+    [artifact, selectedCandidateIds],
   );
   selectionRef.current = selectionFingerprint;
+  const selectedCandidateSet = useMemo(
+    () => new Set(selectedCandidateIds),
+    [selectedCandidateIds],
+  );
+  const visibleCandidates = useMemo(
+    () => gate.candidates.filter((candidate, index) => (
+      index < candidateLimit || selectedCandidateSet.has(candidate.id)
+    )),
+    [candidateLimit, gate.candidates, selectedCandidateSet],
+  );
+  const hiddenCandidateCount = gate.candidates.length - visibleCandidates.length;
   const view = useMemo(
     () => (result ? candidateExperimentView(result.experiment, result.expected) : null),
     [result],
+  );
+  const controls = useMemo(
+    () => candidateExperimentControlState({
+      gateReady: runtimeGateReady,
+      readOnly,
+      loading,
+      acknowledged,
+      selectedCandidateIds,
+      selectionFingerprint,
+      resultReady: view?.ready === true,
+    }),
+    [
+      acknowledged,
+      loading,
+      readOnly,
+      runtimeGateReady,
+      selectedCandidateIds,
+      selectionFingerprint,
+      view?.ready,
+    ],
   );
 
   useEffect(() => {
     coordinatorRef.current.cancel();
     requestIdentityRef.current = { fingerprint: "", clientRequestId: "" };
     setSelectedCandidateIds([]);
+    setCandidateLimit(CANDIDATE_SELECTOR_PAGE_SIZE);
     setAcknowledged(false);
     setError("");
     setResult(null);
@@ -202,6 +280,7 @@ export function CandidateExperimentPanel({ room, artifact, readOnly = false, rea
   }, [exactContext, readOnly]);
 
   useEffect(() => {
+    coordinatorRef.current.cancel();
     if (requestIdentityRef.current.fingerprint !== selectionFingerprint) {
       requestIdentityRef.current = { fingerprint: "", clientRequestId: "" };
     }
@@ -211,7 +290,7 @@ export function CandidateExperimentPanel({ room, artifact, readOnly = false, rea
   }, [selectionFingerprint]);
 
   const toggleCandidate = (candidateId) => {
-    if (loading || readOnly) return;
+    if (loading || readOnly || !runtimeGateReady) return;
     setSelectedCandidateIds((current) => {
       if (current.includes(candidateId)) return current.filter((id) => id !== candidateId);
       if (current.length >= 6) return current;
@@ -220,15 +299,7 @@ export function CandidateExperimentPanel({ room, artifact, readOnly = false, rea
   };
 
   const runExperiment = () => {
-    if (
-      loading
-      || readOnly
-      || !gate.ready
-      || !acknowledged
-      || selectedCandidateIds.length < 2
-      || selectedCandidateIds.length > 6
-      || !selectionFingerprint
-    ) return;
+    if (!controls.canRun || coordinatorRef.current.inFlight) return;
     const requestContext = exactContext;
     const requestSelection = selectionFingerprint;
     const requestIdentity = candidateExperimentRequestIdentity(
@@ -243,24 +314,25 @@ export function CandidateExperimentPanel({ room, artifact, readOnly = false, rea
         clientRequestId: requestIdentity.clientRequestId,
       });
     } catch (requestError) {
-      setError(requestError.message);
+      setError(candidateExperimentErrorMessage(requestError, "无法构造精确候选实验请求。"));
       setResult(null);
       return;
     }
-    const expected = expectedContext(roomId, artifact, payload);
+    const expected = expectedContext(roomId, payload);
     setError("");
     setResult(null);
     coordinatorRef.current.run({
       request: async (signal) => {
         const created = await api.createCandidateExperiment(roomId, payload, signal);
         const experiment = created?.experiment || {};
-        const cohortId = String(experiment.id || "").trim();
+        const cohortId = typeof experiment.id === "string" ? experiment.id.trim().slice(0, 240) : "";
         if (
           !cohortId
-          || String(experiment.room_id || "") !== roomId
-          || String(experiment.artifact_id || "") !== String(artifact.id || "")
-          || Number(experiment.artifact_version) !== Number(artifact.version)
-          || String(experiment.client_request_id || "") !== payload.client_request_id
+          || (typeof experiment.room_id !== "string" ? "" : experiment.room_id.trim()) !== roomId
+          || (typeof experiment.artifact_id !== "string" ? "" : experiment.artifact_id.trim()) !== payload.artifact_id
+          || !Number.isSafeInteger(experiment.artifact_version)
+          || experiment.artifact_version !== payload.expected_artifact_version
+          || (typeof experiment.client_request_id !== "string" ? "" : experiment.client_request_id.trim()) !== payload.client_request_id
         ) {
           throw new Error("联合实验创建响应与本次精确授权上下文不一致，结果已隐藏。");
         }
@@ -281,57 +353,101 @@ export function CandidateExperimentPanel({ room, artifact, readOnly = false, rea
         ) return;
         setResult(null);
         setError(
-          requestError?.status === 409
-            ? "实验请求编号已绑定不同语义，服务端已拒绝运行；未自动改号或换算。"
-            : requestError.message || "联合实验失败，未展示任何指标。",
+            requestError?.status === 409
+              ? "实验请求编号已绑定不同语义，服务端已拒绝运行；未自动改号或换算。"
+              : candidateExperimentErrorMessage(requestError),
         );
       },
       onLoadingChange: setLoading,
     });
   };
 
-  const rows = view?.ready ? commonSpecRows(view.commonSpec, view.datasetSeal) : [];
+  const rows = useMemo(
+    () => (view?.ready ? commonSpecRows(view.commonSpec, view.datasetSeal) : []),
+    [view],
+  );
 
   return (
-    <section className="candidate-experiment-panel" aria-labelledby="candidate-experiment-title">
+    <section
+      className="candidate-experiment-panel candidate-experiment-workbench"
+      data-control-phase={controls.phase}
+      aria-labelledby={titleId}
+      aria-busy={loading}
+    >
       <header className="candidate-experiment-heading">
-        <span>
-          <strong id="candidate-experiment-title"><FlaskConical size={15} />决定前 A/B/C 原子历史实验</strong>
-          <small>一次授权，以同一冻结数据和服务端共同规格并列复算当前候选；授权不表示支持任何候选。</small>
-        </span>
-        <em>{gate.candidates.length} 个精确候选</em>
+        <div className="candidate-experiment-heading-copy">
+          <small className="candidate-experiment-kicker">CONTROLLED HISTORICAL LAB</small>
+          <strong id={titleId}><FlaskConical size={17} aria-hidden="true" />决定前 A/B/C 原子历史实验</strong>
+          <p>一次授权，以同一冻结数据和服务端共同规格并列复算当前候选；授权不表示支持任何候选。</p>
+        </div>
+        <em><span>SEALED SET</span>{gate.candidates.length} 个精确候选</em>
       </header>
+
+      <ol className="candidate-experiment-workflow" aria-label="候选实验四阶段">
+        {controls.steps.map((step) => (
+          <li
+            key={step.key}
+            data-step-state={step.status}
+            aria-current={step.status === "active" ? "step" : undefined}
+          >
+            <b aria-hidden="true">{step.order}</b>
+            <span>{step.label}</span>
+            <em>
+              {step.status === "complete"
+                ? "完成"
+                : step.status === "active"
+                  ? "当前"
+                  : step.status === "locked"
+                    ? "锁定"
+                    : "待处理"}
+            </em>
+          </li>
+        ))}
+      </ol>
 
       {readOnly ? (
         <p className="candidate-experiment-readonly" role="note">
-          <ShieldCheck size={13} />
+          <ShieldCheck size={13} aria-hidden="true" />
           {readOnlyReason || "该产物的冻结插件合同当前仅可查看，不能发起新的历史实验。"}
         </p>
       ) : null}
 
-      {!gate.ready ? (
+      {!runtimeGateReady ? (
         <p className="candidate-experiment-empty" role="status">
-          <AlertTriangle size={13} />{gate.reason || "当前产物不满足联合实验授权条件。"}
+          <AlertTriangle size={13} aria-hidden="true" />
+          {!roomId ? "房间身份缺失，不能创建或读取候选历史实验。" : gate.reason || "当前产物不满足联合实验授权条件。"}
         </p>
       ) : (
         <>
-          <fieldset className="candidate-experiment-selector" disabled={loading || readOnly}>
+          <fieldset
+            className="candidate-experiment-selector"
+            disabled={loading || readOnly}
+            aria-describedby={instructionId}
+          >
             <legend>选择 2–6 个当前治理候选，列顺序按你的选择顺序保留</legend>
-            {gate.candidates.map((candidate) => {
+            {visibleCandidates.map((candidate) => {
               const selected = selectedCandidateIds.includes(candidate.id);
+              const selectionOrder = selectedCandidateIds.indexOf(candidate.id) + 1;
               const disabled = loading || (!selected && selectedCandidateIds.length >= 6);
               return (
-                <label className={selected ? "selected" : ""} key={candidate.id}>
+                <label
+                  className={selected ? "selected" : ""}
+                  data-selection-order={selected ? selectionOrder : undefined}
+                  key={candidate.id}
+                >
                   <input
                     type="checkbox"
                     checked={selected}
                     disabled={disabled}
                     onChange={() => toggleCandidate(candidate.id)}
                   />
+                  <b className="candidate-experiment-order" aria-hidden="true">
+                    {selected ? String(selectionOrder).padStart(2, "0") : "·"}
+                  </b>
                   <span>
                     <strong>{candidate.title}</strong>
                     <small>
-                      {candidate.symbol.replace("US.", "")} · {candidate.direction}
+                      {formatSymbol(candidate.symbol)} · {candidate.direction}
                       {` · r${candidate.revision} · ${candidate.horizonDays} 日`}
                     </small>
                     <small title={candidate.snapshotSha256}>快照 {shortHash(candidate.snapshotSha256)}</small>
@@ -341,11 +457,34 @@ export function CandidateExperimentPanel({ room, artifact, readOnly = false, rea
               );
             })}
           </fieldset>
+          <p className="candidate-experiment-candidate-status" role="status" aria-live="polite">
+            展示 {visibleCandidates.length} / {gate.candidates.length} 个精确治理候选；所有已选候选始终可见。
+          </p>
+          {hiddenCandidateCount ? (
+            <button
+              type="button"
+              className="secondary compact candidate-experiment-more"
+              disabled={loading || readOnly}
+              onClick={() => setCandidateLimit((current) => current + CANDIDATE_SELECTOR_PAGE_SIZE)}
+            >
+              再显示 {Math.min(CANDIDATE_SELECTOR_PAGE_SIZE, hiddenCandidateCount)} 个候选
+            </button>
+          ) : null}
+          <div
+            className="candidate-experiment-selection-status"
+            data-selection-state={controls.selectionReady ? "ready" : "incomplete"}
+            id={instructionId}
+            role="status"
+            aria-live="polite"
+          >
+            <span><strong>{controls.selectedCount}/6</strong><small>已选候选</small></span>
+            <p>{controls.instruction}</p>
+          </div>
           <label className="candidate-experiment-acknowledgement">
             <input
               type="checkbox"
               checked={acknowledged}
-              disabled={loading || readOnly}
+              disabled={!controls.canAcknowledge}
               onChange={(event) => setAcknowledged(event.target.checked)}
             />
             <span>
@@ -356,45 +495,52 @@ export function CandidateExperimentPanel({ room, artifact, readOnly = false, rea
           <button
             className="secondary compact candidate-experiment-run"
             type="button"
-            disabled={readOnly || loading || !acknowledged || selectedCandidateIds.length < 2}
+            disabled={!controls.canRun}
             aria-busy={loading}
+            aria-describedby={instructionId}
             onClick={runExperiment}
           >
-            <FlaskConical size={13} />
-            {loading
-              ? "正在原子复算并重读完整性…"
-              : view?.ready
-                ? `按同一请求编号重新核验 ${selectedCandidateIds.length} 个候选`
-                : `运行所选 ${selectedCandidateIds.length} 个候选`}
+            <FlaskConical size={13} aria-hidden="true" />
+            {controls.actionLabel}
           </button>
         </>
       )}
 
       {error ? (
-        <p className="candidate-experiment-error" role="alert"><AlertTriangle size={13} />{error}</p>
+        <p className="candidate-experiment-error" role="alert"><AlertTriangle size={13} aria-hidden="true" />{error}</p>
       ) : null}
       {view && !view.ready ? (
         <div className="candidate-experiment-result blocked" role="alert">
-          <AlertTriangle size={15} />
+          <AlertTriangle size={15} aria-hidden="true" />
           <span>
             <strong>整组完整性未通过，所有 arm 历史指标已隐藏</strong>
-            <small>{view.issues[0]?.message || "输入、arm、结果或聚合封印不一致。"}</small>
+            <small>{view.issues?.[0]?.message || "输入、arm、结果或聚合封印不一致。"}</small>
           </span>
         </div>
       ) : null}
       {view?.ready ? (
-        <div className="candidate-experiment-result ready" aria-live="polite">
-          <div className="candidate-experiment-proof">
-            <CheckCircle2 size={16} />
-            <span>
-              <strong>原子 cohort 完整性已通过</strong>
-              <small>
-                cohort {view.cohortId} · 请求 {view.clientRequestId}
-              </small>
-              <small>
-                数据封印 {shortHash(view.datasetSealSha256)} · 共同规格 {shortHash(view.specSha256)}
-              </small>
-            </span>
+        <div
+          className="candidate-experiment-result ready"
+          role="region"
+          aria-labelledby={resultTitleId}
+        >
+          <header className="candidate-experiment-result-heading">
+            <div className="candidate-experiment-proof">
+              <CheckCircle2 size={17} aria-hidden="true" />
+              <span>
+                <small role="status" aria-live="polite">SEALED COHORT / INTEGRITY PASS</small>
+                <strong id={resultTitleId}>原子 cohort 完整性已通过</strong>
+                <span className="candidate-experiment-proof-boundary">仅核验本次封印输入与历史结果，不表示候选获得支持。</span>
+                <span>cohort {view.cohortId} · 请求 {view.clientRequestId}</span>
+                <span>数据封印 {shortHash(view.datasetSealSha256)} · 共同规格 {shortHash(view.specSha256)}</span>
+              </span>
+            </div>
+            <em><span>SEALED ARMS</span>{String(view.arms.length).padStart(2, "0")}</em>
+          </header>
+          <div className="candidate-experiment-neutrality-ledger" role="list" aria-label="实验中立性边界">
+            <span role="listitem"><small>封印候选</small><strong>{view.arms.length}</strong></span>
+            <span role="listitem"><small>共同摩擦情景</small><strong>{SCENARIO_ENTRIES.length}</strong></span>
+            <span role="listitem"><small>排名 / 赢家</small><strong>均不产生</strong></span>
           </div>
           {rows.length ? (
             <dl className="candidate-experiment-common-spec">
@@ -403,10 +549,31 @@ export function CandidateExperimentPanel({ room, artifact, readOnly = false, rea
               ))}
             </dl>
           ) : null}
-          <div className="candidate-experiment-table-wrap">
+          <ol className="candidate-experiment-arm-index" aria-label="候选比较顺序">
+            {view.arms.map((arm, index) => (
+              <li key={arm.candidateId}>
+                <b aria-hidden="true">{String(index + 1).padStart(2, "0")}</b>
+                <span>
+                  <strong>{arm.title}</strong>
+                  <small>{formatSymbol(arm.symbol)} · {arm.direction}→{arm.side}</small>
+                </span>
+                <code>r{arm.candidateRevision}</code>
+              </li>
+            ))}
+          </ol>
+          <p className="candidate-experiment-table-hint" id={tableHintId}>
+            比较表是独立横向滚动区域；候选列严格保留你的选择顺序，不按历史结果排序。
+          </p>
+          <div
+            className="candidate-experiment-table-wrap"
+            role="region"
+            aria-label="候选历史实验比较表"
+            aria-describedby={tableHintId}
+            tabIndex={0}
+          >
             <table
               className="candidate-experiment-table"
-              style={{ minWidth: `${132 + (view.arms.length * 190)}px` }}
+              style={{ minWidth: `${TABLE_ROW_HEADER_WIDTH + (view.arms.length * TABLE_ARM_WIDTH)}px` }}
             >
               <caption>相同冻结历史数据、服务端共同规格和三档摩擦下的候选并列结果</caption>
               <thead>
@@ -415,7 +582,7 @@ export function CandidateExperimentPanel({ room, artifact, readOnly = false, rea
                   {view.arms.map((arm) => (
                     <th scope="col" key={arm.candidateId}>
                       <strong>{arm.title}</strong>
-                      <small>{arm.symbol.replace("US.", "")} · {arm.direction}→{arm.side}</small>
+                      <small>{formatSymbol(arm.symbol)} · {arm.direction}→{arm.side}</small>
                       <small>r{arm.candidateRevision} · 快照 {shortHash(arm.candidateSnapshotSha256)}</small>
                     </th>
                   ))}
@@ -442,7 +609,7 @@ export function CandidateExperimentPanel({ room, artifact, readOnly = false, rea
                   <th scope="row">失效条件</th>
                   {view.arms.map((arm) => <td key={arm.candidateId}>{arm.invalidation}</td>)}
                 </tr>
-                {Object.entries(SCENARIO_LABELS).map(([scenarioId, label]) => (
+                {SCENARIO_ENTRIES.map(([scenarioId, label]) => (
                   <tr key={scenarioId}>
                     <th scope="row">{label}</th>
                     {view.arms.map((arm) => (
@@ -456,11 +623,11 @@ export function CandidateExperimentPanel({ room, artifact, readOnly = false, rea
             </table>
           </div>
           <p className="candidate-experiment-safety" role="note">
-            <ShieldCheck size={14} />
+            <ShieldCheck size={14} aria-hidden="true" />
             不产生排名、赢家、未来胜率或自动决定；不会修改下方用户最终决定，用户仍可选择任一有效候选。
           </p>
         </div>
       ) : null}
     </section>
   );
-}
+});

@@ -1,5 +1,33 @@
 import { createElement, useRef } from "react";
 import { useModalFocus } from "./useModalFocus.js";
+import "./styles/deferred-surface-polish.css";
+
+function loadingStatus(label) {
+  return createElement(
+    "div",
+    { className: "deferred-surface-status", role: "status", "aria-live": "polite" },
+    createElement(
+      "span",
+      { className: "deferred-surface-signal", "aria-hidden": "true" },
+      createElement("i"),
+      createElement("i"),
+      createElement("i"),
+    ),
+    createElement(
+      "span",
+      { className: "deferred-surface-copy" },
+      createElement("small", null, "界面准备中"),
+      createElement("strong", null, `正在加载${label}…`),
+    ),
+    createElement(
+      "span",
+      { className: "deferred-surface-bars", "aria-hidden": "true" },
+      createElement("i"),
+      createElement("i"),
+      createElement("i"),
+    ),
+  );
+}
 
 export function DeferredSurfaceFallback({
   label,
@@ -21,8 +49,8 @@ export function DeferredSurfaceFallback({
   if (ownsModalFocus && !open) return null;
   const content = createElement(
     "div",
-    { className: "deferred-surface-fallback", role: "status", "aria-live": "polite" },
-    `正在加载${label}…`,
+    { className: "deferred-surface-fallback", "aria-busy": "true" },
+    loadingStatus(label),
   );
   if (!dialog) return content;
   if (!ownsModalFocus) {
@@ -46,11 +74,7 @@ export function DeferredSurfaceFallback({
         "aria-busy": "true",
         tabIndex: -1,
       },
-      createElement(
-        "span",
-        { role: "status", "aria-live": "polite" },
-        `正在加载${label}…`,
-      ),
+      loadingStatus(label),
       createElement(
         "button",
         {

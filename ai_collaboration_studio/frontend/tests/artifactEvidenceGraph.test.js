@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   filterEvidencePaths,
   normalizeArtifactEvidenceGraph,
+  summarizeActiveEvidenceGraph,
   summarizeEvidenceGraph,
 } from "../src/artifactEvidenceGraph.js";
 
@@ -105,11 +106,48 @@ test("separates whole-graph and current-target statistics", () => {
   assert.equal(whole.relationCount, 2);
   assert.equal(whole.sourceIds.size, 2);
   assert.equal(current.relationCount, 1);
+  assert.equal(summarizeActiveEvidenceGraph(graph).relationCount, 0);
+  assert.equal(summarizeActiveEvidenceGraph(graph, "summary").relationCount, 1);
   assert.equal(current.support, 1);
   assert.equal(filterEvidencePaths(graph, "attention").length, 1);
   assert.equal(filterEvidencePaths(graph, "reviewed").length, 2);
   assert.equal(filterEvidencePaths(graph, "active", "summary").length, 1);
   assert.equal(filterEvidencePaths(graph, "active", "decision_options:option_a").length, 1);
+});
+
+test("normalizes optional display metadata before valid graph rendering", () => {
+  const payload = fixture();
+  payload.nodes[0].source_id = { unsafe: true };
+  payload.nodes[0].status = ["available"];
+  payload.nodes[2].item_key = { unsafe: true };
+  payload.edges[0].review_note = { unsafe: true };
+  payload.review_chain.events[0].created_by = { unsafe: true };
+  payload.review_chain.events[0].relation_count = { unsafe: true };
+
+  const graph = normalizeArtifactEvidenceGraph(payload, expected);
+
+  assert.equal(graph.valid, true);
+  assert.equal(graph.nodeById.get("source_v1").source_id, "");
+  assert.equal(graph.nodeById.get("source_v1").status, "");
+  assert.equal(graph.nodeById.get("target_summary").item_key, "");
+  assert.equal(graph.edgeById.get("edge_support").review_note, "");
+  assert.equal(graph.reviewEvents[0].created_by, "");
+  assert.equal(graph.reviewEvents[0].relation_count, 0);
+});
+
+test("fails fast on oversized graph and review collections", () => {
+  const oversizedNodes = fixture();
+  oversizedNodes.nodes = Array.from({ length: 7501 }, () => null);
+  const nodeGraph = normalizeArtifactEvidenceGraph(oversizedNodes, expected);
+  assert.equal(nodeGraph.valid, false);
+  assert.ok(nodeGraph.issues.includes("NODE_LIMIT_EXCEEDED"));
+
+  const oversizedEvents = fixture();
+  oversizedEvents.review_chain.events = Array.from({ length: 501 }, () => null);
+  oversizedEvents.review_chain.event_count = 501;
+  const eventGraph = normalizeArtifactEvidenceGraph(oversizedEvents, expected);
+  assert.equal(eventGraph.valid, false);
+  assert.ok(eventGraph.issues.includes("REVIEW_EVENT_LIMIT_EXCEEDED"));
 });
 
 test("keeps partial source or legacy integrity visible without calling it verified", () => {
@@ -172,4 +210,19 @@ test("fails closed on review-chain gaps", () => {
 
   assert.equal(graph.valid, false);
   assert.ok(graph.issues.includes("REVIEW_EVENT_SEQUENCE_INVALID"));
+});
+
+test("fails closed on duplicate review event hashes", () => {
+  const payload = fixture();
+  payload.review_chain.events.push({
+    ...payload.review_chain.events[0],
+    sequence_no: 2,
+    artifact_version: 4,
+  });
+  payload.review_chain.event_count = 2;
+  payload.review_chain.head_sequence = 2;
+  const graph = normalizeArtifactEvidenceGraph(payload, expected);
+
+  assert.equal(graph.valid, false);
+  assert.ok(graph.issues.includes("REVIEW_EVENT_HASH_DUPLICATE"));
 });

@@ -13,6 +13,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $frontendRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $testsRoot = [IO.Path]::GetFullPath((Join-Path $frontendRoot 'tests'))
+$domCssHook = [IO.Path]::GetFullPath((Join-Path $testsRoot 'helpers/dom-css-noop-register.mjs'))
+$domCssHookUri = ([Uri]::new($domCssHook)).AbsoluteUri
 $node = (Get-Command node.exe -ErrorAction Stop).Source
 $taskkill = (Get-Command taskkill.exe -ErrorAction Stop).Source
 
@@ -43,7 +45,41 @@ function New-TestProcess {
   $startInfo.CreateNoWindow = $true
   $startInfo.RedirectStandardOutput = $true
   $startInfo.RedirectStandardError = $true
-  $startInfo.Arguments = '--max-old-space-size=2048 --test --test-concurrency=1 --test-isolation=none "{0}"' -f $TestPath
+  $arguments = [Collections.Generic.List[string]]::new()
+  [void]$arguments.Add('--max-old-space-size=2048')
+  if ([IO.Path]::GetFileName($TestPath).EndsWith('.dom.test.js', [StringComparison]::OrdinalIgnoreCase)) {
+    if (-not (Test-Path -LiteralPath $domCssHook -PathType Leaf)) {
+      throw "DOM CSS test hook not found: $domCssHook"
+    }
+    [void]$arguments.Add('--import')
+    [void]$arguments.Add($domCssHookUri)
+  }
+  foreach ($argument in @('--test', '--test-concurrency=1', '--test-isolation=none', $TestPath)) {
+    [void]$arguments.Add($argument)
+  }
+
+  # Windows PowerShell 5.1 runs on .NET Framework, where ArgumentList is not
+  # available. Keep the typed collection on modern runtimes and use a strictly
+  # quoted fallback for the README/npm entry point.
+  $argumentListProperty = $startInfo.GetType().GetProperty('ArgumentList')
+  $argumentList = if ($null -ne $argumentListProperty) {
+    $argumentListProperty.GetValue($startInfo)
+  } else {
+    $null
+  }
+  if ($null -ne $argumentList) {
+    foreach ($argument in $arguments) {
+      [void]$argumentList.Add($argument)
+    }
+  } else {
+    $quotedArguments = foreach ($argument in $arguments) {
+      if ($argument.Contains('"') -or $argument.EndsWith('\')) {
+        throw "Runner argument cannot be represented safely on Windows PowerShell 5.1: $argument"
+      }
+      '"' + $argument + '"'
+    }
+    $startInfo.Arguments = $quotedArguments -join ' '
+  }
 
   $process = [Diagnostics.Process]::new()
   $process.StartInfo = $startInfo

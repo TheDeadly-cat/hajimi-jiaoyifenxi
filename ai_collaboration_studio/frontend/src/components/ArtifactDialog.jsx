@@ -11,13 +11,23 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
+import {
+  artifactEditorDisplayText,
+  artifactEditorErrorMessage,
+  artifactEditorFieldText,
+  artifactEditorIdentity,
+  artifactEditorMutationControl,
+  artifactEditorRecord,
+  artifactEditorRows,
+  artifactEditorSavedState,
+  artifactEditorSourceState,
+} from "../artifactEditorUi";
 import "../styles/artifact-dialog.css";
 import { useModalFocus } from "../useModalFocus";
 import { ArtifactCandidateGovernance } from "./ArtifactCandidateGovernance";
 import { CandidateExperimentPanel } from "./CandidateExperimentPanel";
-import { ProjectReadinessPanel } from "./ProjectReadinessPanel";
 import { ArtifactEvidenceGraph } from "./ArtifactEvidenceGraph";
 import { ArtifactEvidenceReview } from "./ArtifactEvidenceReview";
 import { ArtifactVersionHistory } from "./ArtifactVersionHistory";
@@ -52,6 +62,27 @@ import {
   resolveHostOwnedSlot,
   resolvedHostContribution,
 } from "../capabilityContributions";
+
+const ProjectReadinessPanel = lazy(() => import("./ProjectReadinessPanel.jsx").then((module) => ({
+  default: module.ProjectReadinessPanel,
+})));
+
+function ProjectReadinessFallback({ artifactVersion }) {
+  return (
+    <section
+      className="project-readiness-panel"
+      aria-label="项目实施前结构复核（只读）"
+      aria-busy="true"
+    >
+      <p className="project-readiness-state" role="status" aria-live="polite">
+        正在加载绑定 v{artifactVersion || "?"} 的只读结构复核模块……
+      </p>
+      <p className="project-readiness-boundary">
+        仅加载确定性展示模块；不产生 Provider 调用、市场读取、业务写入或授权结论。
+      </p>
+    </section>
+  );
+}
 
 const disagreementStatuses = [
   ["open", "待解决"],
@@ -141,29 +172,29 @@ function normalizedItemId(section, item, seenIds) {
 
 function normalizeSectionItems(section, rawItems = []) {
   const seenIds = new Set();
-  return rawItems.map((rawItem) => {
+  return artifactEditorRows(rawItems).map((rawItem) => {
     const item = typeof rawItem === "string" ? { text: rawItem } : rawItem || {};
     const id = normalizedItemId(section, item, seenIds);
     const base = {
       id,
-      text: String(item.text || ""),
+      text: artifactEditorFieldText(item.text),
       initialEvidence: Array.isArray(item.evidence) ? item.evidence : [],
     };
     if (section === "disagreements") {
       return {
         ...base,
-        positions: Array.isArray(item.positions) ? item.positions.map((position) => String(position)) : [],
+        positions: artifactEditorRows(item.positions).map((position) => artifactEditorFieldText(position)).filter(Boolean),
         status: validDisagreementStatuses.has(item.status) ? item.status : "open",
         blocking: typeof item.blocking === "boolean" ? item.blocking : true,
-        owner: String(item.owner || "待分配"),
-        resolution: String(item.resolution || ""),
+        owner: artifactEditorFieldText(item.owner, "待分配") || "待分配",
+        resolution: artifactEditorFieldText(item.resolution),
       };
     }
     if (section === "actions") {
       return {
         ...base,
-        owner: String(item.owner || "待分配"),
-        due: String(item.due || ""),
+        owner: artifactEditorFieldText(item.owner, "待分配") || "待分配",
+        due: artifactEditorFieldText(item.due),
         state: validActionStates.has(item.state) ? item.state : "open",
       };
     }
@@ -171,8 +202,8 @@ function normalizeSectionItems(section, rawItems = []) {
       return {
         ...base,
         status: validRequirementStatuses.has(item.status) ? item.status : "pending",
-        owner: String(item.owner || "待确认"),
-        acceptance_criteria: String(item.acceptance_criteria || ""),
+        owner: artifactEditorFieldText(item.owner, "待确认") || "待确认",
+        acceptance_criteria: artifactEditorFieldText(item.acceptance_criteria),
       };
     }
     if (section === "risks") {
@@ -182,9 +213,9 @@ function normalizeSectionItems(section, rawItems = []) {
         probability: validRiskLevels.has(item.probability) ? item.probability : "unknown",
         impact: validRiskLevels.has(item.impact) ? item.impact : "unknown",
         blocking: typeof item.blocking === "boolean" ? item.blocking : true,
-        trigger: String(item.trigger || ""),
-        mitigation: String(item.mitigation || ""),
-        owner: String(item.owner || "待分配"),
+        trigger: artifactEditorFieldText(item.trigger),
+        mitigation: artifactEditorFieldText(item.mitigation),
+        owner: artifactEditorFieldText(item.owner, "待分配") || "待分配",
       };
     }
     return base;
@@ -192,6 +223,7 @@ function normalizeSectionItems(section, rawItems = []) {
 }
 
 function normalizeDecision(rawDecision = {}) {
+  rawDecision = artifactEditorRecord(rawDecision);
   const seenIds = new Set();
   const preferredRaw = String(rawDecision.preferred_option_id || "");
   let preferredOptionId = "";
@@ -202,14 +234,14 @@ function normalizeDecision(rawDecision = {}) {
     if (rawId === preferredRaw && !preferredOptionId) preferredOptionId = id;
     return {
       id,
-      title: String(option.title || ""),
-      description: String(option.description || option.text || ""),
-      benefits: Array.isArray(option.benefits) ? option.benefits.map((item) => String(item)) : [],
-      risks: Array.isArray(option.risks) ? option.risks.map((item) => String(item)) : [],
-      value: String(option.value || ""),
-      cost: String(option.cost || ""),
-      timeline: String(option.timeline || ""),
-      dependencies: Array.isArray(option.dependencies) ? option.dependencies.map((item) => String(item)) : [],
+      title: artifactEditorFieldText(option.title),
+      description: artifactEditorFieldText(option.description || option.text),
+      benefits: artifactEditorRows(option.benefits).map((item) => artifactEditorFieldText(item)).filter(Boolean),
+      risks: artifactEditorRows(option.risks).map((item) => artifactEditorFieldText(item)).filter(Boolean),
+      value: artifactEditorFieldText(option.value),
+      cost: artifactEditorFieldText(option.cost),
+      timeline: artifactEditorFieldText(option.timeline),
+      dependencies: artifactEditorRows(option.dependencies).map((item) => artifactEditorFieldText(item)).filter(Boolean),
       reversibility: validReversibilityLevels.has(option.reversibility) ? option.reversibility : "unknown",
       initialEvidence: Array.isArray(option.evidence) ? option.evidence : [],
     };
@@ -218,7 +250,7 @@ function normalizeDecision(rawDecision = {}) {
     status: validDecisionStatuses.has(rawDecision.status) ? rawDecision.status : "undecided",
     options,
     preferred_option_id: preferredOptionId,
-    rationale: String(rawDecision.rationale || ""),
+    rationale: artifactEditorFieldText(rawDecision.rationale),
     initialEvidence: Array.isArray(rawDecision.evidence) ? rawDecision.evidence : [],
   };
 }
@@ -228,7 +260,8 @@ function targetKey(section, itemId) {
 }
 
 function createEditorState(artifact) {
-  const content = artifact.content || {};
+  artifact = artifactEditorSourceState(artifact).artifact;
+  const content = artifactEditorRecord(artifact.content);
   const normalizedDecision = normalizeDecision(content.decision);
   const normalizedSections = {
     requirements: normalizeSectionItems("requirements", content.requirements),
@@ -264,8 +297,8 @@ function createEditorState(artifact) {
     ]),
   );
   return {
-    title: artifact.title || "会议纪要",
-    summary: content.summary || "",
+    title: artifactEditorFieldText(artifact.title, "会议纪要") || "会议纪要",
+    summary: artifactEditorFieldText(content.summary),
     ...sections,
     decision: {
       ...normalizedDecision,
@@ -380,7 +413,7 @@ function SectionHeader({ title, help, onAdd }) {
   return (
     <div className="artifact-structured-heading">
       <span><strong>{title}</strong><small>{help}</small></span>
-      <button type="button" className="secondary compact" onClick={onAdd}><Plus size={13} />添加</button>
+      <button type="button" className="secondary compact" onClick={onAdd}><Plus aria-hidden="true" size={13} />添加</button>
     </div>
   );
 }
@@ -388,7 +421,7 @@ function SectionHeader({ title, help, onAdd }) {
 function RemoveItemButton({ label, onRemove }) {
   return (
     <button type="button" className="artifact-item-remove" aria-label={`删除${label}`} title={`删除${label}`} onClick={onRemove}>
-      <Trash2 size={13} />
+      <Trash2 aria-hidden="true" size={13} />
     </button>
   );
 }
@@ -656,6 +689,8 @@ function UserFinalDecisionSection({ artifact, onSubmit }) {
   const [selectedOptionId, setSelectedOptionId] = useState("");
   const [busyAction, setBusyAction] = useState("");
   const [decisionError, setDecisionError] = useState("");
+  const decisionTitleId = useId();
+  const decisionInFlightRef = useRef(false);
   const { current, latest, stale, history } = artifactDecisionState(artifact);
   const displayedDecision = current || latest;
   const selection = useMemo(() => artifactUserDecisionSelection(artifact), [artifact]);
@@ -664,9 +699,14 @@ function UserFinalDecisionSection({ artifact, onSubmit }) {
   ) || null;
   const cleanRationale = rationale.trim();
   const currentConfirmationValid = artifact.evidence_review?.confirmation_ready !== false;
+  const canSubmit = typeof onSubmit === "function";
 
   const submitDecision = async (action) => {
-    if (!cleanRationale || busyAction) return;
+    if (!cleanRationale || busyAction || decisionInFlightRef.current) return;
+    if (!canSubmit) {
+      setDecisionError(() => "当前未提供最终决定提交处理器，不能提交。");
+      return;
+    }
     if (!selection.decisionReady) {
       setDecisionError(() => selection.decisionReason || "当前治理记录未就绪，不能记录最终决定。");
       return;
@@ -679,6 +719,7 @@ function UserFinalDecisionSection({ artifact, onSubmit }) {
       setDecisionError(() => "支持候选前，请明确选择一个当前治理候选。");
       return;
     }
+    decisionInFlightRef.current = true;
     setBusyAction(() => action);
     setDecisionError(() => "");
     try {
@@ -691,17 +732,18 @@ function UserFinalDecisionSection({ artifact, onSubmit }) {
       setRationale(() => "");
       setSelectedOptionId(() => "");
     } catch (requestError) {
-      setDecisionError(() => requestError.message || "最终决定提交失败，请稍后重试。");
+      setDecisionError(() => artifactEditorErrorMessage(requestError, "最终决定提交失败，请稍后重试。"));
     } finally {
+      decisionInFlightRef.current = false;
       setBusyAction(() => "");
     }
   };
 
   return (
-    <section className="artifact-final-decision" aria-labelledby="artifact-final-decision-title">
+    <section className="artifact-final-decision" aria-labelledby={decisionTitleId}>
       <div className="artifact-final-decision-heading">
         <span>
-          <strong id="artifact-final-decision-title">第三层 · 用户最终决定</strong>
+          <strong id={decisionTitleId}>第三层 · 用户最终决定</strong>
           <small>这是唯一的用户决定记录；上方风控“支持 / 质疑 / 拒绝”不会生成用户决定，也不代表批准、否决或执行授权。</small>
         </span>
         <em>绑定已确认版本 v{artifact.version}</em>
@@ -709,7 +751,7 @@ function UserFinalDecisionSection({ artifact, onSubmit }) {
 
       {current ? (
         <div className={`artifact-user-decision-current ${current.action || "unknown"}`}>
-          <CheckCircle2 size={16} />
+          <CheckCircle2 aria-hidden="true" size={16} />
           <span>
             <strong>当前决定：{userDecisionLabel(current)}</strong>
             <small>
@@ -722,14 +764,14 @@ function UserFinalDecisionSection({ artifact, onSubmit }) {
         </div>
       ) : (
         <div className="artifact-user-decision-empty">
-          <CirclePause size={16} />
+          <CirclePause aria-hidden="true" size={16} />
           <span><strong>尚未记录当前版本的最终决定</strong><small>请先说明理由，再选择下面一种态度。</small></span>
         </div>
       )}
 
       {!current && displayedDecision ? (
         <div className="artifact-user-decision-stale" role="status">
-          <AlertTriangle size={15} />
+          <AlertTriangle aria-hidden="true" size={15} />
           <span>
             <strong>此前决定已过期：{userDecisionLabel(displayedDecision)}</strong>
             <small>
@@ -763,12 +805,12 @@ function UserFinalDecisionSection({ artifact, onSubmit }) {
             aria-label="可供用户支持的当前候选"
             disabled={Boolean(busyAction) || !selection.ready}
           >
-            {selection.candidates.map((candidate) => {
+            {selection.candidates.map((candidate, candidateIndex) => {
               const selected = selectedOptionId === candidate.id;
               return (
                 <label
                   className={`artifact-user-decision-candidate${candidate.aiPreferred ? " ai-preferred" : ""}${selected ? " selected" : ""}`}
-                  key={candidate.id}
+                  key={JSON.stringify([candidate.id, candidate.revision, candidateIndex])}
                 >
                   <input
                     type="radio"
@@ -826,6 +868,7 @@ function UserFinalDecisionSection({ artifact, onSubmit }) {
         最终决定理由
         <textarea
           required
+          maxLength={8000}
           value={rationale}
           onChange={(event) => setRationale(() => event.target.value)}
           placeholder="写明你依据了哪些证据、保留了哪些分歧，以及什么条件会改变这个决定。"
@@ -845,13 +888,16 @@ function UserFinalDecisionSection({ artifact, onSubmit }) {
           const supportUnavailable = action === "support" && !selection.ready;
           const disabled = Boolean(
             busyAction
+            || !canSubmit
             || !cleanRationale
             || lacksCandidate
             || !currentConfirmationValid
             || !selection.decisionReady
             || supportUnavailable
           );
-          const actionTitle = !selection.decisionReady
+          const actionTitle = !canSubmit
+            ? "当前未提供最终决定提交处理器"
+            : !selection.decisionReady
             ? selection.decisionReason || "当前治理记录未就绪"
             : supportUnavailable
               ? selection.reason || "当前候选状态不可用于支持决定"
@@ -871,7 +917,7 @@ function UserFinalDecisionSection({ artifact, onSubmit }) {
               title={actionTitle}
               onClick={() => submitDecision(action)}
             >
-              <Icon size={15} />
+              <Icon aria-hidden="true" size={15} />
               <span><strong>{busyAction === action ? "正在提交…" : meta.label}</strong><small>{meta.description}</small></span>
             </button>
           );
@@ -881,10 +927,12 @@ function UserFinalDecisionSection({ artifact, onSubmit }) {
 
       {history.length ? (
         <details className="artifact-user-decision-history">
-          <summary><History size={14} />决策历史（{history.length}）{stale.length ? ` · ${stale.length} 条已过期` : ""}</summary>
+          <summary><History aria-hidden="true" size={14} />决策历史（{history.length}）{stale.length ? ` · ${stale.length} 条已过期` : ""}</summary>
           <div>
-            {history.map((decision) => (
-              <article className={decision.is_current ? "current" : "stale"} key={decision.id || `${decision.artifact_version}:${decision.created_at}`}>
+            {history.map((decision, decisionIndex) => (
+              <article className={decision.is_current ? "current" : "stale"} key={decision.id
+                ? JSON.stringify(["decision_id", decision.id])
+                : JSON.stringify(["decision_record", decision.artifact_version, decision.created_at, decisionIndex])}>
                 <span><strong>{userDecisionLabel(decision)}</strong><small>绑定 v{decision.artifact_version || "?"} · {formatUserDecisionTime(decision.created_at)}</small></span>
                 <small className="artifact-user-decision-history-binding">{userDecisionBindingText(artifact, decision)}</small>
                 <p>{decision.rationale}</p>
@@ -898,12 +946,34 @@ function UserFinalDecisionSection({ artifact, onSubmit }) {
   );
 }
 
+const MemoSimpleItemEditor = memo(SimpleItemEditor, (previous, next) => (
+  previous.item === next.item
+  && previous.section === next.section
+  && previous.label === next.label
+));
+const MemoDisagreementEditor = memo(DisagreementEditor, (previous, next) => previous.item === next.item);
+const MemoActionEditor = memo(ActionEditor, (previous, next) => previous.item === next.item);
+const MemoRequirementEditor = memo(RequirementEditor, (previous, next) => previous.item === next.item);
+const MemoRiskEditor = memo(RiskEditor, (previous, next) => previous.item === next.item);
+const MemoDecisionMatrixPreview = memo(DecisionMatrixPreview);
+const MemoDecisionOptionEditor = memo(DecisionOptionEditor, (previous, next) => (
+  previous.item === next.item
+  && previous.selected === next.selected
+  && previous.structured === next.structured
+  && previous.structuredReadOnly === next.structuredReadOnly
+));
+const MemoUserFinalDecisionSection = memo(UserFinalDecisionSection);
+
 function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open, messages, materials, onClose, onSave, onConfirm, onUserDecision, onExport, restoreFocusRef }) {
+  const sourceState = artifactEditorSourceState(artifact);
   const dialogRef = useRef(null);
   const closeButtonRef = useRef(null);
-  const [editor, setEditor] = useState(() => createEditorState(artifact));
-  const [workingArtifact, setWorkingArtifact] = useState(artifact);
+  const dialogTitleId = useId();
+  const dialogDescriptionId = useId();
+  const [editor, setEditor] = useState(() => createEditorState(sourceState.artifact));
+  const [workingArtifact, setWorkingArtifact] = useState(sourceState.artifact);
   const [mutationAction, setMutationAction] = useState("");
+  const [mutationError, setMutationError] = useState("");
   const [progressNotice, setProgressNotice] = useState("");
   const [sourceDetailByKey, setSourceDetailByKey] = useState({});
   const [roundEvidenceEnvelope, setRoundEvidenceEnvelope] = useState(null);
@@ -911,33 +981,70 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
   const [evidenceGraph, setEvidenceGraph] = useState(null);
   const [evidenceGraphState, setEvidenceGraphState] = useState("loading");
   const [focusedEvidenceKey, setFocusedEvidenceKey] = useState("");
+  const mutationRequestRef = useRef(0);
+  const mutationInFlightRef = useRef(false);
+  const sourceDetailRequestGenerationRef = useRef(0);
   const busy = Boolean(mutationAction);
+  const canClose = typeof onClose === "function";
   const requestClose = () => {
-    if (!busy) onClose();
+    if (busy) return;
+    if (!canClose) {
+      setMutationError("关闭处理器不可用。");
+      return;
+    }
+    try {
+      onClose();
+    } catch (closeError) {
+      setMutationError(artifactEditorErrorMessage(closeError, "窗口关闭失败。"));
+    }
   };
   useModalFocus({
     open,
     containerRef: dialogRef,
     initialFocusRef: closeButtonRef,
     restoreFallbackRef: restoreFocusRef,
-    onClose: busy ? null : requestClose,
+    onClose: busy || !canClose ? null : requestClose,
   });
   useEffect(() => {
     if (open && busy) dialogRef.current?.focus({ preventScroll: true });
   }, [busy, open]);
   useEffect(() => {
+    sourceDetailRequestGenerationRef.current += 1;
+    mutationRequestRef.current += 1;
+    mutationInFlightRef.current = false;
+    if (!open) {
+      setMutationAction("");
+      setMutationError("");
+    }
+    return () => {
+      sourceDetailRequestGenerationRef.current += 1;
+      mutationRequestRef.current += 1;
+      mutationInFlightRef.current = false;
+    };
+  }, [open]);
+  useEffect(() => {
     if (!open) return undefined;
+    sourceDetailRequestGenerationRef.current += 1;
     let cancelled = false;
     const controller = new AbortController();
+    const evidenceIdentity = artifactEditorIdentity(workingArtifact, room);
     setRoundEvidenceEnvelope(null);
     setSourceDetailByKey({});
     setEvidenceGraph(null);
     setEvidenceGraphState("loading");
+    if (!evidenceIdentity.integrityOk) {
+      setRoundEvidenceSourceState("error");
+      setEvidenceGraphState("error");
+      return () => {
+        cancelled = true;
+        controller.abort();
+      };
+    }
     if (!workingArtifact.round_id) {
       setRoundEvidenceSourceState("ready");
     } else {
       setRoundEvidenceSourceState("loading");
-      api.artifactEvidenceSources(room.id, workingArtifact.id, controller.signal)
+      api.artifactEvidenceSources(evidenceIdentity.roomId, evidenceIdentity.artifactId, controller.signal)
         .then((data) => {
           if (cancelled) return;
           const normalized = normalizeArtifactEvidenceResponse(data, {
@@ -951,12 +1058,12 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
           setRoundEvidenceSourceState("error");
         });
     }
-    api.artifactEvidenceGraph(room.id, workingArtifact.id, controller.signal)
+    api.artifactEvidenceGraph(evidenceIdentity.roomId, evidenceIdentity.artifactId, controller.signal)
       .then((data) => {
         if (cancelled) return;
         setEvidenceGraph(normalizeArtifactEvidenceGraph(data, {
-          roomId: room.id,
-          artifactId: workingArtifact.id,
+          roomId: evidenceIdentity.roomId,
+          artifactId: evidenceIdentity.artifactId,
           artifactVersion: workingArtifact.version,
           roundId: workingArtifact.round_id || "",
         }));
@@ -970,7 +1077,7 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
       cancelled = true;
       controller.abort();
     };
-  }, [open, room.id, workingArtifact.id, workingArtifact.round_id, workingArtifact.version]);
+  }, [open, room?.id, workingArtifact.id, workingArtifact.round_id, workingArtifact.version]);
   const artifactWorkspaceSlot = useMemo(
     () => resolveHostOwnedSlot({
       slotId: HOST_SLOT_IDS.artifactWorkspace,
@@ -1015,7 +1122,7 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
       : []),
     ...(Array.isArray(room?.active_capability_pack_ids)
       ? room.active_capability_pack_ids
-      : (room?.capability_pack_ids || [])),
+      : artifactEditorRows(room?.capability_pack_ids)),
   ];
   const footballResearchPackPresent = frozenAndCurrentCapabilityPackIds
     .includes("football_research_readonly");
@@ -1035,7 +1142,7 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
     });
   }, [materials, messages, roundEvidenceEnvelope, workingArtifact.content, workingArtifact.round_id]);
 
-  const evidenceTargets = [
+  const evidenceTargets = useMemo(() => [
     { key: "summary", label: "会议摘要" },
     { key: "decision", label: "首选方案选择理由" },
     ...editor.decision.options.map((item) => ({
@@ -1062,18 +1169,29 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
       key: targetKey("actions", item.id),
       label: `待办 · ${item.text.slice(0, 34) || "未命名"}`,
     })),
-  ];
+  ], [
+    editor.actions,
+    editor.conclusions,
+    editor.decision.options,
+    editor.disagreements,
+    editor.requirements,
+    editor.risks,
+    editor.unknowns,
+  ]);
   const activeTarget = evidenceTargets.some((target) => target.key === editor.reviewTarget)
     ? editor.reviewTarget
     : "summary";
   const activeReview = editor.evidenceByTarget[activeTarget] || {};
-  const selectedEvidence = Object.keys(activeReview);
+  const selectedEvidence = useMemo(() => Object.keys(activeReview), [activeReview]);
   const currentArtifact = useMemo(
     () => buildArtifact(workingArtifact, editor, evidenceCandidates),
     [editor, evidenceCandidates, workingArtifact],
   );
   const currentContent = currentArtifact.content || {};
-  const evidenceReview = artifactEvidenceReviewSummary(currentArtifact.content || {});
+  const evidenceReview = useMemo(
+    () => artifactEvidenceReviewSummary(currentArtifact.content || {}),
+    [currentArtifact.content],
+  );
   const candidateByKey = useMemo(
     () => new Map(evidenceCandidates.map((item) => [evidenceKey(item), item])),
     [evidenceCandidates],
@@ -1084,14 +1202,14 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
     )),
     [editor.evidenceByTarget],
   );
-  const selectedAuthoritativeSourceMissing = Boolean(artifact.round_id)
+  const selectedAuthoritativeSourceMissing = Boolean(workingArtifact.round_id)
     && selectedEvidenceRelations.some(({ sourceKey }) => !candidateByKey.has(sourceKey));
-  const selectedAuthoritativeIdentityMismatch = Boolean(artifact.round_id)
+  const selectedAuthoritativeIdentityMismatch = Boolean(workingArtifact.round_id)
     && selectedEvidenceRelations.some(({ sourceKey, audit }) => {
       const candidate = candidateByKey.get(sourceKey);
       return Boolean(candidate) && !evidenceSourceIdentityMatches(candidate, audit);
     });
-  const selectedAuthoritativeGap = Boolean(artifact.round_id)
+  const selectedAuthoritativeGap = Boolean(workingArtifact.round_id)
     && selectedEvidenceRelations.some(({ sourceKey, audit }) => {
       const candidate = candidateByKey.get(sourceKey);
       const sourceDetail = candidate
@@ -1099,7 +1217,7 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
         : null;
       return !candidate || evidenceRelationFlags(candidate, audit, sourceDetail).gap;
     });
-  const evidenceMutationBlocked = Boolean(artifact.round_id) && (
+  const evidenceMutationBlocked = Boolean(workingArtifact.round_id) && (
     roundEvidenceSourceState !== "ready"
     || selectedAuthoritativeSourceMissing
     || selectedAuthoritativeIdentityMismatch
@@ -1167,6 +1285,23 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
           ? "正式轮次产物仍引用不可精确读取的证据缺口；请移除该引用，或等待权威来源恢复。"
         : evidenceReviewReason;
   const confirmDisabled = Boolean(confirmDisabledReason);
+  const artifactIdentity = artifactEditorIdentity(workingArtifact, room);
+  const mutationControlInput = {
+    identity: artifactIdentity,
+    title: editor.title,
+    summary: editor.summary,
+    busy,
+    inFlight: mutationInFlightRef.current,
+    evidenceBlocked: evidenceMutationBlocked,
+    confirmDisabledReason,
+    saveHandlerAvailable: typeof onSave === "function",
+    confirmHandlerAvailable: typeof onConfirm === "function",
+    exportHandlerAvailable: typeof onExport === "function",
+  };
+  const progressControl = artifactEditorMutationControl({ ...mutationControlInput, action: "progress" });
+  const draftControl = artifactEditorMutationControl({ ...mutationControlInput, action: "draft" });
+  const confirmControl = artifactEditorMutationControl({ ...mutationControlInput, action: "confirm" });
+  const exportControl = artifactEditorMutationControl({ ...mutationControlInput, action: "export" });
 
   const updateItem = (section, itemId, patch) => {
     setEditor((current) => ({
@@ -1367,6 +1502,7 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
   const loadEvidenceSourceDetail = async (item, citedVersion) => {
     const previewKey = `${item.type}:${item.id}:v${citedVersion}`;
     if (["loading", "ready"].includes(sourceDetailByKey[previewKey]?.status)) return;
+    const requestGeneration = sourceDetailRequestGenerationRef.current;
     setSourceDetailByKey((current) => ({
       ...current,
       [previewKey]: { status: "loading" },
@@ -1413,6 +1549,7 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
         if (!normalized) throw new Error("完整冻结来源响应未通过身份校验");
         detail = normalized.source;
       }
+      if (requestGeneration !== sourceDetailRequestGenerationRef.current) return;
       setSourceDetailByKey((current) => ({
         ...current,
         [previewKey]: {
@@ -1421,6 +1558,7 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
         },
       }));
     } catch {
+      if (requestGeneration !== sourceDetailRequestGenerationRef.current) return;
       setSourceDetailByKey((current) => ({
         ...current,
         [previewKey]: {
@@ -1434,15 +1572,25 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
   };
 
   const saveProgress = async () => {
-    if (!editor.title.trim() || !editor.summary.trim() || mutationAction || evidenceMutationBlocked) return;
+    if (mutationInFlightRef.current || !progressControl.canRun) {
+      setMutationError(progressControl.instruction);
+      return;
+    }
+    const requestId = ++mutationRequestRef.current;
+    mutationInFlightRef.current = true;
+    const saveHandler = onSave;
     setMutationAction("progress");
+    setMutationError("");
     setProgressNotice("");
     try {
-      const saved = await onSave(currentArtifact, { keepOpen: true });
-      if (saved) {
-        setWorkingArtifact(saved);
+      const saved = await saveHandler(currentArtifact, { keepOpen: true });
+      if (requestId !== mutationRequestRef.current) return;
+      const savedState = artifactEditorSavedState(saved, workingArtifact);
+      if (!savedState.ok) throw new Error(savedState.error);
+      if (savedState.artifact) {
+        setWorkingArtifact(savedState.artifact);
         setEditor((current) => {
-          const normalized = createEditorState(saved);
+          const normalized = createEditorState(savedState.artifact);
           return {
             ...normalized,
             reviewTarget: normalized.evidenceByTarget[current.reviewTarget]
@@ -1450,30 +1598,89 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
               : "summary",
           };
         });
-        setProgressNotice(`审核进度已保存为 v${saved.version}，可以继续逐条核验。`);
+        setProgressNotice(`审核进度已保存为 v${savedState.artifact.version}，可以继续逐条核验。`);
+      }
+    } catch (saveError) {
+      if (requestId === mutationRequestRef.current) {
+        setMutationError(artifactEditorErrorMessage(saveError, "保存审核进度失败。"));
       }
     } finally {
-      setMutationAction("");
+      if (requestId === mutationRequestRef.current) {
+        mutationInFlightRef.current = false;
+        setMutationAction("");
+      }
     }
   };
 
   const saveAndClose = async () => {
-    if (mutationAction || evidenceMutationBlocked) return;
+    if (mutationInFlightRef.current || !draftControl.canRun) {
+      setMutationError(draftControl.instruction);
+      return;
+    }
+    const requestId = ++mutationRequestRef.current;
+    mutationInFlightRef.current = true;
+    const saveHandler = onSave;
     setMutationAction("draft");
+    setMutationError("");
     try {
-      await onSave(currentArtifact);
+      await saveHandler(currentArtifact);
+    } catch (saveError) {
+      if (requestId === mutationRequestRef.current) {
+        setMutationError(artifactEditorErrorMessage(saveError, "保存草稿失败。"));
+      }
     } finally {
-      setMutationAction("");
+      if (requestId === mutationRequestRef.current) {
+        mutationInFlightRef.current = false;
+        setMutationAction("");
+      }
     }
   };
 
   const saveAndConfirm = async () => {
-    if (mutationAction || confirmDisabled) return;
+    if (mutationInFlightRef.current || !confirmControl.canRun) {
+      setMutationError(confirmControl.instruction);
+      return;
+    }
+    const requestId = ++mutationRequestRef.current;
+    mutationInFlightRef.current = true;
+    const confirmHandler = onConfirm;
     setMutationAction("confirm");
+    setMutationError("");
     try {
-      await onConfirm(currentArtifact);
+      await confirmHandler(currentArtifact);
+    } catch (confirmError) {
+      if (requestId === mutationRequestRef.current) {
+        setMutationError(artifactEditorErrorMessage(confirmError, "保存并确认产物失败。"));
+      }
     } finally {
-      setMutationAction("");
+      if (requestId === mutationRequestRef.current) {
+        mutationInFlightRef.current = false;
+        setMutationAction("");
+      }
+    }
+  };
+
+  const exportCurrentArtifact = async () => {
+    if (mutationInFlightRef.current || !exportControl.canRun) {
+      setMutationError(exportControl.instruction);
+      return;
+    }
+    const requestId = ++mutationRequestRef.current;
+    mutationInFlightRef.current = true;
+    const exportHandler = onExport;
+    setMutationAction("export");
+    setMutationError("");
+    try {
+      await exportHandler(currentArtifact);
+    } catch (exportError) {
+      if (requestId === mutationRequestRef.current) {
+        setMutationError(artifactEditorErrorMessage(exportError, "导出 Markdown 失败。"));
+      }
+    } finally {
+      if (requestId === mutationRequestRef.current) {
+        mutationInFlightRef.current = false;
+        setMutationAction("");
+      }
     }
   };
 
@@ -1483,7 +1690,7 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
       className="dialog-backdrop"
       role="presentation"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !busy) onClose();
+        if (event.target === event.currentTarget && !busy) requestClose();
       }}
     >
       <form
@@ -1491,8 +1698,10 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
         className="dialog artifact-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="会议产物工作区"
+        aria-labelledby={dialogTitleId}
+        aria-describedby={dialogDescriptionId}
         aria-busy={busy}
+        data-mutation-state={mutationAction || "idle"}
         tabIndex={-1}
         onSubmit={(event) => {
           event.preventDefault();
@@ -1502,26 +1711,42 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
       >
         <header>
           <span>
-            <strong>会议产物工作区</strong>
-            <small className={`version-tag ${workingArtifact.status === "CONFIRMED" ? "confirmed" : ""}`}>
+            <strong id={dialogTitleId}>会议产物工作区</strong>
+            <small id={dialogDescriptionId} className={`version-tag ${workingArtifact.status === "CONFIRMED" ? "confirmed" : ""}`}>
               v{workingArtifact.version} · {workingArtifact.status === "CONFIRMED" ? "用户已确认" : "草稿待确认"}
             </small>
           </span>
-          <button ref={closeButtonRef} type="button" className="icon-button" aria-label="关闭会议产物工作区" onClick={requestClose} disabled={busy}><X size={18} /></button>
+          <button ref={closeButtonRef} type="button" className="icon-button" aria-label="关闭会议产物工作区" onClick={requestClose} disabled={busy || !canClose}><X aria-hidden="true" size={18} /></button>
         </header>
 
-        <ArtifactVersionHistory roomId={room.id} artifact={workingArtifact} />
+        <fieldset className="artifact-editor-fields" disabled={busy}>
+          <legend className="artifact-editor-fields-legend">会议产物编辑内容</legend>
+
+        <ArtifactVersionHistory roomId={artifactIdentity.roomId} artifact={workingArtifact} />
+        <section className="artifact-mutation-ledger" aria-label="产物操作许可">
+          <span><small>保存草稿</small><strong>{draftControl.instruction}</strong></span>
+          <span><small>确认产物</small><strong>{confirmControl.instruction}</strong></span>
+          <span><small>导出</small><strong>{exportControl.instruction}</strong></span>
+        </section>
+        {!sourceState.integrityOk || !artifactIdentity.integrityOk ? (
+          <p className="artifact-source-warning" role="alert">
+            {!sourceState.integrityOk ? `来源产物已按安全结构打开：${sourceState.issues[0]} ` : null}
+            {artifactIdentity.integrityOk
+              ? "保存会写入修复后的草稿结构。"
+              : "产物或房间身份无效，当前不能读取证据、保存或确认。"}
+          </p>
+        ) : null}
         {serverConfirmationIssues.length ? (
           <section className={requiredMarketSnapshotMissing ? "artifact-server-gate required" : "artifact-server-gate"}>
             <span>
               <strong>服务端确认门：仍有 {workingArtifact.evidence_review?.confirmation_issue_count || serverConfirmationIssues.length} 项</strong>
               <small>{requiredMarketSnapshotMissing
                 ? "当前旧草稿缺少本轮冻结市场快照。保存后服务端会自动加入精确 revision/SHA，且初始保持未核验。"
-                : serverConfirmationIssues[0]}</small>
+                : artifactEditorDisplayText(serverConfirmationIssues[0], "服务端未返回可展示的确认门原因。")}</small>
             </span>
             {requiredMarketSnapshotMissing ? (
-              <button type="button" className="secondary" disabled={Boolean(mutationAction) || evidenceMutationBlocked || !editor.title.trim() || !editor.summary.trim()} onClick={saveProgress}>
-                <Save size={13} />{mutationAction === "progress" ? "正在绑定…" : "保存并绑定快照"}
+              <button type="button" className="secondary" disabled={!progressControl.canRun} onClick={saveProgress}>
+                <Save aria-hidden="true" size={13} />{mutationAction === "progress" ? "正在绑定…" : "保存并绑定快照"}
               </button>
             ) : null}
           </section>
@@ -1553,7 +1778,7 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
               <section className="artifact-structured-section project-workspace-section">
                 <SectionHeader title="需求证据地图" help="区分已确认需求、工作假设、待补证据和已排除事项" onAdd={() => addItem("requirements")} />
                 <div className="artifact-item-list">
-                  {editor.requirements.map((item) => <RequirementEditor
+                  {editor.requirements.map((item) => <MemoRequirementEditor
                     key={item.id}
                     item={item}
                     onChange={updateItem}
@@ -1566,7 +1791,7 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
               <section className="artifact-structured-section project-workspace-section">
                 <SectionHeader title="项目风险登记" help="记录概率、影响、阻断性、触发信号、负责人和处置状态" onAdd={() => addItem("risks")} />
                 <div className="artifact-item-list">
-                  {editor.risks.map((item) => <RiskEditor
+                  {editor.risks.map((item) => <MemoRiskEditor
                     key={item.id}
                     item={item}
                     onChange={updateItem}
@@ -1606,10 +1831,10 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
                 />
               </label>
             </div>
-            {projectWorkspace ? <DecisionMatrixPreview options={editor.decision.options} preferredOptionId={editor.decision.preferred_option_id} /> : null}
+            {projectWorkspace ? <MemoDecisionMatrixPreview options={editor.decision.options} preferredOptionId={editor.decision.preferred_option_id} /> : null}
             <div className="artifact-item-list">
               {editor.decision.options.map((item) => (
-                <DecisionOptionEditor
+                <MemoDecisionOptionEditor
                   key={item.id}
                   item={item}
                   selected={item.id === editor.decision.preferred_option_id}
@@ -1638,7 +1863,7 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
             <SectionHeader title="结论" help="稳定条目 ID 保证增删后证据不会错位" onAdd={() => addItem("conclusions")} />
             <div className="artifact-item-list">
               {editor.conclusions.map((item) => (
-                <SimpleItemEditor
+                <MemoSimpleItemEditor
                   key={item.id}
                   section="conclusions"
                   label="结论"
@@ -1656,7 +1881,7 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
             <SectionHeader title="分歧" help="记录立场、处理状态、阻塞性与处置结论" onAdd={() => addItem("disagreements")} />
             <div className="artifact-item-list">
               {editor.disagreements.map((item) => (
-                <DisagreementEditor
+                <MemoDisagreementEditor
                   key={item.id}
                   item={item}
                   onChange={updateItem}
@@ -1672,7 +1897,7 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
             <SectionHeader title="待验证" help="记录仍需补证或复核的事项" onAdd={() => addItem("unknowns")} />
             <div className="artifact-item-list">
               {editor.unknowns.map((item) => (
-                <SimpleItemEditor
+                <MemoSimpleItemEditor
                   key={item.id}
                   section="unknowns"
                   label="待验证项"
@@ -1690,7 +1915,7 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
             <SectionHeader title="待办" help="明确负责人、期限和进展状态" onAdd={() => addItem("actions")} />
             <div className="artifact-item-list">
               {editor.actions.map((item) => (
-                <ActionEditor
+                <MemoActionEditor
                   key={item.id}
                   item={item}
                   onChange={updateItem}
@@ -1725,73 +1950,77 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
           onLoadSourceDetail={loadEvidenceSourceDetail}
           focusedEvidenceKey={focusedEvidenceKey}
         />
-        {roundEvidenceSourceState === "loading" && artifact.round_id
+        {roundEvidenceSourceState === "loading" && workingArtifact.round_id
           ? <p className="field-help artifact-note">正在校验并加载本轮冻结市场快照；不会读取当前实时行情。</p>
           : null}
-        {roundEvidenceSourceState === "error" && artifact.round_id
+        {roundEvidenceSourceState === "error" && workingArtifact.round_id
           ? <p className="field-help artifact-note">本轮冻结市场快照暂时无法读取；在恢复前不能把当前行情替代为本轮证据。</p>
           : null}
-        {roundEvidenceSourceState === "untrusted" && artifact.round_id
+        {roundEvidenceSourceState === "untrusted" && workingArtifact.round_id
           ? <p className="field-help artifact-note">证据接口未声明本轮来源具有权威性；当前不提供任何房间资料或消息作为替代候选。</p>
           : null}
         {selectedAuthoritativeSourceMissing
           ? <p className="field-help artifact-note">权威来源响应遗漏了已绑定证据。为避免保存时静默删除旧引用，当前编辑只读；请恢复来源接口后重试。</p>
           : null}
-        {artifact.status !== "CONFIRMED" && artifact.content?.generation_notes
-          ? <p className="field-help artifact-note">{artifact.content.generation_notes}</p>
+        {workingArtifact.status !== "CONFIRMED" && workingArtifact.content?.generation_notes
+          ? <p className="field-help artifact-note">{artifactEditorDisplayText(workingArtifact.content.generation_notes)}</p>
           : null}
         {confirmDisabledReason ? <p className="field-help artifact-note">{confirmDisabledReason}</p> : null}
         {workingArtifact.status === "CONFIRMED" ? (
-          <ProjectReadinessPanel
-            key={`${workingArtifact.id}:${workingArtifact.version}:${projectReadinessContribution?.contractHash || "legacy"}`}
+          <Suspense fallback={<ProjectReadinessFallback artifactVersion={workingArtifact.version} />}>
+            <ProjectReadinessPanel
+              key={JSON.stringify([workingArtifact.id, workingArtifact.version, projectReadinessContribution?.contractHash || "legacy"])}
+              room={room}
+              artifact={workingArtifact}
+              slot={artifactWorkspaceSlot}
+              contribution={projectReadinessContribution}
+              showLegacyFallback={hasProjectWorkspaceFootprint(workingArtifact.content)}
+            />
+          </Suspense>
+        ) : null}
+        {workingArtifact.status === "CONFIRMED" && storageCandidateExperimentAllowed ? (
+          <CandidateExperimentPanel
+            key={JSON.stringify([workingArtifact.id, workingArtifact.version, workingArtifact.governance_snapshot?.attestation_sha256 || ""])}
             room={room}
             artifact={workingArtifact}
-            slot={artifactWorkspaceSlot}
-            contribution={projectReadinessContribution}
-            showLegacyFallback={hasProjectWorkspaceFootprint(workingArtifact.content)}
-          />
-        ) : null}
-        {artifact.status === "CONFIRMED" && storageCandidateExperimentAllowed ? (
-          <CandidateExperimentPanel
-            key={`${artifact.id}:${artifact.version}:${artifact.governance_snapshot?.attestation_sha256 || ""}`}
-            room={room}
-            artifact={artifact}
             readOnly={storageWorkspaceReadOnly}
             readOnlyReason={storageWorkspaceReason}
           />
         ) : null}
-        {artifact.status === "CONFIRMED" ? (
-          <UserFinalDecisionSection
-            key={`${artifact.id}:${artifact.version}`}
-            artifact={artifact}
+        {workingArtifact.status === "CONFIRMED" ? (
+          <MemoUserFinalDecisionSection
+            key={JSON.stringify([workingArtifact.id, workingArtifact.version])}
+            artifact={workingArtifact}
             onSubmit={onUserDecision}
           />
         ) : null}
+        </fieldset>
+        {mutationError ? <p className="artifact-mutation-error" role="alert">{mutationError}</p> : null}
         <footer className="artifact-dialog-footer">
-          <button type="button" className="secondary" onClick={() => onExport(currentArtifact)}><Download size={14} />导出 Markdown</button>
+          <button type="button" className="secondary" disabled={!exportControl.canRun} onClick={exportCurrentArtifact}><Download size={14} aria-hidden="true" />{mutationAction === "export" ? "正在导出…" : "导出 Markdown"}</button>
           <span>
-            {artifact.status !== "CONFIRMED" ? (
+            {workingArtifact.status !== "CONFIRMED" ? (
               <button
                 className="secondary"
                 type="button"
-                disabled={Boolean(mutationAction) || evidenceMutationBlocked || !editor.title.trim() || !editor.summary.trim()}
+                disabled={!progressControl.canRun}
                 onClick={saveProgress}
               >
-                <Save size={14} />{mutationAction === "progress" ? "正在保存…" : "保存进度并继续"}
+                <Save aria-hidden="true" size={14} />{mutationAction === "progress" ? "正在保存…" : "保存进度并继续"}
               </button>
             ) : null}
-            <button className="secondary" type="submit" disabled={Boolean(mutationAction) || evidenceMutationBlocked}>
-              <Save size={14} />{mutationAction === "draft" ? "正在保存…" : "保存草稿"}
+            <button className="secondary" type="submit" disabled={!draftControl.canRun}>
+              <Save aria-hidden="true" size={14} />{mutationAction === "draft" ? "正在保存…" : "保存草稿"}
             </button>
-            {artifact.status !== "CONFIRMED" ? (
+            {workingArtifact.status !== "CONFIRMED" ? (
               <button
                 className="primary"
                 type="button"
-                disabled={confirmDisabled || Boolean(mutationAction)}
+                disabled={!confirmControl.canRun}
                 title={confirmDisabledReason || "保存当前草稿并请求后端完成证据确认门"}
                 onClick={saveAndConfirm}
               >
-                <CheckCircle2 size={14} />{mutationAction === "confirm" ? "正在确认…" : "保存并确认"}
+                <CheckCircle2 aria-hidden="true" size={14} />{mutationAction === "confirm" ? "正在确认…" : "保存并确认"}
               </button>
             ) : null}
           </span>
@@ -1802,7 +2031,9 @@ function ArtifactEditor({ artifact, room, pluginRegistry, pluginLifecycle, open,
   );
 }
 
-export function ArtifactDialog({ artifact, room, pluginRegistry, pluginLifecycle, open, messages, materials, onClose, onSave, onConfirm, onUserDecision, onExport, restoreFocusRef }) {
+const MemoArtifactEditor = memo(ArtifactEditor);
+
+export const ArtifactDialog = memo(function ArtifactDialog({ artifact, room, pluginRegistry, pluginLifecycle, open, messages, materials, onClose, onSave, onConfirm, onUserDecision, onExport, restoreFocusRef }) {
   const [retainedArtifact, setRetainedArtifact] = useState(null);
   const [editorSession, setEditorSession] = useState(0);
   const capturedRestoreFocusRef = useRef(null);
@@ -1835,8 +2066,8 @@ export function ArtifactDialog({ artifact, room, pluginRegistry, pluginLifecycle
   }, [retainedArtifact, surfaceOpen]);
   if (!renderedArtifact) return null;
   return (
-    <ArtifactEditor
-      key={`${renderedArtifact.id}:${renderedArtifact.version}:${editorSession}`}
+    <MemoArtifactEditor
+      key={JSON.stringify([renderedArtifact.id, renderedArtifact.version, editorSession])}
       artifact={renderedArtifact}
       room={room}
       pluginRegistry={pluginRegistry}
@@ -1852,4 +2083,4 @@ export function ArtifactDialog({ artifact, room, pluginRegistry, pluginLifecycle
       restoreFocusRef={restoreFocusRef || capturedRestoreFocusRef}
     />
   );
-}
+});

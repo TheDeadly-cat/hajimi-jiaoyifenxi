@@ -1,6 +1,10 @@
 export const CANDIDATE_COMPARISON_REQUEST_VERSION = "candidate_comparison_request_v1";
 export const CANDIDATE_COMPARISON_PREVIEW_VERSION = "candidate_comparison_preview_v1";
 export const CANDIDATE_COMPARISON_BASIS_VERSION = "candidate_comparison_basis_v1";
+export const CANDIDATE_COMPARISON_PORTFOLIO_LIMIT = 500;
+export const CANDIDATE_COMPARISON_RUN_LIMIT = 5000;
+export const CANDIDATE_COMPARISON_RUNS_PER_PORTFOLIO_LIMIT = 2000;
+export const CANDIDATE_COMPARISON_ISSUE_LIMIT = 200;
 
 const SCENARIO_IDS = Object.freeze(["baseline", "stressed", "severe"]);
 const STORAGE_SYMBOLS = new Set(["US.MU", "US.SNDK", "US.WDC", "US.STX"]);
@@ -15,8 +19,15 @@ const REQUIRED_RUN_INTEGRITY = Object.freeze([
 ]);
 
 
-function nonEmptyString(value) {
-  return typeof value === "string" && value.trim() ? value.trim() : "";
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+
+function nonEmptyString(value, maxLength = 1000) {
+  return typeof value === "string" && value.trim()
+    ? value.trim().slice(0, maxLength)
+    : "";
 }
 
 
@@ -27,11 +38,7 @@ function sha256(value) {
 
 
 function finiteNumber(value) {
-  if (value === null || value === undefined || value === "" || typeof value === "boolean") {
-    return null;
-  }
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 
@@ -42,7 +49,7 @@ function jsonNumber(value) {
 
 export function buildCandidateComparisonRequest(runIds) {
   const selected = Array.isArray(runIds)
-    ? runIds.map(nonEmptyString).filter(Boolean)
+    ? runIds.map((runId) => nonEmptyString(runId, 240)).filter(Boolean)
     : [];
   if (selected.length < 2 || selected.length > 6 || new Set(selected).size !== selected.length) {
     throw new TypeError("候选比较必须选择 2–6 条不同的回放记录。");
@@ -55,16 +62,66 @@ export function buildCandidateComparisonRequest(runIds) {
 }
 
 
-export function candidateComparisonEligibleRuns(portfolios, runsByPortfolio) {
+export function candidateComparisonSelectionFingerprint(runIds) {
+  const selected = Array.isArray(runIds)
+    ? runIds.map((runId) => nonEmptyString(runId, 240)).filter(Boolean)
+    : [];
+  return JSON.stringify(selected);
+}
+
+
+export function candidateComparisonErrorMessage(error, fallback = "候选比较失败，未展示任何指标。") {
+  return nonEmptyString(error?.message, 1000)
+    || nonEmptyString(fallback, 1000)
+    || "候选比较失败，未展示任何指标。";
+}
+
+
+export function candidateComparisonEligibility(portfolios, runsByPortfolio) {
+  const portfolioRows = Array.isArray(portfolios) ? portfolios : [];
+  const runEntries = Object.entries(isRecord(runsByPortfolio) ? runsByPortfolio : {});
+  if (portfolioRows.length > CANDIDATE_COMPARISON_PORTFOLIO_LIMIT) {
+    return {
+      integrityOk: false,
+      issue: `纸面组合超过 ${CANDIDATE_COMPARISON_PORTFOLIO_LIMIT} 条安全上限，已停止收集可比较回放。`,
+      runs: [],
+    };
+  }
+  if (runEntries.length > CANDIDATE_COMPARISON_PORTFOLIO_LIMIT) {
+    return {
+      integrityOk: false,
+      issue: `回放分组超过 ${CANDIDATE_COMPARISON_PORTFOLIO_LIMIT} 个安全上限，已停止收集可比较回放。`,
+      runs: [],
+    };
+  }
+  let totalRunCount = 0;
+  for (const [, runs] of runEntries) {
+    if (!Array.isArray(runs)) continue;
+    if (runs.length > CANDIDATE_COMPARISON_RUNS_PER_PORTFOLIO_LIMIT) {
+      return {
+        integrityOk: false,
+        issue: `单个组合回放超过 ${CANDIDATE_COMPARISON_RUNS_PER_PORTFOLIO_LIMIT} 条安全上限，已停止收集可比较回放。`,
+        runs: [],
+      };
+    }
+    totalRunCount += runs.length;
+    if (totalRunCount > CANDIDATE_COMPARISON_RUN_LIMIT) {
+      return {
+        integrityOk: false,
+        issue: `回放总数超过 ${CANDIDATE_COMPARISON_RUN_LIMIT} 条安全上限，已停止收集可比较回放。`,
+        runs: [],
+      };
+    }
+  }
   const portfolioMap = new Map(
-    (Array.isArray(portfolios) ? portfolios : [])
+    portfolioRows
       .filter((portfolio) => nonEmptyString(portfolio?.id))
-      .map((portfolio) => [String(portfolio.id), portfolio]),
+      .map((portfolio) => [nonEmptyString(portfolio.id, 240), portfolio]),
   );
   const eligible = [];
   const seenRunIds = new Set();
-  for (const [portfolioId, runs] of Object.entries(runsByPortfolio || {})) {
-    const portfolio = portfolioMap.get(String(portfolioId));
+  for (const [portfolioId, runs] of runEntries) {
+    const portfolio = portfolioMap.get(nonEmptyString(portfolioId, 240));
     const contract = portfolio?.candidate_simulation_contract;
     if (
       !portfolio
@@ -74,7 +131,11 @@ export function candidateComparisonEligibleRuns(portfolios, runsByPortfolio) {
     ) continue;
     for (const run of Array.isArray(runs) ? runs : []) {
       const runId = nonEmptyString(run?.id);
-      const exactPortfolioVersion = Number(run?.portfolio_version) === Number(portfolio.version);
+      const runPortfolioVersion = jsonNumber(run?.portfolio_version);
+      const portfolioVersion = jsonNumber(portfolio.version);
+      const exactPortfolioVersion = Number.isInteger(runPortfolioVersion)
+        && runPortfolioVersion > 0
+        && runPortfolioVersion === portfolioVersion;
       const exactContract = sha256(run?.candidate_simulation_contract_sha256)
         === sha256(contract.contract_sha256);
       const integrityReady = REQUIRED_RUN_INTEGRITY.every((field) => run?.[field] === true);
@@ -91,31 +152,40 @@ export function candidateComparisonEligibleRuns(portfolios, runsByPortfolio) {
       seenRunIds.add(runId);
       eligible.push({
         runId,
-        portfolioId: String(portfolio.id),
-        portfolioVersion: Number(portfolio.version),
-        portfolioName: nonEmptyString(portfolio.name) || "未命名纸面组合",
-        candidateId: nonEmptyString(contract?.source?.candidate_id),
-        candidateTitle: nonEmptyString(contract?.source?.candidate_snapshot?.title) || "未命名候选",
-        symbol: nonEmptyString(contract?.implementation?.target_symbol),
-        direction: nonEmptyString(contract?.source?.candidate_snapshot?.direction),
-        side: nonEmptyString(contract?.implementation?.target_side),
+        portfolioId: nonEmptyString(portfolio.id, 240),
+        portfolioVersion,
+        portfolioName: nonEmptyString(portfolio.name, 400) || "未命名纸面组合",
+        candidateId: nonEmptyString(contract?.source?.candidate_id, 240),
+        candidateTitle: nonEmptyString(contract?.source?.candidate_snapshot?.title, 400) || "未命名候选",
+        symbol: nonEmptyString(contract?.implementation?.target_symbol, 40),
+        direction: nonEmptyString(contract?.source?.candidate_snapshot?.direction, 20),
+        side: nonEmptyString(contract?.implementation?.target_side, 20),
         weightPct: finiteNumber(contract?.implementation?.target_weight_pct),
         horizonDays: finiteNumber(contract?.evaluation?.horizon_days),
-        createdAt: finiteNumber(run?.created_at) ?? 0,
+        createdAt: jsonNumber(run?.created_at) ?? 0,
         actionableNow: run?.actionable_now === true,
         sourceDecisionCurrent: run?.source_decision_current === true,
       });
     }
   }
-  return eligible
+  return {
+    integrityOk: true,
+    issue: "",
+    runs: eligible
     .toSorted((left, right) => right.createdAt - left.createdAt || left.runId.localeCompare(right.runId))
-    .slice(0, 30);
+    .slice(0, 30),
+  };
+}
+
+
+export function candidateComparisonEligibleRuns(portfolios, runsByPortfolio) {
+  return candidateComparisonEligibility(portfolios, runsByPortfolio).runs;
 }
 
 
 function scenarioView(value) {
-  const scenario = value && typeof value === "object" ? value : {};
-  const metrics = scenario.metrics && typeof scenario.metrics === "object" ? scenario.metrics : {};
+  const scenario = isRecord(value) ? value : {};
+  const metrics = isRecord(scenario.metrics) ? scenario.metrics : {};
   const blocked = scenario.blocked === true;
   const metricsVisible = scenario.metrics_visible === true && !blocked;
   const rawMetricValues = [
@@ -163,9 +233,10 @@ function scenarioView(value) {
 
 
 function candidateView(value) {
-  const candidate = value && typeof value === "object" ? value : {};
-  const scenarios = Array.isArray(candidate.scenarios)
-    ? candidate.scenarios.map(scenarioView)
+  const candidate = isRecord(value) ? value : {};
+  const rawScenarios = Array.isArray(candidate.scenarios) ? candidate.scenarios : [];
+  const scenarios = rawScenarios.length === SCENARIO_IDS.length
+    ? rawScenarios.map(scenarioView)
     : [];
   const scenarioIds = scenarios.map((scenario) => scenario.id);
   const scenarioShapeReady = scenarioIds.length === SCENARIO_IDS.length
@@ -204,14 +275,14 @@ function candidateView(value) {
     candidateId,
     candidateRevision,
     candidateSnapshotSha256,
-    title: nonEmptyString(candidate.title) || "未命名候选",
+    title: nonEmptyString(candidate.title, 400) || "未命名候选",
     symbol,
     direction,
     side,
     weightPct,
     horizonDays,
-    thesis: nonEmptyString(candidate.thesis),
-    invalidation: nonEmptyString(candidate.invalidation),
+    thesis: nonEmptyString(candidate.thesis, 4000),
+    invalidation: nonEmptyString(candidate.invalidation, 2000),
     contractSha256,
     sourceDecisionCurrent: candidate.source_decision_current === true,
     actionableNow: candidate.actionable_now === true,
@@ -224,26 +295,55 @@ function candidateView(value) {
 }
 
 
+function comparisonIssues(value) {
+  const rows = Array.isArray(value) ? value : [];
+  if (rows.length > CANDIDATE_COMPARISON_ISSUE_LIMIT) {
+    return [{
+      code: "CANDIDATE_COMPARISON_ISSUE_LIMIT_EXCEEDED",
+      message: `比较问题记录超过 ${CANDIDATE_COMPARISON_ISSUE_LIMIT} 条安全上限。`,
+      runId: "",
+    }];
+  }
+  const seen = new Set();
+  return rows.flatMap((issue) => {
+    if (typeof issue === "string") {
+      const message = nonEmptyString(issue, 1000);
+      return message ? [{ code: "CANDIDATE_COMPARISON_BLOCKED", message, runId: "" }] : [];
+    }
+    if (!isRecord(issue)) return [];
+    const code = nonEmptyString(issue.code, 120) || "CANDIDATE_COMPARISON_BLOCKED";
+    const message = nonEmptyString(issue.message, 1000) || "候选比较完整性未通过。";
+    return [{ code, message, runId: nonEmptyString(issue.run_id, 240) }];
+  }).filter((issue) => {
+    const key = `${issue.code}:${issue.message}:${issue.runId}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+
 export function candidateComparisonView(value) {
-  const comparison = value && typeof value === "object" ? value : {};
-  const candidates = Array.isArray(comparison.candidates)
-    ? comparison.candidates.map(candidateView)
+  const comparison = isRecord(value) ? value : {};
+  const rawCandidates = Array.isArray(comparison.candidates) ? comparison.candidates : [];
+  const candidateCollectionReady = rawCandidates.length >= 2 && rawCandidates.length <= 6;
+  const candidates = candidateCollectionReady
+    ? rawCandidates.map(candidateView)
     : [];
-  const issues = Array.isArray(comparison.issues)
-    ? comparison.issues.map((issue) => ({
-        code: nonEmptyString(issue?.code),
-        message: nonEmptyString(issue?.message),
-        runId: nonEmptyString(issue?.run_id),
-      })).filter((issue) => issue.code)
-    : [];
-  const basis = comparison.comparison_basis && typeof comparison.comparison_basis === "object"
+  const issues = comparisonIssues(comparison.issues);
+  const basis = isRecord(comparison.comparison_basis)
     ? comparison.comparison_basis
     : {};
   const candidateIds = candidates.map((candidate) => candidate.runId).filter(Boolean);
-  const selectedRunIds = Array.isArray(comparison.selected_run_ids)
-    ? comparison.selected_run_ids.map(nonEmptyString).filter(Boolean)
+  const rawSelectedRunIds = Array.isArray(comparison.selected_run_ids)
+    ? comparison.selected_run_ids
     : [];
-  const candidatesReady = candidates.length >= 2
+  const selectedCollectionReady = rawSelectedRunIds.length >= 2 && rawSelectedRunIds.length <= 6;
+  const selectedRunIds = selectedCollectionReady
+    ? rawSelectedRunIds.map((runId) => nonEmptyString(runId, 240)).filter(Boolean)
+    : [];
+  const candidatesReady = candidateCollectionReady
+    && candidates.length >= 2
     && candidates.length <= 6
     && candidateIds.length === candidates.length
     && new Set(candidateIds).size === candidates.length
@@ -256,7 +356,8 @@ export function candidateComparisonView(value) {
     `${candidate.candidateId}:${candidate.candidateRevision}:${candidate.candidateSnapshotSha256}`
   ));
   const candidateVersionsUnique = new Set(exactCandidateKeys).size === exactCandidateKeys.length;
-  const selectionReady = selectedRunIds.length === candidateIds.length
+  const selectionReady = selectedCollectionReady
+    && selectedRunIds.length === candidateIds.length
     && selectedRunIds.every((runId, index) => runId === candidateIds[index]);
   const metricSemantics = comparison.metric_semantics
     && typeof comparison.metric_semantics === "object"

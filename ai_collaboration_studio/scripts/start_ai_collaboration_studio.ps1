@@ -6,7 +6,7 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $appUrl = "http://127.0.0.1:8770/"
-$healthUrl = "http://127.0.0.1:8770/api/health"
+$readinessUrl = "http://127.0.0.1:8770/api/readiness"
 $frontendIndex = Join-Path $projectRoot "frontend\dist\index.html"
 
 function Show-LauncherError {
@@ -21,10 +21,14 @@ function Show-LauncherError {
     ) | Out-Null
 }
 
-function Test-StudioHealth {
+function Test-StudioReady {
     try {
-        $health = Invoke-RestMethod -Uri $healthUrl -Method Get -TimeoutSec 2
-        return $health.ok -eq $true -and $null -ne $health.service
+        $readiness = Invoke-RestMethod -Uri $readinessUrl -Method Get -TimeoutSec 2
+        return `
+            $readiness.ok -eq $true -and `
+            $readiness.ready -eq $true -and `
+            $readiness.schema_version -eq "host_readiness_v1" -and `
+            $readiness.service.id -eq "ai_collaboration_studio"
     } catch {
         return $false
     }
@@ -60,7 +64,7 @@ function Open-StudioWindow {
     Start-Process $appUrl
 }
 
-if (Test-StudioHealth) {
+if (Test-StudioReady) {
     if (-not $CheckOnly) {
         Open-StudioWindow
     }
@@ -81,13 +85,25 @@ if (-not (Test-Path -LiteralPath $frontendIndex -PathType Leaf)) {
     exit 1
 }
 
-$pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
+$managedPython = Join-Path $projectRoot "runtime\bootstrap\python\Scripts\python.exe"
+$pythonPath = $null
 $pythonArguments = @("server.py")
-if (-not $pythonCommand) {
+if (Test-Path -LiteralPath $managedPython -PathType Leaf) {
+    $pythonPath = $managedPython
+} else {
+    $pythonCommand = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($pythonCommand) {
+        $pythonPath = $pythonCommand.Source
+    }
+}
+if (-not $pythonPath) {
     $pythonCommand = Get-Command py.exe -ErrorAction SilentlyContinue
     $pythonArguments = @("-3", "server.py")
+    if ($pythonCommand) {
+        $pythonPath = $pythonCommand.Source
+    }
 }
-if (-not $pythonCommand) {
+if (-not $pythonPath) {
     Show-LauncherError "Python 3 was not found. Install it or add python.exe to PATH."
     exit 1
 }
@@ -99,7 +115,7 @@ $stdoutPath = Join-Path $logDirectory "server-$stamp.stdout.log"
 $stderrPath = Join-Path $logDirectory "server-$stamp.stderr.log"
 
 $serverProcess = Start-Process `
-    -FilePath $pythonCommand.Source `
+    -FilePath $pythonPath `
     -ArgumentList $pythonArguments `
     -WorkingDirectory $projectRoot `
     -WindowStyle Hidden `
@@ -110,7 +126,7 @@ $serverProcess = Start-Process `
 $ready = $false
 for ($attempt = 0; $attempt -lt 60; $attempt += 1) {
     Start-Sleep -Milliseconds 250
-    if (Test-StudioHealth) {
+    if (Test-StudioReady) {
         $ready = $true
         break
     }

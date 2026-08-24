@@ -39,10 +39,14 @@ const VERIFICATION_STATUSES = new Set([
 ]);
 
 function cleanText(value, maxLength = 1000) {
+  if (typeof value !== "string" && typeof value !== "number") return "";
+  if (typeof value === "number" && !Number.isFinite(value)) return "";
   return String(value ?? "").trim().slice(0, maxLength);
 }
 
 function cleanInteger(value, fallback = 0) {
+  if (typeof value !== "string" && typeof value !== "number") return fallback;
+  if (typeof value === "string" && !value.trim()) return fallback;
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
@@ -105,6 +109,9 @@ export function normalizeArtifactEvidenceGraph(rawPayload, expected = {}) {
   const rawEdges = Array.isArray(raw.edges) ? raw.edges : [];
   if (rawNodes.length > 7500) issues.push("NODE_LIMIT_EXCEEDED");
   if (rawEdges.length > 13000) issues.push("EDGE_LIMIT_EXCEEDED");
+  if (rawNodes.length > 7500 || rawEdges.length > 13000) {
+    return invalidGraph(issues, raw);
+  }
   const nodes = [];
   const nodeById = new Map();
   rawNodes.forEach((rawNode) => {
@@ -125,6 +132,13 @@ export function normalizeArtifactEvidenceGraph(rawPayload, expected = {}) {
       node_kind: nodeKind,
       label: cleanText(node.label, 240),
       text: cleanText(node.text, 1000),
+      source_type: cleanText(node.source_type, 60),
+      source_id: cleanText(node.source_id, 240),
+      source_version: cleanInteger(node.source_version),
+      status: cleanText(node.status, 60),
+      item_key: cleanText(node.item_key, 180),
+      action: cleanText(node.action, 60),
+      artifact_version: cleanInteger(node.artifact_version),
     };
     nodes.push(normalized);
     nodeById.set(nodeId, normalized);
@@ -153,6 +167,10 @@ export function normalizeArtifactEvidenceGraph(rawPayload, expected = {}) {
     }
     const fromNode = nodeById.get(fromNodeId);
     const toNode = nodeById.get(toNodeId);
+    let relationId = "";
+    let itemKey = "";
+    let evidenceRole = "";
+    let verificationStatus = "";
     const semanticEndpointsValid = RELATION_EDGE_TYPES.has(edgeType)
       ? fromNode.node_kind === "evidence_source" && TARGET_NODE_KINDS.has(toNode.node_kind)
       : edgeType === "part_of"
@@ -167,17 +185,20 @@ export function normalizeArtifactEvidenceGraph(rawPayload, expected = {}) {
       return;
     }
     if (RELATION_EDGE_TYPES.has(edgeType)) {
-      const relationId = cleanText(edge.relation_id, 120);
-      if (!relationId || relationIds.has(relationId) || !cleanText(edge.item_key, 180)) {
+      relationId = cleanText(edge.relation_id, 120);
+      itemKey = cleanText(edge.item_key, 180);
+      evidenceRole = cleanText(edge.evidence_role, 40);
+      verificationStatus = cleanText(edge.verification_status, 40);
+      if (!relationId || relationIds.has(relationId) || !itemKey) {
         issues.push("RELATION_ID_INVALID");
         return;
       }
       relationIds.add(relationId);
-      if (!EVIDENCE_ROLES.has(cleanText(edge.evidence_role, 40))) {
+      if (!EVIDENCE_ROLES.has(evidenceRole)) {
         issues.push("RELATION_ROLE_INVALID");
         return;
       }
-      if (!VERIFICATION_STATUSES.has(cleanText(edge.verification_status, 40))) {
+      if (!VERIFICATION_STATUSES.has(verificationStatus)) {
         issues.push("RELATION_STATUS_INVALID");
         return;
       }
@@ -188,6 +209,11 @@ export function normalizeArtifactEvidenceGraph(rawPayload, expected = {}) {
       edge_type: edgeType,
       from_node_id: fromNodeId,
       to_node_id: toNodeId,
+      relation_id: relationId,
+      item_key: itemKey,
+      evidence_role: evidenceRole,
+      verification_status: verificationStatus,
+      review_note: cleanText(edge.review_note, 1000),
     };
     edges.push(normalized);
     edgeById.set(edgeId, normalized);
@@ -198,16 +224,24 @@ export function normalizeArtifactEvidenceGraph(rawPayload, expected = {}) {
     issues.push("REVIEW_CHAIN_VERSION_INVALID");
   }
   const rawEvents = Array.isArray(chain.events) ? chain.events : [];
-  if (rawEvents.length > 500) issues.push("REVIEW_EVENT_LIMIT_EXCEEDED");
+  if (rawEvents.length > 500) {
+    issues.push("REVIEW_EVENT_LIMIT_EXCEEDED");
+    return invalidGraph(issues, raw);
+  }
   const reviewEvents = [];
+  const reviewEventHashes = new Set();
   let previousArtifactVersion = 0;
   rawEvents.forEach((rawEvent, index) => {
     const event = rawEvent && typeof rawEvent === "object" ? rawEvent : {};
     const sequence = cleanInteger(event.sequence_no);
     if (sequence !== index + 1) issues.push("REVIEW_EVENT_SEQUENCE_INVALID");
-    if (!/^[0-9a-f]{64}$/i.test(cleanText(event.event_sha256, 64))) {
+    const eventHash = cleanText(event.event_sha256, 64);
+    if (!/^[0-9a-f]{64}$/i.test(eventHash)) {
       issues.push("REVIEW_EVENT_HASH_INVALID");
+    } else if (reviewEventHashes.has(eventHash)) {
+      issues.push("REVIEW_EVENT_HASH_DUPLICATE");
     }
+    reviewEventHashes.add(eventHash);
     const eventArtifactVersion = cleanInteger(event.artifact_version);
     if (eventArtifactVersion <= previousArtifactVersion) {
       issues.push("REVIEW_EVENT_VERSION_INVALID");
@@ -217,7 +251,15 @@ export function normalizeArtifactEvidenceGraph(rawPayload, expected = {}) {
       ...event,
       sequence_no: sequence,
       artifact_version: eventArtifactVersion,
+      event_type: cleanText(event.event_type, 60),
+      event_sha256: eventHash,
       created_at: cleanInteger(event.created_at),
+      created_by: cleanText(event.created_by, 240),
+      relation_count: cleanInteger(event.relation_count),
+      unreviewed_count: cleanInteger(event.unreviewed_count),
+      added_relation_count: cleanInteger(event.added_relation_count),
+      removed_relation_count: cleanInteger(event.removed_relation_count),
+      changed_relation_count: cleanInteger(event.changed_relation_count),
     });
   });
   if (chain.verified !== true) issues.push("REVIEW_CHAIN_UNVERIFIED");
@@ -317,6 +359,12 @@ export function summarizeEvidenceGraph(graph, itemKey = "") {
     disputed: 0,
     sourceIds: new Set(),
   });
+}
+
+export function summarizeActiveEvidenceGraph(graph, itemKey = "") {
+  return cleanText(itemKey, 180)
+    ? summarizeEvidenceGraph(graph, cleanText(itemKey, 180))
+    : summarizeEvidenceGraph(null);
 }
 
 export function filterEvidencePaths(graph, filter = "all", activeTarget = "") {

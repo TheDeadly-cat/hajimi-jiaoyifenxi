@@ -1,0 +1,93 @@
+.market-resource.market-resource-workbench {
+  --market-ink: #244e63;
+  --market-blue: #3d758d;
+  position: relative;
+  min-width: 0;
+  container-name: market-snapshot;
+  container-type: inline-size;
+  border-left: 3px solid rgb(61 117 141 / 58%);
+  border-radius: 7px;
+  background:
+    radial-gradient(circle at 98% 3%, rgb(166 116 54 / 8%), transparent 25%),
+    linear-gradient(145deg, #fbfdfd, #f0f6f7);
+}
+
+.market-resource-workbench .market-resource-head {
+  padding: 9px 10px;
+  background: rgb(255 255 255 / 76%);
+}
+.market-resource-workbench .market-state { font-size: 10px; font-weight: 800; }
+.market-resource-workbench .market-state.unknown { color: #805b2d; }
+.market-resource-workbench .market-refresh { min-height: 38px; padding: 5px 8px; font-size: 10px; }
+
+.market-resource-workbench .quote-row { padding: 10px; background: rgb(255 255 255 / 84%); }
+.market-resource-workbench .quote-symbol strong,
+.market-resource-workbench .quote-value strong { color: var(--market-ink); font-size: 13px; }
+.market-resource-workbench .quote-symbol small,
+.market-resource-workbench .quote-value small,
+.market-resource-workbench .quote-time { font-size: 10px; }
+.market-resource-workbench .market-offline-copy,
+.market-resource-workbench .market-gate-reason { font-size: 10px; line-height: 1.55; }
+
+.market-resource-workbench .market-evidence summary {
+  display: list-item;
+  min-height: 44px;
+  color: var(--market-ink);
+  font-size: 11px;
+}
+.market-resource-workbench .market-evidence summary small {
+  float: right;
+  margin-left: 8px;
+  font-size: 9px;
+}
+.market-resource-workbench .market-evidence summary::after { display: table; clear: both; content: ""; }
+.market-resource-workbench .market-evidence summary:focus-visible,
+.market-resource-workbench .market-refresh:focus-visible {
+  outline: 3px solid rgb(61 117 141 / 32%);
+  outline-offset: 2px;
+}
+
+.market-resource-workbench .evidence-company { padding: 10px; }
+.market-resource-workbench .evidence-company-head strong { font-size: 12px; }
+.market-resource-workbench .evidence-company-head small,
+.market-resource-workbench .evidence-asof { font-size: 9px; }
+.market-resource-workbench .evidence-metric { min-height: 38px; padding: 7px; }
+.market-resource-workbench .evidence-metric small { font-size: 9px; }
+.market-resource-workbench .evidence-metric strong {
+  overflow: visible;
+  font-size: 11px;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.market-resource-workbench .market-evidence > p,
+.market-resource-workbench .market-resource-foot,
+.market-resource-workbench .missing-symbols { font-size: 9px; line-height: 1.5; }
+
+@container market-snapshot (max-width: 380px) {
+  .market-resource-workbench .market-resource-head { align-items: stretch; flex-wrap: wrap; }
+  .market-resource-workbench .market-refresh { min-height: 44px; }
+  .market-resource-workbench .evidence-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .market-resource-workbench .market-evidence summary small {
+    display: block;
+    float: none;
+    margin: 3px 0 0;
+  }
+  .market-resource-workbench .market-resource-foot { align-items: flex-start; flex-direction: column; gap: 3px; }
+}
+
+@media (forced-colors: active) {
+  .market-resource.market-resource-workbench,
+  .market-resource-workbench .quote-row,
+  .market-resource-workbench .evidence-company {
+    border-color: CanvasText;
+    color: CanvasText;
+    background: Canvas;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .market-resource-workbench *,
+  .market-resource-workbench *::before,
+  .market-resource-workbench *::after { scroll-behavior: auto !important; }
+}

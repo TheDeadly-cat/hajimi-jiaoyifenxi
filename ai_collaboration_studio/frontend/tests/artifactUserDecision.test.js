@@ -392,6 +392,8 @@ test("dialog uses an explicit radio choice and App submits through the contract 
   assert.match(dialogSource, /type="radio"/);
   assert.match(dialogSource, /AI 首选/);
   assert.match(dialogSource, /我的选择/);
-  assert.ok(dialogSource.includes('key={`${artifact.id}:${artifact.version}`}'));
+  assert.ok(dialogSource.includes(
+    "key={JSON.stringify([renderedArtifact.id, renderedArtifact.version, editorSession])}",
+  ));
   assert.match(appSource, /buildArtifactUserDecisionRequest\(artifact/);
 });

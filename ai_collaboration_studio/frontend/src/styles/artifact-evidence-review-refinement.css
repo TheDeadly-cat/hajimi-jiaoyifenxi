@@ -1,0 +1,187 @@
+.artifact-evidence-review.evidence-review-workbench {
+  --review-ink: var(--accent, #24776f);
+  --review-alert: #b55d35;
+  --review-line: color-mix(in srgb, var(--review-ink) 22%, transparent);
+  position: relative;
+  container-name: artifact-evidence-review evidence-review;
+  container-type: inline-size;
+  isolation: isolate;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 100% 0, color-mix(in srgb, var(--review-alert) 10%, transparent), transparent 28%),
+    linear-gradient(145deg, color-mix(in srgb, var(--review-ink) 7%, transparent), transparent 48%);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--review-ink) 65%, transparent);
+}
+
+.artifact-evidence-review.evidence-review-workbench::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: -1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--review-ink), var(--review-alert), transparent 82%);
+}
+
+.evidence-review-workbench .artifact-evidence-review-ledger {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--review-line);
+  border-radius: 14px;
+  background: var(--review-line);
+}
+
+.evidence-review-workbench .artifact-evidence-review-ledger > span {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+  padding: 0.72rem 0.82rem;
+  background: color-mix(in srgb, var(--panel, #f7f4ec) 94%, transparent);
+}
+
+.evidence-review-workbench .artifact-evidence-review-ledger small {
+  font-size: 0.68rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+}
+
+.evidence-review-workbench .artifact-evidence-review-ledger strong {
+  color: var(--review-ink);
+  font-size: 1.08rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.evidence-review-workbench .artifact-evidence-review-ledger > span:last-child strong {
+  color: #76552f;
+  font-size: 0.82rem;
+}
+
+.evidence-review-workbench .artifact-evidence-heading > strong {
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
+.evidence-review-workbench .artifact-evidence-heading > span,
+.evidence-review-workbench > p,
+.evidence-review-workbench .artifact-counter-note,
+.evidence-review-workbench .artifact-source-usage,
+.evidence-review-workbench .artifact-evidence-gap-note {
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.evidence-review-workbench .artifact-evidence-heading > span.reviewed {
+  border-color: color-mix(in srgb, var(--review-ink) 34%, transparent);
+  color: color-mix(in srgb, var(--review-ink) 88%, #214d60);
+  background: color-mix(in srgb, var(--review-ink) 8%, white);
+}
+
+.evidence-review-workbench .artifact-evidence-review-source-warning {
+  margin: 0;
+  padding: 0.68rem 0.78rem;
+  border: 1px solid color-mix(in srgb, var(--review-alert) 32%, transparent);
+  border-left: 3px solid var(--review-alert);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--review-alert) 8%, transparent);
+}
+
+.evidence-review-workbench .artifact-evidence-review-list-status {
+  margin: 0;
+  padding: 0.5rem 0.68rem;
+  border-left: 2px solid var(--review-ink);
+  color: color-mix(in srgb, currentColor 74%, transparent);
+  font-size: 0.78rem;
+}
+
+.evidence-review-workbench .artifact-evidence-option {
+  contain-intrinsic-block-size: auto 280px;
+  content-visibility: auto;
+  scroll-margin-block: 5rem;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.evidence-review-workbench .artifact-evidence-option:focus-within {
+  border-color: color-mix(in srgb, var(--review-ink) 62%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--review-ink) 12%, transparent);
+}
+
+.evidence-review-workbench .artifact-evidence-option.focused {
+  box-shadow: inset 3px 0 0 var(--review-ink);
+}
+
+.evidence-review-workbench .artifact-evidence-review-more {
+  align-self: center;
+  min-height: 44px;
+  touch-action: manipulation;
+}
+
+.evidence-review-workbench .artifact-evidence-progress > button,
+.evidence-review-workbench .artifact-version-review button,
+.evidence-review-workbench .artifact-evidence-target select,
+.evidence-review-workbench .artifact-evidence-audit select,
+.evidence-review-workbench .artifact-evidence-audit input {
+  min-height: 44px;
+}
+
+.evidence-review-workbench .artifact-evidence-source {
+  min-height: 44px;
+}
+
+.evidence-review-workbench .artifact-evidence-source input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+}
+
+.evidence-review-workbench .artifact-evidence-progress[data-count-state="unknown"] {
+  border-color: color-mix(in srgb, var(--review-alert) 36%, transparent);
+  background: color-mix(in srgb, var(--review-alert) 7%, transparent);
+}
+
+.evidence-review-workbench select:focus-visible,
+.evidence-review-workbench input:focus-visible,
+.evidence-review-workbench button:focus-visible,
+.evidence-review-workbench summary:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--review-ink) 46%, transparent);
+  outline-offset: 3px;
+}
+
+@container evidence-review (max-width: 720px) {
+  .evidence-review-workbench .artifact-evidence-review-ledger {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container evidence-review (max-width: 560px) {
+  .evidence-review-workbench .artifact-evidence-review-ledger {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .evidence-review-workbench .artifact-evidence-review-ledger > span {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: baseline;
+  }
+
+  .evidence-review-workbench .artifact-evidence-progress {
+    align-items: stretch;
+  }
+
+  .evidence-review-workbench .artifact-evidence-progress > button,
+  .evidence-review-workbench .artifact-evidence-review-more {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .evidence-review-workbench .artifact-evidence-option {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .artifact-evidence-review.evidence-review-workbench,
+  .evidence-review-workbench .artifact-evidence-review-ledger,
+  .evidence-review-workbench .artifact-evidence-review-source-warning {
+    border-color: CanvasText;
+  }
+}

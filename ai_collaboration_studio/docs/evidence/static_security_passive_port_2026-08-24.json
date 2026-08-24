@@ -1,0 +1,76 @@
+{
+  "schema_version": "static_security_scan_v1",
+  "ok": true,
+  "summary": {
+    "checks": 6,
+    "passed": 6,
+    "failed": 0
+  },
+  "checks": [
+    {
+      "id": "publishable_source_boundary",
+      "ok": true,
+      "summary": "Source inventory reuses the versioned-backup exclusion contract.",
+      "evidence": {
+        "files_scanned": 547,
+        "required_excluded_directories": 7,
+        "sensitive_filename_examples": 6
+      }
+    },
+    {
+      "id": "workflow_action_pins",
+      "ok": true,
+      "summary": "Every external workflow action must use a reviewed 40-character commit.",
+      "evidence": {
+        "workflow_count": 1,
+        "action_references": 4,
+        "issues": []
+      }
+    },
+    {
+      "id": "isolated_ci_entrypoints",
+      "ok": true,
+      "summary": "CI must remain isolated and use only guarded test and smoke entrypoints.",
+      "evidence": {
+        "missing_requirements": [],
+        "forbidden_rules": [],
+        "provider_env_issues": []
+      }
+    },
+    {
+      "id": "python_dependency_lock",
+      "ok": true,
+      "summary": "Every Python dependency must be exact and protected by SHA-256.",
+      "evidence": {
+        "package_count": 10,
+        "sha256": "22e149f601a83f26833cff20d32cbf5aaa01242906de0d8cf9d53a6e569ea699"
+      }
+    },
+    {
+      "id": "structured_redacted_logging",
+      "ok": true,
+      "summary": "Host lifecycle and HTTP metadata must use bounded JSONL events.",
+      "evidence": {
+        "missing_contracts": [],
+        "direct_print_files": [],
+        "raw_exception_exit": false
+      }
+    },
+    {
+      "id": "high_confidence_secret_patterns",
+      "ok": true,
+      "summary": "Publishable text must not contain high-confidence credential material.",
+      "evidence": {
+        "text_files_scanned": 539,
+        "findings": []
+      }
+    }
+  ],
+  "boundaries": {
+    "offline": true,
+    "network_requests": 0,
+    "sast_complete": false,
+    "dependency_cve_audit": false,
+    "penetration_test": false
+  }
+}

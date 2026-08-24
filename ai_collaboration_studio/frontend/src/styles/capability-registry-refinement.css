@@ -1,0 +1,115 @@
+.plugin-registry-snapshot .plugin-registry-title,
+.plugin-registry-snapshot .plugin-registry-title > * {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+.plugin-registry-audit {
+  background: rgba(255, 254, 250, 0.84);
+  border: 1px solid var(--registry-line);
+  border-radius: 12px;
+  display: grid;
+  overflow: hidden;
+}
+
+.plugin-registry-audit-control {
+  align-items: center;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 12px 14px;
+}
+
+.plugin-registry-audit-control > span {
+  display: grid;
+  gap: 3px;
+  min-inline-size: 0;
+}
+
+.plugin-registry-audit-control small {
+  color: var(--registry-muted);
+  font: 700 0.59rem/1.25 "IBM Plex Mono", "Cascadia Code", monospace;
+  letter-spacing: 0.09em;
+}
+
+.plugin-registry-audit-control strong {
+  color: var(--registry-ink);
+  font: 750 0.86rem/1.35 "Noto Serif SC", "Songti SC", serif;
+}
+
+.plugin-registry-audit-control p {
+  color: var(--registry-muted);
+  font-size: 0.69rem;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.plugin-registry-audit-control button {
+  align-items: center;
+  background: rgba(41, 89, 107, 0.06);
+  border: 1px solid rgba(41, 89, 107, 0.24);
+  border-radius: 8px;
+  color: #285c70;
+  display: inline-flex;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 700;
+  gap: 6px;
+  justify-content: center;
+  min-height: 44px;
+  padding: 7px 10px;
+  touch-action: manipulation;
+}
+
+.plugin-registry-audit-control button:hover { background: rgba(41, 89, 107, 0.11); }
+.plugin-registry-audit-control button:focus-visible { outline: 3px solid rgba(41, 89, 107, 0.24); outline-offset: 2px; }
+.plugin-registry-audit-control button svg { transition: transform 160ms ease; }
+.plugin-registry-audit-control button[aria-expanded="true"] svg { transform: rotate(180deg); }
+
+.plugin-registry-exact-bindings {
+  border-top: 1px solid var(--registry-line);
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.plugin-registry-exact-bindings[hidden] { display: none; }
+
+@container capability-registry (max-width: 420px) {
+  .plugin-registry-snapshot .plugin-registry-header {
+    gap: 11px;
+  }
+
+  .plugin-registry-snapshot .plugin-registry-mark {
+    align-items: center;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .plugin-registry-snapshot .plugin-registry-title > small {
+    letter-spacing: 0.07em;
+    line-height: 1.45;
+  }
+
+  .plugin-registry-audit-control {
+    align-items: start;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .plugin-registry-audit-control button {
+    justify-content: space-between;
+    width: 100%;
+  }
+}
+
+@media (forced-colors: active) {
+  .plugin-registry-audit,
+  .plugin-registry-audit-control button,
+  .plugin-registry-exact-bindings {
+    border-color: CanvasText;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plugin-registry-audit-control button svg { transition-duration: 0.01ms; }
+}

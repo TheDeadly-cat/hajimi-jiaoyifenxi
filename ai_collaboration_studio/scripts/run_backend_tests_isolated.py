@@ -18,8 +18,8 @@ from typing import Any, Iterator
 from unittest.mock import patch
 
 
-BACKEND_TEST_LAYER_MANIFEST_VERSION = "backend_test_layers_v1"
-BACKEND_TEST_LAYER_IDS = ("migration", "core", "domains", "full")
+BACKEND_TEST_LAYER_MANIFEST_VERSION = "backend_test_layers_v2"
+BACKEND_TEST_LAYER_IDS = ("migration", "core", "domains", "delivery", "full")
 BACKEND_TEST_LAYER_MANIFEST_PATH = Path(__file__).with_name(
     "backend_test_layers.json"
 )

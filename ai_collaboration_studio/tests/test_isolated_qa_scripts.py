@@ -58,3 +58,19 @@ class IsolatedQAScriptContractTests(unittest.TestCase):
         self.assertIn('AI_STUDIO_QA_READY_FILE', source)
         self.assertIn('Path(tempfile.gettempdir()).resolve()', source)
         self.assertIn('ready_path.relative_to(temp_parent)', source)
+
+    def test_project_round_focus_qa_uses_the_generic_v5_context_contract(self) -> None:
+        script_path = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "run_isolated_project_round_focus_qa.py"
+        )
+        source = script_path.read_text(encoding="utf-8")
+        self.assertIn('"round_launch_plan_v5"', source)
+        self.assertIn('"round_context_authorization_set_v1"', source)
+        self.assertIn('"round_context_authorization_entry_v1"', source)
+        self.assertIn('round_context_authorizations=authorization_set', source)
+        self.assertIn('"v5_round_context_plan_verified": True', source)
+        self.assertIn("flush=True", source)
+        self.assertNotIn("def _assert_v4_plan", source)
+        self.assertNotIn('"v4_plan_verified"', source)

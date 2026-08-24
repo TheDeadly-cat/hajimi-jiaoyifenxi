@@ -55,6 +55,7 @@ READONLY_SAFETY_FIELDS = {
     "approval_produced": False,
     "user_final_decision_required": True,
 }
+LONG_LIST_REQUIREMENT_COUNT = 45
 
 
 def _configure_isolation(temp_root: Path) -> Path:
@@ -102,20 +103,27 @@ def _fixture_content(material_id: str) -> dict[str, Any]:
             "establish that the proposed mitigation is sufficient."
         ),
     )
+    requirements = [
+        {
+            "id": f"requirement_acceptance_definition_{index:02d}",
+            "text": (
+                "Define measurable acceptance criteria for bounded prototype "
+                f"workstream {index:02d}."
+            ),
+            "status": "pending",
+            "owner": "",
+            "acceptance_criteria": "",
+            "evidence": [support],
+        }
+        for index in range(1, LONG_LIST_REQUIREMENT_COUNT + 1)
+    ]
     return {
         "summary": (
             "A bounded local prototype is documented, while readiness gaps "
             "remain explicitly unresolved for user review."
         ),
         "summary_evidence": [support],
-        "requirements": [{
-            "id": "requirement_acceptance_definition",
-            "text": "Define measurable acceptance criteria for the first prototype.",
-            "status": "pending",
-            "owner": "",
-            "acceptance_criteria": "",
-            "evidence": [support],
-        }],
+        "requirements": requirements,
         "risks": [{
             "id": "risk_capacity_blocker",
             "text": "The current team may not cover the full prototype scope.",
@@ -156,8 +164,16 @@ def _assert_projection_is_qa_ready(projection: dict[str, Any]) -> None:
         for field, expected in READONLY_SAFETY_FIELDS.items()
     ):
         raise RuntimeError("project-readiness fixture violated its safety contract")
-    if not projection.get("structural_gaps"):
-        raise RuntimeError("project-readiness fixture needs a visible structural gap")
+    structural_gaps = projection.get("structural_gaps") or []
+    if len(structural_gaps) <= 40:
+        raise RuntimeError(
+            "project-readiness fixture must exercise the paginated structural list"
+        )
+    structural_identities = {
+        (row.get("code"), row.get("item_key")) for row in structural_gaps
+    }
+    if len(structural_identities) != len(structural_gaps):
+        raise RuntimeError("project-readiness structural gap identities are not unique")
     if not projection.get("blockers"):
         raise RuntimeError("project-readiness fixture needs a visible blocker")
     if not projection.get("evidence_gaps"):
@@ -415,6 +431,15 @@ def main() -> int:
                 "readiness_service_successes": 0,
                 "business_write_attempts": 0,
                 "fixture_seed_writes_completed_before_server_start": True,
+                "initial_structural_gap_count": len(
+                    initial_projection.get("structural_gaps") or []
+                ),
+                "initial_blocker_count": len(
+                    initial_projection.get("blockers") or []
+                ),
+                "initial_evidence_gap_count": len(
+                    initial_projection.get("evidence_gaps") or []
+                ),
             }
 
             original_inspect = ProjectReadinessService.inspect
@@ -441,6 +466,15 @@ def main() -> int:
             class QaRequestHandler(http_server.StudioRequestHandler):
                 def do_GET(self) -> None:
                     path = urlparse(self.path).path
+                    if path == "/__qa/stop":
+                        if not self._guard_request():
+                            return
+                        self._send_json({"ok": True, "stopping": True})
+                        threading.Thread(
+                            target=self.server.shutdown,
+                            daemon=True,
+                        ).start()
+                        return
                     if path == "/__qa/status":
                         if not self._guard_request():
                             return
@@ -517,6 +551,7 @@ def main() -> int:
                     "ok": True,
                     "url": url,
                     "qa_status_url": f"{url}__qa/status",
+                    "qa_stop_url": f"{url}__qa/stop",
                     "room_id": room_id,
                     "artifact_id": artifact_id,
                     "artifact_version": artifact_version,

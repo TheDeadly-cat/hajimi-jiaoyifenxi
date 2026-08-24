@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -105,7 +106,7 @@ class StoreImportIsolationTests(unittest.TestCase):
                 "try:\n"
                 "    server.main()\n"
                 "except SystemExit as exc:\n"
-                "    assert 'does not exist' in str(exc)\n"
+                "    assert exc.code == 1\n"
                 "else:\n"
                 "    raise AssertionError('missing database startup did not fail')\n",
                 database_path,
@@ -113,6 +114,16 @@ class StoreImportIsolationTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(database_path.exists())
+            self.assertEqual(result.stderr, "")
+            events = [json.loads(line) for line in result.stdout.splitlines()]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["schema_version"], "studio_log_event_v1")
+            self.assertEqual(events[0]["event"], "server_start_failed")
+            self.assertEqual(
+                events[0]["fields"]["phase"],
+                "database_preflight_or_host_start",
+            )
+            self.assertNotIn(str(database_path), result.stdout)
 
     def test_wrong_owner_is_rejected_before_default_store_initialization(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ai-studio-wrong-owner-") as temp_dir:

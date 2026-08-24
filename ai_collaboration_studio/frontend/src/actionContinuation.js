@@ -1,10 +1,10 @@
-export const ACTION_CONTINUATION_VERSION = "artifact_action_continuation_v1";
-export const ACTION_CONTINUATION_ITEM_VERSION = "artifact_action_continuation_item_v1";
-export const ACTION_CONTINUATION_RESULT_VERSION = "artifact_action_continuation_result_v1";
-
 import {
   normalizeActionDeskCandidate,
 } from "./actionDesk.js";
+
+export const ACTION_CONTINUATION_VERSION = "artifact_action_continuation_v1";
+export const ACTION_CONTINUATION_ITEM_VERSION = "artifact_action_continuation_item_v1";
+export const ACTION_CONTINUATION_RESULT_VERSION = "artifact_action_continuation_result_v1";
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,120}$/;
@@ -64,6 +64,39 @@ function positiveInteger(value) {
 function sha256(value) {
   const normalized = cleanText(value, 64)?.toLowerCase() || "";
   return SHA256_PATTERN.test(normalized) ? normalized : null;
+}
+
+function actionCandidateIdentity(value) {
+  const candidate = record(value);
+  const artifactId = requiredText(candidate.artifactId, 120);
+  const artifactVersion = positiveInteger(candidate.artifactVersion);
+  const actionId = requiredText(candidate.actionId, 120);
+  const actionSnapshotSha256 = sha256(candidate.actionSnapshotSha256);
+  if (
+    candidate.valid !== true
+    || !artifactId
+    || !ID_PATTERN.test(artifactId)
+    || artifactVersion === null
+    || !actionId
+    || !ID_PATTERN.test(actionId)
+    || !actionSnapshotSha256
+  ) return null;
+  return {
+    artifactId,
+    artifactVersion,
+    actionId,
+    actionSnapshotSha256,
+    sourceKey: `${artifactId}:${artifactVersion}:${actionId}`,
+  };
+}
+
+function actionLineageIdentity(value) {
+  const item = record(value);
+  const artifactId = requiredText(item.artifactId, 120);
+  const artifactVersion = positiveInteger(item.artifactVersion);
+  return item.valid === true && artifactId && ID_PATTERN.test(artifactId) && artifactVersion !== null
+    ? { artifactId, artifactVersion }
+    : null;
 }
 
 function epochTimestamp(value) {
@@ -163,10 +196,18 @@ export function normalizeActionDeskContinuationsResponse(payload, expectedRoomId
 
   const relations = raw.relations.map((value, index) => normalizeRelation(value, index));
   const rowIssues = [];
+  const seenRelationIds = new Set();
   const seenSources = new Set();
   const seenTargets = new Set();
   relations.forEach((relation) => {
     if (!relation.valid) rowIssues.push(`RELATION_INVALID:${relation.index}`);
+    if (relation.relationId && seenRelationIds.has(relation.relationId)) {
+      relation.valid = false;
+      relation.metricsVisible = false;
+      relation.issues.push("RELATION_ID_DUPLICATED");
+      rowIssues.push(`RELATION_ID_DUPLICATED:${relation.index}`);
+    }
+    if (relation.relationId) seenRelationIds.add(relation.relationId);
     if (relation.sourceKey && seenSources.has(relation.sourceKey)) {
       relation.valid = false;
       relation.metricsVisible = false;
@@ -208,7 +249,14 @@ export function newActionContinuationClientRequestId() {
 }
 
 export function buildActionContinuationRequest({ source, target, sourceRevision, reason = "", clientRequestId }) {
-  if (!source?.valid || !target?.valid || source.artifactId !== target.artifactId || target.artifactVersion <= source.artifactVersion) {
+  const sourceIdentity = actionCandidateIdentity(source);
+  const targetIdentity = actionCandidateIdentity(target);
+  if (
+    !sourceIdentity
+    || !targetIdentity
+    || sourceIdentity.artifactId !== targetIdentity.artifactId
+    || targetIdentity.artifactVersion <= sourceIdentity.artifactVersion
+  ) {
     throw new TypeError("行动延续必须绑定同一产物谱系中的更新确认版本。 ");
   }
   const requestId = requiredText(clientRequestId, 120);
@@ -219,23 +267,39 @@ export function buildActionContinuationRequest({ source, target, sourceRevision,
   return {
     version: ACTION_CONTINUATION_VERSION,
     client_request_id: requestId,
-    source_artifact_id: source.artifactId,
-    source_artifact_version: source.artifactVersion,
-    source_action_id: source.actionId,
-    source_action_snapshot_sha256: source.actionSnapshotSha256,
+    source_artifact_id: sourceIdentity.artifactId,
+    source_artifact_version: sourceIdentity.artifactVersion,
+    source_action_id: sourceIdentity.actionId,
+    source_action_snapshot_sha256: sourceIdentity.actionSnapshotSha256,
     source_expected_revision: sourceRevision,
-    target_artifact_id: target.artifactId,
-    target_artifact_version: target.artifactVersion,
-    target_action_id: target.actionId,
-    target_action_snapshot_sha256: target.actionSnapshotSha256,
+    target_artifact_id: targetIdentity.artifactId,
+    target_artifact_version: targetIdentity.artifactVersion,
+    target_action_id: targetIdentity.actionId,
+    target_action_snapshot_sha256: targetIdentity.actionSnapshotSha256,
     reason: cleanReason,
     user_confirmed: true,
   };
 }
 
 export function continuationTargetCandidates(item, candidates) {
-  if (!item?.valid || !Array.isArray(candidates)) return [];
-  return candidates.filter((candidate) => candidate?.valid
-    && candidate.artifactId === item.artifactId
-    && candidate.artifactVersion > item.artifactVersion);
+  const sourceLineage = actionLineageIdentity(item);
+  if (!sourceLineage || !Array.isArray(candidates)) return [];
+  const seen = new Set();
+  return candidates.flatMap((candidate) => {
+    const identity = actionCandidateIdentity(candidate);
+    if (
+      !identity
+      || identity.artifactId !== sourceLineage.artifactId
+      || identity.artifactVersion <= sourceLineage.artifactVersion
+      || seen.has(identity.sourceKey)
+    ) return [];
+    seen.add(identity.sourceKey);
+    return [{
+      ...candidate,
+      ...identity,
+    }];
+  }).sort((left, right) => (
+    left.artifactVersion - right.artifactVersion
+    || (left.sourceKey < right.sourceKey ? -1 : left.sourceKey > right.sourceKey ? 1 : 0)
+  ));
 }

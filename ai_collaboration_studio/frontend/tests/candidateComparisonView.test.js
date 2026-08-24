@@ -4,10 +4,14 @@ import test from "node:test";
 
 import {
   buildCandidateComparisonRequest,
+  candidateComparisonEligibility,
   candidateComparisonEligibleRuns,
+  candidateComparisonErrorMessage,
+  candidateComparisonSelectionFingerprint,
   candidateComparisonView,
   CANDIDATE_COMPARISON_BASIS_VERSION,
   CANDIDATE_COMPARISON_PREVIEW_VERSION,
+  CANDIDATE_COMPARISON_RUN_LIMIT,
   CANDIDATE_COMPARISON_REQUEST_VERSION,
 } from "../src/candidateComparisonView.js";
 
@@ -167,6 +171,26 @@ test("eligible runs require the exact current candidate contract and all integri
 });
 
 
+test("eligibility fails closed before sorting oversized run collections", () => {
+  const state = candidateComparisonEligibility([], {
+    portfolio_a: Array.from({ length: CANDIDATE_COMPARISON_RUN_LIMIT + 1 }, () => null),
+  });
+  assert.equal(state.integrityOk, false);
+  assert.deepEqual(state.runs, []);
+  assert.match(state.issue, /安全上限/);
+});
+
+
+test("selection fingerprints avoid delimiter collisions and errors are bounded", () => {
+  assert.notEqual(
+    candidateComparisonSelectionFingerprint(["run_a", "run_b|run_c"]),
+    candidateComparisonSelectionFingerprint(["run_a|run_b", "run_c"]),
+  );
+  assert.equal(candidateComparisonErrorMessage({ message: { unsafe: true } }, "fallback"), "fallback");
+  assert.equal(candidateComparisonErrorMessage({ message: "x".repeat(1500) }).length, 1000);
+});
+
+
 test("ready response exposes same-basis metrics without ranking or winner claims", () => {
   const view = candidateComparisonView(readyResponse());
 
@@ -228,11 +252,77 @@ test("blocked scenarios cannot leak metrics and selection changes hide stale res
   );
   const appSource = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
   const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  const refinementStyles = readFileSync(
+    new URL("../src/styles/candidate-comparison-refinement.css", import.meta.url),
+    "utf8",
+  );
   assert.match(panelSource, /if \(loading\) return;\s+setAcknowledged\(false\);/);
-  assert.match(panelSource, /visibleView = view\?\.selectedRunIds\.join\("\|"\) === selectedFingerprint/);
-  assert.match(panelSource, /disabled=\{loading \|\| \(!selectedRunIds\.includes/);
+  assert.match(panelSource, /candidateComparisonSelectionFingerprint\(view\?\.selectedRunIds\)/);
+  assert.match(panelSource, /const selectedRunSet = useMemo\(\(\) => new Set\(selectedRunIds\)/);
+  assert.match(panelSource, /const selected = selectedRunSet\.has\(run\.runId\)/);
+  assert.match(panelSource, /disabled=\{loading \|\| \(!selected && selectedRunIds\.length >= 6\)\}/);
+  assert.match(panelSource, /submissionRef\.current/);
+  assert.match(panelSource, /RUN_SELECTOR_PAGE_SIZE = 18/);
+  assert.match(panelSource, /role="region"/);
+  assert.ok(
+    panelSource.indexOf("!eligibility.integrityOk")
+      < panelSource.indexOf("eligibleRuns.length >= 2"),
+  );
   assert.match(appSource, /candidateComparisonRequestRef\.current\.cancel\(\)/);
   assert.match(appSource, /candidateComparisonContextRef\.current !== targetContext/);
   assert.match(appSource, /returnedRunIds\.some\(\(runId, index\) => runId !== payload\.run_ids\[index\]\)/);
   assert.match(styles, /\.candidate-comparison-table-wrap\s*\{[\s\S]*?overflow-x:\s*auto;/);
+  assert.match(refinementStyles, /candidate-comparison-neutrality-ledger/);
+  assert.match(refinementStyles, /prefers-reduced-motion/);
+  assert.match(refinementStyles, /forced-colors/);
+});
+
+
+test("oversized candidates, scenarios, and string issues fail closed before display", () => {
+  const tooManyCandidates = readyResponse();
+  tooManyCandidates.candidates = Array.from({ length: 7 }, () => null);
+  assert.equal(candidateComparisonView(tooManyCandidates).ready, false);
+
+  const tooManyScenarios = readyResponse();
+  tooManyScenarios.candidates[0].scenarios = Array.from({ length: 4 }, () => null);
+  assert.equal(candidateComparisonView(tooManyScenarios).ready, false);
+
+  const stringIssue = readyResponse();
+  stringIssue.issues = ["server integrity warning"];
+  const issueView = candidateComparisonView(stringIssue);
+  assert.equal(issueView.ready, false);
+  assert.equal(issueView.issues[0].code, "CANDIDATE_COMPARISON_BLOCKED");
+});
+
+
+test("comparison workbench exposes a heading, neutral scope, and explicit quantity gate", () => {
+  const panelSource = readFileSync(
+    new URL("../src/components/CandidateComparisonPanel.jsx", import.meta.url),
+    "utf8",
+  );
+  const refinementStyles = readFileSync(
+    new URL("../src/styles/candidate-comparison-refinement.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(panelSource, /<h4 id=\{titleId\}>[\s\S]*已验证回放同口径复核<\/h4>/);
+  assert.match(panelSource, /<em><data value=\{eligibleRuns\.length\}>/);
+  assert.match(panelSource, /className="candidate-comparison-scope" role="list"/);
+  assert.match(panelSource, /同数据 · 同窗口 · 同摩擦/);
+  assert.match(panelSource, /排名 · 赢家 · 授权/);
+  assert.match(panelSource, /const minimumComparableRuns = 2/);
+  assert.match(panelSource, /const missingComparableRuns = Math\.max\(0, minimumComparableRuns - eligibleRuns\.length\)/);
+  assert.match(panelSource, /className=\{`candidate-comparison-readiness \$\{readinessTone\}`\}/);
+  assert.match(panelSource, /这不是批准/);
+  assert.match(panelSource, /className="candidate-comparison-empty" role="note"/);
+  assert.match(panelSource, /aria-label="候选比较开放前提"/);
+  assert.match(panelSource, /<h5 id=\{resultTitleId\}>同一冻结基准已核验<\/h5>/);
+  assert.match(refinementStyles, /\.candidate-comparison-scope \{[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(refinementStyles, /\.candidate-comparison-readiness \{[\s\S]*grid-template-columns: auto minmax\(0, 1fr\) auto/);
+  assert.match(refinementStyles, /@container candidate-comparison \(max-width: 620px\)[\s\S]*\.candidate-comparison-scope \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+  assert.match(refinementStyles, /@media \(forced-colors: active\)[\s\S]*\.candidate-comparison-readiness > data/);
+  assert.equal(
+    (refinementStyles.match(/\{/g) || []).length,
+    (refinementStyles.match(/\}/g) || []).length,
+  );
 });

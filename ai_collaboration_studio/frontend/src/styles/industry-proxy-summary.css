@@ -1,0 +1,367 @@
+/* Industry proxy dossier: deliberately distinct from first-party company evidence. */
+.industry-proxy-summary.industry-proxy-summary-v2 {
+  --proxy-ink: #2d403f;
+  --proxy-teal: #47766f;
+  --proxy-amber: #a26f32;
+  --proxy-paper: #f6f7f2;
+  overflow: hidden;
+  border: 1px solid #c5cec4;
+  border-radius: 11px;
+  color: var(--proxy-ink);
+  background:
+    linear-gradient(135deg, rgba(71, 118, 111, 0.055), transparent 42%),
+    var(--proxy-paper);
+  box-shadow: 0 6px 18px rgba(43, 65, 62, 0.06);
+  container: industry-proxy / inline-size;
+}
+
+.industry-proxy-summary-v2 > summary {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 11px;
+  cursor: pointer;
+  color: #2b4b49;
+  background:
+    repeating-linear-gradient(90deg, rgba(67, 105, 100, 0.07) 0 1px, transparent 1px 24px),
+    linear-gradient(110deg, #eef3ef, #fbfcf8 74%);
+  font-family: Bahnschrift, "Aptos Display", "Segoe UI", sans-serif;
+  font-weight: 760;
+  list-style-position: inside;
+}
+
+.industry-proxy-summary-v2[open] > summary {
+  border-bottom: 1px solid #cbd4cc;
+}
+
+.industry-proxy-summary-v2 > summary > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.industry-proxy-summary-v2 > summary > span svg { color: var(--proxy-teal); }
+
+.industry-proxy-summary-v2 > summary > small {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid #c5cec8;
+  border-radius: 999px;
+  color: #63726f;
+  background: #f7f9f7;
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.industry-proxy-summary-v2 > summary > small.ready {
+  border-color: #a9c4b8;
+  color: #356654;
+  background: #eef7f2;
+}
+
+.industry-proxy-summary-v2 > summary > small.degraded {
+  border-color: #dac399;
+  color: #785b28;
+  background: #fcf7ea;
+}
+
+.industry-proxy-summary-v2 > summary > small.offline {
+  border-color: #c9cdd0;
+  color: #667078;
+  background: #f2f3f4;
+}
+
+.industry-proxy-overview {
+  display: grid;
+  grid-template-columns: minmax(84px, auto) minmax(84px, auto) minmax(0, 1fr);
+  gap: 1px;
+  border-bottom: 1px solid #cbd4cc;
+  background: #d7ded8;
+}
+
+.industry-proxy-overview > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding: 9px 10px;
+  background: rgba(255, 255, 252, 0.94);
+}
+
+.industry-proxy-overview small {
+  color: #74817d;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .07em;
+}
+
+.industry-proxy-overview strong {
+  color: #365a55;
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.industry-proxy-overview .source strong {
+  font-size: 10px;
+}
+
+.industry-proxy-summary-v2 .industry-proxy-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  max-height: min(56vh, 520px);
+  padding: 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(245, 247, 242, 0.9));
+}
+
+.industry-proxy-summary-v2 .industry-proxy-row {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #cbd4ce;
+  border-left: 3px solid #789c94;
+  border-radius: 8px;
+  background: rgba(255, 255, 253, 0.96);
+  box-shadow: 0 3px 10px rgba(46, 68, 64, 0.045);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 160px;
+}
+
+.industry-proxy-summary-v2 .industry-proxy-row.derived {
+  border-left-color: var(--proxy-amber);
+}
+
+.industry-proxy-row > header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.industry-proxy-row > header > span,
+.industry-proxy-row > header > em {
+  padding: 3px 6px;
+  border-radius: 999px;
+  font-size: 8px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.industry-proxy-row > header > span.device {
+  color: #375f6f;
+  background: #e8f1f4;
+}
+
+.industry-proxy-row > header > span.semiconductor {
+  color: #536a45;
+  background: #eef3e8;
+}
+
+.industry-proxy-row > header > span.unknown {
+  color: #666f75;
+  background: #eef0f1;
+}
+
+.industry-proxy-row > header > em.source {
+  color: #3d6b58;
+  background: #eaf5ee;
+}
+
+.industry-proxy-row > header > em.derived {
+  color: #775724;
+  background: #fbf2de;
+}
+
+.industry-proxy-row h4 {
+  margin: 0;
+  color: #2e4644;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.industry-proxy-summary-v2 .industry-proxy-value {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 9px;
+  padding: 9px;
+  border: 1px solid #d6ddd7;
+  border-radius: 7px;
+  background: #f8faf7;
+}
+
+.industry-proxy-value > span {
+  display: inline-flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.industry-proxy-value > span strong {
+  color: #294f4a;
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.industry-proxy-value > span em {
+  color: #71807c;
+  font-size: 8px;
+  font-style: normal;
+}
+
+.industry-proxy-value > small {
+  color: #657670;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.industry-proxy-row > footer {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  color: #6b7976;
+  font-size: 8px;
+}
+
+.industry-proxy-row > footer time {
+  min-width: 0;
+  font-family: Consolas, "SFMono-Regular", monospace;
+  overflow-wrap: anywhere;
+}
+
+.industry-proxy-row > footer a {
+  display: inline-flex;
+  min-height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 7px;
+  border: 1px solid #b8cbc5;
+  border-radius: 6px;
+  color: #346a60;
+  background: #f2f8f5;
+  font-size: 9px;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.industry-proxy-row > footer a:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.proxy-source-missing {
+  flex: 0 0 auto;
+  color: #876832;
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.industry-proxy-summary-v2 .industry-proxy-empty {
+  display: grid;
+  min-height: 92px;
+  grid-template-columns: auto minmax(0, 1fr);
+  place-content: center;
+  align-items: start;
+  gap: 7px;
+  padding: 16px;
+  color: #765b2c;
+  background: #fcf8ed;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.industry-proxy-empty svg { margin-top: 1px; }
+
+.industry-proxy-boundary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+  margin: 0;
+  padding: 9px 11px;
+  border-top: 1px solid #d2dad3;
+  color: #5f716a;
+  background: #f8faf7;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.industry-proxy-boundary svg { margin-top: 1px; }
+.industry-proxy-boundary span { min-width: 0; overflow-wrap: anywhere; }
+
+.industry-proxy-summary-v2 :is(summary, a):focus-visible {
+  outline: 3px solid rgba(71, 118, 111, .64);
+  outline-offset: 2px;
+}
+
+@container industry-proxy (max-width: 560px) {
+  .industry-proxy-summary-v2 .industry-proxy-list {
+    grid-template-columns: minmax(0, 1fr);
+    max-height: none;
+    overflow-y: visible;
+  }
+
+  .industry-proxy-row > footer a {
+    min-height: 44px;
+  }
+}
+
+@container industry-proxy (max-width: 360px) {
+  .industry-proxy-summary-v2 > summary,
+  .industry-proxy-summary-v2 .industry-proxy-value,
+  .industry-proxy-row > footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .industry-proxy-summary-v2 > summary > small {
+    align-self: flex-start;
+  }
+
+  .industry-proxy-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .industry-proxy-overview .source {
+    grid-column: 1 / -1;
+  }
+
+  .industry-proxy-value > small {
+    text-align: left;
+  }
+
+  .industry-proxy-row > footer a {
+    justify-content: center;
+    width: 100%;
+  }
+}
+
+@media (forced-colors: active) {
+  .industry-proxy-summary.industry-proxy-summary-v2,
+  .industry-proxy-overview > span,
+  .industry-proxy-summary-v2 .industry-proxy-row,
+  .industry-proxy-summary-v2 .industry-proxy-value,
+  .industry-proxy-row > footer a,
+  .industry-proxy-summary-v2 .industry-proxy-empty,
+  .industry-proxy-boundary {
+    border-color: CanvasText;
+    color: CanvasText;
+    background: Canvas;
+    box-shadow: none;
+  }
+}

@@ -67,6 +67,13 @@ function text(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function validLifecycleClientRequestId(value) {
+  const clean = text(value);
+  return /^plugin-lifecycle:[A-Za-z0-9][A-Za-z0-9._:-]{7,191}$/.test(clean)
+    ? clean
+    : "";
+}
+
 function rows(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -720,6 +727,8 @@ export function pluginLifecycleImpactPreviewView(value, { target, action } = {})
       userFinalDecisionUnaffected: impact.user_final_decision_unaffected === true,
     },
     previewSha256: sha256(source.preview_sha256),
+    expectedHeadSequence: nonnegativeInteger(source.expected_head_sequence),
+    expectedHeadSha256: sha256(source.expected_head_sha256),
   };
 }
 
@@ -730,19 +739,48 @@ export function buildPluginLifecycleTransitionRequest({
   clientRequestId,
   reason,
 }) {
-  if (!preview?.integrityOk || !target || !LIFECYCLE_ACTIONS.has(action)) {
+  const normalizedAction = text(action);
+  const targetRef = target ? publicTargetRef(target) : null;
+  if (!preview?.integrityOk
+    || !targetRef
+    || !TARGET_KINDS.has(targetRef.kind)
+    || !text(targetRef.id)
+    || !text(targetRef.version)
+    || !sha256(targetRef.sha256)
+    || !LIFECYCLE_ACTIONS.has(normalizedAction)) {
     throw new Error("必须先取得完整且未漂移的影响预览。");
+  }
+  if (!sameTargetRef(preview.target, targetRef)) {
+    throw new Error("影响预览与生命周期精确目标不一致。");
+  }
+  if (preview.action !== normalizedAction) {
+    throw new Error("影响预览与生命周期动作不一致。");
+  }
+  const previewSha256 = sha256(preview.previewSha256);
+  if (!previewSha256) throw new Error("影响预览封印无效。");
+  const expectedHeadSequence = nonnegativeInteger(target.headSequence);
+  const expectedHeadSha256 = sha256(target.headSha256);
+  if (expectedHeadSequence === null || !expectedHeadSha256
+    || preview.expectedHeadSequence !== expectedHeadSequence
+    || preview.expectedHeadSha256 !== expectedHeadSha256) {
+    throw new Error("影响预览与生命周期 head 不一致。");
+  }
+  const normalizedClientRequestId = validLifecycleClientRequestId(clientRequestId);
+  if (!normalizedClientRequestId) throw new Error("生命周期客户端请求编号无效。");
+  const normalizedReason = text(reason);
+  if (normalizedReason.length < 4 || normalizedReason.length > 500) {
+    throw new Error("生命周期变更原因必须为 4 至 500 个字符。");
   }
   return {
     version: PLUGIN_LIFECYCLE_TRANSITION_REQUEST_VERSION,
-    client_request_id: text(clientRequestId),
-    target: publicTargetRef(target),
-    action,
-    expected_head_sequence: target.headSequence,
-    expected_head_sha256: target.headSha256,
+    client_request_id: normalizedClientRequestId,
+    target: targetRef,
+    action: normalizedAction,
+    expected_head_sequence: expectedHeadSequence,
+    expected_head_sha256: expectedHeadSha256,
     replacement: null,
-    impact_preview_sha256: preview.previewSha256,
-    reason: text(reason),
+    impact_preview_sha256: previewSha256,
+    reason: normalizedReason,
     user_confirmed_history_preserved: true,
     user_confirmed_no_automatic_migration: true,
   };
@@ -787,5 +825,5 @@ export function pluginLifecycleTransitionResultView(value, { target, action } = 
 export function newPluginLifecycleClientRequestId() {
   const uuid = globalThis.crypto?.randomUUID?.();
   if (uuid) return `plugin-lifecycle:${uuid}`;
-  return `plugin-lifecycle:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  throw new Error("当前运行环境无法生成安全的生命周期请求编号。");
 }

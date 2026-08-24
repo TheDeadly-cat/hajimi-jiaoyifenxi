@@ -21,6 +21,10 @@ test("the guarded runner monitors the actual test body and fails closed", () => 
   assert.match(runnerSource, /\[int\]\$MaxOutputMB = 64/);
   assert.match(runnerSource, /RedirectStandardOutput = \$true/);
   assert.match(runnerSource, /BaseStream\.CopyToAsync/);
+  assert.match(runnerSource, /GetProperty\('ArgumentList'\)/);
+  assert.match(runnerSource, /\$argumentList\.Add\(\$argument\)/);
+  assert.match(runnerSource, /\$startInfo\.Arguments = \$quotedArguments -join ' '/);
+  assert.match(runnerSource, /\$argument\.Contains\('\"'\) -or \$argument\.EndsWith\('\\'\)/);
   assert.match(runnerSource, /Get-Content -LiteralPath \$stdoutPath -Encoding UTF8/);
   assert.match(runnerSource, /while \(-not \$process\.WaitForExit\(250\)\)/);
   assert.match(runnerSource, /\$process\.Refresh\(\)\s*\$exitCode = \$process\.ExitCode/);

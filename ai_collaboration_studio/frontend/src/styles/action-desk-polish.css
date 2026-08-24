@@ -1,0 +1,99 @@
+.action-desk-panel {
+  --action-desk-ink: #224f65;
+  --action-desk-accent: #34748b;
+  --action-desk-warm: #aa7439;
+  position: relative;
+  container-name: action-desk;
+  container-type: inline-size;
+  isolation: isolate;
+  box-shadow: inset 3px 0 0 rgb(52 116 139 / 58%);
+  background:
+    radial-gradient(circle at 98% 2%, rgb(170 116 57 / 9%), transparent 26%),
+    linear-gradient(145deg, rgb(52 116 139 / 6%), transparent 48%);
+}
+
+.action-desk-panel .action-desk-heading {
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgb(52 116 139 / 22%);
+}
+.action-desk-panel .action-desk-heading strong { color: var(--action-desk-ink); font-size: 14px; }
+.action-desk-panel .action-desk-heading > em { font-size: 9px; }
+.action-desk-panel .action-desk-intro,
+.action-desk-panel .action-desk-empty,
+.action-desk-panel .action-desk-boundary { font-size: 10px; line-height: 1.6; }
+
+.action-desk-panel .action-desk-state { font-size: 10px; }
+.action-desk-panel .action-desk-state small { font-size: 9px; }
+.action-desk-panel .action-desk-state > button { min-height: 38px; }
+
+.action-desk-panel .action-desk-counts > span {
+  padding: 8px;
+  border-color: rgb(52 116 139 / 18%);
+  background: rgb(255 255 255 / 86%);
+}
+.action-desk-panel .action-desk-counts small { font-size: 9px; }
+.action-desk-panel .action-desk-counts strong { font-size: 16px; font-variant-numeric: tabular-nums; }
+.action-desk-panel .action-desk-group-heading { font-size: 11px; }
+.action-desk-panel .action-desk-group-heading > span { font-size: 9px; }
+
+.action-desk-panel .action-desk-row { gap: 10px; padding: 11px; }
+.action-desk-panel .action-desk-row.integrity-failed strong { font-size: 11px; }
+.action-desk-panel .action-desk-row.integrity-failed small { font-size: 9px; }
+.action-desk-panel .action-desk-source strong,
+.action-desk-panel .action-desk-source small {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.action-desk-panel .action-desk-source strong { font-size: 11px; }
+.action-desk-panel .action-desk-source small,
+.action-desk-panel .action-desk-source code { font-size: 9px; }
+.action-desk-panel .action-desk-text { font-size: 12px; line-height: 1.65; }
+.action-desk-panel .action-desk-row-meta { font-size: 9px; }
+
+.action-desk-panel .action-desk-continuation { font-size: 10px; }
+.action-desk-panel .action-desk-continuation > label,
+.action-desk-panel .action-desk-form-grid > label { font-size: 10px; }
+.action-desk-panel .action-desk-continuation select,
+.action-desk-panel .action-desk-continuation textarea,
+.action-desk-panel .action-desk-form-grid input,
+.action-desk-panel .action-desk-form-grid select,
+.action-desk-panel .action-desk-form-grid textarea { font-size: 11px; }
+.action-desk-panel .action-desk-continuation select,
+.action-desk-panel .action-desk-form-grid input,
+.action-desk-panel .action-desk-form-grid select { min-height: 40px; height: auto; }
+.action-desk-panel .action-desk-continuation textarea,
+.action-desk-panel .action-desk-form-grid textarea { min-height: 72px; }
+.action-desk-panel .action-desk-actions button,
+.action-desk-panel .action-desk-continuation > button { min-height: 38px; }
+
+.action-desk-panel :is(button, input, select, textarea):focus-visible {
+  outline: 3px solid rgb(52 116 139 / 32%);
+  outline-offset: 2px;
+}
+
+@container action-desk (max-width: 440px) {
+  .action-desk-panel .action-desk-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .action-desk-panel .action-desk-counts > span:last-child { grid-column: 1 / -1; }
+  .action-desk-panel .action-desk-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .action-desk-panel .action-desk-note-field { grid-column: auto; }
+  .action-desk-panel .action-desk-source { align-items: flex-start; flex-direction: column; }
+  .action-desk-panel .action-desk-actions { align-items: stretch; flex-direction: column; }
+  .action-desk-panel .action-desk-actions button,
+  .action-desk-panel .action-desk-continuation > button,
+  .action-desk-panel .action-desk-state > button { width: 100%; min-height: 44px; justify-content: center; }
+}
+
+@media (forced-colors: active) {
+  .action-desk-panel,
+  .action-desk-panel .action-desk-counts > span {
+    border-color: CanvasText;
+    color: CanvasText;
+    background: Canvas;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .action-desk-panel *,
+  .action-desk-panel *::before,
+  .action-desk-panel *::after { scroll-behavior: auto !important; }
+}

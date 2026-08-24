@@ -1,11 +1,11 @@
 import { AlertTriangle, BarChart3, CheckCircle2, GitBranch, History, Pencil, Plus, RefreshCw, ShieldCheck, Unlink, X } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   WALK_FORWARD_LOCKED_SCENARIOS,
   WALK_FORWARD_SCENARIO_SET_VERSION,
   walkForwardScenarioView,
 } from "../walkForwardScenarioView";
-import { buildPortfolioLineageIndex, decisionPackageSource } from "./DecisionLineagePanel";
+import { buildPortfolioLineageIndex, decisionPackageSource } from "../decisionLineageView";
 import { CandidateComparisonPanel } from "./CandidateComparisonPanel";
 import { useModalFocus } from "../useModalFocus";
 import "../styles/paper-portfolio.css";
@@ -29,6 +29,9 @@ const BUDGET_FIELDS = [
   ["max_worst_5d_loss_pct", "最差 5 日损失上限", 15],
   ["max_stress_loss_pct", "压力损失上限", 15],
 ];
+const DEFAULT_BUDGETS = Object.freeze(
+  Object.fromEntries(BUDGET_FIELDS.map(([field, _label, fallback]) => [field, fallback])),
+);
 const DEFAULT_SCENARIOS = [
   {
     id: "broad_storage_selloff",
@@ -61,6 +64,7 @@ const USD_FORMATTER = new Intl.NumberFormat("en-US", {
   currency: "USD",
   maximumFractionDigits: 0,
 });
+const EMPTY_LIST = Object.freeze([]);
 
 
 function blankPlan() {
@@ -73,7 +77,7 @@ function blankPlan() {
       thesis: "",
       invalidation: "",
     })),
-    budgets: Object.fromEntries(BUDGET_FIELDS.map(([field, _label, fallback]) => [field, fallback])),
+    budgets: { ...DEFAULT_BUDGETS },
     stress_scenarios: DEFAULT_SCENARIOS.map((scenario) => ({
       ...scenario,
       shocks: { ...scenario.shocks },
@@ -118,7 +122,7 @@ function portfolioPlan(portfolio) {
       };
     }),
     budgets: {
-      ...blankPlan().budgets,
+      ...DEFAULT_BUDGETS,
       ...(portfolio.budgets || {}),
     },
     stress_scenarios: (portfolio.stress_scenarios?.length
@@ -189,6 +193,16 @@ function compactObject(value, limit = 180) {
   } catch (_error) {
     return "无法显示";
   }
+}
+
+
+function boundedText(value, fallback = "", limit = 1000) {
+  const text = typeof value === "string"
+    ? value.trim()
+    : value instanceof Error
+      ? value.message.trim()
+      : "";
+  return (text || fallback).slice(0, limit);
 }
 
 
@@ -263,12 +277,22 @@ function walkForwardSourceLabel(result) {
 }
 
 
-function readableTimestamp(value) {
+function timestampValue(value) {
   if (value === null || value === undefined || value === "") return "";
   const numericValue = Number(value);
-  if (Number.isFinite(numericValue) && numericValue <= 0) return "";
-  const date = Number.isFinite(numericValue) ? new Date(numericValue) : new Date(String(value));
-  if (Number.isNaN(date.getTime())) return "";
+  if (Number.isFinite(numericValue)) {
+    if (numericValue <= 0) return null;
+    return numericValue < 1_000_000_000_000 ? numericValue * 1000 : numericValue;
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+
+function readableTimestamp(value) {
+  const timestamp = timestampValue(value);
+  if (timestamp === null || timestamp === "") return "";
+  const date = new Date(timestamp);
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 
@@ -276,12 +300,12 @@ function readableTimestamp(value) {
 function WalkForwardScenarioResults({ rows, positiveRateLabel = "历史测试正收益窗口比例（非未来胜率）" }) {
   return (
     <div className="walk-forward-scenario-results" aria-label="三档纸面摩擦场景结果">
-      {rows.map((row) => {
+      {rows.map((row, index) => {
         const gap = capacityGapValue(row.capacityGap);
         return (
           <article
             className={`walk-forward-scenario-result${row.blocked ? " blocked" : ""}${row.available ? "" : " unavailable"}`}
-            key={row.id}
+            key={JSON.stringify([row.id, row.label, index])}
           >
             <header>
               <strong>{row.label}</strong>
@@ -328,7 +352,7 @@ function WalkForwardMethodCard({ view }) {
           <div><dt>多 / 空数量</dt><dd>{contract.longCount ?? "—"} / {contract.shortCount ?? "—"}</dd></div>
           <div><dt>多 / 空预算</dt><dd>{percent(contract.longBudgetPct)} / {percent(contract.shortBudgetPct)}</dd></div>
           <div><dt>权重 / 调仓</dt><dd>{contract.weighting || "未返回"} · {contract.rebalance || "未返回"}</dd></div>
-          <div><dt>标的范围</dt><dd>{contract.universe.map((symbol) => symbol.replace("US.", "")).join(" / ") || "未返回"}</dd></div>
+          <div><dt>标的范围</dt><dd>{(Array.isArray(contract.universe) ? contract.universe : []).map((symbol) => symbol.replace("US.", "")).join(" / ") || "未返回"}</dd></div>
           <div><dt>合同哈希</dt><dd title={contract.sha256}>{shortHash(contract.sha256)}</dd></div>
         </dl>
       ) : null}
@@ -362,13 +386,13 @@ function WalkForwardFoldAudit({ rows }) {
     <details className="walk-forward-fold-audit">
       <summary>逐折审计 · {rows.length} 个非重叠历史测试窗口</summary>
       <div className="walk-forward-fold-list">
-        {rows.map((fold) => {
+        {rows.map((fold, foldIndex) => {
           const decision = fold.strategyDecision || {};
           const positions = (decision.generatedPositions || [])
             .map(generatedPositionLabel)
             .filter(Boolean);
           return (
-            <article key={fold.id}>
+            <article key={JSON.stringify([fold.id, fold.index, fold.testStart, foldIndex])}>
               <header>
                 <strong>{fold.id || `fold_${fold.index || "?"}`}</strong>
                 <small>决策截止 {fold.decisionCutoff || "未返回"} · 纸面入场 {fold.scheduledEntryDate || "未返回"}</small>
@@ -384,8 +408,8 @@ function WalkForwardFoldAudit({ rows }) {
                 <div><dt>决策输入哈希</dt><dd title={decision.decisionInputHash}>{shortHash(decision.decisionInputHash)}</dd></div>
               </dl>
               <div className="walk-forward-fold-scenarios" aria-label={`${fold.id} 三档摩擦状态`}>
-                {fold.scenarios.map((scenario) => (
-                  <span className={scenario.state} key={scenario.id} title={blockerSummary(scenario.blocker)}>
+                {fold.scenarios.map((scenario, scenarioIndex) => (
+                  <span className={scenario.state} key={JSON.stringify([scenario.id, scenario.name, scenarioIndex])} title={blockerSummary(scenario.blocker)}>
                     <strong>{scenario.name}</strong><small>{scenario.label}</small>
                   </span>
                 ))}
@@ -476,7 +500,7 @@ function WalkForwardSummary({ run, actionableNow = true }) {
         <>
           {scenarioView.legacyFrictionWarning ? (
             <p className="walk-forward-legacy-warning">
-              <AlertTriangle size={12} /> {scenarioView.legacyFrictionWarning.message}
+              <AlertTriangle aria-hidden="true" size={12} /> {scenarioView.legacyFrictionWarning.message}
             </p>
           ) : null}
           {isV3 || isV4 ? (
@@ -497,15 +521,15 @@ function WalkForwardSummary({ run, actionableNow = true }) {
             </dl>
           )}
 
-          {isV4 ? <WalkForwardGates view={scenarioView} /> : null}
-          <WalkForwardMethodCard view={scenarioView} />
+          {isV4 ? <MemoWalkForwardGates view={scenarioView} /> : null}
+          <MemoWalkForwardMethodCard view={scenarioView} />
           {scenarioView.scenarioMetricsVisible && displayReady ? (
-            <WalkForwardScenarioResults
+            <MemoWalkForwardScenarioResults
               rows={scenarioView.rows}
               positiveRateLabel={scenarioView.evaluation?.positiveRateLabel}
             />
           ) : null}
-          {isV4 && displayReady ? <WalkForwardFoldAudit rows={scenarioView.foldRows} /> : null}
+          {isV4 && displayReady ? <MemoWalkForwardFoldAudit rows={scenarioView.foldRows} /> : null}
           {insufficient && !hasBlockedScenario ? (
             <p className="walk-forward-insufficient">
               {nonOverlappingFoldCount < minimumFoldCount
@@ -521,7 +545,7 @@ function WalkForwardSummary({ run, actionableNow = true }) {
                 : "每个测试窗口内按固定纸面买入持有规则回放。"}
           </p>
           <p className={safetyBoundaryReady ? "walk-forward-safe-note" : "walk-forward-safe-note blocked"}>
-            <ShieldCheck size={12} />
+            <ShieldCheck aria-hidden="true" size={12} />
             {safetyBoundaryReady
               ? "安全边界：本次模型调用 0、OpenAI 调用 0；仅历史研究与纸面评估，无账户连接、无下单能力、禁止实盘。"
               : "安全字段不完整或出现模型调用：该结果不可用于确认或任何执行。"}
@@ -534,7 +558,7 @@ function WalkForwardSummary({ run, actionableNow = true }) {
         </>
       ) : (
         <p className="walk-forward-method-note blocked" role="alert">
-          <AlertTriangle size={12} /> {integrity.detail}
+          <AlertTriangle aria-hidden="true" size={12} /> {integrity.detail}
         </p>
       )}
       <p className="walk-forward-interpretation">
@@ -616,8 +640,16 @@ function portfolioLineageMeta(entries, portfolio) {
 }
 
 
-export function PaperPortfolioPanel({
-  portfolios,
+const MemoLockedFrictionScenarios = memo(LockedFrictionScenarios);
+const MemoWalkForwardScenarioResults = memo(WalkForwardScenarioResults);
+const MemoWalkForwardMethodCard = memo(WalkForwardMethodCard);
+const MemoWalkForwardGates = memo(WalkForwardGates);
+const MemoWalkForwardFoldAudit = memo(WalkForwardFoldAudit);
+const MemoWalkForwardSummary = memo(WalkForwardSummary);
+
+
+export const PaperPortfolioPanel = memo(function PaperPortfolioPanel({
+  portfolios = EMPTY_LIST,
   loading,
   walkForwardRunsByPortfolio,
   walkForwardLoadingByPortfolio,
@@ -625,7 +657,7 @@ export function PaperPortfolioPanel({
   candidateComparison = null,
   candidateComparisonLoading = false,
   candidateComparisonError = "",
-  decisionPackages = [],
+  decisionPackages = EMPTY_LIST,
   onAdd,
   onEdit,
   onConfirm,
@@ -634,11 +666,34 @@ export function PaperPortfolioPanel({
   onCompareCandidates,
 }) {
   const [walkForwardConfigs, setWalkForwardConfigs] = useState({});
-  const visible = (portfolios || []).slice(0, 4);
-  const lineageIndex = useMemo(
-    () => buildPortfolioLineageIndex(decisionPackages),
-    [decisionPackages],
+  const [visibleLimit, setVisibleLimit] = useState(4);
+  const panelTitleId = useId();
+  const cardTitleIdPrefix = useId();
+  const portfolioRows = Array.isArray(portfolios) ? portfolios : EMPTY_LIST;
+  const decisionPackageRows = Array.isArray(decisionPackages) ? decisionPackages : EMPTY_LIST;
+  const portfolioCollectionKey = useMemo(
+    () => JSON.stringify(portfolioRows.map((portfolio) => String(portfolio?.id || ""))),
+    [portfolioRows],
   );
+  useEffect(() => setVisibleLimit(4), [portfolioCollectionKey]);
+  const visible = useMemo(
+    () => portfolioRows.slice(0, visibleLimit),
+    [portfolioRows, visibleLimit],
+  );
+  const hiddenPortfolioCount = Math.max(0, portfolioRows.length - visible.length);
+  const portfolioStats = useMemo(() => portfolioRows.reduce((stats, portfolio) => ({
+    confirmed: stats.confirmed + (portfolio?.status === "CONFIRMED" ? 1 : 0),
+    riskReady: stats.riskReady + (portfolio?.evaluation?.risk_gate?.status === "PASS" ? 1 : 0),
+  }), { confirmed: 0, riskReady: 0 }), [portfolioRows]);
+  const lineageIndex = useMemo(
+    () => buildPortfolioLineageIndex(decisionPackageRows),
+    [decisionPackageRows],
+  );
+  const canAdd = typeof onAdd === "function";
+  const canEdit = typeof onEdit === "function";
+  const canConfirm = typeof onConfirm === "function";
+  const canEvaluate = typeof onEvaluate === "function";
+  const canRunWalkForward = typeof onRunWalkForward === "function";
 
   const updateWalkForwardConfig = (portfolioId, field, value) => {
     setWalkForwardConfigs((current) => ({
@@ -652,15 +707,31 @@ export function PaperPortfolioPanel({
   };
 
   return (
-    <div className="paper-portfolio-panel">
+    <section className="paper-portfolio-panel" aria-labelledby={panelTitleId} aria-busy={Boolean(loading)}>
       <div className="paper-portfolio-toolbar">
-        <p>用纸面权重和风险预算约束研究方案；不连接账户，不产生订单。</p>
-        <button className="secondary compact" type="button" onClick={(event) => onAdd({}, event.currentTarget)} disabled={loading}>
-          <Plus size={13} />新建方案
+        <div className="paper-portfolio-toolbar-copy">
+          <BarChart3 aria-hidden="true" size={18} />
+          <span>
+            <small>SIMULATION CONTROL / LOCAL ONLY</small>
+            <h3 id={panelTitleId}>纸面组合与历史验证</h3>
+            <p>用纸面权重和风险预算约束研究方案；不连接账户，不产生订单。</p>
+          </span>
+        </div>
+        <button className="secondary compact" type="button" onClick={(event) => canAdd && onAdd({}, event.currentTarget)} disabled={loading || !canAdd}>
+          <Plus aria-hidden="true" size={13} />新建方案
         </button>
       </div>
+      <div className="paper-portfolio-summary">
+        <dl aria-label="模拟组合工作台摘要">
+          <div><dt>组合总数</dt><dd><data value={portfolioRows.length}>{portfolioRows.length}</data></dd></div>
+          <div><dt>用户已确认</dt><dd><data value={portfolioStats.confirmed}>{portfolioStats.confirmed}</data></dd></div>
+          <div><dt>风险门内</dt><dd><data value={portfolioStats.riskReady}>{portfolioStats.riskReady}</data></dd></div>
+          <div><dt>当前展示</dt><dd><data value={visible.length}>{visible.length} / {portfolioRows.length}</data></dd></div>
+        </dl>
+        <small>计数只表示本地纸面状态；风险门内不代表推荐、批准或可执行。</small>
+      </div>
       <CandidateComparisonPanel
-        portfolios={portfolios}
+        portfolios={portfolioRows}
         runsByPortfolio={walkForwardRunsByPortfolio}
         comparison={candidateComparison}
         loading={candidateComparisonLoading}
@@ -668,8 +739,9 @@ export function PaperPortfolioPanel({
         onCompare={onCompareCandidates}
       />
       {visible.length ? (
-        <div className="paper-portfolio-list">
-          {visible.map((portfolio) => {
+        <>
+          <div className="paper-portfolio-list" role="list">
+            {visible.map((portfolio, portfolioIndex) => {
             const evaluation = portfolio.evaluation || {};
             const gate = evaluation.risk_gate || {};
             const exposures = evaluation.exposures || {};
@@ -692,12 +764,12 @@ export function PaperPortfolioPanel({
             const allWalkForwardRuns = walkForwardRunsByPortfolio?.[portfolio.id] || [];
             const currentWalkForwardRuns = allWalkForwardRuns
               .filter((run) => walkForwardPortfolioVersion(run) === Number(portfolio.version))
-              .toSorted((left, right) => (Number(right.created_at) || 0) - (Number(left.created_at) || 0));
+              .sort((left, right) => (timestampValue(right.created_at) || 0) - (timestampValue(left.created_at) || 0));
             const walkForwardRun = currentWalkForwardRuns[0] || null;
             const historicalWalkForwardCount = allWalkForwardRuns.length - currentWalkForwardRuns.length;
             const lineageLocked = Boolean(lineage.source && lineage.tone !== "active");
             const walkForwardBusy = Boolean(walkForwardLoadingByPortfolio?.[portfolio.id]);
-            const walkForwardError = walkForwardErrorsByPortfolio?.[portfolio.id] || "";
+            const walkForwardError = boundedText(walkForwardErrorsByPortfolio?.[portfolio.id]);
             const configReady = walkForwardConfigValid(walkForwardConfig);
             const walkForwardReady = portfolio.status === "CONFIRMED"
               && lineage.tone === "active"
@@ -712,24 +784,32 @@ export function PaperPortfolioPanel({
                   : !candidateMappingReady
                     ? "候选模拟合同未通过精确语义校验"
                     : "";
+            const portfolioTitle = boundedText(portfolio.name, "未命名模拟组合", 160);
+            const cardTitleId = `${cardTitleIdPrefix}-${portfolioIndex}`;
             return (
-              <article className="paper-portfolio-card" key={portfolio.id}>
+              <article
+                className="paper-portfolio-card"
+                data-risk-state={ready ? "pass" : "blocked"}
+                key={JSON.stringify([portfolio.id, portfolio.version, portfolioIndex])}
+                role="listitem"
+                aria-labelledby={cardTitleId}
+              >
                 <header>
                   <span>
-                    <strong>{portfolio.name}</strong>
+                    <h4 id={cardTitleId}>{portfolioTitle}</h4>
                     <small>v{portfolio.version} · {portfolio.status === "CONFIRMED" ? "用户已确认" : "待确认草稿"}</small>
                   </span>
                   <span className={ready ? "paper-risk-status pass" : "paper-risk-status blocked"}>
-                    {ready ? <CheckCircle2 size={13} /> : <AlertTriangle size={13} />}
+                    {ready ? <CheckCircle2 aria-hidden="true" size={13} /> : <AlertTriangle aria-hidden="true" size={13} />}
                     {ready ? "预算内" : "未通过"}
                   </span>
                 </header>
                 <div className={`paper-lineage-source ${lineage.tone}`}>
-                  {lineage.source ? <GitBranch size={12} /> : <Unlink size={12} />}
+                  {lineage.source ? <GitBranch aria-hidden="true" size={12} /> : <Unlink aria-hidden="true" size={12} />}
                   <span><strong>{lineage.label}</strong><small>{lineage.detail}</small></span>
                 </div>
                 <div className={`paper-lineage-source ${candidateBinding.ready ? "active" : "stale"}`}>
-                  {candidateBinding.ready ? <ShieldCheck size={12} /> : <AlertTriangle size={12} />}
+                  {candidateBinding.ready ? <ShieldCheck aria-hidden="true" size={12} /> : <AlertTriangle aria-hidden="true" size={12} />}
                   <span>
                     <strong>
                       {candidateBinding.ready
@@ -747,9 +827,9 @@ export function PaperPortfolioPanel({
                     </small>
                   </span>
                 </div>
-                <div className="paper-position-chips">
-                  {(portfolio.positions || []).filter((position) => position.side !== "FLAT").map((position) => (
-                    <span key={position.symbol} className={position.side.toLowerCase()}>
+                <div className="paper-position-chips" role="list" aria-label="纸面方向与权重">
+                  {(portfolio.positions || []).filter((position) => position.side !== "FLAT").map((position, positionIndex) => (
+                    <span key={JSON.stringify([portfolio.id, position.symbol, positionIndex])} className={position.side.toLowerCase()} role="listitem">
                       {position.symbol.replace("US.", "")} · {sideLabel(position.side)} {percent(position.weight_pct, 0)}
                     </span>
                   ))}
@@ -771,7 +851,7 @@ export function PaperPortfolioPanel({
                       <strong>{candidateBinding.ready ? "固定候选方向历史回放" : "固定纸面组合历史滚动回放"}</strong>
                       <small>{candidateBinding.ready ? "候选期限与标的已锁定 · 历史 QFQ 日线" : "版本化纸面方案 · 历史 QFQ 日线"}</small>
                     </span>
-                    <BarChart3 size={15} />
+                    <BarChart3 aria-hidden="true" size={15} />
                   </div>
                   <div className="walk-forward-config-grid">
                     {WALK_FORWARD_CONFIG_FIELDS.map(([field, label, minimum, maximum, step, unit]) => (
@@ -789,72 +869,105 @@ export function PaperPortfolioPanel({
                       </label>
                     ))}
                   </div>
-                  <LockedFrictionScenarios />
+                  <MemoLockedFrictionScenarios />
                   <button
                     className="secondary compact walk-forward-run"
                     type="button"
-                    disabled={loading || walkForwardBusy || !configReady || !walkForwardReady}
+                    disabled={loading || walkForwardBusy || !configReady || !walkForwardReady || !canRunWalkForward}
                     aria-busy={walkForwardBusy}
                     title={walkForwardBlockedReason || "运行当前组合版本的历史回放"}
-                    onClick={() => onRunWalkForward(portfolio, {
-                      train_days: Number(walkForwardConfig.train_days),
-                      test_days: Number(walkForwardConfig.test_days),
-                      step_days: Number(walkForwardConfig.step_days),
-                    })}
+                    onClick={() => {
+                      if (!canRunWalkForward) return;
+                      onRunWalkForward(portfolio, {
+                        train_days: Number(walkForwardConfig.train_days),
+                        test_days: Number(walkForwardConfig.test_days),
+                        step_days: Number(walkForwardConfig.step_days),
+                      });
+                    }}
                   >
-                    <BarChart3 size={12} />
+                    <BarChart3 aria-hidden="true" size={12} />
                     {walkForwardBusy ? "正在读取历史并回放…" : "运行历史回放"}
                   </button>
+                  {walkForwardBusy ? <p className="paper-request-status" role="status" aria-live="polite">正在读取历史数据并运行纸面回放。</p> : null}
                   {!configReady ? <p className="walk-forward-inline-error">请检查训练、测试和步进窗口。</p> : null}
                   {walkForwardBlockedReason ? <p className="walk-forward-inline-error">{walkForwardBlockedReason}，历史回放暂不可运行。</p> : null}
-                  {walkForwardError ? <p className="walk-forward-inline-error">{walkForwardError}</p> : null}
+                  {walkForwardError ? <p className="walk-forward-inline-error" role="alert">{walkForwardError}</p> : null}
                 </section>
                 {walkForwardRun ? (
-                  <WalkForwardSummary run={walkForwardRun} actionableNow={walkForwardReady} />
+                  <MemoWalkForwardSummary run={walkForwardRun} actionableNow={walkForwardReady} />
                 ) : (
                   <p className="walk-forward-empty">
                     尚无匹配组合 v{portfolio.version} 的版本化回放结果。运行后只生成历史研究记录，不改变组合，也不会产生订单。
                   </p>
                 )}
                 {historicalWalkForwardCount ? (
-                  <p className="walk-forward-history-note"><History size={11} />另有 {historicalWalkForwardCount} 条旧版本回放，未作为当前 v{portfolio.version} 结果展示。</p>
+                  <p className="walk-forward-history-note"><History aria-hidden="true" size={11} />另有 {historicalWalkForwardCount} 条旧版本回放，未作为当前 v{portfolio.version} 结果展示。</p>
                 ) : null}
                 <footer>
                   <button
                     className="text-action"
                     type="button"
-                    onClick={(event) => onEdit({
-                      ...portfolio,
-                      ...(lineage.source ? { lineage_source: lineage.source } : {}),
-                    }, event.currentTarget)}
-                    disabled={loading || walkForwardBusy || lineageLocked}
+                    onClick={(event) => {
+                      if (!canEdit) return;
+                      onEdit({
+                        ...portfolio,
+                        ...(lineage.source ? { lineage_source: lineage.source } : {}),
+                      }, event.currentTarget);
+                    }}
+                    disabled={loading || walkForwardBusy || lineageLocked || !canEdit}
                   >
-                    <Pencil size={12} />编辑
+                    <Pencil aria-hidden="true" size={12} />编辑
                   </button>
-                  <button className="text-action" type="button" onClick={() => onEvaluate(portfolio)} disabled={loading || walkForwardBusy || lineageLocked || !candidateMappingReady}>
-                    <RefreshCw size={12} />重新复算
+                  <button className="text-action" type="button" onClick={() => canEvaluate && onEvaluate(portfolio)} disabled={loading || walkForwardBusy || lineageLocked || !candidateMappingReady || !canEvaluate}>
+                    <RefreshCw aria-hidden="true" size={12} />重新复算
                   </button>
                   {portfolio.status !== "CONFIRMED" ? (
-                    <button className="text-action confirm" type="button" onClick={() => onConfirm(portfolio)} disabled={loading || walkForwardBusy || !ready || lineageLocked || !candidateMappingReady}>
-                      <ShieldCheck size={12} />用户确认
+                    <button className="text-action confirm" type="button" onClick={() => canConfirm && onConfirm(portfolio)} disabled={loading || walkForwardBusy || !ready || lineageLocked || !candidateMappingReady || !canConfirm}>
+                      <ShieldCheck aria-hidden="true" size={12} />用户确认
                     </button>
                   ) : null}
                 </footer>
               </article>
             );
-          })}
-        </div>
+            })}
+          </div>
+          {hiddenPortfolioCount ? (
+            <button
+              className="paper-portfolio-more"
+              type="button"
+              onClick={() => setVisibleLimit((current) => Math.min(current + 4, portfolioRows.length))}
+            >
+              <Plus aria-hidden="true" size={13} />
+              再显示 {Math.min(4, hiddenPortfolioCount)} 个组合
+              <small>仍有 {hiddenPortfolioCount} 个未显示</small>
+            </button>
+          ) : null}
+        </>
       ) : (
-        <div className="empty-resource">尚未建立可供风控复核的模拟组合</div>
+        <div className="paper-portfolio-empty" role="note">
+          <BarChart3 aria-hidden="true" size={20} />
+          <span>
+            <small>EMPTY SIMULATION LEDGER</small>
+            <strong>尚未建立可供风控复核的模拟组合</strong>
+            <p>可从用户支持的候选建立精确关联组合，也可使用上方入口创建独立纸面方案；任何结果仍需用户复核。</p>
+          </span>
+          <ul aria-label="空组合工作台边界">
+            <li>不连接账户</li>
+            <li>不产生订单</li>
+            <li>不替代用户决定</li>
+          </ul>
+        </div>
       )}
-    </div>
+    </section>
   );
-}
+});
 
 
-export function PaperPortfolioDialog({ portfolio, open, onClose, onSubmit, restoreFocusRef }) {
+export const PaperPortfolioDialog = memo(function PaperPortfolioDialog({ portfolio, open, onClose, onSubmit, restoreFocusRef }) {
   const dialogRef = useRef(null);
   const closeButtonRef = useRef(null);
+  const dialogTitleId = useId();
+  const dialogDescriptionId = useId();
   const [draft, setDraft] = useState(() => blankPlan());
   const [initializedPortfolio, setInitializedPortfolio] = useState(null);
   const [derivationNote, setDerivationNote] = useState("");
@@ -862,6 +975,8 @@ export function PaperPortfolioDialog({ portfolio, open, onClose, onSubmit, resto
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const requestSessionRef = useRef(0);
+  const canClose = typeof onClose === "function";
+  const canSubmit = typeof onSubmit === "function";
 
   useLayoutEffect(() => {
     requestSessionRef.current += 1;
@@ -879,6 +994,7 @@ export function PaperPortfolioDialog({ portfolio, open, onClose, onSubmit, resto
 
   const surfaceOpen = Boolean(open && portfolio && initializedPortfolio === portfolio);
   const closeDialog = () => {
+    if (!canClose) return;
     requestSessionRef.current += 1;
     setBusy(false);
     onClose();
@@ -891,7 +1007,7 @@ export function PaperPortfolioDialog({ portfolio, open, onClose, onSubmit, resto
     containerRef: dialogRef,
     initialFocusRef: closeButtonRef,
     restoreFallbackRef: restoreFocusRef,
-    onClose: busy ? null : requestClose,
+    onClose: busy || !canClose ? null : requestClose,
   });
   useEffect(() => {
     if (surfaceOpen && busy) dialogRef.current?.focus({ preventScroll: true });
@@ -987,6 +1103,10 @@ export function PaperPortfolioDialog({ portfolio, open, onClose, onSubmit, resto
   const submit = async (event) => {
     event.preventDefault();
     if (busy) return;
+    if (!canSubmit) {
+      setError("当前未提供模拟组合保存处理器，不能提交。");
+      return;
+    }
     if (!activeCount) {
       setError("请至少选择一个模拟做多或模拟做空标的。");
       return;
@@ -1031,7 +1151,9 @@ export function PaperPortfolioDialog({ portfolio, open, onClose, onSubmit, resto
       });
       if (requestSessionRef.current === requestSession) closeDialog();
     } catch (requestError) {
-      if (requestSessionRef.current === requestSession) setError(requestError.message);
+      if (requestSessionRef.current === requestSession) {
+        setError(boundedText(requestError, "模拟组合保存失败。"));
+      }
     } finally {
       if (requestSessionRef.current === requestSession) setBusy(false);
     }
@@ -1050,7 +1172,8 @@ export function PaperPortfolioDialog({ portfolio, open, onClose, onSubmit, resto
         className="dialog paper-portfolio-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label={portfolio?.id ? "编辑模拟组合" : "新建模拟组合"}
+        aria-labelledby={dialogTitleId}
+        aria-describedby={dialogDescriptionId}
         aria-busy={busy}
         tabIndex={-1}
         onSubmit={submit}
@@ -1058,16 +1181,17 @@ export function PaperPortfolioDialog({ portfolio, open, onClose, onSubmit, resto
       >
         <header>
           <span>
-            <strong>{portfolio?.id ? "编辑模拟组合" : "新建模拟组合"}</strong>
-            <small>保存时使用富途只读复权历史重新计算风险</small>
+            <strong id={dialogTitleId}>{portfolio?.id ? "编辑模拟组合" : "新建模拟组合"}</strong>
+            <small id={dialogDescriptionId}>保存时使用富途只读复权历史重新计算风险</small>
           </span>
-          <button ref={closeButtonRef} className="icon-button" type="button" aria-label="关闭模拟组合设置" onClick={requestClose} disabled={busy}><X size={18} /></button>
+          <button ref={closeButtonRef} className="icon-button" type="button" aria-label="关闭模拟组合设置" onClick={requestClose} disabled={busy || !canClose}><X aria-hidden="true" size={18} /></button>
         </header>
-        <div className="paper-portfolio-dialog-body">
-          {error ? <div className="dialog-error">{error}</div> : null}
+        <fieldset className="paper-portfolio-dialog-body" disabled={busy}>
+          <legend className="paper-dialog-body-legend">模拟组合设置</legend>
+          {error ? <div className="dialog-error" role="alert">{error}</div> : null}
           {lineageSource ? (
             <section className={`paper-dialog-lineage-source ${lineageSource.package_state || "stale"}`}>
-              <GitBranch size={17} />
+              <GitBranch aria-hidden="true" size={17} />
               <span>
                 <small>只读来源 · 不会随组合编辑而改写</small>
                 <strong>{lineageSource.selected_option_title || "已选候选方案"}</strong>
@@ -1084,7 +1208,7 @@ export function PaperPortfolioDialog({ portfolio, open, onClose, onSubmit, resto
           ) : null}
           {strictCandidateMapping ? (
             <section className={`paper-dialog-lineage-source ${strictCandidateReady ? "active" : "stale"}`}>
-              {strictCandidateReady ? <ShieldCheck size={17} /> : <AlertTriangle size={17} />}
+              {strictCandidateReady ? <ShieldCheck aria-hidden="true" size={17} /> : <AlertTriangle aria-hidden="true" size={17} />}
               <span>
                 <small>已封印候选 · 只读精确规格</small>
                 <strong>
@@ -1118,7 +1242,7 @@ export function PaperPortfolioDialog({ portfolio, open, onClose, onSubmit, resto
             </label>
           ) : null}
           <label className="paper-plan-name">方案名称
-            <input value={draft.name} maxLength={80} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+            <input value={draft.name} maxLength={80} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} />
           </label>
 
           <section className="paper-dialog-section">
@@ -1188,19 +1312,21 @@ export function PaperPortfolioDialog({ portfolio, open, onClose, onSubmit, resto
             <div className="paper-dialog-heading">
               <span><strong>压力情景</strong><small>每个数字是假设价格冲击幅度</small></span>
               <button className="secondary compact" type="button" onClick={addScenario} disabled={draft.stress_scenarios.length >= 8}>
-                <Plus size={12} />添加情景
+                <Plus aria-hidden="true" size={12} />添加情景
               </button>
             </div>
             <div className="paper-stress-editor">
               {draft.stress_scenarios.map((scenario, index) => (
-                <fieldset key={scenario.id}>
+                <fieldset key={scenario.id
+                  ? JSON.stringify(["scenario_id", scenario.id])
+                  : JSON.stringify(["scenario_index", index])}>
                   <legend>
                     <input value={scenario.name} maxLength={80} onChange={(event) => updateScenario(index, { name: event.target.value })} />
                     {draft.stress_scenarios.length > 1 ? (
                       <button type="button" aria-label={`移除 ${scenario.name}`} onClick={() => setDraft((current) => ({
                         ...current,
                         stress_scenarios: current.stress_scenarios.filter((_, scenarioIndex) => scenarioIndex !== index),
-                      }))}><X size={13} /></button>
+                      }))}><X aria-hidden="true" size={13} /></button>
                     ) : null}
                   </legend>
                   {SYMBOLS.map((symbol) => (
@@ -1232,14 +1358,15 @@ export function PaperPortfolioDialog({ portfolio, open, onClose, onSubmit, resto
               </span>
             </label>
           ) : null}
-          <p className="paper-safe-note"><ShieldCheck size={14} />仅研究、回测和模拟；没有账户、数量、价格指令或下单能力。</p>
-        </div>
+          <p className="paper-safe-note"><ShieldCheck aria-hidden="true" size={14} />仅研究、回测和模拟；没有账户、数量、价格指令或下单能力。</p>
+        </fieldset>
         <footer>
-          <button className="secondary" type="button" onClick={requestClose} disabled={busy}>取消</button>
+          <button className="secondary" type="button" onClick={requestClose} disabled={busy || !canClose}>取消</button>
           <button
             className="primary"
             type="submit"
             disabled={busy
+              || !canSubmit
               || (requiresDerivation && derivationNote.trim().length < 3)
               || (strictCandidateMapping && !strictCandidateReady)
               || (strictCandidateReady && !mappingConfirmed)}
@@ -1248,4 +1375,4 @@ export function PaperPortfolioDialog({ portfolio, open, onClose, onSubmit, resto
       </form>
     </div>
   );
-}
+});

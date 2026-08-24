@@ -9,6 +9,8 @@ export const MODAL_FOCUSABLE_SELECTOR = [
   "input:not([disabled])",
   "select:not([disabled])",
   "textarea:not([disabled])",
+  '[contenteditable="true"]',
+  "summary",
   '[tabindex]:not([tabindex="-1"])',
 ].join(",");
 
@@ -24,13 +26,19 @@ export function modalFocusIndex(controlCount, activeIndex, shiftKey) {
 
 function visibleControls(container) {
   return Array.from(container.querySelectorAll(MODAL_FOCUSABLE_SELECTOR))
-    .filter(visibleFocusTarget);
+    .filter(sequentialFocusTarget);
+}
+
+function sequentialFocusTarget(target) {
+  return visibleFocusTarget(target) && Number.isInteger(target.tabIndex) && target.tabIndex >= 0;
 }
 
 function visibleFocusTarget(target) {
   if (
     !target?.isConnected
     || target.disabled === true
+    || target.matches?.(":disabled")
+    || target.closest?.("[inert], [aria-hidden=\"true\"]")
     || typeof target.focus !== "function"
     || target.getClientRects().length === 0
   ) return false;
@@ -77,6 +85,12 @@ function topModalSurfaceIs(token) {
   });
 }
 
+function topModalSurface() {
+  return activeModalSurfaces.find((entry) => (
+    entry.container?.isConnected && topModalSurfaceIs(entry.token)
+  )) || null;
+}
+
 export function useModalFocus({
   open,
   containerRef,
@@ -102,22 +116,27 @@ export function useModalFocus({
     const surfaceToken = surfaceTokenRef.current;
     registerModalSurface(surfaceToken, container);
     const activeElement = document.activeElement;
-    if (activeElement && activeElement !== document.body && !container.contains(activeElement) && typeof activeElement.focus === "function") {
+    if (activeElement && activeElement !== document.body && !container.contains(activeElement) && visibleFocusTarget(activeElement)) {
       restoreTargetRef.current = activeElement;
     }
 
     const initialFocusFrame = globalThis.requestAnimationFrame(() => {
+      if (!topModalSurfaceIs(surfaceToken)) return;
       const controls = visibleControls(container);
       const preferredTarget = initialFocusRef?.current;
-      const target = visibleFocusTarget(preferredTarget) ? preferredTarget : controls[0];
-      target?.focus({ preventScroll: true });
+      const preferredInContainer = container.contains(preferredTarget);
+      const target = preferredInContainer && visibleFocusTarget(preferredTarget) ? preferredTarget : controls[0];
+      const focusTarget = target || (visibleFocusTarget(container) ? container : null);
+      focusTarget?.focus({ preventScroll: true });
     });
     const handleKeyDown = (event) => {
       if (!topModalSurfaceIs(surfaceToken)) return;
+      if (event.isComposing || event.keyCode === 229) return;
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation();
+        if (event.repeat) return;
         if (typeof closeRef.current === "function") closeRef.current();
         return;
       }
@@ -148,16 +167,23 @@ export function useModalFocus({
       document.removeEventListener("keydown", handleKeyDown, true);
       unregisterModalSurface(surfaceToken);
       const capturedTarget = restoreTargetRef.current;
-      restoreTargetRef.current = null;
       restoreFrameRef.current = globalThis.requestAnimationFrame(() => {
         restoreFrameRef.current = null;
         const fallbackTarget = restoreFallbackRef?.current;
         const restoreTarget = visibleFocusTarget(capturedTarget)
           ? capturedTarget
           : fallbackTarget;
-        if (visibleFocusTarget(restoreTarget)) {
+        const activeSurface = topModalSurface();
+        if (activeSurface && !activeSurface.container.contains(restoreTarget)) {
+          const activeSurfaceTarget = visibleControls(activeSurface.container)[0]
+            || activeSurface.container;
+          if (visibleFocusTarget(activeSurfaceTarget)) {
+            activeSurfaceTarget.focus({ preventScroll: true });
+          }
+        } else if (visibleFocusTarget(restoreTarget)) {
           restoreTarget.focus({ preventScroll: true });
         }
+        restoreTargetRef.current = null;
       });
     };
   }, [open]);

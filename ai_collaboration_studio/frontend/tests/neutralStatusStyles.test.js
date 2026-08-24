@@ -3,6 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+const capabilityStyles = readFileSync(
+  new URL("../src/styles/capability-registry.css", import.meta.url),
+  "utf8",
+);
 
 function rule(selector) {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -38,7 +42,7 @@ test("workflow states no longer reference undefined legacy variables and integri
   for (const name of ["--success", "--danger", "--line", "--panel"]) {
     assert.doesNotMatch(styles, new RegExp(`var\\(${name.replace("--", "--")}\\)`));
   }
-  assert.match(styles, /\.plugin-registry-snapshot\.integrity-failed\s*\{[\s\S]*?(?:#963e47|#fff7f7|#fff8f8)/);
+  assert.match(capabilityStyles, /\.plugin-registry-snapshot\.integrity-failed\s*\{[\s\S]*?(?:#963e47|#fff7f7|#fff8f8)/);
   assert.match(styles, /\.action-desk-row\.integrity-failed\s*\{/);
   assert.match(rule(".meeting-readiness.critical"), /--state-critical-/);
   assert.match(rule(".market-gate-reason.critical"), /--state-critical-/);

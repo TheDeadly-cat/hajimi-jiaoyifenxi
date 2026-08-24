@@ -1,0 +1,500 @@
+.project-readiness-panel.readiness-docket {
+  --readiness-ink: var(--accent, #24776f);
+  --readiness-warm: #b66738;
+  --readiness-line: color-mix(in srgb, var(--readiness-ink) 22%, transparent);
+  position: relative;
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 96% 4%, color-mix(in srgb, var(--readiness-warm) 10%, transparent), transparent 28%),
+    linear-gradient(145deg, color-mix(in srgb, var(--readiness-ink) 7%, transparent), transparent 48%);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--readiness-ink) 66%, transparent);
+  container-name: project-readiness;
+  container-type: inline-size;
+}
+
+.project-readiness-panel.readiness-docket::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: -1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--readiness-ink), var(--readiness-warm), transparent 82%);
+}
+
+.readiness-docket .project-readiness-gap-status {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(4rem, 0.4fr);
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  border-left: 2px solid var(--readiness-ink);
+  color: color-mix(in srgb, currentColor 74%, transparent);
+  font-size: 0.78rem;
+}
+
+.readiness-docket .project-readiness-gap-group > header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 44px;
+  align-items: center;
+}
+
+.readiness-docket .project-readiness-gap-group[data-expanded="true"] > header {
+  border-bottom-color: color-mix(in srgb, var(--readiness-ink) 24%, transparent);
+  background:
+    linear-gradient(110deg, color-mix(in srgb, var(--readiness-ink) 7%, transparent), transparent 72%);
+}
+
+.readiness-docket .project-readiness-gap-title > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.readiness-docket .project-readiness-gap-toggle {
+  display: grid;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--readiness-ink) 20%, transparent);
+  border-radius: 50%;
+  color: color-mix(in srgb, var(--readiness-ink) 78%, #173f5f);
+  background: color-mix(in srgb, var(--panel, #f7f4ec) 88%, transparent);
+  touch-action: manipulation;
+}
+
+.readiness-docket .project-readiness-gap-toggle svg {
+  transition: transform 160ms ease;
+}
+
+.readiness-docket .project-readiness-gap-toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+
+.readiness-docket .project-readiness-gap-body {
+  display: grid;
+  min-width: 0;
+}
+
+.readiness-docket .project-readiness-gap-body[hidden] {
+  display: none;
+}
+
+.readiness-docket .project-readiness-gap-progress {
+  display: block;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--readiness-ink) 12%, transparent);
+}
+
+.readiness-docket .project-readiness-gap-progress > i {
+  display: block;
+  width: var(--readiness-list-progress, 0%);
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--readiness-ink), var(--readiness-warm));
+  transition: width 180ms ease;
+}
+
+.readiness-docket .project-readiness-more {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.5rem;
+  align-self: center;
+  min-height: 44px;
+  touch-action: manipulation;
+}
+
+.readiness-docket .project-readiness-more small {
+  color: color-mix(in srgb, currentColor 62%, transparent);
+  font-size: 0.66rem;
+}
+
+.readiness-docket .project-readiness-more[data-list-action="collapse"] {
+  border-color: color-mix(in srgb, var(--readiness-warm) 42%, transparent);
+  color: color-mix(in srgb, var(--readiness-warm) 82%, #5f3827);
+  background: color-mix(in srgb, var(--readiness-warm) 7%, white);
+  box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--readiness-warm) 18%, transparent);
+}
+
+.readiness-docket .project-readiness-heading-title h3 {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.35;
+}
+
+.readiness-docket .project-readiness-kicker,
+.readiness-docket .project-readiness-heading > em span,
+.readiness-docket .project-readiness-summary-copy > small,
+.readiness-docket .project-readiness-summary > em small,
+.readiness-docket .project-readiness-metrics li > span small,
+.readiness-docket .project-readiness-metrics li > em small,
+.readiness-docket .project-readiness-gap-title small,
+.readiness-docket .project-readiness-gap-group header > em span {
+  font-size: 0.64rem;
+}
+
+.readiness-docket .project-readiness-heading-copy p,
+.readiness-docket .project-readiness-summary-copy > span,
+.readiness-docket .project-readiness-state,
+.readiness-docket .project-readiness-boundary {
+  font-size: 0.75rem;
+}
+
+.readiness-docket .project-readiness-heading > em,
+.readiness-docket .project-readiness-metrics li > b,
+.readiness-docket .project-readiness-gap-title > b {
+  font-size: 0.68rem;
+}
+
+.readiness-docket .project-readiness-summary-copy > strong {
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
+.readiness-docket .project-readiness-summary.ready {
+  border-color: color-mix(in srgb, var(--readiness-ink) 34%, #d7e2e7);
+  color: color-mix(in srgb, var(--readiness-ink) 88%, #173f5f);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--readiness-ink) 7%, white), rgba(255, 255, 255, 0.96));
+}
+
+.readiness-docket .project-readiness-scope-ledger {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--readiness-line);
+  border-radius: 12px;
+  background: var(--readiness-line);
+}
+
+.readiness-docket .project-readiness-scope-ledger > span {
+  display: grid;
+  min-width: 0;
+  gap: 0.2rem;
+  padding: 0.7rem 0.8rem;
+  background: color-mix(in srgb, var(--panel, #f7f4ec) 95%, white);
+}
+
+.readiness-docket .project-readiness-scope-ledger small {
+  color: color-mix(in srgb, var(--readiness-ink) 62%, #6a7882);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.readiness-docket .project-readiness-scope-ledger strong {
+  color: color-mix(in srgb, var(--readiness-ink) 88%, #173f5f);
+  font-size: 0.84rem;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.readiness-docket .project-readiness-locator {
+  display: grid;
+  grid-template-columns: auto minmax(12rem, 1fr);
+  align-items: center;
+  gap: 0.6rem 0.8rem;
+  padding: 0.7rem;
+  border: 1px solid var(--readiness-line);
+  border-radius: 12px;
+  background:
+    linear-gradient(110deg, color-mix(in srgb, var(--readiness-ink) 7%, white), rgba(255, 255, 255, 0.94));
+}
+
+.readiness-docket .project-readiness-locator[data-query-active="true"] {
+  border-color: color-mix(in srgb, var(--readiness-ink) 42%, #c8d8df);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--readiness-ink) 46%, transparent);
+}
+
+.readiness-docket .project-readiness-locator[aria-busy="true"] .project-readiness-locator-status {
+  color: color-mix(in srgb, var(--readiness-ink) 82%, #294b64);
+}
+
+.readiness-docket .project-readiness-locator > label {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.5rem;
+  color: color-mix(in srgb, var(--readiness-ink) 86%, #173f5f);
+}
+
+.readiness-docket .project-readiness-locator > label > span {
+  display: grid;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.readiness-docket .project-readiness-locator label small {
+  font-size: 0.62rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.readiness-docket .project-readiness-locator label strong {
+  font-size: 0.78rem;
+}
+
+.readiness-docket .project-readiness-locator-field {
+  display: flex;
+  min-width: 0;
+  gap: 0.4rem;
+}
+
+.readiness-docket .project-readiness-locator-field input {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--readiness-ink) 24%, #d4e0e8);
+  border-radius: 9px;
+  color: #294b64;
+  background: rgba(255, 255, 255, 0.92);
+  font: inherit;
+  font-size: 0.78rem;
+}
+
+.readiness-docket .project-readiness-locator-clear {
+  display: grid;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--readiness-warm) 30%, transparent);
+  border-radius: 50%;
+  color: var(--readiness-warm);
+  background: color-mix(in srgb, var(--readiness-warm) 7%, white);
+  touch-action: manipulation;
+}
+
+.readiness-docket .project-readiness-locator-status {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: color-mix(in srgb, currentColor 68%, transparent);
+  font-size: 0.7rem;
+}
+
+.readiness-docket .project-readiness-locator-status[data-empty="true"] {
+  color: color-mix(in srgb, var(--readiness-warm) 86%, #5f3827);
+}
+
+.readiness-docket .project-readiness-metrics li > span strong,
+.readiness-docket .project-readiness-gap-title h4 {
+  margin: 0;
+  font-size: 0.76rem;
+}
+
+.readiness-docket .project-readiness-gap-group li strong,
+.readiness-docket .project-readiness-binding summary,
+.readiness-docket .project-readiness-binding dd {
+  font-size: 0.72rem;
+}
+
+.readiness-docket .project-readiness-gap-group li small,
+.readiness-docket .project-readiness-binding dt,
+.readiness-docket .project-readiness-gap-group code {
+  font-size: 0.66rem;
+}
+
+.readiness-docket .project-readiness-gap-body > p {
+  font-size: 0.72rem;
+}
+
+.readiness-docket .project-readiness-binding summary {
+  min-height: 44px;
+  touch-action: manipulation;
+}
+
+.readiness-docket .project-readiness-gap-group {
+  position: relative;
+  overflow: hidden;
+  scroll-margin-block: 5rem;
+}
+
+.readiness-docket .project-readiness-gap-group:target,
+.readiness-docket .project-readiness-gap-group:focus {
+  outline: 3px solid color-mix(in srgb, var(--readiness-ink) 34%, transparent);
+  outline-offset: 3px;
+}
+
+.readiness-docket .project-readiness-gap-group[data-gate-state="clear"] {
+  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--readiness-ink) 40%, transparent);
+}
+
+.readiness-docket .project-readiness-gap-group[data-gate-state="hold"],
+.readiness-docket .project-readiness-gap-group[data-gate-state="open"] {
+  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--readiness-warm) 52%, transparent);
+}
+
+.readiness-docket .project-readiness-gap-group li {
+  scroll-margin-block: 5rem;
+}
+
+.readiness-docket .project-readiness-metrics li {
+  position: relative;
+  padding-inline-end: 3.45rem;
+}
+
+.readiness-docket .project-readiness-gate-jump {
+  position: absolute;
+  top: 50%;
+  inset-inline-end: 0.35rem;
+  display: grid;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--readiness-ink) 22%, transparent);
+  border-radius: 50%;
+  color: color-mix(in srgb, var(--readiness-ink) 82%, #173f5f);
+  background: color-mix(in srgb, var(--panel, #f7f4ec) 88%, transparent);
+  transform: translateY(-50%);
+  touch-action: manipulation;
+}
+
+.readiness-docket .project-readiness-gate-jump:hover {
+  border-color: color-mix(in srgb, var(--readiness-ink) 48%, transparent);
+  background: color-mix(in srgb, var(--readiness-ink) 10%, white);
+}
+
+.readiness-docket .project-readiness-gate-jump svg {
+  transition: transform 160ms ease;
+}
+
+.readiness-docket .project-readiness-gate-jump:hover svg {
+  transform: translate(2px, 2px);
+}
+
+.readiness-docket button:focus-visible,
+.readiness-docket .project-readiness-locator-field input:focus-visible,
+.readiness-docket summary:focus-visible,
+.readiness-docket .project-readiness-gap-toggle:focus-visible,
+.readiness-docket .project-readiness-gate-jump:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--readiness-ink) 46%, transparent);
+  outline-offset: 3px;
+}
+
+@media (max-width: 620px) {
+  .readiness-docket .project-readiness-more {
+    width: 100%;
+  }
+
+  .readiness-docket .project-readiness-binding dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@container project-readiness (max-width: 44rem) {
+  .readiness-docket .project-readiness-metrics,
+  .readiness-docket .project-readiness-gaps {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .readiness-docket .project-readiness-metrics li + li::before {
+    top: -9px;
+    left: 18px;
+    width: 2px;
+    height: 9px;
+  }
+}
+
+@container project-readiness (max-width: 32rem) {
+  .readiness-docket .project-readiness-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .readiness-docket .project-readiness-heading > em {
+    align-self: flex-start;
+    text-align: left;
+  }
+
+  .readiness-docket .project-readiness-summary {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .readiness-docket .project-readiness-summary > em {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding-top: 0.55rem;
+    border-top: 1px solid currentColor;
+    border-left: 0;
+    text-align: left;
+  }
+
+  .readiness-docket .project-readiness-scope-ledger {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .readiness-docket .project-readiness-scope-ledger > span {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: baseline;
+  }
+
+  .readiness-docket .project-readiness-locator {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .readiness-docket .project-readiness-locator-status {
+    grid-column: 1;
+  }
+
+  .readiness-docket .project-readiness-binding dl,
+  .readiness-docket .project-readiness-binding dl > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .readiness-docket .project-readiness-binding dl > div {
+    gap: 0.15rem;
+  }
+
+  .readiness-docket .project-readiness-gap-group li {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .readiness-docket .project-readiness-gap-group code {
+    max-width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .readiness-docket *,
+  .readiness-docket *::before,
+  .readiness-docket *::after {
+    scroll-behavior: auto !important;
+  }
+
+  .readiness-docket .project-readiness-gap-progress > i,
+  .readiness-docket .project-readiness-gap-toggle svg,
+  .readiness-docket .project-readiness-gate-jump svg {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .project-readiness-panel.readiness-docket,
+  .readiness-docket .project-readiness-gap-group,
+  .readiness-docket .project-readiness-gap-status,
+  .readiness-docket .project-readiness-scope-ledger,
+  .readiness-docket .project-readiness-locator,
+  .readiness-docket .project-readiness-locator-field input,
+  .readiness-docket .project-readiness-locator-clear,
+  .readiness-docket .project-readiness-gap-toggle,
+  .readiness-docket .project-readiness-gate-jump {
+    border-color: CanvasText;
+  }
+
+  .readiness-docket .project-readiness-gap-progress,
+  .readiness-docket .project-readiness-gap-progress > i {
+    background: CanvasText;
+  }
+}

@@ -25,12 +25,17 @@ const SENSITIVE_QUERY_KEY_COMPACT = new Set([
 const CAMEL_CASE_BOUNDARY = /([a-z0-9])([A-Z])/g;
 const NON_ALPHANUMERIC = /[^a-z0-9]+/g;
 const EVIDENCE_SOURCE_DETAIL_MAX_BYTES = 300 * 1024;
+export const ARTIFACT_EVIDENCE_SOURCE_LIMIT = 2000;
 
 function cleanText(value, maxLength = 4000) {
+  if (typeof value !== "string" && typeof value !== "number") return "";
+  if (typeof value === "number" && !Number.isFinite(value)) return "";
   return String(value ?? "").trim().slice(0, maxLength);
 }
 
 function cleanInteger(value, fallback = 0) {
+  if (typeof value !== "string" && typeof value !== "number") return fallback;
+  if (typeof value === "string" && !value.trim()) return fallback;
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
@@ -413,21 +418,30 @@ export function normalizeArtifactEvidenceResponse(payload, { roundId = "" } = {}
       ? payload
       : {};
   const normalizedRoundId = cleanText(envelope.round_id || roundId, 240);
-  const sources = uniqueSources(envelope.sources, { roundId: normalizedRoundId });
+  const rawSources = Array.isArray(envelope.sources) ? envelope.sources : [];
+  const rawUnresolved = Array.isArray(envelope.unresolved) ? envelope.unresolved : [];
+  const sourceLimitExceeded = rawSources.length + rawUnresolved.length > ARTIFACT_EVIDENCE_SOURCE_LIMIT;
+  const sources = sourceLimitExceeded
+    ? []
+    : uniqueSources(rawSources, { roundId: normalizedRoundId });
   const sourceKeys = new Set(sources.map((source) => `${source.type}:${source.id}`));
-  const unresolved = uniqueSources(envelope.unresolved, {
-    roundId: normalizedRoundId,
-    unresolved: true,
-  }).filter((source) => !sourceKeys.has(`${source.type}:${source.id}`));
+  const unresolved = sourceLimitExceeded
+    ? []
+    : uniqueSources(rawUnresolved, {
+      roundId: normalizedRoundId,
+      unresolved: true,
+    }).filter((source) => !sourceKeys.has(`${source.type}:${source.id}`));
+  const declaredAuthoritative = typeof envelope.authoritative === "boolean"
+    ? envelope.authoritative
+    : Boolean(normalizedRoundId);
   return {
     version: cleanText(envelope.version, 120) || (legacyArray ? "artifact_evidence_sources_v1" : ""),
     artifactId: cleanText(envelope.artifact_id, 240),
     roundId: normalizedRoundId,
-    authoritative: typeof envelope.authoritative === "boolean"
-      ? envelope.authoritative
-      : Boolean(normalizedRoundId),
+    authoritative: declaredAuthoritative && !sourceLimitExceeded,
     sources,
     unresolved,
+    issues: sourceLimitExceeded ? ["SOURCE_LIMIT_EXCEEDED"] : [],
   };
 }
 
@@ -544,11 +558,19 @@ export function summarizeEvidenceRelations(
   reviewByKey = {},
   sourceDetailByKey = {},
 ) {
-  const byKey = new Map(candidates.map((source) => [`${source.type}:${source.id}`, source]));
-  return selectedKeys.reduce((summary, key) => {
+  const candidateRows = Array.isArray(candidates) ? candidates : [];
+  const selectedRows = Array.isArray(selectedKeys) ? selectedKeys : [];
+  const reviewMap = reviewByKey && typeof reviewByKey === "object" && !Array.isArray(reviewByKey)
+    ? reviewByKey
+    : {};
+  const detailMap = sourceDetailByKey && typeof sourceDetailByKey === "object" && !Array.isArray(sourceDetailByKey)
+    ? sourceDetailByKey
+    : {};
+  const byKey = new Map(candidateRows.map((source) => [`${source?.type}:${source?.id}`, source]));
+  return selectedRows.reduce((summary, key) => {
     const source = byKey.get(key) || { exact: false, status: "missing", unresolved: true };
-    const audit = reviewByKey[key] || {};
-    const detail = sourceDetailByKey[evidenceSourceDetailKey(source, audit)];
+    const audit = reviewMap[key] || {};
+    const detail = detailMap[evidenceSourceDetailKey(source, audit)];
     const flags = evidenceRelationFlags(source, audit, detail);
     summary.selected += 1;
     for (const name of ["support", "counter", "conflict", "gap"]) {

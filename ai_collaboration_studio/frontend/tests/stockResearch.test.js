@@ -342,8 +342,9 @@ test("stock authorization is cleared on edits, drift, room change and successful
   );
   assert.match(appSource, /sameRoom && sameRegistry && sameScope && stockResearchActivation\.active/);
   assert.match(confirmationSource, /setStockRoundContextAuthorization\(null\)/);
-  assert.match(panelSource, /updateSource[\s\S]*onRoundContextAuthorizationChange\?\.\(null\)/);
-  assert.match(panelSource, /const inspect[\s\S]*onRoundContextAuthorizationChange\?\.\(null\)/);
+  assert.match(panelSource, /const canUpdateRoundAuthorization = typeof onRoundContextAuthorizationChange === "function"/);
+  assert.match(panelSource, /const updateSource[\s\S]*if \(roundContextAuthorization && canUpdateRoundAuthorization\) onRoundContextAuthorizationChange\(null\)/);
+  assert.match(panelSource, /const inspect[\s\S]*if \(roundContextAuthorization && canUpdateRoundAuthorization\) onRoundContextAuthorizationChange\(null\)/);
 });
 
 test("missing registry data never activates the stock contribution", () => {

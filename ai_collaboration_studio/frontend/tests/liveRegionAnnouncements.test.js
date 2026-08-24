@@ -204,7 +204,9 @@ test("components expose one atomic polite status each and no live large containe
   assert.doesNotMatch(`${chatSource}\n${convergenceSource}`, /style=\{SCREEN_READER_ONLY_STYLE\}/);
 });
 
-test("chat accessibility change preserves reduced-motion scroll behavior", () => {
+test("chat navigation keeps preferred message jumps and a deterministic return path", () => {
   assert.match(chatSource, /import \{ preferredScrollBehavior \} from "\.\.\/motionPreferences"/);
-  assert.equal((chatSource.match(/behavior:\s*preferredScrollBehavior\(\)/g) || []).length, 2);
+  assert.equal((chatSource.match(/behavior:\s*preferredScrollBehavior\(\)/g) || []).length, 1);
+  assert.match(chatSource, /element\.scrollTop = Math\.max\(0, element\.scrollHeight - element\.clientHeight\)/);
+  assert.match(chatSource, /element\.focus\(\{ preventScroll: true \}\)/);
 });

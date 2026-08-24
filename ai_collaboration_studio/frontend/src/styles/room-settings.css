@@ -1,0 +1,418 @@
+.room-settings-dialog {
+  --settings-ink: #112b32;
+  --settings-muted: #597077;
+  --settings-line: color-mix(in srgb, #2d6670 24%, transparent);
+  --settings-paper: #fbf8ef;
+  width: min(820px, 100%);
+  max-height: min(880px, calc(var(--visual-viewport-height, 100dvh) - max(32px, env(safe-area-inset-top)) - max(32px, env(safe-area-inset-bottom))));
+  padding: 0;
+  overflow: auto;
+  color: var(--settings-ink);
+  background:
+    linear-gradient(90deg, transparent 33px, rgba(201, 89, 50, 0.14) 34px, transparent 35px),
+    repeating-linear-gradient(0deg, rgba(45, 102, 112, 0.045) 0 1px, transparent 1px 30px),
+    var(--settings-paper);
+  border: 1px solid var(--settings-line);
+  border-radius: 24px;
+  box-shadow: 0 28px 80px rgba(9, 32, 37, 0.26);
+  container-type: inline-size;
+  scrollbar-gutter: stable;
+}
+
+.room-settings-dialog > header {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 24px 26px 18px 48px;
+  background: color-mix(in srgb, var(--settings-paper) 92%, transparent);
+  border-bottom: 1px solid var(--settings-line);
+  backdrop-filter: blur(14px);
+}
+
+.room-settings-heading {
+  align-items: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.room-settings-heading-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.room-settings-dialog > header small {
+  color: var(--settings-muted);
+  font-family: "IBM Plex Mono", "Cascadia Mono", monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.room-settings-dialog > header h2 {
+  margin: 0;
+  font-family: "Noto Serif SC", "Source Han Serif SC", Georgia, serif;
+  font-size: clamp(1.28rem, 4cqi, 1.75rem);
+  letter-spacing: -0.025em;
+}
+
+.room-settings-dialog > header button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.room-settings-status {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  padding: 0 0 0 34px;
+  background: var(--settings-line);
+  border-bottom: 1px solid var(--settings-line);
+}
+
+.room-settings-status > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 12px 16px;
+  background: color-mix(in srgb, var(--settings-paper) 96%, #dce9e4);
+}
+
+.room-settings-status small {
+  color: var(--settings-muted);
+  font-size: 0.68rem;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.room-settings-status strong {
+  overflow: hidden;
+  color: #1f5d63;
+  font-size: 0.83rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-settings-status > span:last-child strong {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.room-settings-source-warning {
+  margin: 14px 26px 0 48px;
+  padding: 10px 12px;
+  border: 1px solid rgba(173, 93, 57, 0.32);
+  border-left: 4px solid #a95d39;
+  border-radius: 10px;
+  color: #7b452c;
+  background: rgba(255, 244, 235, 0.92);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.room-settings-impact {
+  margin: 14px 26px 0 48px;
+  overflow: hidden;
+  border: 1px solid rgba(32, 99, 101, 0.25);
+  border-left: 4px solid #2f7478;
+  border-radius: 12px;
+  background: rgba(248, 252, 249, 0.9);
+  box-shadow: 0 8px 24px rgba(17, 43, 50, 0.055);
+}
+
+.room-settings-impact.blocked { border-left-color: #a96834; }
+
+.room-settings-impact > header {
+  align-items: center;
+  display: grid;
+  gap: 9px;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  padding: 11px 12px;
+  background: linear-gradient(110deg, rgba(32, 105, 108, 0.08), rgba(255, 255, 252, 0.52));
+}
+
+.room-settings-impact.blocked > header { background: linear-gradient(110deg, rgba(169, 93, 57, 0.1), rgba(255, 255, 252, 0.52)); }
+.room-settings-impact > header > svg { color: #2f7478; }
+.room-settings-impact.blocked > header > svg { color: #a96834; }
+.room-settings-impact > header > span { display: grid; gap: 2px; min-width: 0; }
+.room-settings-impact > header small { color: var(--settings-muted); font: 700 0.58rem/1.2 "IBM Plex Mono", "Cascadia Mono", monospace; letter-spacing: 0.09em; }
+.room-settings-impact > header h3 { color: var(--settings-ink); font: 750 0.82rem/1.35 "Noto Serif SC", "Source Han Serif SC", Georgia, serif; margin: 0; overflow-wrap: anywhere; }
+.room-settings-impact > header > data { border: 1px solid currentColor; border-radius: 999px; color: #2f666b; font: 700 0.64rem/1 "IBM Plex Mono", "Cascadia Mono", monospace; padding: 6px 8px; }
+.room-settings-impact.blocked > header > data { color: #8b5632; }
+.room-settings-impact > p { border-top: 1px solid var(--settings-line); color: var(--settings-muted); font-size: 0.7rem; line-height: 1.5; margin: 0; padding: 9px 12px; }
+.room-settings-impact-grid { border-top: 1px solid var(--settings-line); display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.room-settings-impact-grid > span { display: grid; gap: 3px; min-width: 0; padding: 9px 11px; }
+.room-settings-impact-grid > span + span { border-left: 1px solid var(--settings-line); }
+.room-settings-impact-grid small { color: var(--settings-muted); font-size: 0.64rem; letter-spacing: 0.06em; }
+.room-settings-impact-grid strong { color: #285d63; font-size: 0.72rem; line-height: 1.4; overflow-wrap: anywhere; }
+.room-settings-impact.blocked .room-settings-impact-grid strong { color: #754a2f; }
+
+.room-settings-editable {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1fr);
+  min-inline-size: 0;
+  margin: 0;
+  padding: 22px 26px 24px 48px;
+  border: 0;
+}
+
+.room-settings-editable > * {
+  max-inline-size: 100%;
+  min-inline-size: 0;
+}
+
+.room-settings-editable:disabled {
+  opacity: 0.76;
+}
+
+.room-settings-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.room-settings-dialog .form-grid {
+  gap: 14px 16px;
+}
+
+.room-settings-dialog label {
+  color: var(--settings-muted);
+  font-size: 0.77rem;
+  font-weight: 720;
+  letter-spacing: 0.025em;
+}
+
+.room-settings-dialog input,
+.room-settings-dialog textarea,
+.room-settings-dialog select {
+  color: var(--settings-ink);
+  background: rgba(255, 255, 252, 0.82);
+  border-color: var(--settings-line);
+}
+
+.room-settings-dialog input:focus-visible,
+.room-settings-dialog textarea:focus-visible,
+.room-settings-dialog select:focus-visible,
+.room-settings-dialog button:focus-visible {
+  outline: 3px solid rgba(21, 108, 110, 0.3);
+  outline-offset: 2px;
+}
+
+.room-settings-pack-picker {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.room-settings-pack-picker > :not(legend) {
+  max-inline-size: 100%;
+  min-inline-size: 0;
+}
+
+.room-settings-dialog .capability-pack-card {
+  background: rgba(255, 255, 252, 0.72);
+  border-color: var(--settings-line);
+  box-shadow: 0 8px 22px rgba(17, 43, 50, 0.055);
+}
+
+.room-settings-capability-preview {
+  background: rgba(224, 239, 234, 0.58);
+  border-color: rgba(32, 99, 101, 0.2);
+}
+
+.capability-pack-contract-meta {
+  color: var(--settings-muted);
+  font-family: "IBM Plex Mono", "Cascadia Mono", monospace;
+  font-size: 0.7rem;
+}
+
+.room-settings-dialog .capability-registry-snapshot,
+.room-settings-dialog .capability-pack-lifecycle-panel,
+.room-settings-dialog .material-version-history {
+  border-color: var(--settings-line);
+  background: rgba(255, 255, 252, 0.65);
+}
+
+.room-settings-freeze-note {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 10px;
+  padding: 14px 16px;
+  color: #6b3d23;
+  background: rgba(229, 172, 107, 0.15);
+  border: 1px solid rgba(159, 91, 48, 0.24);
+  border-radius: 14px;
+}
+
+.room-settings-freeze-note > span {
+  grid-row: 1 / span 2;
+}
+
+.room-settings-freeze-note strong,
+.room-settings-freeze-note small {
+  display: block;
+}
+
+.room-settings-freeze-note small {
+  margin-top: 3px;
+  color: #795d4d;
+  line-height: 1.45;
+}
+
+.room-settings-dialog .dialog-error {
+  margin: 0;
+  padding: 12px 14px;
+  color: #802f2b;
+  background: rgba(190, 62, 50, 0.08);
+  border-left: 3px solid #b94b3e;
+  border-radius: 8px;
+}
+
+.room-settings-dialog > footer {
+  align-items: center;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
+  margin: 0;
+  padding: 16px 26px 16px 48px;
+  background: color-mix(in srgb, var(--settings-paper) 92%, transparent);
+  border-top: 1px solid var(--settings-line);
+  backdrop-filter: blur(14px);
+}
+
+.room-settings-save-summary {
+  align-items: start;
+  color: #775831;
+  display: grid;
+  gap: 7px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  min-width: 0;
+}
+
+.room-settings-save-summary.review { color: #2f696d; }
+.room-settings-save-summary.blocked { color: #8a453b; }
+.room-settings-save-summary > svg { margin-top: 1px; }
+.room-settings-save-summary > span { display: grid; gap: 2px; min-width: 0; }
+.room-settings-save-summary strong { font-size: 0.72rem; line-height: 1.35; }
+.room-settings-save-summary small { color: var(--settings-muted); font-size: 0.64rem; line-height: 1.4; overflow-wrap: anywhere; }
+.room-settings-actions { display: inline-flex; gap: 8px; }
+.room-settings-actions button { align-items: center; display: inline-flex; gap: 5px; justify-content: center; }
+
+.room-settings-dialog :is(button, input, select, textarea, summary),
+.room-settings-dialog .capability-pack-card {
+  touch-action: manipulation;
+}
+
+.room-settings-dialog .capability-pack-card,
+.room-settings-dialog .material-version-diff > section > article {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
+}
+
+@container (max-width: 700px) {
+  .room-settings-pack-picker {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .room-settings-status {
+    grid-template-columns: 1fr;
+  }
+
+  .room-settings-impact-grid { grid-template-columns: 1fr; }
+  .room-settings-impact-grid > span + span { border-left: 0; border-top: 1px solid var(--settings-line); }
+
+  .room-settings-status {
+    gap: 0;
+  }
+}
+
+@container (max-width: 460px) {
+  .room-settings-dialog > header,
+  .room-settings-editable,
+  .room-settings-dialog > footer,
+  .room-settings-source-warning {
+    padding-right: max(18px, env(safe-area-inset-right));
+    padding-left: max(18px, env(safe-area-inset-left));
+  }
+
+  .room-settings-source-warning {
+    margin-right: max(18px, env(safe-area-inset-right));
+    margin-left: max(18px, env(safe-area-inset-left));
+  }
+
+  .room-settings-impact {
+    margin-right: max(18px, env(safe-area-inset-right));
+    margin-left: max(18px, env(safe-area-inset-left));
+  }
+
+  .room-settings-status {
+    padding-left: 0;
+  }
+
+  .room-settings-dialog input,
+  .room-settings-dialog select,
+  .room-settings-dialog button {
+    min-height: 44px;
+  }
+
+  .room-settings-dialog > footer { align-items: stretch; grid-template-columns: 1fr; }
+  .room-settings-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 520px) {
+  .room-settings-dialog {
+    width: 100%;
+    max-height: calc(var(--visual-viewport-height, 100dvh) - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    border-radius: 18px 18px 0 0;
+  }
+
+  .room-settings-dialog > header {
+    padding-top: max(18px, env(safe-area-inset-top));
+  }
+
+  .room-settings-dialog > footer {
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room-settings-dialog,
+  .room-settings-dialog * {
+    scroll-behavior: auto;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .room-settings-dialog,
+  .room-settings-status,
+  .room-settings-source-warning,
+  .room-settings-impact,
+  .room-settings-save-summary,
+  .room-settings-freeze-note,
+  .room-settings-dialog .capability-pack-card {
+    border-color: CanvasText;
+  }
+
+  .room-settings-dialog :is(button, input, select, textarea, summary):focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 3px;
+  }
+}

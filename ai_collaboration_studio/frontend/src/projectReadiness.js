@@ -14,6 +14,7 @@ export const PROJECT_READINESS_INSPECT_ACTION = "project_readiness.inspect";
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const ITEM_LIMIT = 500;
+const REGISTRY_COLLECTION_LIMIT = 2000;
 const PROJECT_READINESS_VIEW_MODEL_FIELDS = new Set([
   "version",
   "integrity_ok",
@@ -47,8 +48,10 @@ function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
-function text(value) {
-  return typeof value === "string" ? value.trim() : "";
+function text(value, maxLength = 1000) {
+  if (typeof value !== "string") return "";
+  const normalized = value.trim();
+  return normalized && normalized.length <= maxLength ? normalized : "";
 }
 
 function sha256(value) {
@@ -65,7 +68,14 @@ function array(value) {
 }
 
 function sameReference(actual, expected, fields) {
-  return fields.every((field) => text(actual[field]).toLowerCase() === text(expected[field]).toLowerCase());
+  return fields.every((field) => {
+    const actualValue = text(actual[field]);
+    const expectedValue = text(expected[field]);
+    if (field.endsWith("_sha256")) {
+      return actualValue.toLowerCase() === expectedValue.toLowerCase();
+    }
+    return actualValue === expectedValue;
+  });
 }
 
 function exactKeys(value, expected) {
@@ -104,6 +114,110 @@ function invalidProjection(issues) {
   };
 }
 
+export function projectReadinessErrorMessage(error, fallback = "项目就绪投影暂时无法读取。") {
+  const message = typeof error?.message === "string" ? error.message.trim().slice(0, 1000) : "";
+  const safeFallback = typeof fallback === "string" ? fallback.trim().slice(0, 1000) : "";
+  return message || safeFallback || "项目就绪投影暂时无法读取。";
+}
+
+const PROJECT_READINESS_COPY = Object.freeze({
+  blocked: Object.freeze({
+    eyebrow: "PRE-FLIGHT / HOLD",
+    headline: "实施准备仍被阻断",
+    description: "先关闭阻断条件，再处理结构与证据缺口；该投影不构成批准。",
+  }),
+  gaps_present: Object.freeze({
+    eyebrow: "PRE-FLIGHT / OPEN",
+    headline: "实施准备仍有合同内缺口",
+    description: "阻断项已经清空，但结构或证据仍需补齐；这不是发布许可。",
+  }),
+  ready: Object.freeze({
+    eyebrow: "PRE-FLIGHT / CONTRACT CLEAR",
+    headline: "合同定义范围内未见结构缺口",
+    description: "仅表示确定性投影未发现已定义缺口，不等同于部署、发布或执行批准。",
+  }),
+});
+
+function unavailableReadinessPresentation() {
+  return {
+    visible: false,
+    state: "unavailable",
+    eyebrow: "PRE-FLIGHT / UNAVAILABLE",
+    headline: "项目就绪指标不可用",
+    description: "未获得经过完整性校验的精确版本投影。",
+    totalGapCount: 0,
+    groups: [],
+  };
+}
+
+/**
+ * Derive display-only sequencing from a validated projection. This helper
+ * refuses to expose counts when callers bypass the response normalizer.
+ */
+export function projectReadinessPresentation(value) {
+  const projection = record(value);
+  if (
+    projection.valid !== true
+    || !Array.isArray(projection.structuralGaps)
+    || !Array.isArray(projection.blockers)
+    || !Array.isArray(projection.evidenceGaps)
+  ) {
+    return unavailableReadinessPresentation();
+  }
+
+  const expectedState = projection.blockers.length
+    ? "blocked"
+    : projection.structuralGaps.length || projection.evidenceGaps.length
+      ? "gaps_present"
+      : "ready";
+  if (projection.state !== expectedState) return unavailableReadinessPresentation();
+
+  const groups = [
+    {
+      key: "blockers",
+      order: "01",
+      eyebrow: "先清除",
+      title: "阻断条件",
+      rows: projection.blockers,
+      emptyText: "未记录阻断条件。",
+      tone: "blocking",
+    },
+    {
+      key: "structural",
+      order: "02",
+      eyebrow: "再补齐",
+      title: "结构缺口",
+      rows: projection.structuralGaps,
+      emptyText: "未记录结构缺口。",
+      tone: "structural",
+    },
+    {
+      key: "evidence",
+      order: "03",
+      eyebrow: "后核验",
+      title: "证据缺口",
+      rows: projection.evidenceGaps,
+      emptyText: "未记录证据缺口。",
+      tone: "evidence",
+    },
+  ].map((group) => ({
+    ...group,
+    count: group.rows.length,
+    status: group.rows.length ? (group.key === "blockers" ? "hold" : "open") : "clear",
+    statusLabel: group.rows.length ? (group.key === "blockers" ? "HOLD" : "OPEN") : "CLEAR",
+  }));
+  const copy = PROJECT_READINESS_COPY[expectedState];
+  return {
+    visible: true,
+    state: expectedState,
+    eyebrow: copy.eyebrow,
+    headline: copy.headline,
+    description: copy.description,
+    totalGapCount: groups.reduce((total, group) => total + group.count, 0),
+    groups,
+  };
+}
+
 function normalizeGapRows(value, group, issues) {
   if (!Array.isArray(value)) {
     issues.push(`${group.toUpperCase()}_NOT_ARRAY`);
@@ -113,10 +227,10 @@ function normalizeGapRows(value, group, issues) {
   const seen = new Set();
   return value.slice(0, ITEM_LIMIT).map((raw, index) => {
     const row = record(raw);
-    const code = text(row.code);
-    const itemKey = text(row.item_key);
-    const message = text(row.message);
-    const identity = `${code}|${itemKey}`;
+    const code = text(row.code, 120);
+    const itemKey = text(row.item_key, 240);
+    const message = text(row.message, 1000);
+    const identity = JSON.stringify([code, itemKey]);
     if (!exactKeys(row, ["code", "item_key", "message"]) || !code || !itemKey || !message || seen.has(identity)) {
       issues.push(`${group.toUpperCase()}_ROW_INVALID:${index}`);
     }
@@ -171,6 +285,12 @@ function exactFrozenResolution(artifact, contribution) {
   const context = record(artifact?.plugin_registry_context);
   const snapshot = record(context.snapshot);
   const rawContributions = array(snapshot.ui_contributions);
+  if (
+    rawContributions.length > REGISTRY_COLLECTION_LIMIT
+    || array(snapshot.capability_packs).length > REGISTRY_COLLECTION_LIMIT
+    || array(snapshot.domain_adapters).length > REGISTRY_COLLECTION_LIMIT
+    || array(snapshot.port_resolutions).length > REGISTRY_COLLECTION_LIMIT
+  ) return null;
   const frozenContributions = rawContributions.filter(
     (item) => text(item?.contribution_id) === HOST_CONTRIBUTION_IDS.projectReadinessArtifactWorkspace,
   );
@@ -283,10 +403,15 @@ export function projectReadinessLoadPlan({
     return { ...base, reason: "冻结插件快照版本无法识别；项目就绪投影已关闭。" };
   }
   if (slot?.integrityOk !== true || context.integrity_ok !== true || context.exact_binding !== true) {
-    return { ...base, reason: slot?.reason || "冻结插件合同完整性无法验证；项目就绪投影已关闭。" };
+    return { ...base, reason: text(slot?.reason, 1000) || "冻结插件合同完整性无法验证；项目就绪投影已关闭。" };
   }
   if (contribution?.present !== true || contribution?.active !== true) {
-    return { ...base, reason: contribution?.reason || slot?.reason || "项目就绪贡献当前不可用，只保留只读说明。" };
+    return {
+      ...base,
+      reason: text(contribution?.reason, 1000)
+        || text(slot?.reason, 1000)
+        || "项目就绪贡献当前不可用，只保留只读说明。",
+    };
   }
   if (
     contribution.id !== HOST_CONTRIBUTION_IDS.projectReadinessArtifactWorkspace
@@ -305,8 +430,8 @@ export function projectReadinessLoadPlan({
   if (!resolution) {
     return { ...base, reason: "项目就绪贡献缺少声明的精确来源端口、adapter 或视图模型绑定。" };
   }
-  const roomId = text(room?.id);
-  const artifactId = text(artifact?.id);
+  const roomId = text(room?.id, 240);
+  const artifactId = text(artifact?.id, 240);
   const artifactVersion = positiveInteger(artifact?.version);
   const pluginRegistrySnapshotSha256 = sha256(context.snapshot_sha256);
   if (!roomId || !artifactId || !artifactVersion || !pluginRegistrySnapshotSha256) {
@@ -325,7 +450,7 @@ export function projectReadinessLoadPlan({
     shouldLoad: true,
     mode: "load",
     reason: "",
-    requestKey: [
+    requestKey: JSON.stringify([
       roomId,
       artifactId,
       artifactVersion,
@@ -335,7 +460,7 @@ export function projectReadinessLoadPlan({
       resolution.port.contract_sha256,
       resolution.port.output_schema_sha256,
       resolution.viewModel.schema_sha256,
-    ].join("|"),
+    ]),
     expected,
   };
 }

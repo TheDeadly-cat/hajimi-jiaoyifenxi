@@ -1,0 +1,315 @@
+.candidate-experiment-workbench {
+  --experiment-ink: var(--accent, #24776f);
+  --experiment-warm: #b66738;
+  --experiment-line: color-mix(in srgb, var(--experiment-ink) 22%, transparent);
+  position: relative;
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 96% 4%, color-mix(in srgb, var(--experiment-warm) 10%, transparent), transparent 28%),
+    linear-gradient(145deg, color-mix(in srgb, var(--experiment-ink) 7%, transparent), transparent 48%);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--experiment-ink) 66%, transparent);
+}
+
+.candidate-experiment-panel.candidate-experiment-workbench {
+  container-name: candidate-experiment;
+  container-type: inline-size;
+}
+
+.candidate-experiment-workbench::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: -1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--experiment-ink), var(--experiment-warm), transparent 82%);
+}
+
+.candidate-experiment-candidate-status {
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  border-left: 2px solid var(--experiment-ink);
+  color: color-mix(in srgb, currentColor 74%, transparent);
+  font-size: 0.78rem;
+}
+
+.candidate-experiment-workbench .candidate-experiment-heading-copy > strong {
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
+.candidate-experiment-workbench .candidate-experiment-heading-copy > p,
+.candidate-experiment-workbench .candidate-experiment-readonly,
+.candidate-experiment-workbench .candidate-experiment-empty,
+.candidate-experiment-workbench .candidate-experiment-error,
+.candidate-experiment-workbench .candidate-experiment-selection-status > p,
+.candidate-experiment-workbench .candidate-experiment-acknowledgement {
+  font-size: 0.76rem;
+}
+
+.candidate-experiment-workbench .candidate-experiment-kicker,
+.candidate-experiment-workbench .candidate-experiment-heading > em span,
+.candidate-experiment-workbench .candidate-experiment-selection-status > span small,
+.candidate-experiment-workbench .candidate-experiment-proof > span > small,
+.candidate-experiment-workbench .candidate-experiment-result-heading > em span {
+  font-size: 0.64rem;
+}
+
+.candidate-experiment-workbench .candidate-experiment-heading > em,
+.candidate-experiment-workbench .candidate-experiment-workflow li > span,
+.candidate-experiment-workbench .candidate-experiment-selector legend,
+.candidate-experiment-workbench .candidate-experiment-table-hint,
+.candidate-experiment-workbench .candidate-experiment-safety {
+  font-size: 0.72rem;
+}
+
+.candidate-experiment-workbench .candidate-experiment-workflow li > b,
+.candidate-experiment-workbench .candidate-experiment-workflow li > em,
+.candidate-experiment-workbench .candidate-experiment-order {
+  font-size: 0.66rem;
+}
+
+.candidate-experiment-workbench .candidate-experiment-selector > label {
+  min-height: 92px;
+}
+
+.candidate-experiment-workbench .candidate-experiment-selector input,
+.candidate-experiment-workbench .candidate-experiment-acknowledgement input {
+  width: 18px;
+  height: 18px;
+}
+
+.candidate-experiment-workbench .candidate-experiment-selector > label strong,
+.candidate-experiment-workbench .candidate-experiment-common-spec dd,
+.candidate-experiment-workbench .candidate-experiment-arm-index li strong {
+  font-size: 0.76rem;
+}
+
+.candidate-experiment-workbench .candidate-experiment-selector > label small,
+.candidate-experiment-workbench .candidate-experiment-arm-index li small,
+.candidate-experiment-workbench .candidate-experiment-arm-index code,
+.candidate-experiment-workbench .candidate-experiment-common-spec dt {
+  font-size: 0.67rem;
+}
+
+.candidate-experiment-more {
+  align-self: center;
+  min-height: 44px;
+  touch-action: manipulation;
+}
+
+.candidate-experiment-workbench .candidate-experiment-run {
+  min-height: 44px;
+  touch-action: manipulation;
+}
+
+.candidate-experiment-neutrality-ledger {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--experiment-line);
+  border-radius: 14px;
+  background: var(--experiment-line);
+}
+
+.candidate-experiment-neutrality-ledger > span {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+  padding: 0.72rem 0.82rem;
+  background: color-mix(in srgb, var(--panel, #f7f4ec) 94%, transparent);
+}
+
+.candidate-experiment-neutrality-ledger small {
+  font-size: 0.68rem;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+}
+
+.candidate-experiment-neutrality-ledger strong {
+  color: var(--experiment-ink);
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.candidate-experiment-workbench .candidate-experiment-result.ready {
+  border-color: color-mix(in srgb, var(--experiment-ink) 30%, #d9e4e8);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--experiment-ink) 6%, white), rgba(255, 255, 255, 0.96));
+}
+
+.candidate-experiment-workbench .candidate-experiment-proof > svg,
+.candidate-experiment-workbench .candidate-experiment-proof strong,
+.candidate-experiment-workbench .candidate-experiment-result-heading > em {
+  color: color-mix(in srgb, var(--experiment-ink) 88%, #173f55);
+}
+
+.candidate-experiment-workbench .candidate-experiment-proof > span > span {
+  font-size: 0.67rem;
+}
+
+.candidate-experiment-workbench .candidate-experiment-proof > span > .candidate-experiment-proof-boundary {
+  margin-block: 0.18rem 0.12rem;
+  color: #765b32;
+  font-family: inherit;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.candidate-experiment-workbench .candidate-experiment-common-spec > div,
+.candidate-experiment-workbench .candidate-experiment-arm-index li {
+  min-height: 58px;
+}
+
+.candidate-experiment-workbench .candidate-experiment-table-wrap {
+  scrollbar-gutter: stable;
+  scroll-padding-inline: 148px 1rem;
+}
+
+.candidate-experiment-workbench .candidate-experiment-table caption,
+.candidate-experiment-workbench .candidate-experiment-table td {
+  font-size: 0.72rem;
+}
+
+.candidate-experiment-workbench .candidate-experiment-table th:first-child {
+  width: 148px;
+  min-width: 148px;
+}
+
+.candidate-experiment-workbench .candidate-experiment-table tr > *:not(:first-child) {
+  min-width: 210px;
+}
+
+.candidate-experiment-workbench .candidate-experiment-table th > strong {
+  font-size: 0.74rem;
+}
+
+.candidate-experiment-workbench .candidate-experiment-table th > small,
+.candidate-experiment-workbench .candidate-experiment-evidence-list small,
+.candidate-experiment-workbench .candidate-experiment-metric-stack small,
+.candidate-experiment-workbench .candidate-experiment-capacity-block small,
+.candidate-experiment-workbench .candidate-experiment-missing {
+  font-size: 0.66rem;
+}
+
+.candidate-experiment-workbench .candidate-experiment-metric-stack strong {
+  font-size: 0.72rem;
+}
+
+.candidate-experiment-workbench label:focus-within,
+.candidate-experiment-workbench .candidate-experiment-table-wrap:focus-visible,
+.candidate-experiment-workbench button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--experiment-ink) 46%, transparent);
+  outline-offset: 3px;
+}
+
+.candidate-experiment-workbench .candidate-experiment-selector > label {
+  scroll-margin-block: 5rem;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.candidate-experiment-workbench .candidate-experiment-selector > label:focus-within {
+  border-color: color-mix(in srgb, var(--experiment-ink) 58%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--experiment-ink) 12%, transparent);
+}
+
+@media (max-width: 620px) {
+  .candidate-experiment-neutrality-ledger {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .candidate-experiment-neutrality-ledger > span {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: baseline;
+  }
+
+  .candidate-experiment-more {
+    width: 100%;
+  }
+}
+
+@container candidate-experiment (max-width: 38rem) {
+  .candidate-experiment-workbench .candidate-experiment-heading,
+  .candidate-experiment-workbench .candidate-experiment-result-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .candidate-experiment-workbench .candidate-experiment-heading > em,
+  .candidate-experiment-workbench .candidate-experiment-result-heading > em {
+    align-self: flex-start;
+    border-top: 1px solid var(--experiment-line);
+    border-left: 0;
+    text-align: left;
+  }
+
+  .candidate-experiment-workbench .candidate-experiment-workflow {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .candidate-experiment-workbench .candidate-experiment-workflow li:nth-child(3)::before {
+    display: none;
+  }
+
+  .candidate-experiment-workbench .candidate-experiment-selector,
+  .candidate-experiment-workbench .candidate-experiment-common-spec,
+  .candidate-experiment-workbench .candidate-experiment-arm-index {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .candidate-experiment-workbench .candidate-experiment-run {
+    justify-self: stretch;
+    justify-content: center;
+    width: 100%;
+  }
+}
+
+@container candidate-experiment (max-width: 25rem) {
+  .candidate-experiment-workbench .candidate-experiment-workflow,
+  .candidate-experiment-workbench .candidate-experiment-neutrality-ledger {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .candidate-experiment-workbench .candidate-experiment-workflow li + li::before,
+  .candidate-experiment-workbench .candidate-experiment-workflow li:nth-child(3)::before {
+    display: block;
+    top: -8px;
+    left: 18px;
+    width: 2px;
+    height: 8px;
+  }
+
+  .candidate-experiment-workbench .candidate-experiment-neutrality-ledger > span {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: baseline;
+  }
+
+  .candidate-experiment-workbench .candidate-experiment-selection-status {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .candidate-experiment-workbench .candidate-experiment-selection-status > span {
+    grid-template-columns: auto 1fr;
+    align-items: baseline;
+    gap: 0.4rem;
+    padding-right: 0;
+    padding-bottom: 0.5rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--experiment-line);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .candidate-experiment-workbench .candidate-experiment-selector > label {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .candidate-experiment-workbench,
+  .candidate-experiment-neutrality-ledger,
+  .candidate-experiment-candidate-status {
+    border-color: CanvasText;
+  }
+}

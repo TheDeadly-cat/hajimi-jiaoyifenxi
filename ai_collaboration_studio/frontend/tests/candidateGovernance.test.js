@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   ARTIFACT_GOVERNANCE_BOUNDARY,
+  CANDIDATE_GOVERNANCE_CANDIDATE_LIMIT,
   artifactCandidateGovernance,
   artifactGovernanceBadge,
   candidateGovernanceRows,
@@ -130,7 +132,14 @@ test("normalizes server-bound lineage and exact-version risk reviews", () => {
             candidate_revision: 2,
             current_candidate_revision: 2,
             candidate_latest_message_id: "message_revision",
-            candidate_snapshot: { title: "冻结候选 A" },
+            candidate_snapshot: {
+              title: "冻结候选 A",
+              symbol: "US.MU",
+              direction: "UP",
+              horizon_days: 20,
+              thesis: "冻结研究论点",
+              invalidation: "冻结失效条件",
+            },
             candidate_snapshot_sha256: "a".repeat(64),
             action: "support",
             status: "current",
@@ -160,6 +169,14 @@ test("normalizes server-bound lineage and exact-version risk reviews", () => {
   assert.equal(governance.lineage.candidates[0].title, "冻结候选 A");
   assert.equal(governance.lineage.candidates[0].preferred, true);
   assert.equal(governance.lineage.candidates[0].revision, 2);
+  assert.deepEqual(governance.riskReview.reviews[0].candidateSnapshot, {
+    title: "冻结候选 A",
+    symbol: "US.MU",
+    direction: "UP",
+    horizon_days: 20,
+    thesis: "冻结研究论点",
+    invalidation: "冻结失效条件",
+  });
   assert.equal(governance.riskReview.reviews[0].candidateSnapshotSha256, "a".repeat(64));
   assert.equal(governance.riskReview.reviews[0].dispositionLabel, "风控意见：支持");
   assert.deepEqual(governance.riskReview.actionCounts, {
@@ -207,7 +224,10 @@ test("fails closed for stale or missing durable governance records", () => {
   assert.equal(governance.ready, false);
   assert.equal(governance.riskReview.reviews[0].status, "stale");
   assert.equal(governance.riskReview.reviews[0].dispositionLabel, "风控意见：拒绝");
-  assert.deepEqual(governance.riskReview.issues, ["候选 candidate_a 已修订，旧意见失效。"]);
+  assert.deepEqual(governance.riskReview.issues, [
+    "候选 candidate_a 已修订，旧意见失效。",
+    "风控声明计数与实际精确版本复核记录不一致，展示值已按记录重算。",
+  ]);
   assert.equal(artifactGovernanceBadge(artifact).label, "治理记录待补齐");
 });
 
@@ -307,4 +327,232 @@ test("fails closed when a governance snapshot contradicts the no-execution bound
   assert.equal(governance.safetyOk, false);
   assert.equal(governance.ready, false);
   assert.equal(artifactGovernanceBadge(artifact).tone, "blocked");
+});
+
+test("recomputes review counts and fails closed on declared-count drift", () => {
+  const artifact = {
+    content: { decision: { options: [{ id: "candidate_a", title: "候选 A" }] } },
+    governance_snapshot: {
+      candidate_lineage: {
+        applicable: true,
+        ready: true,
+        candidate_count: 1,
+        candidates: [{
+          id: "candidate_a",
+          revision: 2,
+          origin_message_id: "message_origin",
+          latest_message_id: "message_latest",
+        }],
+      },
+      candidate_risk_reviews: {
+        applicable: true,
+        ready: true,
+        target_candidate_count: 1,
+        reviewed_candidate_count: 1,
+        current_review_count: 2,
+        stale_review_count: 0,
+        action_counts: { support: 2, challenge: 0, reject: 0 },
+        reviews: [{
+          candidate_id: "candidate_a",
+          candidate_revision: 2,
+          current_candidate_revision: 2,
+          candidate_latest_message_id: "message_latest",
+          action: "support",
+          status: "current",
+          review_message_id: "message_review",
+        }],
+      },
+    },
+  };
+
+  const governance = artifactCandidateGovernance(artifact);
+  assert.equal(governance.ready, false);
+  assert.equal(governance.riskReview.currentReviewCount, 1);
+  assert.equal(governance.riskReview.actionCounts.support, 1);
+  assert.ok(governance.riskReview.issues.some((issue) => issue.includes("声明计数")));
+});
+
+test("rejects reviews outside lineage or against the wrong current revision", () => {
+  const artifact = {
+    content: { decision: { options: [] } },
+    governance_snapshot: {
+      candidate_lineage: {
+        applicable: true,
+        ready: true,
+        candidates: [{
+          id: "candidate_a",
+          revision: 3,
+          origin_message_id: "message_origin",
+          latest_message_id: "message_latest",
+        }],
+      },
+      candidate_risk_reviews: {
+        applicable: true,
+        ready: true,
+        target_candidate_ids: ["candidate_a"],
+        reviews: [{
+          candidate_id: "candidate_outside",
+          candidate_revision: 2,
+          current_candidate_revision: 2,
+          action: "challenge",
+          status: "current",
+          review_message_id: "message_review",
+        }],
+      },
+    },
+  };
+
+  const governance = artifactCandidateGovernance(artifact);
+  assert.equal(governance.ready, false);
+  assert.equal(governance.riskReview.ready, false);
+});
+
+test("fails closed on oversized lineage and malformed attestation hashes", () => {
+  const oversized = artifactCandidateGovernance({
+    governance_snapshot: {
+      candidate_lineage: {
+        applicable: true,
+        ready: true,
+        candidates: Array.from({ length: CANDIDATE_GOVERNANCE_CANDIDATE_LIMIT + 1 }, () => null),
+      },
+      candidate_risk_reviews: { applicable: false, ready: true, reviews: [] },
+    },
+  });
+  assert.equal(oversized.ready, false);
+  assert.ok(oversized.lineage.issues.some((issue) => issue.includes("安全上限")));
+
+  const malformed = artifactCandidateGovernance({
+    governance_snapshot: {
+      attestation_version: "artifact_governance_attestation_v1",
+      attestation_sha256: "not-a-hash",
+      candidate_lineage: { applicable: true, ready: true, candidates: [] },
+      candidate_risk_reviews: { applicable: false, ready: true, reviews: [] },
+    },
+  });
+  assert.equal(malformed.integrityOk, false);
+  assert.ok(malformed.issues.some((issue) => issue.includes("SHA-256")));
+
+  const hashOnly = artifactCandidateGovernance({
+    governance_snapshot: {
+      attestation_sha256: "d".repeat(64),
+      candidate_lineage: { applicable: true, ready: true, candidates: [] },
+      candidate_risk_reviews: { applicable: false, ready: true, reviews: [] },
+    },
+  });
+  assert.equal(hashOnly.integrityOk, true);
+});
+
+test("bounds both string and object governance issue messages", () => {
+  const governance = artifactCandidateGovernance({
+    governance_snapshot: {
+      applicable: false,
+      issues: ["a".repeat(1500), { message: "b".repeat(1500) }],
+    },
+  });
+
+  assert.equal(governance.issues.length, 2);
+  assert.equal(governance.issues[0].length, 1000);
+  assert.equal(governance.issues[1].length, 1000);
+});
+
+test("governance ledger source keeps pagination and responsive accessibility contracts", () => {
+  const component = readFileSync(
+    new URL("../src/components/ArtifactCandidateGovernance.jsx", import.meta.url),
+    "utf8",
+  );
+  const styles = readFileSync(
+    new URL("../src/styles/candidate-governance-refinement.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(component, /CANDIDATE_PAGE_SIZE = 40/);
+  assert.match(component, /REVIEW_PAGE_SIZE = 60/);
+  assert.match(component, /key=\{candidate\.projectionKey\}/);
+  assert.match(component, /key=\{review\.projectionKey\}/);
+  assert.doesNotMatch(component, /candidate\.originMessageId, index|review\.candidateRevision, index/);
+  assert.match(component, /aria-controls=\{candidateListId\}/);
+  assert.match(component, /aria-controls=\{riskReviewListId\}/);
+  assert.match(component, /Math\.min\(current \+ CANDIDATE_PAGE_SIZE, lineage\.candidates\.length\)/);
+  assert.match(component, /Math\.min\(current \+ REVIEW_PAGE_SIZE, riskReview\.reviews\.length\)/);
+  assert.match(component, /<progress aria-label="冻结候选挂载进度"/);
+  assert.match(component, /<progress aria-label="精确版本意见挂载进度"/);
+  assert.match(component, /artifact-governance-ledger/);
+  assert.match(component, /artifact-governance-issue-dossier/);
+  assert.match(styles, /container-name: governance-ledger/);
+  assert.match(styles, /container-type: inline-size/);
+  assert.match(styles, /@container governance-ledger \(max-width: 620px\)/);
+  assert.match(styles, /\.artifact-governance-list-status progress/);
+  assert.match(styles, /prefers-reduced-motion/);
+  assert.match(styles, /forced-colors/);
+});
+
+test("governance projection keys remain stable across reorder and unique for duplicate diagnostics", () => {
+  const candidateA = {
+    id: "candidate_a",
+    revision: 2,
+    origin_message_id: "message_origin_a",
+    latest_message_id: "message_latest_a",
+  };
+  const candidateB = {
+    id: "candidate_b",
+    revision: 1,
+    origin_message_id: "message_origin_b",
+    latest_message_id: "message_latest_b",
+  };
+  const reviewA = {
+    candidate_id: "candidate_a",
+    candidate_revision: 2,
+    current_candidate_revision: 2,
+    candidate_latest_message_id: "message_latest_a",
+    action: "support",
+    status: "current",
+    review_message_id: "message_review_a",
+  };
+  const reviewB = {
+    candidate_id: "candidate_b",
+    candidate_revision: 1,
+    current_candidate_revision: 1,
+    candidate_latest_message_id: "message_latest_b",
+    action: "challenge",
+    status: "current",
+    review_message_id: "message_review_b",
+  };
+  const project = (candidates, reviews) => artifactCandidateGovernance({
+    governance_snapshot: {
+      candidate_lineage: {
+        applicable: true,
+        ready: true,
+        candidates,
+      },
+      candidate_risk_reviews: {
+        applicable: true,
+        ready: true,
+        target_candidate_ids: ["candidate_a", "candidate_b"],
+        target_candidate_count: 2,
+        reviewed_candidate_count: 2,
+        current_review_count: 2,
+        stale_review_count: 0,
+        action_counts: { support: 1, challenge: 1, reject: 0 },
+        reviews,
+      },
+    },
+  });
+
+  const forward = project([candidateA, candidateB], [reviewA, reviewB]);
+  const reversed = project([candidateB, candidateA], [reviewB, reviewA]);
+  assert.deepEqual(
+    Object.fromEntries(forward.lineage.candidates.map((candidate) => [candidate.id, candidate.projectionKey])),
+    Object.fromEntries(reversed.lineage.candidates.map((candidate) => [candidate.id, candidate.projectionKey])),
+  );
+  assert.deepEqual(
+    Object.fromEntries(forward.riskReview.reviews.map((review) => [review.reviewMessageId, review.projectionKey])),
+    Object.fromEntries(reversed.riskReview.reviews.map((review) => [review.reviewMessageId, review.projectionKey])),
+  );
+
+  const duplicateDiagnostics = project(
+    [candidateA, { ...candidateA }],
+    [reviewA, { ...reviewA }],
+  );
+  assert.equal(new Set(duplicateDiagnostics.lineage.candidates.map((candidate) => candidate.projectionKey)).size, 2);
+  assert.equal(new Set(duplicateDiagnostics.riskReview.reviews.map((review) => review.projectionKey)).size, 2);
 });

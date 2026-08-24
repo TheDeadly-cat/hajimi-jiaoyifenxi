@@ -11,6 +11,7 @@ import {
   pluginLifecycleImpactPreviewView,
   pluginLifecycleTransitionResultView,
 } from "../src/pluginLifecycle.js";
+import { pluginLifecycleTargetKey } from "../src/pluginLifecycleUi.js";
 
 const safety = {
   execution_capability: "none",
@@ -464,6 +465,42 @@ test("preview and transition builders preserve the exact server contract", () =>
   assert.equal(transition.user_confirmed_no_automatic_migration, true);
   assert.equal(Object.hasOwn(transition, "decision"), false);
 
+  assert.throws(() => buildPluginLifecycleTransitionRequest({
+    target: lifecycleTarget,
+    action: "quarantine",
+    preview,
+    clientRequestId: "plugin-lifecycle:test-request-0002",
+    reason: "动作已经发生漂移",
+  }), /动作不一致/);
+  assert.throws(() => buildPluginLifecycleTransitionRequest({
+    target: { ...lifecycleTarget, targetSha256: "0".repeat(64) },
+    action: "disable",
+    preview,
+    clientRequestId: "plugin-lifecycle:test-request-0003",
+    reason: "精确目标已经发生漂移",
+  }), /精确目标不一致/);
+  assert.throws(() => buildPluginLifecycleTransitionRequest({
+    target: { ...lifecycleTarget, headSequence: lifecycleTarget.headSequence + 1 },
+    action: "disable",
+    preview,
+    clientRequestId: "plugin-lifecycle:test-request-0004",
+    reason: "生命周期 head 已经漂移",
+  }), /head 不一致/);
+  assert.throws(() => buildPluginLifecycleTransitionRequest({
+    target: lifecycleTarget,
+    action: "disable",
+    preview,
+    clientRequestId: "request-0005",
+    reason: "客户端请求编号错误",
+  }), /请求编号无效/);
+  assert.throws(() => buildPluginLifecycleTransitionRequest({
+    target: lifecycleTarget,
+    action: "disable",
+    preview,
+    clientRequestId: "plugin-lifecycle:test-request-0006",
+    reason: "短",
+  }), /4 至 500/);
+
   const v2Payload = structuredClone(previewPayload);
   v2Payload.version = "plugin_lifecycle_impact_preview_v2";
   v2Payload.current.implementation_available = true;
@@ -599,12 +636,59 @@ test("App and host surfaces wire lifecycle without disabling the final decision"
   assert.match(app, /onPreviewPluginLifecycle=\{previewPluginLifecycle\}/);
   assert.match(settings, /<CapabilityPackLifecyclePanel/);
   assert.match(settings, /disabled=\{!availability\.canToggle\}/);
-  assert.match(create, /disabled=\{creationBlocked\}/);
+  assert.match(create, /const submitBlocked = creationBlocked \|\| submitUnavailable \|\| submitting/);
+  assert.match(create, /type="submit" disabled=\{submitBlocked\}/);
   assert.match(artifact, /pluginLifecycle,\s*open/);
-  assert.ok(artifact.indexOf("<CandidateExperimentPanel") < artifact.indexOf("<UserFinalDecisionSection"));
-  assert.doesNotMatch(artifact.slice(artifact.indexOf("<UserFinalDecisionSection")), /readOnly=\{storageWorkspaceReadOnly\}/);
+  const userDecisionStart = artifact.indexOf("<MemoUserFinalDecisionSection");
+  assert.ok(userDecisionStart >= 0);
+  assert.ok(artifact.indexOf("<CandidateExperimentPanel") < userDecisionStart);
+  assert.doesNotMatch(artifact.slice(userDecisionStart), /readOnly=\{storageWorkspaceReadOnly\}/);
   assert.match(inspector, /pluginLifecycle,\s*members/);
   assert.match(lifecyclePanel, /替代声明/);
   assert.match(lifecyclePanel, /不会自动迁移/);
   assert.match(lifecyclePanel, /view\.replacementDeclarations/);
+});
+
+test("lifecycle React keys bind the full exact target identity", () => {
+  const base = {
+    kind: "capability_pack",
+    id: "project_readiness_review",
+    version: "1.0.0",
+    targetSha256: "a".repeat(64),
+  };
+  const exactKey = pluginLifecycleTargetKey(base);
+
+  assert.equal(exactKey, pluginLifecycleTargetKey({ ...base }));
+  assert.notEqual(exactKey, pluginLifecycleTargetKey({ ...base, kind: "ui_contribution" }));
+  assert.notEqual(exactKey, pluginLifecycleTargetKey({ ...base, version: "1.0.1" }));
+  assert.notEqual(exactKey, pluginLifecycleTargetKey({ ...base, targetSha256: "b".repeat(64) }));
+});
+
+test("lifecycle catalog progressively discloses exact contracts and actions", () => {
+  const panel = readFileSync(new URL("../src/components/CapabilityPackLifecyclePanel.jsx", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../src/styles/plugin-lifecycle.css", import.meta.url), "utf8");
+  const settingsCss = readFileSync(new URL("../src/styles/room-settings.css", import.meta.url), "utf8");
+  const registryCss = readFileSync(new URL("../src/styles/capability-registry.css", import.meta.url), "utf8");
+
+  assert.match(panel, /const catalogTitleId = useId\(\)/);
+  assert.match(panel, /REVIEW DIRECTORY \/ EXACT TARGETS/);
+  assert.match(panel, /先展开精确合同，再选择生命周期动作/);
+  assert.match(panel, /key=\{pluginLifecycleTargetKey\(target\)\}/);
+  assert.match(panel, /aria-expanded=\{expanded\}/);
+  assert.match(panel, /aria-controls=\{disclosureId\}/);
+  assert.match(panel, /hidden=\{!expanded\}/);
+  assert.match(panel, /if \(selected \|\| attentionRequired\) setExpanded\(true\)/);
+  assert.match(css, /\.plugin-lifecycle-directory-bar\s*\{/);
+  assert.match(css, /\.plugin-lifecycle-pack-details\[hidden\]\s*\{\s*display: none/);
+  assert.match(css, /\.plugin-lifecycle-panel \.plugin-lifecycle-masthead\s*\{[^}]*display: grid/s);
+  assert.match(css, /\.plugin-lifecycle-panel \.plugin-lifecycle-review-heading\s*\{[^}]*display: grid/s);
+  assert.match(css, /@container plugin-lifecycle \(max-width: 440px\)/);
+  assert.match(css, /@container plugin-lifecycle \(max-width: 440px\)\s*\{[^}]*\.plugin-lifecycle-panel \.plugin-lifecycle-masthead[^}]*grid-template-columns: 1fr/s);
+  assert.match(css, /\.plugin-lifecycle-panel \.plugin-lifecycle-directory-bar\s*\{[^}]*grid-template-columns: 1fr/s);
+  assert.match(settingsCss, /\.room-settings-editable\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\)/s);
+  assert.match(settingsCss, /\.room-settings-editable > \*\s*\{[^}]*min-inline-size: 0/s);
+  assert.match(settingsCss, /@container \(max-width: 700px\)\s*\{[^}]*\.room-settings-pack-picker\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\)/s);
+  assert.match(registryCss, /\.plugin-registry-snapshot \.plugin-registry-header\s*\{[^}]*display: grid/s);
+  assert.match(registryCss, /\.plugin-registry-snapshot \.plugin-registry-header\s*\{[^}]*grid-template-columns: 1fr/);
+  assert.match(registryCss, /\.plugin-registry-trust\s*\{[^}]*white-space: normal/s);
 });

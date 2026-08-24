@@ -11,7 +11,7 @@ runtime, SQLite database, Provider ledger, market data, Futu/OpenD, or port
 
 Fixture initialization is completed before the server starts.  Afterwards all
 business-write methods fail closed.  The only POST exception is the read-only
-round-launch-plan projection needed to display (but not confirm) the v4 launch
+round-launch-plan projection needed to display (but not confirm) the v5 launch
 dialog.  ``/__qa/status`` exposes zero-use counters.
 """
 
@@ -80,8 +80,8 @@ def _arguments() -> argparse.Namespace:
         choices=SCENARIOS,
         default="exact",
         help=(
-            "exact shows the confirmed-artifact card and v4 dialog; bootstrap "
-            "shows the no-artifact card and v4 dialog; inactive-record shows a "
+            "exact shows the confirmed-artifact card and v5 dialog; bootstrap "
+            "shows the no-artifact card and v5 dialog; inactive-record shows a "
             "frozen paused-round record after its contribution is disabled"
         ),
     )
@@ -193,6 +193,20 @@ def _authorization(preview: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _round_context_authorization_set(
+    authorization: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "version": "round_context_authorization_set_v1",
+        "contexts": [{
+            "version": "round_context_authorization_entry_v1",
+            "owner_pack_id": "project_round_focus",
+            "port_id": "core.round.context/v1",
+            "request": dict(authorization),
+        }],
+    }
+
+
 def _assert_focus_projection(
     value: dict[str, Any],
     *,
@@ -285,27 +299,29 @@ def _assert_focus_projection(
             raise RuntimeError("project-round-focus item ordering or targets drifted")
 
 
-def _assert_v4_plan(
+def _assert_v5_plan(
     plan: dict[str, Any],
-    authorization: dict[str, Any],
+    authorization_set: dict[str, Any],
     *,
     registry_sha256: str,
 ) -> None:
-    if plan.get("version") != "round_launch_plan_v4":
-        raise RuntimeError("focus fixture did not build round_launch_plan_v4")
-    if plan.get("project_round_focus_authorization") != authorization:
-        raise RuntimeError("v4 plan changed the exact focus authorization")
+    if plan.get("version") != "round_launch_plan_v5":
+        raise RuntimeError("focus fixture did not build round_launch_plan_v5")
+    if "project_round_focus_authorization" in plan:
+        raise RuntimeError("v5 plan exposed the retired project-only authorization")
+    if plan.get("round_context_authorizations") != authorization_set:
+        raise RuntimeError("v5 plan changed the exact round-context authorization")
     if (plan.get("room") or {}).get("plugin_registry_snapshot_sha256") != registry_sha256:
-        raise RuntimeError("v4 plan registry binding drifted")
+        raise RuntimeError("v5 plan registry binding drifted")
     if plan.get("ready_for_authorization") is not True:
-        raise RuntimeError(f"v4 launch plan is blocked: {plan.get('blockers')!r}")
+        raise RuntimeError(f"v5 launch plan is blocked: {plan.get('blockers')!r}")
     safety = plan.get("safety") or {}
     if (
         safety.get("execution_capability") != "none"
         or safety.get("live_trading_allowed") is not False
         or safety.get("user_confirmation_required") is not True
     ):
-        raise RuntimeError("v4 launch plan safety fields drifted")
+        raise RuntimeError("v5 launch plan safety fields drifted")
 
 
 class FakeProviderRegistry:
@@ -514,6 +530,7 @@ def main() -> int:
             authorization = normalize_project_round_focus_authorization(
                 _authorization(initial_preview)
             )
+            authorization_set = _round_context_authorization_set(authorization)
             current_room = (store.room_snapshot(room_id) or {}).get("room") or {}
             registry_sha256 = str(
                 current_room.get("plugin_registry_snapshot_sha256") or ""
@@ -522,11 +539,11 @@ def main() -> int:
                 room_id,
                 str(initial_preview.get("suggested_objective") or room_objective),
                 {"openai"},
-                authorization,
+                round_context_authorizations=authorization_set,
             )
-            _assert_v4_plan(
+            _assert_v5_plan(
                 initial_plan,
-                authorization,
+                authorization_set,
                 registry_sha256=registry_sha256,
             )
             if fake_providers.call_attempts:
@@ -604,7 +621,7 @@ def main() -> int:
                 "exact_focus_verified": scenario in {"exact", "inactive-record"},
                 "bootstrap_none_verified": scenario == "bootstrap",
                 "inactive_frozen_record_verified": scenario == "inactive-record",
-                "v4_plan_verified": True,
+                "v5_round_context_plan_verified": True,
             }
 
             class QaRequestHandler(http_server.StudioRequestHandler):
@@ -684,18 +701,21 @@ def main() -> int:
                 raise RuntimeError("ephemeral QA server must never use formal port 8770")
             qa_state["port"] = server.server_port
             url = f"http://127.0.0.1:{server.server_port}/"
-            print(json.dumps({
-                "ok": True,
-                "scenario": scenario,
-                "url": url,
-                "qa_status_url": f"{url}__qa/status",
-                "room_id": room_id,
-                "artifact_id": artifact_id,
-                "artifact_version": artifact_version,
-                "round_id": round_id,
-                "formal_port_8770_used": False,
-                "temporary_database": True,
-            }, ensure_ascii=False))
+            print(
+                json.dumps({
+                    "ok": True,
+                    "scenario": scenario,
+                    "url": url,
+                    "qa_status_url": f"{url}__qa/status",
+                    "room_id": room_id,
+                    "artifact_id": artifact_id,
+                    "artifact_version": artifact_version,
+                    "round_id": round_id,
+                    "formal_port_8770_used": False,
+                    "temporary_database": True,
+                }, ensure_ascii=False),
+                flush=True,
+            )
             if scenario == "inactive-record":
                 print(
                     "Open room information and verify the paused round's frozen focus "
@@ -704,7 +724,7 @@ def main() -> int:
             else:
                 print(
                     "Open room information, verify the focus card, choose Fill next-round "
-                    "objective, then Start one round to inspect the v4 confirmation dialog. "
+                    "objective, then Start one round to inspect the v5 confirmation dialog. "
                     "Do not confirm the dialog."
                 )
             print("Press Ctrl+C to stop and delete the temporary database.")

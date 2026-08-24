@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   ArrowDown,
   BarChart3,
+  ChevronDown,
   CircleDashed,
   FileCheck2,
   FlaskConical,
@@ -15,8 +16,27 @@ import {
   UserCheck,
   WalletCards,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import { bindableAiProposals } from "../observationLineage";
+import {
+  buildDecisionLineagePanelModel,
+  createdTime,
+  decisionLineageRows,
+  decisionPackageKey,
+  eventRevision,
+  isObservationEvent,
+  isPortfolioEvent,
+  isWalkForwardEvent,
+  latestResourceEvents,
+  lineageDisplayText,
+  packageEvents,
+  runPortfolioVersion,
+  shortId,
+  walkForwardState,
+} from "../decisionLineageView";
+import "../styles/decision-lineage.css";
+
+export { buildPortfolioLineageIndex, decisionPackageSource } from "../decisionLineageView";
 
 
 const PACKAGE_STATES = Object.freeze({
@@ -31,136 +51,21 @@ const ACTION_LABELS = Object.freeze({
   hold: "暂时保留",
   return: "退回修订",
 });
+const EMPTY_LIST = Object.freeze([]);
+const EMPTY_RECORD = Object.freeze({});
+const EMPTY_MEMBER_MAP = new Map();
 
 
-function isPortfolioEvent(event) {
-  return String(event?.resource_type || "").toLowerCase() === "simulation.paper_portfolio";
+function formatSymbol(value) {
+  const normalized = typeof value === "string" ? value.trim().slice(0, 48) : "";
+  return normalized ? normalized.replace(/^US\./, "") : "—";
 }
 
 
-function isObservationEvent(event) {
-  return String(event?.resource_type || "").toLowerCase().includes("observation");
-}
-
-
-function isWalkForwardEvent(event) {
-  return String(event?.resource_type || "").toLowerCase().includes("walk_forward");
-}
-
-
-function eventRevision(event) {
-  return String(event?.resource_revision || event?.resource_snapshot?.version || "");
-}
-
-
-function runPortfolioVersion(run) {
-  const direct = Number(run?.portfolio_version);
-  if (Number.isInteger(direct) && direct > 0) return direct;
-  const nested = Number(run?.result?.portfolio_version);
-  return Number.isInteger(nested) && nested > 0 ? nested : 0;
-}
-
-
-function shortId(value) {
-  const text = String(value || "");
-  return text.length > 12 ? `…${text.slice(-8)}` : text || "未记录";
-}
-
-
-function createdTime(value) {
-  const date = new Date(Number(value) || String(value || ""));
-  if (Number.isNaN(date.getTime())) return "时间未知";
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
-}
-
-
-function packageEvents(decisionPackage) {
-  return (Array.isArray(decisionPackage?.lineage) ? decisionPackage.lineage : [])
-    .slice()
-    .sort((left, right) => (
-      (Number(left.sequence_no) || 0) - (Number(right.sequence_no) || 0)
-      || String(left.id || "").localeCompare(String(right.id || ""))
-    ));
-}
-
-
-export function decisionPackageSource(decisionPackage, event = null) {
-  const anchor = decisionPackage?.anchor || {};
-  const selectedOption = anchor.selected_option || {};
-  return {
-    package_id: String(decisionPackage?.package_id || anchor.user_decision_id || ""),
-    package_state: String(decisionPackage?.state || "stale"),
-    package_integrity_ok: decisionPackage?.integrity_ok === true && anchor.integrity_ok === true,
-    user_decision_id: String(anchor.user_decision_id || ""),
-    artifact_id: String(anchor.artifact_id || ""),
-    artifact_version: Number(anchor.artifact_version) || 0,
-    action: String(anchor.action || ""),
-    decision_version: String(anchor.decision_version || ""),
-    ai_preferred_option_id: String(anchor.ai_preferred_option_id || ""),
-    selected_option_id: String(anchor.selected_option_id || ""),
-    selected_is_ai_preferred: anchor.selected_is_ai_preferred === true,
-    preferred_option_id: String(anchor.selected_option_id || anchor.preferred_option_id || ""),
-    selected_option_title: String(selectedOption.title || selectedOption.name || "已选候选方案"),
-    candidate_simulation_seed: anchor.candidate_simulation_seed || null,
-    relation_type: String(event?.relation_type || ""),
-    resource_revision: eventRevision(event),
-    derivation_note: String(event?.relation_note || ""),
-  };
-}
-
-
-export function buildPortfolioLineageIndex(decisionPackages) {
-  const index = new Map();
-  for (const decisionPackage of decisionPackages || []) {
-    for (const event of packageEvents(decisionPackage)) {
-      if (!isPortfolioEvent(event) || !event.resource_id) continue;
-      const resourceId = String(event.resource_id);
-      const entries = index.get(resourceId) || [];
-      entries.push({ decisionPackage, event });
-      index.set(resourceId, entries);
-    }
-  }
-  for (const entries of index.values()) {
-    entries.sort((left, right) => (
-      (Number(right.event.sequence_no) || 0) - (Number(left.event.sequence_no) || 0)
-    ));
-  }
-  return index;
-}
-
-
-function latestResourceEvents(events, predicate) {
-  const byResource = new Map();
-  for (const event of events) {
-    if (!predicate(event) || !event.resource_id) continue;
-    byResource.set(String(event.resource_id), event);
-  }
-  return [...byResource.values()];
-}
-
-
-function walkForwardState(run) {
-  const result = run?.result || {};
-  const summary = result.summary || {};
-  const status = String(summary.adequacy_status || summary.status || result.state || "insufficient");
-  const folds = Number(summary.non_overlapping_test_fold_count ?? summary.independent_fold_count ?? 0) || 0;
-  return {
-    label: status === "sufficient" ? "样本达到最低门槛" : "历史样本仍不足",
-    tone: status === "sufficient" ? "ready" : "pending",
-    detail: `${folds} 个非重叠窗口 · 固定纸面方案回放`,
-  };
-}
-
-
-function LineageNode({ icon: Icon, eyebrow, title, detail, tone = "pending" }) {
+const LineageNode = memo(function LineageNode({ icon: Icon, eyebrow, title, detail, tone = "pending" }) {
   return (
-    <div className={`decision-lineage-node ${tone}`}>
-      <Icon size={14} />
+    <div className={`decision-lineage-node ${tone}`} data-node-state={tone}>
+      <Icon aria-hidden="true" size={14} />
       <span>
         <small>{eyebrow}</small>
         <strong>{title}</strong>
@@ -168,15 +73,37 @@ function LineageNode({ icon: Icon, eyebrow, title, detail, tone = "pending" }) {
       </span>
     </div>
   );
-}
+});
 
 
-function ProposalBindingControl({ proposals, membersById, anchor, sourceBranch, onBind }) {
+const ProposalBindingControl = memo(function ProposalBindingControl({
+  proposals = EMPTY_LIST,
+  membersById = EMPTY_MEMBER_MAP,
+  anchor,
+  sourceBranch,
+  onBind,
+}) {
   const [proposalId, setProposalId] = useState("");
   const [derivationNote, setDerivationNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  if (!sourceBranch || !onBind || !proposals.length) return null;
+  const requestRef = useRef(0);
+  const noteHelpId = useId();
+  const sourceKey = useMemo(() => JSON.stringify([
+      anchor?.user_decision_id || "",
+      sourceBranch?.event?.resource_id || "",
+      sourceBranch?.revision || 0,
+      proposals.map((item) => item.id),
+    ]), [anchor, proposals, sourceBranch]);
+  useEffect(() => {
+    requestRef.current += 1;
+    setProposalId("");
+    setDerivationNote("");
+    setBusy(false);
+    setError("");
+    return () => { requestRef.current += 1; };
+  }, [sourceKey]);
+  if (!sourceBranch || typeof onBind !== "function" || !proposals.length) return null;
   const effectiveProposalId = proposals.some((item) => item.id === proposalId)
     ? proposalId
     : proposals[0]?.id || "";
@@ -185,6 +112,8 @@ function ProposalBindingControl({ proposals, membersById, anchor, sourceBranch, 
     event.preventDefault();
     const note = derivationNote.trim();
     if (!selected || note.length < 3 || busy) return;
+    const sequence = requestRef.current + 1;
+    requestRef.current = sequence;
     setBusy(true);
     setError("");
     try {
@@ -194,69 +123,93 @@ function ProposalBindingControl({ proposals, membersById, anchor, sourceBranch, 
         source_portfolio_version: Number(sourceBranch.revision) || 0,
         derivation_note: note,
       });
+      if (requestRef.current !== sequence) return;
       setDerivationNote("");
     } catch (requestError) {
-      setError(requestError.message || "绑定失败，请检查决定与组合版本。");
+      if (requestRef.current !== sequence) return;
+      setError(requestError instanceof Error && requestError.message.trim()
+        ? requestError.message.trim().slice(0, 1000)
+        : "绑定失败，请检查决定与组合版本。");
     } finally {
-      setBusy(false);
+      if (requestRef.current === sequence) setBusy(false);
     }
   };
   return (
     <details className="decision-lineage-proposal-bind">
-      <summary><Link2 size={11} />采纳 AI 原提案（{proposals.length}）</summary>
-      <form onSubmit={submit}>
+      <summary>
+        <Link2 aria-hidden="true" size={13} />
+        <span>采纳 AI 原提案（{proposals.length}）</span>
+        <ChevronDown className="decision-lineage-disclosure-chevron" aria-hidden="true" size={14} />
+      </summary>
+      <form aria-busy={busy} onSubmit={submit}>
         <label>待绑定提案
-          <select value={effectiveProposalId} onChange={(event) => setProposalId(event.target.value)}>
-            {proposals.map((item) => (
-              <option key={item.id} value={item.id}>
+          <select disabled={busy} value={effectiveProposalId} onChange={(event) => setProposalId(event.target.value)}>
+            {proposals.map((item, proposalIndex) => (
+              <option key={`${item.id}:${proposalIndex}`} value={item.id}>
                 {membersById.get(String(item.created_by || ""))?.name || "历史 AI"}
-                {` · ${String(item.symbol || "").replace("US.", "")} · ${item.direction} · ${item.horizon_days}日 · ${item.model_confidence ?? "?"}%`}
+                {` · ${formatSymbol(item.symbol)} · ${item.direction} · ${item.horizon_days}日 · ${item.model_confidence ?? "?"}%`}
               </option>
             ))}
           </select>
         </label>
         <label>采纳说明
           <textarea
+            autoComplete="off"
+            disabled={busy}
             required
             minLength={3}
             maxLength={1000}
+            aria-describedby={noteHelpId}
             value={derivationNote}
             onChange={(event) => setDerivationNote(event.target.value)}
             placeholder="说明该 AI 提案如何验证当前支持方案及已确认组合；原作者、方法、阈值和置信度不会被改写。"
           />
+          <span id={noteHelpId} className="decision-lineage-note-meter">
+            <span>至少 3 字；原提案字段保持只读。</span>
+            <output aria-label={`已输入 ${derivationNote.length} / 1000 字`}>
+              {derivationNote.length} / 1000
+            </output>
+          </span>
         </label>
-        {error ? <p className="decision-lineage-proposal-error">{error}</p> : null}
+        {error ? <p className="decision-lineage-proposal-error" role="alert">{error}</p> : null}
         <button type="submit" disabled={busy || derivationNote.trim().length < 3}>
-          {busy ? <LoaderCircle className="spin" size={11} /> : <Link2 size={11} />}
-          绑定原提案
+          {busy ? <LoaderCircle aria-hidden="true" className="spin" size={11} /> : <Link2 aria-hidden="true" size={11} />}
+          {busy ? "正在绑定…" : "绑定原提案"}
         </button>
       </form>
     </details>
   );
-}
+});
 
 
-function DecisionPackageCard({
+const DecisionPackageCard = memo(function DecisionPackageCard({
   decisionPackage,
   membersById,
   unlinkedAiProposals,
   paperPortfolioById,
   walkForwardRunsByPortfolio,
+  modelIntegrityOk,
   onCreatePortfolio,
   onCreateObservation,
   onBindObservation,
 }) {
+  const packageTitleId = useId();
   const anchor = decisionPackage.anchor || {};
   const events = packageEvents(decisionPackage);
   const portfolioEvents = latestResourceEvents(events, isPortfolioEvent);
   const observationEvents = latestResourceEvents(events, isObservationEvent);
   const explicitWalkForwardEvents = latestResourceEvents(events, isWalkForwardEvent);
   const selectedOption = anchor.selected_option || {};
+  const selectedOptionTitle = lineageDisplayText(
+    selectedOption.title,
+    lineageDisplayText(selectedOption.name, "候选方案快照不可用"),
+  );
   const state = PACKAGE_STATES[decisionPackage.state] || PACKAGE_STATES.stale;
   const safeBoundary = decisionPackage.execution_capability === "none"
     && decisionPackage.live_trading_allowed === false
     && decisionPackage.can_autonomously_decide === false;
-  const integrityReady = decisionPackage.integrity_ok === true
+  const integrityReady = modelIntegrityOk
+    && decisionPackage.integrity_ok === true
     && anchor.integrity_ok === true
     && safeBoundary;
   const hasImplementation = events.some((event) => event.relation_type === "implements");
@@ -269,13 +222,14 @@ function DecisionPackageCard({
     && integrityReady
     && !hasImplementation;
   const canCreatePortfolio = canCreatePortfolioBase && !candidateSimulationBlocked;
+  const portfolioCreationAvailable = canCreatePortfolio && typeof onCreatePortfolio === "function";
 
   const portfolioBranches = portfolioEvents.map((event) => {
     const portfolio = paperPortfolioById.get(String(event.resource_id));
     const revision = Number(eventRevision(event)) || 0;
     const exactLiveRevision = Number(portfolio?.version || 0) === revision;
     const mayShowRevision = decisionPackage.state === "stale" || exactLiveRevision;
-    const runs = (mayShowRevision ? walkForwardRunsByPortfolio?.[event.resource_id] || [] : [])
+    const runs = decisionLineageRows(mayShowRevision ? walkForwardRunsByPortfolio?.[event.resource_id] : [])
       .filter((run) => runPortfolioVersion(run) === revision)
       .toSorted((left, right) => (Number(right.created_at) || 0) - (Number(left.created_at) || 0));
     return { event, portfolio, revision, exactLiveRevision, latestRun: runs[0] || null };
@@ -340,11 +294,18 @@ function DecisionPackageCard({
     : `AI 首选 ${anchor.ai_preferred_option_id || "未记录"} · 用户选择 无`;
 
   return (
-    <article className={`decision-package-card ${state.tone}${packageBroken ? " broken" : ""}`}>
+    <article
+      className={`decision-package-card ${state.tone}${packageBroken ? " broken" : ""}`}
+      data-package-state={packageBroken ? "broken" : state.tone}
+      aria-labelledby={packageTitleId}
+    >
       <header>
         <span>
-          <GitBranch size={14} />
-          <strong>{state.label}</strong>
+          <GitBranch aria-hidden="true" size={14} />
+          <h4 id={packageTitleId}>
+            {state.label}
+            <span className="decision-lineage-visually-hidden">：{selectedOptionTitle}</span>
+          </h4>
         </span>
         <em>{createdTime(anchor.created_at)}</em>
       </header>
@@ -353,7 +314,7 @@ function DecisionPackageCard({
         <LineageNode
           icon={FileCheck2}
           eyebrow="候选产物"
-          title={selectedOption.title || selectedOption.name || "候选方案快照不可用"}
+          title={selectedOptionTitle}
           detail={`产物 ${shortId(anchor.artifact_id)} · v${anchor.artifact_version || "?"}`}
           tone={candidateTone}
         />
@@ -375,7 +336,10 @@ function DecisionPackageCard({
                   key={`${event.resource_id}:${event.resource_revision}`}
                   icon={WalletCards}
                   eyebrow={event.relation_type === "implements" ? "关联模拟组合" : "组合版本事件"}
-                  title={portfolio?.name || event.resource_snapshot?.name || shortId(event.resource_id)}
+                  title={lineageDisplayText(
+                    portfolio?.name,
+                    lineageDisplayText(event.resource_snapshot?.name, shortId(event.resource_id)),
+                  )}
                   detail={`事件 v${revision || "?"} · ${event.resource_state || "状态未知"}${exactLiveRevision ? "" : " · 当前版本不同"}`}
                   tone={eventReady ? "ready" : packageBroken ? "broken" : "stale"}
                 />
@@ -386,28 +350,28 @@ function DecisionPackageCard({
           <LineageNode
             icon={WalletCards}
             eyebrow="模拟组合"
-            title={canCreatePortfolio ? "尚未建立关联组合" : "当前决定没有可派生组合"}
+            title={portfolioCreationAvailable ? "尚未建立关联组合" : canCreatePortfolio ? "组合创建入口不可用" : "当前决定没有可派生组合"}
             detail={canCreatePortfolio ? "从已支持候选推导纸面权重与风险预算" : "不会从保留、退回或旧决定自动派生"}
             tone={packageBroken ? "broken" : "pending"}
           />
         )}
       </div>
 
-      {canCreatePortfolio ? (
+      {portfolioCreationAvailable ? (
         <button className="decision-lineage-create" type="button" onClick={(event) => onCreatePortfolio(decisionPackage, event.currentTarget)}>
-          <Plus size={13} />建立关联模拟组合
+          <Plus aria-hidden="true" size={13} />建立关联模拟组合
         </button>
       ) : null}
       {canCreatePortfolioBase && candidateSimulationBlocked ? (
         <p className="decision-lineage-warning">
           当前正式候选不能建立严格模拟映射：
-          {candidateSimulationSeed?.issues?.[0]?.message || "候选规格不完整。"}
+          {lineageDisplayText(candidateSimulationSeed?.issues?.[0]?.message, "候选规格不完整。")}
         </p>
       ) : null}
 
       <div className="decision-lineage-validation" aria-label="并行验证轨">
         <div className="decision-lineage-lane observation">
-          <FlaskConical size={14} />
+          <FlaskConical aria-hidden="true" size={14} />
           <span>
             <small>前瞻验证轨</small>
             <strong>{currentObservationEvents.length ? `${currentObservationEvents.length} 条当前版本观察` : "尚无当前版本观察"}</strong>
@@ -416,13 +380,13 @@ function DecisionPackageCard({
               {observationEvents.length > currentObservationEvents.length ? ` 另有 ${observationEvents.length - currentObservationEvents.length} 条历史版本。` : ""}
             </em>
           </span>
-          {observationSourceBranch && onCreateObservation ? (
+          {observationSourceBranch && typeof onCreateObservation === "function" ? (
             <button
               className="decision-lineage-lane-action"
               type="button"
               onClick={(event) => onCreateObservation(decisionPackage, observationSourceBranch, event.currentTarget)}
             >
-              <Plus size={11} />建立前向观察
+              <Plus aria-hidden="true" size={11} />建立前向观察
             </button>
           ) : null}
           <ProposalBindingControl
@@ -434,7 +398,7 @@ function DecisionPackageCard({
           />
         </div>
         <div className={`decision-lineage-lane walk-forward ${walkForwardSummary?.tone || "pending"}`}>
-          <BarChart3 size={14} />
+          <BarChart3 aria-hidden="true" size={14} />
           <span>
             <small>历史验证轨</small>
             <strong>{walkForwardSummary?.label || (currentWalkForwardEvents.length ? `${currentWalkForwardEvents.length} 条当前版本回放` : "尚无当前版本回放")}</strong>
@@ -449,119 +413,116 @@ function DecisionPackageCard({
       </div>
 
       {packageBroken ? (
-        <p className="decision-lineage-warning"><AlertTriangle size={12} />完整性或安全边界校验失败；该链仅供审计，不能继续派生。</p>
+        <p className="decision-lineage-warning"><AlertTriangle aria-hidden="true" size={12} />完整性或安全边界校验失败；该链仅供审计，不能继续派生。</p>
       ) : (
-        <p className="decision-lineage-boundary"><ShieldCheck size={12} />仅研究与模拟 · 无自主决策权 · 禁止实盘</p>
+        <p className="decision-lineage-boundary"><ShieldCheck aria-hidden="true" size={12} />仅研究与模拟 · 无自主决策权 · 禁止实盘</p>
       )}
     </article>
   );
-}
+});
 
 
-export function DecisionLineagePanel({
-  decisionPackages = [],
-  members = [],
-  paperPortfolios = [],
-  observations = [],
-  walkForwardRunsByPortfolio = {},
+export const DecisionLineagePanel = memo(function DecisionLineagePanel({
+  decisionPackages = EMPTY_LIST,
+  members = EMPTY_LIST,
+  paperPortfolios = EMPTY_LIST,
+  observations = EMPTY_LIST,
+  walkForwardRunsByPortfolio = EMPTY_RECORD,
   onCreatePortfolio,
   onCreateObservation,
   onBindObservation,
 }) {
-  const membersById = useMemo(
-    () => new Map((members || []).map((item) => [String(item.id), item])),
-    [members],
-  );
-  const model = useMemo(() => {
-    const packages = (decisionPackages || []).toSorted((left, right) => {
-      const priority = { chain_broken: 0, active: 1, non_actionable: 2, stale: 3 };
-      return (priority[left.state] ?? 9) - (priority[right.state] ?? 9)
-        || (Number(right.anchor?.created_at) || 0) - (Number(left.anchor?.created_at) || 0);
-    });
-    const current = packages.filter((item) => item.state !== "stale");
-    const historical = packages.filter((item) => item.state === "stale");
-    const portfolioById = new Map((paperPortfolios || []).map((item) => [String(item.id), item]));
-    const linkedPortfolioIds = new Set();
-    const linkedObservationIds = new Set();
-    const linkedPortfolioRevisions = new Map();
-    for (const decisionPackage of packages) {
-      for (const event of packageEvents(decisionPackage)) {
-        if (isPortfolioEvent(event)) {
-          const resourceId = String(event.resource_id || "");
-          if (!resourceId) continue;
-          linkedPortfolioIds.add(resourceId);
-          const revisions = linkedPortfolioRevisions.get(resourceId) || new Set();
-          revisions.add(Number(eventRevision(event)) || 0);
-          linkedPortfolioRevisions.set(resourceId, revisions);
-        }
-        if (isObservationEvent(event) && event.resource_id) linkedObservationIds.add(String(event.resource_id));
-      }
+  const titleId = useId();
+  const model = useMemo(() => buildDecisionLineagePanelModel({
+    decisionPackages,
+    members,
+    observations,
+    paperPortfolios,
+    walkForwardRunsByPortfolio,
+  }), [decisionPackages, members, observations, paperPortfolios, walkForwardRunsByPortfolio]);
+  const reviewCount = model.stats.broken + model.stats.unlinked;
+  const reviewSignal = !model.integrityOk
+    ? {
+      tone: "blocked",
+      label: "谱系输入已阻断",
+      detail: "输入集合未通过完整性门，所有继续派生动作保持关闭。",
     }
-    const unlinkedPortfolios = (paperPortfolios || []).filter((item) => !linkedPortfolioIds.has(String(item.id)));
-    const unlinkedObservations = (observations || []).filter((item) => !linkedObservationIds.has(String(item.id)));
-    let historicalWalkForwardCount = 0;
-    let unlinkedWalkForwardCount = 0;
-    for (const [portfolioId, runs] of Object.entries(walkForwardRunsByPortfolio || {})) {
-      const revisions = linkedPortfolioRevisions.get(String(portfolioId));
-      for (const run of runs || []) {
-        if (!revisions) unlinkedWalkForwardCount += 1;
-        else if (!revisions.has(runPortfolioVersion(run))) historicalWalkForwardCount += 1;
+    : reviewCount > 0
+      ? {
+        tone: "attention",
+        label: `${reviewCount} 项谱系信号需要复核`,
+        detail: `异常链 ${model.stats.broken} · 未关联资源 ${model.stats.unlinked}；计数不用于排序或批准。`,
       }
-    }
-    return {
-      current,
-      historical,
-      portfolioById,
-      unlinkedPortfolios,
-      unlinkedObservations,
-      historicalWalkForwardCount,
-      unlinkedWalkForwardCount,
-    };
-  }, [decisionPackages, observations, paperPortfolios, walkForwardRunsByPortfolio]);
+      : {
+        tone: "clear",
+        label: "谱系结构暂无待复核项",
+        detail: "仅表示当前输入没有异常链或未关联资源，不代表研究结论获批。",
+      };
 
-  const renderPackage = (decisionPackage) => (
+  const renderPackage = (decisionPackage, index) => (
     <DecisionPackageCard
-      key={decisionPackage.package_id}
+      key={decisionPackageKey(decisionPackage, index)}
       decisionPackage={decisionPackage}
-      membersById={membersById}
+      membersById={model.membersById}
+      modelIntegrityOk={model.integrityOk}
       unlinkedAiProposals={model.unlinkedObservations}
       paperPortfolioById={model.portfolioById}
-      walkForwardRunsByPortfolio={walkForwardRunsByPortfolio}
+      walkForwardRunsByPortfolio={model.walkForwardRunsByPortfolio}
       onCreatePortfolio={onCreatePortfolio}
       onCreateObservation={onCreateObservation}
       onBindObservation={onBindObservation}
     />
   );
 
-  const hasUnlinked = model.unlinkedPortfolios.length
-    || model.unlinkedObservations.length
-    || model.historicalWalkForwardCount
-    || model.unlinkedWalkForwardCount;
-
   return (
-    <div className="decision-lineage-panel">
-      <div className="decision-lineage-intro">
-        <GitBranch size={15} />
-        <p><strong>决策研究谱系</strong><span>组合之后分成前瞻观察与历史回放两条验证轨，二者互不冒充。</span></p>
+    <section className="decision-lineage-panel" aria-labelledby={titleId} data-model-state={model.integrityOk ? "verified" : "blocked"}>
+      <header className="decision-lineage-intro">
+        <div className="decision-lineage-intro-mark"><GitBranch aria-hidden="true" size={18} /><span>PROVENANCE<br />LEDGER</span></div>
+        <div><small>DECISION → SIMULATION → VALIDATION</small><h3 id={titleId}>决策研究谱系</h3><p>组合之后分成前瞻观察与历史回放两条验证轨，二者互不冒充。</p></div>
+        <dl aria-label="决策谱系摘要">
+          <div data-stat="current"><dt>当前</dt><dd><data value={model.stats.current}>{model.stats.current}</data></dd></div>
+          <div data-stat="historical"><dt>历史</dt><dd><data value={model.stats.historical}>{model.stats.historical}</data></dd></div>
+          <div data-stat="broken"><dt>异常</dt><dd><data value={model.stats.broken}>{model.stats.broken}</data></dd></div>
+          <div data-stat="unlinked"><dt>未关联</dt><dd><data value={model.stats.unlinked}>{model.stats.unlinked}</data></dd></div>
+        </dl>
+      </header>
+
+      <div className={`decision-lineage-review-signal ${reviewSignal.tone}`} role="note">
+        {reviewSignal.tone === "clear"
+          ? <ShieldCheck aria-hidden="true" size={15} />
+          : <AlertTriangle aria-hidden="true" size={15} />}
+        <span><strong>{reviewSignal.label}</strong><small>{reviewSignal.detail}</small></span>
+        <data
+          value={reviewCount}
+          aria-label={model.integrityOk ? `${reviewCount} 项待复核信号` : "完整性阻断"}
+        >
+          {model.integrityOk ? `${reviewCount} 项` : "BLOCKED"}
+        </data>
       </div>
+
+      {!model.integrityOk ? <p className="decision-lineage-model-warning" role="alert"><AlertTriangle aria-hidden="true" size={13} />谱系输入无法完整核验，所有继续派生动作已关闭。{model.issues?.[0] || "输入集合无效。"}</p> : null}
 
       {model.current.length ? model.current.map(renderPackage) : (
         <div className="decision-lineage-empty">
-          <CircleDashed size={15} />
+          <CircleDashed aria-hidden="true" size={15} />
           <span><strong>尚无当前决策链</strong><small>确认候选产物并由用户支持、保留或退回后，这里才建立版本锚点。</small></span>
         </div>
       )}
 
       {model.historical.length ? (
         <details className="decision-lineage-history">
-          <summary><History size={13} />历史决定链（{model.historical.length}）</summary>
+          <summary>
+            <History aria-hidden="true" size={14} />
+            <span>历史决定链（{model.historical.length}）</span>
+            <ChevronDown className="decision-lineage-disclosure-chevron" aria-hidden="true" size={15} />
+          </summary>
           <div>{model.historical.map(renderPackage)}</div>
         </details>
       ) : null}
 
-      {hasUnlinked ? (
+      {model.hasUnlinked ? (
         <div className="decision-lineage-unlinked">
-          <Unlink size={14} />
+          <Unlink aria-hidden="true" size={14} />
           <span>
             <strong>未关联与历史资源</strong>
             <small>
@@ -572,6 +533,6 @@ export function DecisionLineagePanel({
           </span>
         </div>
       ) : null}
-    </div>
+    </section>
   );
-}
+});

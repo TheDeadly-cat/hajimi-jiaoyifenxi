@@ -1,0 +1,818 @@
+{
+  "schema_version": "historical_bootstrap_preflight_matrix_v1",
+  "generated_at_utc": "2026-08-23T20:36:45Z",
+  "ok": true,
+  "evaluator": {
+    "policy": "current_trusted_bootstrap_applied_externally",
+    "bootstrap_sha256": "c4ba5c05fab682d7f0005d2688932fad234f8fe2bc425546612ee6270e7e7452",
+    "fresh_source_safe_extract_sha256": "4160c14d0190f746a1ec2065984e7461780a1bae3c85d28b9640d55c0bd44e6a",
+    "archive_code_executed": false
+  },
+  "selection": {
+    "policy": "all_verified_archives_in_authorized_c_and_z_roots",
+    "archive_count": 8,
+    "transition_count": 7,
+    "chronological": true,
+    "all_source_identities_unique": true,
+    "check_only_pass_count": 3,
+    "check_only_reject_count": 5
+  },
+  "archives": [
+    {
+      "ordinal": 1,
+      "archive_name": "ai_collaboration_studio-source-20260812T135952Z-b47eb401a23b.zip",
+      "archive_sha256": "6fd1e1df79b687c9f7c9acbfcccb837bbb619dc12cdc2a799bb757b646adfbb1",
+      "release_id": "20260812T135952Z-b47eb401a23b",
+      "source_total_sha256": "b47eb401a23bf0e141b738204dcd79af3e1bcd880f0c66c9c377426815cbf65f",
+      "file_count": 529,
+      "total_size": 25479817,
+      "project_version": "0.1.0",
+      "clean_source_exclusions": {
+        ".git": true,
+        "runtime": true,
+        "node_modules": true,
+        "dist": true
+      },
+      "project_markers": {
+        "server.py": true,
+        "requirements.txt": true,
+        "requirements-lock-win-py314.txt": false,
+        "frontend/package.json": true,
+        "frontend/package-lock.json": true
+      },
+      "entrypoints": {
+        "bootstrap": false,
+        "fresh_source_smoke": false,
+        "release_drill": false,
+        "backend_isolated_runner": true,
+        "frontend_safe_runner": false
+      },
+      "server_static_tokens": {
+        "server_present": true,
+        "startup_preflight_token_present": true,
+        "owner_lock_token_present": false,
+        "skip_local_env_token_present": false
+      },
+      "requirements": {
+        "present": true,
+        "sha256": "8edee15d683c09b79db27d6eaec4677f5aafdc79cc2866e44d1c3ec284f9fa58"
+      },
+      "python_lock": {
+        "present": false,
+        "sha256": null,
+        "component_count": null,
+        "component_set_sha256": null,
+        "components": []
+      },
+      "npm_lock": {
+        "present": true,
+        "sha256": "265b34e1bec14d569219060c1eeb4c6bf30849f85ca8cfcac98650ec823fef64",
+        "lockfile_version": 3,
+        "component_count": 116,
+        "component_set_sha256": "d538fb88ca51daa4e22ed80e3b1502c8ffc0df5c007b7220544e6b6e2d4ad3ad",
+        "direct_runtime_dependency_count": 3,
+        "direct_dev_dependency_count": 2
+      },
+      "external_current_bootstrap_check_only": {
+        "ok": false,
+        "error_code": "PROJECT_MARKERS_INCOMPLETE",
+        "inputs": null,
+        "runtime_created": false,
+        "database_created": false
+      }
+    },
+    {
+      "ordinal": 2,
+      "archive_name": "ai_collaboration_studio-source-20260812T140543Z-307418d42388.zip",
+      "archive_sha256": "ea4f58ba87e1b9e30c4c0fcb9dccee7d80fa01a87976e221e6aac653b93bdb26",
+      "release_id": "20260812T140543Z-307418d42388",
+      "source_total_sha256": "307418d423887b21ddc9b0688d5e6fc1ffb773237b207b1f48bb42f5bf2e94ef",
+      "file_count": 529,
+      "total_size": 25480663,
+      "project_version": "0.1.0",
+      "clean_source_exclusions": {
+        ".git": true,
+        "runtime": true,
+        "node_modules": true,
+        "dist": true
+      },
+      "project_markers": {
+        "server.py": true,
+        "requirements.txt": true,
+        "requirements-lock-win-py314.txt": false,
+        "frontend/package.json": true,
+        "frontend/package-lock.json": true
+      },
+      "entrypoints": {
+        "bootstrap": false,
+        "fresh_source_smoke": false,
+        "release_drill": false,
+        "backend_isolated_runner": true,
+        "frontend_safe_runner": false
+      },
+      "server_static_tokens": {
+        "server_present": true,
+        "startup_preflight_token_present": true,
+        "owner_lock_token_present": false,
+        "skip_local_env_token_present": false
+      },
+      "requirements": {
+        "present": true,
+        "sha256": "8edee15d683c09b79db27d6eaec4677f5aafdc79cc2866e44d1c3ec284f9fa58"
+      },
+      "python_lock": {
+        "present": false,
+        "sha256": null,
+        "component_count": null,
+        "component_set_sha256": null,
+        "components": []
+      },
+      "npm_lock": {
+        "present": true,
+        "sha256": "265b34e1bec14d569219060c1eeb4c6bf30849f85ca8cfcac98650ec823fef64",
+        "lockfile_version": 3,
+        "component_count": 116,
+        "component_set_sha256": "d538fb88ca51daa4e22ed80e3b1502c8ffc0df5c007b7220544e6b6e2d4ad3ad",
+        "direct_runtime_dependency_count": 3,
+        "direct_dev_dependency_count": 2
+      },
+      "external_current_bootstrap_check_only": {
+        "ok": false,
+        "error_code": "PROJECT_MARKERS_INCOMPLETE",
+        "inputs": null,
+        "runtime_created": false,
+        "database_created": false
+      }
+    },
+    {
+      "ordinal": 3,
+      "archive_name": "ai_collaboration_studio-source-20260812T140631Z-48b029a585ac.zip",
+      "archive_sha256": "5fe68470f1facaf801f4cfdc53ec79e6ca358d34cf9b495a799a6130301f632e",
+      "release_id": "20260812T140631Z-48b029a585ac",
+      "source_total_sha256": "48b029a585ac72a2c5dece5a4f16e081f029c35bc76fa15729294525b3309b07",
+      "file_count": 529,
+      "total_size": 25480663,
+      "project_version": "0.1.0",
+      "clean_source_exclusions": {
+        ".git": true,
+        "runtime": true,
+        "node_modules": true,
+        "dist": true
+      },
+      "project_markers": {
+        "server.py": true,
+        "requirements.txt": true,
+        "requirements-lock-win-py314.txt": false,
+        "frontend/package.json": true,
+        "frontend/package-lock.json": true
+      },
+      "entrypoints": {
+        "bootstrap": false,
+        "fresh_source_smoke": false,
+        "release_drill": false,
+        "backend_isolated_runner": true,
+        "frontend_safe_runner": false
+      },
+      "server_static_tokens": {
+        "server_present": true,
+        "startup_preflight_token_present": true,
+        "owner_lock_token_present": false,
+        "skip_local_env_token_present": false
+      },
+      "requirements": {
+        "present": true,
+        "sha256": "8edee15d683c09b79db27d6eaec4677f5aafdc79cc2866e44d1c3ec284f9fa58"
+      },
+      "python_lock": {
+        "present": false,
+        "sha256": null,
+        "component_count": null,
+        "component_set_sha256": null,
+        "components": []
+      },
+      "npm_lock": {
+        "present": true,
+        "sha256": "265b34e1bec14d569219060c1eeb4c6bf30849f85ca8cfcac98650ec823fef64",
+        "lockfile_version": 3,
+        "component_count": 116,
+        "component_set_sha256": "d538fb88ca51daa4e22ed80e3b1502c8ffc0df5c007b7220544e6b6e2d4ad3ad",
+        "direct_runtime_dependency_count": 3,
+        "direct_dev_dependency_count": 2
+      },
+      "external_current_bootstrap_check_only": {
+        "ok": false,
+        "error_code": "PROJECT_MARKERS_INCOMPLETE",
+        "inputs": null,
+        "runtime_created": false,
+        "database_created": false
+      }
+    },
+    {
+      "ordinal": 4,
+      "archive_name": "ai_collaboration_studio-source-20260812T141544Z-d075f0771cc2.zip",
+      "archive_sha256": "8118a730e50ee643f754a9d4e3731652df9fd1bc57834109de21c1a87f8089d1",
+      "release_id": "20260812T141544Z-d075f0771cc2",
+      "source_total_sha256": "d075f0771cc2852d964c529ddf9a931fe1a0e697a84211ba28575bf49f3ef5f2",
+      "file_count": 531,
+      "total_size": 25488573,
+      "project_version": "0.1.0",
+      "clean_source_exclusions": {
+        ".git": true,
+        "runtime": true,
+        "node_modules": true,
+        "dist": true
+      },
+      "project_markers": {
+        "server.py": true,
+        "requirements.txt": true,
+        "requirements-lock-win-py314.txt": false,
+        "frontend/package.json": true,
+        "frontend/package-lock.json": true
+      },
+      "entrypoints": {
+        "bootstrap": false,
+        "fresh_source_smoke": false,
+        "release_drill": false,
+        "backend_isolated_runner": true,
+        "frontend_safe_runner": false
+      },
+      "server_static_tokens": {
+        "server_present": true,
+        "startup_preflight_token_present": true,
+        "owner_lock_token_present": false,
+        "skip_local_env_token_present": false
+      },
+      "requirements": {
+        "present": true,
+        "sha256": "8edee15d683c09b79db27d6eaec4677f5aafdc79cc2866e44d1c3ec284f9fa58"
+      },
+      "python_lock": {
+        "present": false,
+        "sha256": null,
+        "component_count": null,
+        "component_set_sha256": null,
+        "components": []
+      },
+      "npm_lock": {
+        "present": true,
+        "sha256": "265b34e1bec14d569219060c1eeb4c6bf30849f85ca8cfcac98650ec823fef64",
+        "lockfile_version": 3,
+        "component_count": 116,
+        "component_set_sha256": "d538fb88ca51daa4e22ed80e3b1502c8ffc0df5c007b7220544e6b6e2d4ad3ad",
+        "direct_runtime_dependency_count": 3,
+        "direct_dev_dependency_count": 2
+      },
+      "external_current_bootstrap_check_only": {
+        "ok": false,
+        "error_code": "PROJECT_MARKERS_INCOMPLETE",
+        "inputs": null,
+        "runtime_created": false,
+        "database_created": false
+      }
+    },
+    {
+      "ordinal": 5,
+      "archive_name": "ai_collaboration_studio-source-20260812T144214Z-a85889aafc3d.zip",
+      "archive_sha256": "69f9ccae2dbbdbadf69d316203684c4cb806d1c40d4819c529c8e7c1fb158eba",
+      "release_id": "20260812T144214Z-a85889aafc3d",
+      "source_total_sha256": "a85889aafc3d981bbe660da5b67f784273de4cf2687f6bcddb830666109b8eef",
+      "file_count": 534,
+      "total_size": 25499844,
+      "project_version": "0.1.0",
+      "clean_source_exclusions": {
+        ".git": true,
+        "runtime": true,
+        "node_modules": true,
+        "dist": true
+      },
+      "project_markers": {
+        "server.py": true,
+        "requirements.txt": true,
+        "requirements-lock-win-py314.txt": false,
+        "frontend/package.json": true,
+        "frontend/package-lock.json": true
+      },
+      "entrypoints": {
+        "bootstrap": false,
+        "fresh_source_smoke": false,
+        "release_drill": false,
+        "backend_isolated_runner": true,
+        "frontend_safe_runner": false
+      },
+      "server_static_tokens": {
+        "server_present": true,
+        "startup_preflight_token_present": true,
+        "owner_lock_token_present": false,
+        "skip_local_env_token_present": false
+      },
+      "requirements": {
+        "present": true,
+        "sha256": "8edee15d683c09b79db27d6eaec4677f5aafdc79cc2866e44d1c3ec284f9fa58"
+      },
+      "python_lock": {
+        "present": false,
+        "sha256": null,
+        "component_count": null,
+        "component_set_sha256": null,
+        "components": []
+      },
+      "npm_lock": {
+        "present": true,
+        "sha256": "265b34e1bec14d569219060c1eeb4c6bf30849f85ca8cfcac98650ec823fef64",
+        "lockfile_version": 3,
+        "component_count": 116,
+        "component_set_sha256": "d538fb88ca51daa4e22ed80e3b1502c8ffc0df5c007b7220544e6b6e2d4ad3ad",
+        "direct_runtime_dependency_count": 3,
+        "direct_dev_dependency_count": 2
+      },
+      "external_current_bootstrap_check_only": {
+        "ok": false,
+        "error_code": "PROJECT_MARKERS_INCOMPLETE",
+        "inputs": null,
+        "runtime_created": false,
+        "database_created": false
+      }
+    },
+    {
+      "ordinal": 6,
+      "archive_name": "ai_collaboration_studio-source-20260823T201640Z-3574206b065b.zip",
+      "archive_sha256": "0b8fb56c06bd1637cb8a52511cd9812c435f013cdcfc9e86af5ac4c11a1533bb",
+      "release_id": "20260823T201640Z-3574206b065b",
+      "source_total_sha256": "3574206b065bae2a7b19f589a219b7bb5ac0fb4a6500ebca072a5f0d360a2652",
+      "file_count": 545,
+      "total_size": 13148334,
+      "project_version": "0.1.0",
+      "clean_source_exclusions": {
+        ".git": true,
+        "runtime": true,
+        "node_modules": true,
+        "dist": true
+      },
+      "project_markers": {
+        "server.py": true,
+        "requirements.txt": true,
+        "requirements-lock-win-py314.txt": true,
+        "frontend/package.json": true,
+        "frontend/package-lock.json": true
+      },
+      "entrypoints": {
+        "bootstrap": true,
+        "fresh_source_smoke": true,
+        "release_drill": true,
+        "backend_isolated_runner": true,
+        "frontend_safe_runner": true
+      },
+      "server_static_tokens": {
+        "server_present": true,
+        "startup_preflight_token_present": true,
+        "owner_lock_token_present": false,
+        "skip_local_env_token_present": false
+      },
+      "requirements": {
+        "present": true,
+        "sha256": "8edee15d683c09b79db27d6eaec4677f5aafdc79cc2866e44d1c3ec284f9fa58"
+      },
+      "python_lock": {
+        "present": true,
+        "sha256": "22e149f601a83f26833cff20d32cbf5aaa01242906de0d8cf9d53a6e569ea699",
+        "component_count": 10,
+        "component_set_sha256": "3cba6ab68056142e91469202fad6d6c538997f6ddb91092c6bfdb3f7ffc457e1",
+        "components": [
+          {
+            "name": "futu-api",
+            "version": "10.10.7008"
+          },
+          {
+            "name": "numpy",
+            "version": "2.5.2"
+          },
+          {
+            "name": "pandas",
+            "version": "3.0.5"
+          },
+          {
+            "name": "protobuf",
+            "version": "7.36.0"
+          },
+          {
+            "name": "pycryptodome",
+            "version": "3.23.0"
+          },
+          {
+            "name": "pypdf",
+            "version": "6.16.2"
+          },
+          {
+            "name": "python-dateutil",
+            "version": "2.9.0.post0"
+          },
+          {
+            "name": "simplejson",
+            "version": "4.1.1"
+          },
+          {
+            "name": "six",
+            "version": "1.17.0"
+          },
+          {
+            "name": "tzdata",
+            "version": "2026.3"
+          }
+        ]
+      },
+      "npm_lock": {
+        "present": true,
+        "sha256": "875e3714c1a69ec74d3510afa73a82e98c0d9cac6ea168587d0ba631a7116ffc",
+        "lockfile_version": 3,
+        "component_count": 155,
+        "component_set_sha256": "830d1bcd8a2fc2dee9e56a2c13dc6bbbf5c7cf02229ae6b73d6906fa62a2a7c4",
+        "direct_runtime_dependency_count": 3,
+        "direct_dev_dependency_count": 3
+      },
+      "external_current_bootstrap_check_only": {
+        "ok": true,
+        "error_code": null,
+        "inputs": {
+          "requirements_sha256": "8edee15d683c09b79db27d6eaec4677f5aafdc79cc2866e44d1c3ec284f9fa58",
+          "requirements_lock_sha256": "22e149f601a83f26833cff20d32cbf5aaa01242906de0d8cf9d53a6e569ea699",
+          "package_json_sha256": "b8d30d4e7f41abf97b0ea98cd3e263521d19413440fcc9190762f8c0e5fce163",
+          "package_lock_sha256": "875e3714c1a69ec74d3510afa73a82e98c0d9cac6ea168587d0ba631a7116ffc",
+          "python_requirements_fully_pinned": true,
+          "python_locked_distribution_count": 10,
+          "python_lock_profile": {
+            "id": "windows_x64_cpython_3_14",
+            "compatible": true,
+            "host_platform": "win32",
+            "host_python": "3.14",
+            "host_machine": "amd64"
+          }
+        },
+        "runtime_created": false,
+        "database_created": false
+      }
+    },
+    {
+      "ordinal": 7,
+      "archive_name": "ai_collaboration_studio-source-20260823T202121Z-de0086296fed.zip",
+      "archive_sha256": "9f2a034fb7bc7ba2e9237ce3a141249fd8de0d4c16ef4701fa1c11c284f9ebff",
+      "release_id": "20260823T202121Z-de0086296fed",
+      "source_total_sha256": "de0086296fed0e7a0e227023d0752b0157961c6eed7c9acec31a54a689624df9",
+      "file_count": 545,
+      "total_size": 13150370,
+      "project_version": "0.1.0",
+      "clean_source_exclusions": {
+        ".git": true,
+        "runtime": true,
+        "node_modules": true,
+        "dist": true
+      },
+      "project_markers": {
+        "server.py": true,
+        "requirements.txt": true,
+        "requirements-lock-win-py314.txt": true,
+        "frontend/package.json": true,
+        "frontend/package-lock.json": true
+      },
+      "entrypoints": {
+        "bootstrap": true,
+        "fresh_source_smoke": true,
+        "release_drill": true,
+        "backend_isolated_runner": true,
+        "frontend_safe_runner": true
+      },
+      "server_static_tokens": {
+        "server_present": true,
+        "startup_preflight_token_present": true,
+        "owner_lock_token_present": false,
+        "skip_local_env_token_present": false
+      },
+      "requirements": {
+        "present": true,
+        "sha256": "8edee15d683c09b79db27d6eaec4677f5aafdc79cc2866e44d1c3ec284f9fa58"
+      },
+      "python_lock": {
+        "present": true,
+        "sha256": "22e149f601a83f26833cff20d32cbf5aaa01242906de0d8cf9d53a6e569ea699",
+        "component_count": 10,
+        "component_set_sha256": "3cba6ab68056142e91469202fad6d6c538997f6ddb91092c6bfdb3f7ffc457e1",
+        "components": [
+          {
+            "name": "futu-api",
+            "version": "10.10.7008"
+          },
+          {
+            "name": "numpy",
+            "version": "2.5.2"
+          },
+          {
+            "name": "pandas",
+            "version": "3.0.5"
+          },
+          {
+            "name": "protobuf",
+            "version": "7.36.0"
+          },
+          {
+            "name": "pycryptodome",
+            "version": "3.23.0"
+          },
+          {
+            "name": "pypdf",
+            "version": "6.16.2"
+          },
+          {
+            "name": "python-dateutil",
+            "version": "2.9.0.post0"
+          },
+          {
+            "name": "simplejson",
+            "version": "4.1.1"
+          },
+          {
+            "name": "six",
+            "version": "1.17.0"
+          },
+          {
+            "name": "tzdata",
+            "version": "2026.3"
+          }
+        ]
+      },
+      "npm_lock": {
+        "present": true,
+        "sha256": "875e3714c1a69ec74d3510afa73a82e98c0d9cac6ea168587d0ba631a7116ffc",
+        "lockfile_version": 3,
+        "component_count": 155,
+        "component_set_sha256": "830d1bcd8a2fc2dee9e56a2c13dc6bbbf5c7cf02229ae6b73d6906fa62a2a7c4",
+        "direct_runtime_dependency_count": 3,
+        "direct_dev_dependency_count": 3
+      },
+      "external_current_bootstrap_check_only": {
+        "ok": true,
+        "error_code": null,
+        "inputs": {
+          "requirements_sha256": "8edee15d683c09b79db27d6eaec4677f5aafdc79cc2866e44d1c3ec284f9fa58",
+          "requirements_lock_sha256": "22e149f601a83f26833cff20d32cbf5aaa01242906de0d8cf9d53a6e569ea699",
+          "package_json_sha256": "b8d30d4e7f41abf97b0ea98cd3e263521d19413440fcc9190762f8c0e5fce163",
+          "package_lock_sha256": "875e3714c1a69ec74d3510afa73a82e98c0d9cac6ea168587d0ba631a7116ffc",
+          "python_requirements_fully_pinned": true,
+          "python_locked_distribution_count": 10,
+          "python_lock_profile": {
+            "id": "windows_x64_cpython_3_14",
+            "compatible": true,
+            "host_platform": "win32",
+            "host_python": "3.14",
+            "host_machine": "amd64"
+          }
+        },
+        "runtime_created": false,
+        "database_created": false
+      }
+    },
+    {
+      "ordinal": 8,
+      "archive_name": "ai_collaboration_studio-source-20260823T203058Z-75cb28185733.zip",
+      "archive_sha256": "287fcfd28e2da5e4b02c868db0360f7a86678e8b413a3addce00155b187084b8",
+      "release_id": "20260823T203058Z-75cb28185733",
+      "source_total_sha256": "75cb28185733985d78f6bc2808e80a8b4a7cfb59536f09a4863c384b9efdd25a",
+      "file_count": 546,
+      "total_size": 13278188,
+      "project_version": "0.1.0",
+      "clean_source_exclusions": {
+        ".git": true,
+        "runtime": true,
+        "node_modules": true,
+        "dist": true
+      },
+      "project_markers": {
+        "server.py": true,
+        "requirements.txt": true,
+        "requirements-lock-win-py314.txt": true,
+        "frontend/package.json": true,
+        "frontend/package-lock.json": true
+      },
+      "entrypoints": {
+        "bootstrap": true,
+        "fresh_source_smoke": true,
+        "release_drill": true,
+        "backend_isolated_runner": true,
+        "frontend_safe_runner": true
+      },
+      "server_static_tokens": {
+        "server_present": true,
+        "startup_preflight_token_present": true,
+        "owner_lock_token_present": false,
+        "skip_local_env_token_present": false
+      },
+      "requirements": {
+        "present": true,
+        "sha256": "8edee15d683c09b79db27d6eaec4677f5aafdc79cc2866e44d1c3ec284f9fa58"
+      },
+      "python_lock": {
+        "present": true,
+        "sha256": "22e149f601a83f26833cff20d32cbf5aaa01242906de0d8cf9d53a6e569ea699",
+        "component_count": 10,
+        "component_set_sha256": "3cba6ab68056142e91469202fad6d6c538997f6ddb91092c6bfdb3f7ffc457e1",
+        "components": [
+          {
+            "name": "futu-api",
+            "version": "10.10.7008"
+          },
+          {
+            "name": "numpy",
+            "version": "2.5.2"
+          },
+          {
+            "name": "pandas",
+            "version": "3.0.5"
+          },
+          {
+            "name": "protobuf",
+            "version": "7.36.0"
+          },
+          {
+            "name": "pycryptodome",
+            "version": "3.23.0"
+          },
+          {
+            "name": "pypdf",
+            "version": "6.16.2"
+          },
+          {
+            "name": "python-dateutil",
+            "version": "2.9.0.post0"
+          },
+          {
+            "name": "simplejson",
+            "version": "4.1.1"
+          },
+          {
+            "name": "six",
+            "version": "1.17.0"
+          },
+          {
+            "name": "tzdata",
+            "version": "2026.3"
+          }
+        ]
+      },
+      "npm_lock": {
+        "present": true,
+        "sha256": "875e3714c1a69ec74d3510afa73a82e98c0d9cac6ea168587d0ba631a7116ffc",
+        "lockfile_version": 3,
+        "component_count": 155,
+        "component_set_sha256": "830d1bcd8a2fc2dee9e56a2c13dc6bbbf5c7cf02229ae6b73d6906fa62a2a7c4",
+        "direct_runtime_dependency_count": 3,
+        "direct_dev_dependency_count": 3
+      },
+      "external_current_bootstrap_check_only": {
+        "ok": true,
+        "error_code": null,
+        "inputs": {
+          "requirements_sha256": "8edee15d683c09b79db27d6eaec4677f5aafdc79cc2866e44d1c3ec284f9fa58",
+          "requirements_lock_sha256": "22e149f601a83f26833cff20d32cbf5aaa01242906de0d8cf9d53a6e569ea699",
+          "package_json_sha256": "b8d30d4e7f41abf97b0ea98cd3e263521d19413440fcc9190762f8c0e5fce163",
+          "package_lock_sha256": "875e3714c1a69ec74d3510afa73a82e98c0d9cac6ea168587d0ba631a7116ffc",
+          "python_requirements_fully_pinned": true,
+          "python_locked_distribution_count": 10,
+          "python_lock_profile": {
+            "id": "windows_x64_cpython_3_14",
+            "compatible": true,
+            "host_platform": "win32",
+            "host_python": "3.14",
+            "host_machine": "amd64"
+          }
+        },
+        "runtime_created": false,
+        "database_created": false
+      }
+    }
+  ],
+  "transitions": [
+    {
+      "baseline_release_id": "20260812T135952Z-b47eb401a23b",
+      "current_release_id": "20260812T140543Z-307418d42388",
+      "project_version_changed": false,
+      "python_lock_presence_before": false,
+      "python_lock_presence_after": false,
+      "python_lock_changed": false,
+      "npm_lock_changed": false,
+      "python_component_count_before": null,
+      "python_component_count_after": null,
+      "npm_component_count_before": 116,
+      "npm_component_count_after": 116
+    },
+    {
+      "baseline_release_id": "20260812T140543Z-307418d42388",
+      "current_release_id": "20260812T140631Z-48b029a585ac",
+      "project_version_changed": false,
+      "python_lock_presence_before": false,
+      "python_lock_presence_after": false,
+      "python_lock_changed": false,
+      "npm_lock_changed": false,
+      "python_component_count_before": null,
+      "python_component_count_after": null,
+      "npm_component_count_before": 116,
+      "npm_component_count_after": 116
+    },
+    {
+      "baseline_release_id": "20260812T140631Z-48b029a585ac",
+      "current_release_id": "20260812T141544Z-d075f0771cc2",
+      "project_version_changed": false,
+      "python_lock_presence_before": false,
+      "python_lock_presence_after": false,
+      "python_lock_changed": false,
+      "npm_lock_changed": false,
+      "python_component_count_before": null,
+      "python_component_count_after": null,
+      "npm_component_count_before": 116,
+      "npm_component_count_after": 116
+    },
+    {
+      "baseline_release_id": "20260812T141544Z-d075f0771cc2",
+      "current_release_id": "20260812T144214Z-a85889aafc3d",
+      "project_version_changed": false,
+      "python_lock_presence_before": false,
+      "python_lock_presence_after": false,
+      "python_lock_changed": false,
+      "npm_lock_changed": false,
+      "python_component_count_before": null,
+      "python_component_count_after": null,
+      "npm_component_count_before": 116,
+      "npm_component_count_after": 116
+    },
+    {
+      "baseline_release_id": "20260812T144214Z-a85889aafc3d",
+      "current_release_id": "20260823T201640Z-3574206b065b",
+      "project_version_changed": false,
+      "python_lock_presence_before": false,
+      "python_lock_presence_after": true,
+      "python_lock_changed": true,
+      "npm_lock_changed": true,
+      "python_component_count_before": null,
+      "python_component_count_after": 10,
+      "npm_component_count_before": 116,
+      "npm_component_count_after": 155
+    },
+    {
+      "baseline_release_id": "20260823T201640Z-3574206b065b",
+      "current_release_id": "20260823T202121Z-de0086296fed",
+      "project_version_changed": false,
+      "python_lock_presence_before": true,
+      "python_lock_presence_after": true,
+      "python_lock_changed": false,
+      "npm_lock_changed": false,
+      "python_component_count_before": 10,
+      "python_component_count_after": 10,
+      "npm_component_count_before": 155,
+      "npm_component_count_after": 155
+    },
+    {
+      "baseline_release_id": "20260823T202121Z-de0086296fed",
+      "current_release_id": "20260823T203058Z-75cb28185733",
+      "project_version_changed": false,
+      "python_lock_presence_before": true,
+      "python_lock_presence_after": true,
+      "python_lock_changed": false,
+      "npm_lock_changed": false,
+      "python_component_count_before": 10,
+      "python_component_count_after": 10,
+      "npm_component_count_before": 155,
+      "npm_component_count_after": 155
+    }
+  ],
+  "ports": {
+    "before": {
+      "8770": false,
+      "11111": false,
+      "18787": false
+    },
+    "after": {
+      "8770": false,
+      "11111": false,
+      "18787": false
+    }
+  },
+  "duration_seconds": 5.235,
+  "boundaries": {
+    "system_temp_only": true,
+    "archive_manifests_verified": true,
+    "archive_code_executed": false,
+    "historical_bootstrap_executed": false,
+    "external_current_bootstrap_check_only_executed": true,
+    "dependency_downloads_performed": false,
+    "dependency_installation_performed": false,
+    "full_fresh_source_smoke_executed": false,
+    "application_started": false,
+    "database_migration_executed": false,
+    "formal_database_opened": false,
+    "runtime_or_database_files_created": false,
+    "external_network_requests": 0,
+    "child_processes_started": 0,
+    "dependency_lock_parse_compatibility_proven_for_passed_archives": true,
+    "dependency_resolution_compatibility_proven": false,
+    "application_runtime_compatibility_proven": false,
+    "database_upgrade_compatibility_proven": false,
+    "production_compatibility_proven": false
+  }
+}

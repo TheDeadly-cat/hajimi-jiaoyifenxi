@@ -60,6 +60,14 @@ const artifactDialogStyles = readFileSync(
   new URL("../src/styles/artifact-dialog.css", import.meta.url),
   "utf8",
 );
+const projectReadinessSource = readFileSync(
+  new URL("../src/components/ProjectReadinessPanel.jsx", import.meta.url),
+  "utf8",
+);
+const projectReadinessStyles = readFileSync(
+  new URL("../src/styles/project-readiness-refinement.css", import.meta.url),
+  "utf8",
+);
 const observationPanelSource = readFileSync(
   new URL("../src/components/ObservationPanel.jsx", import.meta.url),
   "utf8",
@@ -106,9 +114,12 @@ test("chat, sidebar and composer stay eager while heavy host surfaces use direct
   assert.doesNotMatch(appSource, /import\("\.\/components(?:\/index)?"\)/);
 });
 
-test("deferred surfaces mount on first open and remain mounted to preserve local state", () => {
+test("deferred surfaces activate on open and remain mounted through a bounded exit", () => {
   assert.match(appSource, /function useDeferredActivation\(active\)/);
-  assert.match(appSource, /if \(active\) setActivated\(true\)/);
+  assert.match(appSource, /const DEFERRED_SURFACE_EXIT_MS = 240/);
+  assert.match(appSource, /if \(active\) \{\s*setActivated\(true\);\s*return undefined;\s*\}/);
+  assert.match(appSource, /globalThis\.setTimeout\([\s\S]*setActivated\(false\)[\s\S]*DEFERRED_SURFACE_EXIT_MS/);
+  assert.match(appSource, /return \(\) => globalThis\.clearTimeout\(timer\)/);
   assert.match(appSource, /return Boolean\(active\) \|\| activated/);
   assert.match(appSource, /const inspectorActivated = useDeferredActivation\(inspectorOpen\)/);
   assert.match(appSource, /const artifactActivated = useDeferredActivation\(Boolean\(editingArtifact\)\)/);
@@ -119,7 +130,7 @@ test("deferred surfaces mount on first open and remain mounted to preserve local
 });
 
 test("every lazy host surface has an explicit Suspense fallback", () => {
-  assert.match(appSource, /import \{ Suspense, lazy,/);
+  assert.match(appSource, /import \{\s*Suspense,\s*lazy,/);
   assert.match(appSource, /import \{ DeferredSurfaceFallback \} from "\.\/DeferredSurfaceFallback\.js"/);
   assert.match(deferredFallbackSource, /export function DeferredSurfaceFallback/);
   const lazyCount = (appSource.match(/= lazy\(/g) || []).length;
@@ -258,6 +269,26 @@ test("artifact workspace CSS follows its lazy dialog while eager host entries an
 
   assert.match(artifactDialogStyles, /@media \(max-width: 620px\)[\s\S]*\.artifact-item-title\s*\{[\s\S]*min-height:\s*44px;[\s\S]*font-size:\s*12px;[\s\S]*line-height:\s*1\.4;[\s\S]*white-space:\s*normal;/);
   assert.match(artifactDialogStyles, /@media \(max-width: 620px\)[\s\S]*\.artifact-item-remove\s*\{\s*width:\s*44px;\s*height:\s*44px;\s*\}/);
+});
+
+test("project readiness stays nested lazy with an explicit read-only fallback and module-owned refinement CSS", () => {
+  assert.doesNotMatch(
+    artifactDialogSource,
+    /import \{ ProjectReadinessPanel \} from "\.\/ProjectReadinessPanel"/,
+  );
+  assert.match(
+    artifactDialogSource,
+    /const ProjectReadinessPanel = lazy\(\(\) => import\("\.\/ProjectReadinessPanel\.jsx"\)/,
+  );
+  assert.match(artifactDialogSource, /function ProjectReadinessFallback\(\{ artifactVersion \}\)/);
+  assert.match(
+    artifactDialogSource,
+    /<Suspense fallback=\{<ProjectReadinessFallback artifactVersion=\{workingArtifact\.version\} \/>\}>/,
+  );
+  assert.match(artifactDialogSource, /不产生 Provider 调用、市场读取、业务写入或授权结论/);
+  assert.match(projectReadinessSource, /import "\.\.\/styles\/project-readiness-refinement\.css";/);
+  assert.match(projectReadinessStyles, /\.project-readiness-panel\.readiness-docket/);
+  assert.match(projectReadinessStyles, /\.project-readiness-locator/);
 });
 
 test("mobile inspector heading precedes every lazy domain panel", () => {

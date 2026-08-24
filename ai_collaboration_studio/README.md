@@ -94,6 +94,36 @@ AI 共创室是通用多 AI 协作群聊。用户创建房间，为不同 AI 配
 - 不执行真实交易、投注、支付或其他资金动作。
 - 本地服务在创建监听前拒绝 `0.0.0.0`、局域网地址和其他非回环地址；每个请求还核验真实客户端地址必须是 IPv4 / IPv6 回环，不能只靠可伪造的 `Host: localhost`。写接口继续要求同源 JSON 与进程级随机会话令牌，页面拒绝 iframe 嵌入。令牌只存在于当前本机进程和前端内存，不写入 SQLite。
 
+## 统一 Bootstrap 与干净源 Smoke
+
+首次安装或依赖变更后，显式授权访问 PyPI/npm registry，并把 Python 虚拟环境与 npm cache 写入源码备份排除的 `runtime/bootstrap`：
+
+```powershell
+python scripts\bootstrap_ai_collaboration_studio.py --allow-dependency-downloads
+```
+
+该命令不加载 `.env.local`、不启动应用、不创建或打开正式 SQLite，也不连接 Provider、Futu/OpenD、SEC 或 IR；随后桌面 launcher 会优先使用 `runtime/bootstrap/python/Scripts/python.exe`。只读检查参数、工具和输入哈希而不安装任何内容，可运行：
+
+```powershell
+python scripts\bootstrap_ai_collaboration_studio.py --check-only
+```
+
+项目当前不是 Git 仓库。以下验收因此使用已有严格备份器生成并离线校验源码 ZIP，再解包到系统临时目录，不能表述为远程 Git clone；依赖下载需要再次显式授权：
+
+```powershell
+python scripts\run_fresh_source_smoke.py --allow-dependency-downloads
+```
+
+fresh-source smoke 通过 Windows IP Helper API 被动读取 8770、11111、18787 的 IPv4/IPv6
+listener 表，不会向这些受保护端口发起 `connect` / `connect_ex`；只有本次隔离启动的随机
+回环端口会用于 readiness、version、前端和停止后 listener 验收。
+
+smoke 会验证源码排除规则、全新 Python/npm 安装、README 指定的前端安全回归、production build、宿主定向测试和随机回环端口启动，最后删除临时源码、依赖、runtime 与数据库。`requirements.txt` 保留直接依赖兼容范围；实际 bootstrap 使用 `requirements-lock-win-py314.txt` 的精确版本与发行包 SHA，并要求最终 `pip freeze` 完全匹配。该 lock 只覆盖 Windows x64 CPython 3.14，不代表其他平台或字节级构建可复现。
+
+`.github/workflows/isolated-validation.yml` 为未来进入 GitHub 仓库后的 Windows CI 定义：受控前端全量、完整隔离后端层和 clean-source smoke 分别执行。当前目录仍不是 Git 仓库，本地创建该工作流文件不等于 CI 已在 GitHub 实际触发或通过。
+
+CI 中所有第三方 `uses:` 已固定到 2026-08-24 从对应 `actions/*` 官方仓库主版本标签只读解析出的完整提交 SHA；更新 action 必须重新解析、审阅并同步修改契约测试，禁止退回浮动标签。提交固定降低标签漂移风险，但不替代上游代码审阅、依赖告警或实际 CI 运行证据。
+
 ## 本地运行
 
 ```powershell
@@ -108,7 +138,14 @@ python server.py
 
 打开：`http://127.0.0.1:8770/`
 
-桌面快捷方式为 `AI 共创室 - 交易分析.lnk`，入口脚本使用 `scripts/start_ai_collaboration_studio.ps1`：若 8770 上已经是本项目服务则直接打开；否则在后台启动服务并等待健康检查通过。若端口被其他程序占用，入口会失败关闭，不结束或替换现有进程。入口本身不调用 Provider、Futu 或任何交易接口。
+桌面快捷方式为 `AI 共创室 - 交易分析.lnk`，入口脚本使用 `scripts/start_ai_collaboration_studio.ps1`：若 8770 上已经是通过宿主 readiness 契约识别的本项目服务则直接打开；否则在后台启动服务并等待 readiness 通过。若端口被其他程序、旧版服务或未就绪实例占用，入口会失败关闭，不结束或替换现有进程。入口本身不调用 Provider、Futu 或任何交易接口。
+
+宿主交付端点均为只读 JSON，且不探测 Provider、不返回密钥、数据库路径或会话令牌：
+
+- `GET /api/health` 只证明进程存活，不代表数据库、恢复流程或 production frontend 已就绪。
+- `GET /api/readiness` 使用 `host_readiness_v1`；只有启动所有权/迁移 gate 已完成、当前数据库句柄仍存在且 `frontend/dist/index.html` 可读时才返回 `200` 与 `ready: true`，否则返回 `503`。
+- `GET /api/version` 使用 `host_version_v1`，返回产品 `0.1.0`、宿主 API 契约版本及 production frontend `index.html` 的字节数和 SHA256。
+- 未注册的 `/api` GET 路径返回 JSON `404 / API_NOT_FOUND`，不会落入前端 SPA fallback 形成伪 `200 text/html`。
 
 服务会从项目目录及父目录的 `.env.local` 安全读取模型密钥。密钥不会发送到前端，也不会写入 SQLite。当前没有可用模型执行器时，界面明确显示不可用状态，不生成伪造回复。
 
@@ -376,12 +413,27 @@ python scripts/run_isolated_12_role_e2e.py `
 ## 验证
 
 ```powershell
+$env:AI_STUDIO_SKIP_LOCAL_ENV = "1"
+python scripts\run_static_security_checks.py --report "$env:TEMP\ai-studio-static-security.json"
+python scripts\run_isolated_release_drill.py --report "$env:TEMP\ai-studio-release-drill.json"
+$dependencyInventory = Join-Path $env:TEMP ("ai-studio-dependency-inventory-" + [guid]::NewGuid().ToString("N") + ".json")
+python scripts\generate_dependency_inventory.py --output $dependencyInventory
+python scripts\generate_dependency_inventory.py --verify $dependencyInventory
 python scripts\run_backend_tests_isolated.py --layer migration --verbosity 2
 python scripts\run_backend_tests_isolated.py --layer domains --verbosity 2
+python scripts\run_backend_tests_isolated.py --layer delivery --verbosity 2
 python scripts\run_backend_tests_isolated.py --layer full --verbosity 1
 npm.cmd --prefix frontend test
 npm.cmd --prefix frontend run build
 ```
+
+`run_static_security_checks.py` 是不联网、无第三方扫描器依赖的发布源基线。它复用版本化源码备份的排除规则，检查 GitHub Actions 是否固定到完整 commit SHA、CI 是否继续使用隔离入口、fresh-source/release drill 是否只被动读取受保护端口、Python 锁文件是否逐项精确哈希、宿主是否只使用结构化日志，以及发布源中是否出现高置信凭证或私钥特征。报告明确保留 `sast_complete=false`、`dependency_cve_audit=false` 和 `penetration_test=false`；通过不代表已完成完整 SAST、在线依赖漏洞审计或渗透测试。
+
+宿主控制的生命周期与 HTTP 元数据写入单行 `studio_log_event_v1` JSONL。HTTP 日志只保留方法、资源类别和状态码，不记录动态 ID、查询参数、请求头、请求体、会话令牌或 Provider 载荷；启动失败只记录阶段和异常类型，不输出数据库路径或原始异常文本。launcher 的 `server-*.stdout.log` 因而可逐行解析；已处理的启动失败不应向 `stderr` 泄漏路径。
+
+`run_isolated_release_drill.py` 在系统临时目录创建两个 manifest 校验的合成源码版本，验证不可覆盖安装、原子 active pointer、升级、注入 `not_ready` 和显式回滚，并要求外置临时 SQLite 文件族逐字节不变。它不安装依赖、不启动应用、不执行数据库迁移、不访问正式库或外网。该演练只证明当前 release lifecycle 机制失败关闭；`historical_upgrade_compatibility_proven=false`，不能替代真实历史版本升级、正式迁移或生产回滚验收。
+
+`generate_dependency_inventory.py` 只读取精确 Python hash lock 与 npm package-lock v3，在系统临时目录无覆盖写入确定性的 `dependency_inventory_v1`。`--verify` 同时核验闭合结构、内部 SHA-256，并从当前权威锁重建清单逐字段对比。清单包含组件版本、相对 lock locator、完整性摘要和直接/传递范围，不查询 registry、不安装包，也不包含绝对源码路径。其哈希不是数字签名；它明确保留 `vulnerabilities_evaluated=false`、`licenses_evaluated=false` 和 `sbom_standard_conformance_claimed=false`，不能替代 CVE、许可证或标准 SBOM 审计。
 
 前端测试入口按文件逐一创建受监控进程；每个文件使用单并发、`--test-isolation=none`、2 GiB old-space、3 GiB private-memory 守卫、64 MiB 输出守卫和 120 秒超时。输出以临时文件流式承接而不是堆在 runner 内存中；超限或 runner 自身发生异常时都会回收整棵测试进程树并删除临时文件，避免 Windows 本机因失控测试耗尽提交内存。不要绕过该入口直接运行 `node --test`；定向验证单个文件时使用 `npm.cmd --prefix frontend run test:file -- tests/<name>.test.js`。`roomInspectorNestedLazy.dom.test.js` 已改为无 Vite/JSDOM 副作用的静态契约回归，禁止重新引入顶层 Vite server 或未决 lazy-module gate。
 

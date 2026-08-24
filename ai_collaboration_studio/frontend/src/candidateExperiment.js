@@ -4,6 +4,10 @@ import { artifactCandidateGovernance } from "./candidateGovernance.js";
 export const CANDIDATE_EXPERIMENT_REQUEST_VERSION = "candidate_experiment_request_v1";
 export const CANDIDATE_EXPERIMENT_AUTHORIZATION_VERSION = "candidate_experiment_authorization_v1";
 export const CANDIDATE_EXPERIMENT_COHORT_VERSION = "candidate_experiment_cohort_v1";
+export const CANDIDATE_EXPERIMENT_ARM_LIMIT = 6;
+export const CANDIDATE_EXPERIMENT_EVIDENCE_LIMIT = 100;
+export const CANDIDATE_EXPERIMENT_ISSUE_LIMIT = 200;
+export const CANDIDATE_EXPERIMENT_RECORD_FIELD_LIMIT = 100;
 
 const SCENARIO_IDS = Object.freeze(["baseline", "stressed", "severe"]);
 const STORAGE_SYMBOLS = new Set(["US.MU", "US.SNDK", "US.WDC", "US.STX"]);
@@ -24,8 +28,10 @@ function isRecord(value) {
 }
 
 
-function text(value) {
-  return typeof value === "string" && value.trim() ? value.trim() : "";
+function text(value, maxLength = 1000) {
+  return typeof value === "string" && value.trim()
+    ? value.trim().slice(0, maxLength)
+    : "";
 }
 
 
@@ -163,16 +169,16 @@ export function candidateExperimentAuthorizationGate(artifact) {
     }
     const review = reviews[0];
     const snapshot = review.candidateSnapshot;
-    const symbol = text(snapshot.symbol).toUpperCase();
-    const direction = text(snapshot.direction).toUpperCase();
+    const symbol = text(snapshot.symbol, 40).toUpperCase();
+    const direction = text(snapshot.direction, 20).toUpperCase();
     const horizonDays = positiveInteger(snapshot.horizon_days);
     if (
-      !text(snapshot.title)
+      !text(snapshot.title, 400)
       || !STORAGE_SYMBOLS.has(symbol)
       || !["UP", "DOWN"].includes(direction)
       || !horizonDays
-      || !text(snapshot.thesis)
-      || !text(snapshot.invalidation)
+      || !text(snapshot.thesis, 4000)
+      || !text(snapshot.invalidation, 2000)
     ) {
       appendIssue(
         issues,
@@ -183,7 +189,7 @@ export function candidateExperimentAuthorizationGate(artifact) {
     }
     candidates.push({
       id: candidate.id,
-      title: text(snapshot.title) || candidate.title || candidate.id,
+      title: text(snapshot.title, 400) || candidate.title || candidate.id,
       revision: candidate.revision,
       originMessageId: candidate.originMessageId,
       latestMessageId: candidate.latestMessageId,
@@ -191,8 +197,8 @@ export function candidateExperimentAuthorizationGate(artifact) {
       symbol,
       direction,
       horizonDays,
-      thesis: text(snapshot.thesis),
-      invalidation: text(snapshot.invalidation),
+      thesis: text(snapshot.thesis, 4000),
+      invalidation: text(snapshot.invalidation, 2000),
     });
   }
   if (candidates.length < 2) {
@@ -216,6 +222,11 @@ export function candidateExperimentAuthorizationGate(artifact) {
 function validClientRequestId(value) {
   const normalized = text(value);
   return /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(normalized) ? normalized : "";
+}
+
+
+export function candidateExperimentErrorMessage(error, fallback = "联合实验失败，未展示任何指标。") {
+  return text(error?.message, 1000) || text(fallback, 1000) || "联合实验失败，未展示任何指标。";
 }
 
 
@@ -263,7 +274,7 @@ export function buildCandidateExperimentRequest(
   const gate = candidateExperimentAuthorizationGate(artifact);
   if (!gate.ready) throw new Error(gate.reason || "当前产物不能授权历史联合实验。");
   const selectedIds = Array.isArray(candidateIds)
-    ? candidateIds.map(text).filter(Boolean)
+    ? candidateIds.map((candidateId) => text(candidateId, 240)).filter(Boolean)
     : [];
   if (
     selectedIds.length < 2
@@ -294,7 +305,14 @@ export function buildCandidateExperimentRequest(
 export function candidateExperimentSelectionFingerprint(artifact, candidateIds) {
   const gate = candidateExperimentAuthorizationGate(artifact);
   if (!gate.ready) return "";
-  const selectedIds = Array.isArray(candidateIds) ? candidateIds.map(text).filter(Boolean) : [];
+  const selectedIds = Array.isArray(candidateIds)
+    ? candidateIds.map((candidateId) => text(candidateId, 240)).filter(Boolean)
+    : [];
+  if (
+    selectedIds.length < 2
+    || selectedIds.length > 6
+    || new Set(selectedIds).size !== selectedIds.length
+  ) return "";
   const byId = new Map(gate.candidates.map((candidate) => [candidate.id, candidate]));
   const selected = selectedIds.map((candidateId) => byId.get(candidateId));
   if (selected.some((candidate) => !candidate)) return "";
@@ -310,6 +328,101 @@ export function candidateExperimentSelectionFingerprint(artifact, candidateIds) 
       candidate.snapshotSha256,
     ]),
   });
+}
+
+
+/**
+ * Project display-only control state from exact candidate semantics.
+ * This helper never grants authorization or creates a request.
+ */
+export function candidateExperimentControlState({
+  gateReady = false,
+  readOnly = false,
+  loading = false,
+  acknowledged = false,
+  selectedCandidateIds = [],
+  selectionFingerprint = "",
+  resultReady = false,
+} = {}) {
+  const selectedIds = Array.isArray(selectedCandidateIds)
+    ? selectedCandidateIds.map((candidateId) => text(candidateId, 240)).filter(Boolean)
+    : [];
+  const selectedCount = selectedIds.length;
+  const uniqueSelection = new Set(selectedIds).size === selectedCount;
+  const selectionReady = selectedCount >= 2
+    && selectedCount <= 6
+    && uniqueSelection
+    && Boolean(text(selectionFingerprint));
+  const controlsAvailable = gateReady === true && readOnly !== true;
+  const canAcknowledge = controlsAvailable && loading !== true && selectionReady;
+  const canRun = canAcknowledge && acknowledged === true;
+
+  let phase = "select";
+  let instruction = "还需选择 " + Math.max(0, 2 - selectedCount) + " 个候选，最多可选 6 个。";
+  let actionLabel = "运行所选 " + selectedCount + " 个候选";
+  if (readOnly) {
+    phase = "read_only";
+    instruction = "当前冻结合同仅允许查看，不能创建新的历史实验。";
+    actionLabel = "只读，不能运行实验";
+  } else if (gateReady !== true) {
+    phase = "blocked";
+    instruction = "候选治理或精确版本绑定未就绪，实验控制已关闭。";
+    actionLabel = "治理授权不可用";
+  } else if (loading) {
+    phase = "running";
+    instruction = "正在以冻结数据和共同规格复算；当前选择已锁定。";
+    actionLabel = "正在原子复算并重读完整性…";
+  } else if (selectedCount > 6 || !uniqueSelection || (selectedCount >= 2 && !selectionReady)) {
+    phase = "select";
+    instruction = "当前选择无法形成 2–6 个唯一候选的精确语义封印。";
+    actionLabel = "当前选择无法精确绑定";
+  } else if (!selectionReady) {
+    phase = "select";
+  } else if (acknowledged !== true) {
+    phase = "authorize";
+    instruction = "选择已精确绑定；确认一次性历史比较授权后才能运行。";
+    actionLabel = "确认只读授权后运行";
+  } else if (resultReady) {
+    phase = "review";
+    instruction = "完整性已通过；请复核共同规格、三档摩擦与反证，再由用户独立决定。";
+    actionLabel = "按同一请求编号重新核验 " + selectedCount + " 个候选";
+  } else {
+    phase = "ready";
+    instruction = "一次性历史比较授权已确认；可以运行受约束实验。";
+  }
+
+  const workflowAvailable = gateReady === true && readOnly !== true;
+  const authorizationComplete = selectionReady && acknowledged === true;
+  const stepDefinitions = [
+    { key: "select", order: "01", label: "选择候选" },
+    { key: "authorize", order: "02", label: "确认授权" },
+    { key: "run", order: "03", label: "原子复算" },
+    { key: "review", order: "04", label: "独立复核" },
+  ];
+  const steps = stepDefinitions.map((step) => {
+    let status = "pending";
+    if (!workflowAvailable) status = "locked";
+    else if (step.key === "select") status = selectionReady ? "complete" : "active";
+    else if (step.key === "authorize") {
+      status = authorizationComplete ? "complete" : selectionReady ? "active" : "pending";
+    } else if (step.key === "run") {
+      status = resultReady ? "complete" : loading || canRun ? "active" : "pending";
+    } else if (step.key === "review") {
+      status = resultReady ? "active" : "pending";
+    }
+    return { ...step, status };
+  });
+
+  return {
+    phase,
+    selectedCount,
+    selectionReady,
+    canAcknowledge,
+    canRun,
+    instruction,
+    actionLabel,
+    steps,
+  };
 }
 
 
@@ -338,7 +451,27 @@ function evidenceItem(value) {
 
 
 function evidenceItems(value) {
-  return (Array.isArray(value) ? value : []).map(evidenceItem).filter(Boolean);
+  const rows = Array.isArray(value) ? value : [];
+  if (rows.length > CANDIDATE_EXPERIMENT_EVIDENCE_LIMIT) {
+    return { items: [], integrityReady: false };
+  }
+  return {
+    items: rows.map(evidenceItem).filter(Boolean),
+    integrityReady: true,
+  };
+}
+
+
+function blockerView(value) {
+  const blocker = isRecord(value) ? value : {};
+  return {
+    message: text(blocker.message, 1000),
+    reason: text(blocker.reason, 1000),
+    detail: text(blocker.detail, 1000),
+    code: text(blocker.code, 120),
+    symbol: text(blocker.symbol, 40),
+    date: text(blocker.date, 40),
+  };
 }
 
 
@@ -376,7 +509,9 @@ function scenarioView(value) {
     meanWindowReturnPct: metricsVisible ? rawMetrics.meanWindowReturnPct : null,
     worstWindowReturnPct: metricsVisible ? rawMetrics.worstWindowReturnPct : null,
     capacityGapUsd: blocked ? strictNumber(scenario.capacity_gap_usd) : null,
-    firstBlocker: blocked && isRecord(scenario.first_blocker) ? scenario.first_blocker : null,
+    firstBlocker: blocked && isRecord(scenario.first_blocker)
+      ? blockerView(scenario.first_blocker)
+      : null,
   };
 }
 
@@ -388,7 +523,10 @@ function sharedHash(arm, primary, alternative) {
 
 function armView(value, specSha256, datasetSealSha256) {
   const arm = isRecord(value) ? value : {};
-  const scenarios = Array.isArray(arm.scenarios) ? arm.scenarios.map(scenarioView) : [];
+  const rawScenarios = Array.isArray(arm.scenarios) ? arm.scenarios : [];
+  const scenarios = rawScenarios.length === SCENARIO_IDS.length
+    ? rawScenarios.map(scenarioView)
+    : [];
   const scenarioShapeReady = scenarios.length === SCENARIO_IDS.length
     && scenarios.every((scenario, index) => (
       scenario.id === SCENARIO_IDS[index] && scenario.integrityReady
@@ -408,6 +546,8 @@ function armView(value, specSha256, datasetSealSha256) {
     "shared_dataset_seal_sha256",
     "dataset_seal_sha256",
   );
+  const evidence = evidenceItems(arm.evidence);
+  const counterevidence = evidenceItems(arm.counterevidence);
   const integrityReady = positiveInteger(arm.sequence_no)
     && candidateId
     && candidateRevision
@@ -423,6 +563,8 @@ function armView(value, specSha256, datasetSealSha256) {
     && armDatasetSealSha256 === datasetSealSha256
     && arm.integrity_ok === true
     && fixedSafetyReady(arm)
+    && evidence.integrityReady
+    && counterevidence.integrityReady
     && armMetricsFieldReady
     && scenarioShapeReady;
   return {
@@ -436,8 +578,8 @@ function armView(value, specSha256, datasetSealSha256) {
     side,
     thesis: text(arm.thesis),
     invalidation: text(arm.invalidation),
-    evidence: evidenceItems(arm.evidence),
-    counterevidence: evidenceItems(arm.counterevidence),
+    evidence: evidence.items,
+    counterevidence: counterevidence.items,
     candidateBindingSha256: sha256(arm.candidate_binding_sha256),
     specSha256: armSpecSha256,
     datasetSealSha256: armDatasetSealSha256,
@@ -490,17 +632,31 @@ function sameSelection(left, right) {
 
 
 function responseIssues(experiment) {
-  return [
-    ...(Array.isArray(experiment?.issues) ? experiment.issues : []),
-    ...(Array.isArray(experiment?.integrity_issues) ? experiment.integrity_issues : []),
-  ].flatMap((issue) => {
+  const issues = Array.isArray(experiment?.issues) ? experiment.issues : [];
+  const integrityIssues = Array.isArray(experiment?.integrity_issues)
+    ? experiment.integrity_issues
+    : [];
+  if (issues.length + integrityIssues.length > CANDIDATE_EXPERIMENT_ISSUE_LIMIT) {
+    return [{
+      code: "CANDIDATE_EXPERIMENT_ISSUE_LIMIT_EXCEEDED",
+      message: `实验问题记录超过 ${CANDIDATE_EXPERIMENT_ISSUE_LIMIT} 条安全上限。`,
+    }];
+  }
+  const projected = [...issues, ...integrityIssues].flatMap((issue) => {
     if (typeof issue === "string" && text(issue)) {
-      return [{ code: "CANDIDATE_EXPERIMENT_BLOCKED", message: text(issue) }];
+      return [{ code: "CANDIDATE_EXPERIMENT_BLOCKED", message: text(issue, 1000) }];
     }
     if (!isRecord(issue)) return [];
-    const code = text(issue.code) || "CANDIDATE_EXPERIMENT_BLOCKED";
-    const message = text(issue.message) || "联合实验完整性未通过。";
+    const code = text(issue.code, 120) || "CANDIDATE_EXPERIMENT_BLOCKED";
+    const message = text(issue.message, 1000) || "联合实验完整性未通过。";
     return [{ code, message }];
+  });
+  const seen = new Set();
+  return projected.filter((issue) => {
+    const key = `${issue.code}:${issue.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 }
 
@@ -517,14 +673,26 @@ export function candidateExperimentView(value, expected = {}) {
   const aggregateSha256 = sha256(experiment.aggregate_sha256);
   const requestSemanticsSha256 = sha256(experiment.request_semantics_sha256);
   const authorization = isRecord(experiment.authorization) ? experiment.authorization : {};
-  const authorizationSelections = Array.isArray(authorization.candidate_selections)
-    ? authorization.candidate_selections.map(authorizationSelection)
+  const rawAuthorizationSelections = Array.isArray(authorization.candidate_selections)
+    ? authorization.candidate_selections
     : [];
-  const arms = Array.isArray(experiment.arms)
-    ? experiment.arms.map((arm) => armView(arm, specSha256, datasetSealSha256))
+  const authorizationSelectionShapeReady = rawAuthorizationSelections.length >= 2
+    && rawAuthorizationSelections.length <= CANDIDATE_EXPERIMENT_ARM_LIMIT;
+  const authorizationSelections = authorizationSelectionShapeReady
+    ? rawAuthorizationSelections.map(authorizationSelection)
     : [];
-  const expectedSelections = Array.isArray(expected.candidateSelections)
-    ? expected.candidateSelections.map(normalizeExpectedSelection)
+  const rawArms = Array.isArray(experiment.arms) ? experiment.arms : [];
+  const armCollectionShapeReady = rawArms.length >= 2
+    && rawArms.length <= CANDIDATE_EXPERIMENT_ARM_LIMIT;
+  const arms = armCollectionShapeReady
+    ? rawArms.map((arm) => armView(arm, specSha256, datasetSealSha256))
+    : [];
+  const rawExpectedSelections = Array.isArray(expected.candidateSelections)
+    ? expected.candidateSelections
+    : [];
+  const expectedSelectionShapeReady = rawExpectedSelections.length <= CANDIDATE_EXPERIMENT_ARM_LIMIT;
+  const expectedSelections = expectedSelectionShapeReady
+    ? rawExpectedSelections.map(normalizeExpectedSelection)
     : [];
   const roomId = text(experiment.room_id);
   const artifactId = text(experiment.artifact_id);
@@ -547,7 +715,8 @@ export function candidateExperimentView(value, expected = {}) {
     && authorization.does_not_create_artifact_user_decision === true
     && !FORBIDDEN_AUTHORIZATION_KEYS.some((key) => Object.hasOwn(authorization, key))
     && authorizationSelections.length >= 2
-    && authorizationSelections.length <= 6
+    && authorizationSelections.length <= CANDIDATE_EXPERIMENT_ARM_LIMIT
+    && authorizationSelectionShapeReady
     && authorizationSelections.every((selection) => (
       selection.candidateId
       && selection.candidateRevision
@@ -557,7 +726,8 @@ export function candidateExperimentView(value, expected = {}) {
     ));
   const armOrderReady = arms.length === authorizationSelections.length
     && arms.length >= 2
-    && arms.length <= 6
+    && arms.length <= CANDIDATE_EXPERIMENT_ARM_LIMIT
+    && armCollectionShapeReady
     && new Set(arms.map((arm) => arm.candidateId)).size === arms.length
     && arms.every((arm, index) => (
       arm.sequenceNo === index + 1
@@ -566,7 +736,8 @@ export function candidateExperimentView(value, expected = {}) {
       && arm.candidateSnapshotSha256 === authorizationSelections[index]?.snapshotSha256
       && arm.integrityReady
     ));
-  const expectedContextReady = (!expected.roomId || text(expected.roomId) === roomId)
+  const expectedContextReady = expectedSelectionShapeReady
+    && (!expected.roomId || text(expected.roomId) === roomId)
     && (!expected.artifactId || text(expected.artifactId) === artifactId)
     && (!expected.artifactVersion || positiveInteger(expected.artifactVersion) === artifactVersion)
     && (!expected.clientRequestId
@@ -586,6 +757,8 @@ export function candidateExperimentView(value, expected = {}) {
     && experiment.historical_only === true
     && experiment.out_of_sample_claim === false
     && experiment.future_performance_claim === false;
+  const commonSpecFieldCount = Object.keys(commonSpec).length;
+  const datasetSealFieldCount = Object.keys(datasetSeal).length;
   const envelopeReady = experiment.version === CANDIDATE_EXPERIMENT_COHORT_VERSION
     && ["ready", "completed"].includes(text(experiment.status).toLowerCase())
     && experiment.integrity_ok === true
@@ -595,8 +768,10 @@ export function candidateExperimentView(value, expected = {}) {
     && artifactId
     && artifactVersion
     && clientRequestId
-    && Object.keys(commonSpec).length > 0
-    && Object.keys(datasetSeal).length > 0
+    && commonSpecFieldCount > 0
+    && commonSpecFieldCount <= CANDIDATE_EXPERIMENT_RECORD_FIELD_LIMIT
+    && datasetSealFieldCount > 0
+    && datasetSealFieldCount <= CANDIDATE_EXPERIMENT_RECORD_FIELD_LIMIT
     && specSha256
     && datasetSealSha256
     && inputSealSha256

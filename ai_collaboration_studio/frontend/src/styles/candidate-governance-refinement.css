@@ -1,0 +1,228 @@
+.artifact-candidate-governance.governance-ledger {
+  --governance-ink: var(--accent, #24776f);
+  --governance-warm: #b76638;
+  --governance-line: color-mix(in srgb, var(--governance-ink) 22%, transparent);
+  position: relative;
+  container-name: governance-ledger;
+  container-type: inline-size;
+  isolation: isolate;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 96% 4%, color-mix(in srgb, var(--governance-warm) 10%, transparent), transparent 28%),
+    linear-gradient(140deg, color-mix(in srgb, var(--governance-ink) 7%, transparent), transparent 48%);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--governance-ink) 66%, transparent);
+}
+
+.artifact-candidate-governance.governance-ledger::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: -1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--governance-ink), var(--governance-warm), transparent 82%);
+}
+
+.governance-ledger .artifact-governance-ledger {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--governance-line);
+  border-radius: 14px;
+  background: var(--governance-line);
+}
+
+.governance-ledger .artifact-governance-ledger > span:last-child strong {
+  color: #76552f;
+  font-size: 0.82rem;
+}
+
+.governance-ledger .artifact-governance-status.ready {
+  border-color: color-mix(in srgb, var(--governance-ink) 34%, transparent);
+  color: color-mix(in srgb, var(--governance-ink) 88%, #214d60);
+  background: color-mix(in srgb, var(--governance-ink) 8%, white);
+}
+
+.governance-ledger .artifact-candidate-governance-heading > span > strong,
+.governance-ledger .artifact-governance-layer-heading > span > strong {
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
+.governance-ledger .artifact-candidate-governance-heading > span > small,
+.governance-ledger .artifact-governance-layer-heading > span > small,
+.governance-ledger .artifact-governance-summary,
+.governance-ledger .artifact-governance-empty,
+.governance-ledger .artifact-governance-boundary {
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.governance-ledger .artifact-governance-ledger > span {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 0;
+  padding: 0.72rem 0.82rem;
+  background: color-mix(in srgb, var(--panel, #f7f4ec) 94%, transparent);
+}
+
+.governance-ledger .artifact-governance-ledger small {
+  font-size: 0.68rem;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+}
+
+.governance-ledger .artifact-governance-ledger strong {
+  color: var(--governance-ink);
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.governance-ledger .artifact-governance-layer {
+  position: relative;
+  overflow: hidden;
+}
+
+.governance-ledger .artifact-governance-layer[data-layer-state="ready"] {
+  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--governance-ink) 42%, transparent);
+}
+
+.governance-ledger .artifact-governance-layer[data-layer-state="blocked"] {
+  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--governance-warm) 52%, transparent);
+}
+
+.governance-ledger .artifact-governance-list-status {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  gap: 0.45rem 0.7rem;
+  align-items: center;
+  margin: 0;
+  padding: 0.48rem 0.66rem;
+  border-left: 2px solid var(--governance-ink);
+  color: color-mix(in srgb, currentColor 74%, transparent);
+  font-size: 0.76rem;
+}
+
+.governance-ledger .artifact-governance-list-status progress {
+  width: 100%;
+  height: 5px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  color: var(--governance-ink);
+  background: color-mix(in srgb, var(--governance-ink) 14%, transparent);
+}
+
+.governance-ledger .artifact-governance-list-status progress::-webkit-progress-bar {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--governance-ink) 14%, transparent);
+}
+
+.governance-ledger .artifact-governance-list-status progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--governance-ink), var(--governance-warm));
+}
+
+.governance-ledger .artifact-governance-list-status progress::-moz-progress-bar {
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--governance-ink), var(--governance-warm));
+}
+
+.governance-ledger .artifact-governance-list-status progress:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}
+
+.governance-ledger .artifact-lineage-item,
+.governance-ledger .artifact-risk-review-item {
+  contain-intrinsic-block-size: auto 132px;
+  content-visibility: auto;
+  scroll-margin-block: 5rem;
+}
+
+.governance-ledger .artifact-lineage-item strong,
+.governance-ledger .artifact-risk-review-item strong {
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.governance-ledger .artifact-lineage-item small,
+.governance-ledger .artifact-risk-review-item small,
+.governance-ledger .artifact-lineage-item code,
+.governance-ledger .artifact-risk-review-item code,
+.governance-ledger .artifact-risk-review-item em {
+  font-size: 0.68rem;
+  line-height: 1.5;
+}
+
+.governance-ledger .artifact-governance-more {
+  align-self: center;
+  min-height: 44px;
+  touch-action: manipulation;
+}
+
+.governance-ledger .artifact-governance-issue-dossier {
+  border: 1px solid color-mix(in srgb, var(--governance-warm) 26%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--governance-warm) 7%, transparent);
+}
+
+.governance-ledger .artifact-governance-issue-dossier summary {
+  cursor: pointer;
+  min-height: 44px;
+  padding: 0.62rem 0.72rem;
+  font-weight: 750;
+  touch-action: manipulation;
+}
+
+.governance-ledger button:focus-visible,
+.governance-ledger summary:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--governance-ink) 46%, transparent);
+  outline-offset: 3px;
+}
+
+@container governance-ledger (max-width: 760px) {
+  .governance-ledger .artifact-governance-ledger {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .governance-ledger .artifact-governance-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@container governance-ledger (max-width: 620px) {
+  .governance-ledger .artifact-governance-ledger {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .governance-ledger .artifact-governance-ledger > span {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: baseline;
+  }
+
+  .governance-ledger .artifact-governance-more {
+    width: 100%;
+  }
+
+  .governance-ledger .artifact-governance-list-status {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .governance-ledger .artifact-lineage-item,
+  .governance-ledger .artifact-risk-review-item {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .artifact-candidate-governance.governance-ledger,
+  .governance-ledger .artifact-governance-ledger,
+  .governance-ledger .artifact-governance-layer,
+  .governance-ledger .artifact-governance-issue-dossier,
+  .governance-ledger .artifact-governance-list-status progress {
+    border-color: CanvasText;
+  }
+}

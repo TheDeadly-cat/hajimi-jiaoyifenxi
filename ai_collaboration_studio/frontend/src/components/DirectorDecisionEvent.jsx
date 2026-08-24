@@ -2,6 +2,7 @@ import { GitBranch } from "lucide-react";
 import { directorSourceLabel } from "../directorDecision";
 import { stageLabel } from "../workflowPolicy";
 import { DirectorModeratorAttribution } from "./DirectorModeratorAttribution";
+import "../styles/director-decision-polish.css";
 
 function decisionTime(timestamp) {
   const date = new Date(timestamp);
@@ -28,9 +29,9 @@ export function DirectorDecisionEvent({ decision }) {
       aria-label={finish ? "主持建议结束，等待用户复核" : `主持人选择${memberName}发言`}
     >
       <div className="director-trace-head">
-        <span className="director-trace-icon"><GitBranch size={14} /></span>
+        <span className="director-trace-icon"><GitBranch size={14} aria-hidden="true" /></span>
         <strong>{finish ? "主持建议结束，等待用户复核" : `主持人 → ${memberName}`}</strong>
-        {time ? <time>{time}</time> : null}
+        {time ? <time dateTime={decision.created_at || undefined}>{time}</time> : null}
       </div>
       {focusTitle ? <div className="director-trace-focus"><span>当前焦点</span><strong>{focusTitle}</strong></div> : null}
       <DirectorModeratorAttribution context={decision.moderator_context} />

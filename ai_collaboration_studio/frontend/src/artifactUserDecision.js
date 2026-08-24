@@ -398,7 +398,15 @@ export function buildArtifactUserDecisionRequest(
   if (cleanAction !== "support") {
     const decisionGate = artifactUserDecisionGate(artifact);
     if (!decisionGate.ready) {
-      throw new Error(decisionGate.reason || "当前候选治理状态不可用于记录最终决定。");
+      const selection = artifactUserDecisionSelection(artifact);
+      const riskIssue = selection.issues.find((issue) => (
+        cleanText(issue?.code).startsWith("CANDIDATE_RISK_REVIEW_")
+      ));
+      throw new Error(
+        riskIssue?.message
+        || decisionGate.reason
+        || "当前候选治理状态不可用于记录最终决定。",
+      );
     }
     return payload;
   }

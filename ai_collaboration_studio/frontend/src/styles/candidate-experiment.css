@@ -1,0 +1,279 @@
+.candidate-experiment-panel.candidate-experiment-workbench {
+  --experiment-ink: #173f55;
+  --experiment-muted: #687d88;
+  --experiment-rule: #c8d7dc;
+  position: relative;
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+  margin: 15px 16px;
+  padding: 15px;
+  overflow: hidden;
+  border: 1px solid #aec5cd;
+  border-radius: 3px;
+  color: var(--experiment-ink);
+  background:
+    linear-gradient(90deg, rgba(24, 88, 105, 0.13) 0 4px, transparent 4px),
+    repeating-linear-gradient(0deg, rgba(23, 63, 85, 0.035) 0 1px, transparent 1px 25px),
+    linear-gradient(145deg, #fcfefd 0%, #f0f7f5 58%, #edf4f5 100%);
+  box-shadow: 0 12px 28px rgba(28, 67, 79, 0.09), inset 0 1px 0 #fff;
+}
+
+.candidate-experiment-workbench,
+.candidate-experiment-workbench * { box-sizing: border-box; }
+
+.candidate-experiment-workbench::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 112px;
+  height: 7px;
+  background: repeating-linear-gradient(90deg, #397f82 0 9px, transparent 9px 13px);
+  content: "";
+  opacity: 0.78;
+  pointer-events: none;
+}
+
+.candidate-experiment-workbench > * { position: relative; z-index: 1; }
+
+.candidate-experiment-workbench .candidate-experiment-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding-bottom: 11px;
+  border-bottom: 1px solid var(--experiment-rule);
+}
+
+.candidate-experiment-heading-copy { display: grid; min-width: 0; gap: 5px; }
+.candidate-experiment-heading-copy > strong { display: flex; align-items: center; gap: 7px; color: #173f55; font-size: 13px; letter-spacing: 0.015em; }
+.candidate-experiment-heading-copy > strong svg { flex: 0 0 auto; color: #287176; }
+.candidate-experiment-heading-copy > p { margin: 0; color: var(--experiment-muted); font-size: 9px; line-height: 1.55; }
+.candidate-experiment-kicker { color: #5a7a7e; font-size: 7px; font-weight: 900; letter-spacing: 0.17em; }
+
+.candidate-experiment-workbench .candidate-experiment-heading > em {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 1px;
+  min-width: 100px;
+  padding: 6px 8px;
+  border: 1px solid #aac5c6;
+  border-radius: 2px;
+  color: #276568;
+  background: rgba(236, 248, 246, 0.92);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 900;
+  line-height: 1.35;
+  text-align: right;
+}
+.candidate-experiment-workbench .candidate-experiment-heading > em span { color: #6e8789; font-size: 7px; letter-spacing: 0.12em; }
+
+.candidate-experiment-workflow {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.candidate-experiment-workflow li {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 7px;
+  padding: 8px 9px;
+  border: 1px solid #d2dfe2;
+  border-top: 3px solid #a8b8bd;
+  background: rgba(255, 255, 255, 0.82);
+}
+.candidate-experiment-workflow li + li::before { position: absolute; top: calc(50% - 1px); left: -8px; width: 8px; height: 2px; background: #a9babe; content: ""; }
+.candidate-experiment-workflow li[data-step-state="active"] { border-top-color: #b77b2d; background: #fff9ea; }
+.candidate-experiment-workflow li[data-step-state="complete"] { border-top-color: #3f8370; background: #f0f8f4; }
+.candidate-experiment-workflow li[data-step-state="locked"] { border-top-color: #b0a68d; background: #f7f4ec; }
+.candidate-experiment-workflow li > b { grid-row: 1 / 3; align-self: center; color: #71868b; font-family: "Cascadia Code", Consolas, monospace; font-size: 9px; }
+.candidate-experiment-workflow li > span { min-width: 0; color: #2e515e; font-size: 9px; font-weight: 900; }
+.candidate-experiment-workflow li > em { color: #7a8d92; font-size: 7px; font-style: normal; letter-spacing: 0.08em; }
+
+.candidate-experiment-workbench .candidate-experiment-readonly,
+.candidate-experiment-workbench .candidate-experiment-empty,
+.candidate-experiment-workbench .candidate-experiment-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  padding: 9px 10px;
+  border: 1px solid #dfcf9e;
+  border-radius: 2px;
+  color: #755b25;
+  background: #fff9e9;
+  font-size: 9px;
+  line-height: 1.5;
+}
+.candidate-experiment-workbench .candidate-experiment-error { border-color: #e1b6ac; color: #8c4037; background: #fff3f0; }
+.candidate-experiment-workbench .candidate-experiment-readonly svg,
+.candidate-experiment-workbench .candidate-experiment-empty svg,
+.candidate-experiment-workbench .candidate-experiment-error svg { flex: 0 0 auto; margin-top: 1px; }
+
+.candidate-experiment-workbench .candidate-experiment-selector {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  max-height: 360px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid #c8d8dc;
+  background: rgba(247, 251, 250, 0.88);
+}
+.candidate-experiment-workbench .candidate-experiment-selector legend { padding: 0 6px; color: #58737b; font-size: 8px; font-weight: 800; line-height: 1.45; }
+.candidate-experiment-workbench .candidate-experiment-selector > label {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #d3dfe2;
+  border-left: 3px solid #9eb2b7;
+  border-radius: 2px;
+  background: #fff;
+  cursor: pointer;
+}
+.candidate-experiment-workbench .candidate-experiment-selector > label.selected { border-color: #77a6a2; border-left-color: #247873; background: #f0faf7; box-shadow: inset 0 0 0 1px rgba(36, 120, 115, 0.12); }
+.candidate-experiment-workbench .candidate-experiment-selector input { margin: 2px 0 0; accent-color: #247873; }
+.candidate-experiment-workbench .candidate-experiment-selector input:focus-visible { outline: 2px solid #1f7274; outline-offset: 3px; }
+.candidate-experiment-order { min-width: 20px; color: #819297; font-family: "Cascadia Code", Consolas, monospace; font-size: 9px; line-height: 1.5; text-align: center; }
+.candidate-experiment-selector > label.selected .candidate-experiment-order { color: #1f706c; }
+.candidate-experiment-workbench .candidate-experiment-selector > label > span { display: grid; min-width: 0; gap: 3px; }
+.candidate-experiment-workbench .candidate-experiment-selector > label strong { color: #294d59; font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
+.candidate-experiment-workbench .candidate-experiment-selector > label small { color: #73878c; font-size: 8px; line-height: 1.45; overflow-wrap: anywhere; }
+.candidate-experiment-workbench .candidate-experiment-selector-invalidation { padding-top: 4px; border-top: 1px dotted #cbd8da; color: #806545; }
+
+.candidate-experiment-selection-status {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid #d2dfe2;
+  border-left: 4px solid #b18a47;
+  background: rgba(255, 250, 237, 0.9);
+}
+.candidate-experiment-selection-status[data-selection-state="ready"] { border-left-color: #3f8370; background: rgba(241, 249, 245, 0.92); }
+.candidate-experiment-selection-status > span { display: grid; min-width: 58px; padding-right: 10px; border-right: 1px solid #ccd9dc; }
+.candidate-experiment-selection-status > span strong { color: #245a61; font-size: 17px; line-height: 1; }
+.candidate-experiment-selection-status > span small { color: #7a8c90; font-size: 7px; letter-spacing: 0.08em; }
+.candidate-experiment-selection-status > p { margin: 0; color: #536d73; font-size: 9px; line-height: 1.5; }
+
+.candidate-experiment-workbench .candidate-experiment-acknowledgement {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #cbd9dc;
+  background: rgba(255, 255, 255, 0.88);
+  color: #405e65;
+  font-size: 9px;
+  line-height: 1.55;
+}
+.candidate-experiment-workbench .candidate-experiment-acknowledgement input { flex: 0 0 auto; margin-top: 2px; accent-color: #247873; }
+.candidate-experiment-workbench .candidate-experiment-acknowledgement input:focus-visible { outline: 2px solid #1f7274; outline-offset: 3px; }
+
+.candidate-experiment-workbench .candidate-experiment-run {
+  justify-self: end;
+  min-height: 34px;
+  border-color: #397d7a;
+  color: #174f51;
+  background: linear-gradient(180deg, #f5fcfa 0%, #dcefeb 100%);
+  font-weight: 900;
+}
+.candidate-experiment-workbench .candidate-experiment-run:disabled { border-color: #cad4d6; color: #879397; background: #eef2f2; }
+.candidate-experiment-workbench .candidate-experiment-run:focus-visible { outline: 2px solid #1f7274; outline-offset: 3px; }
+
+.candidate-experiment-workbench .candidate-experiment-result {
+  display: grid;
+  min-width: 0;
+  gap: 11px;
+  padding: 12px;
+  border: 1px solid #b7d0c7;
+  border-radius: 2px;
+  background: rgba(246, 252, 249, 0.94);
+}
+.candidate-experiment-workbench .candidate-experiment-result.blocked { display: flex; align-items: flex-start; border-color: #dfb2a7; color: #873f35; background: #fff3f0; }
+.candidate-experiment-result-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 10px; border-bottom: 1px solid #c9ddd5; }
+.candidate-experiment-workbench .candidate-experiment-proof { display: flex; min-width: 0; align-items: flex-start; gap: 8px; }
+.candidate-experiment-workbench .candidate-experiment-proof > svg { flex: 0 0 auto; margin-top: 1px; color: #318064; }
+.candidate-experiment-workbench .candidate-experiment-proof > span { display: grid; min-width: 0; gap: 2px; }
+.candidate-experiment-workbench .candidate-experiment-proof > span > small { color: #5f8173; font-size: 7px; font-weight: 900; letter-spacing: 0.12em; }
+.candidate-experiment-workbench .candidate-experiment-proof strong { color: #285c49; font-size: 11px; }
+.candidate-experiment-workbench .candidate-experiment-proof > span > span { color: #6b8078; font-family: "Cascadia Code", Consolas, monospace; font-size: 7px; line-height: 1.45; overflow-wrap: anywhere; }
+.candidate-experiment-result-heading > em { display: grid; flex: 0 0 auto; gap: 1px; min-width: 70px; padding: 5px 7px; border-left: 1px solid #a9c8bc; color: #28614b; font-size: 17px; font-style: normal; font-weight: 900; text-align: right; }
+.candidate-experiment-result-heading > em span { color: #70877e; font-size: 7px; letter-spacing: 0.1em; }
+
+.candidate-experiment-workbench .candidate-experiment-common-spec { display: grid; min-width: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 0; }
+.candidate-experiment-workbench .candidate-experiment-common-spec > div { display: grid; min-width: 0; gap: 2px; padding: 7px 8px; border: 1px solid #d5e1dd; background: rgba(255, 255, 255, 0.88); }
+.candidate-experiment-workbench .candidate-experiment-common-spec dt { color: #72877f; font-size: 7px; letter-spacing: 0.05em; }
+.candidate-experiment-workbench .candidate-experiment-common-spec dd { min-width: 0; margin: 0; color: #34594c; font-size: 9px; overflow-wrap: anywhere; }
+
+.candidate-experiment-arm-index { display: grid; min-width: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 0; padding: 0; list-style: none; }
+.candidate-experiment-arm-index li { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 8px; border: 1px solid #ceddd8; border-top: 3px solid #4b8781; background: #fff; }
+.candidate-experiment-arm-index li > b { color: #628078; font-family: "Cascadia Code", Consolas, monospace; font-size: 9px; }
+.candidate-experiment-arm-index li > span { display: grid; min-width: 0; gap: 1px; }
+.candidate-experiment-arm-index li strong { color: #31574b; font-size: 9px; overflow-wrap: anywhere; }
+.candidate-experiment-arm-index li small { color: #7b8d86; font-size: 7px; }
+.candidate-experiment-arm-index code { color: #58736a; font-family: "Cascadia Code", Consolas, monospace; font-size: 8px; }
+
+.candidate-experiment-table-hint { margin: 0; color: #637c76; font-size: 8px; line-height: 1.5; }
+.candidate-experiment-workbench .candidate-experiment-table-wrap { min-width: 0; max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; border: 1px solid #bfd2cd; background: #fff; scrollbar-color: #77a49b #eaf2ef; scrollbar-width: thin; }
+.candidate-experiment-workbench .candidate-experiment-table-wrap:focus-visible { outline: 2px solid #1f7274; outline-offset: 3px; }
+.candidate-experiment-workbench .candidate-experiment-table { border-collapse: separate; border-spacing: 0; color: #355750; }
+.candidate-experiment-workbench .candidate-experiment-table caption { padding: 8px 10px; color: #57736b; background: #edf6f3; font-size: 8px; font-weight: 800; text-align: left; }
+.candidate-experiment-workbench .candidate-experiment-table th,
+.candidate-experiment-workbench .candidate-experiment-table td { padding: 9px; border-right: 1px solid #dbe5e2; border-bottom: 1px solid #dbe5e2; background: #fff; vertical-align: top; }
+.candidate-experiment-workbench .candidate-experiment-table thead th { color: #2e5b50; background: #edf6f3; }
+.candidate-experiment-workbench .candidate-experiment-table th:first-child { position: sticky; left: 0; z-index: 2; min-width: 132px; color: #47655e; background: #f4f8f7; box-shadow: 1px 0 0 #c9d8d4; }
+.candidate-experiment-workbench .candidate-experiment-table thead th:first-child { z-index: 3; background: #e7f2ee; }
+.candidate-experiment-workbench .candidate-experiment-table th > strong { display: block; color: #26584d; font-size: 9px; }
+.candidate-experiment-workbench .candidate-experiment-table th > small { display: block; margin-top: 2px; color: #70867f; font-size: 7px; }
+.candidate-experiment-workbench .candidate-experiment-table td { font-size: 8px; line-height: 1.55; overflow-wrap: anywhere; }
+.candidate-experiment-workbench .candidate-experiment-evidence-list { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.candidate-experiment-workbench .candidate-experiment-evidence-list li { display: grid; gap: 1px; padding-left: 7px; border-left: 2px solid #98b9ae; }
+.candidate-experiment-workbench .candidate-experiment-evidence-list small { color: #7a8c86; font-size: 7px; }
+.candidate-experiment-workbench .candidate-experiment-metric-stack,
+.candidate-experiment-workbench .candidate-experiment-capacity-block { display: grid; gap: 4px; }
+.candidate-experiment-workbench .candidate-experiment-metric-stack small { display: flex; justify-content: space-between; gap: 8px; color: #6e827c; font-size: 7px; }
+.candidate-experiment-workbench .candidate-experiment-metric-stack strong { color: #2e5b4e; font-size: 8px; }
+.candidate-experiment-workbench .candidate-experiment-capacity-block { color: #874934; }
+.candidate-experiment-workbench .candidate-experiment-capacity-block small,
+.candidate-experiment-workbench .candidate-experiment-missing { color: #7c8d88; font-size: 7px; }
+
+.candidate-experiment-workbench .candidate-experiment-safety { display: flex; align-items: flex-start; gap: 7px; margin: 0; padding: 9px 10px; border: 1px solid #bed7cc; color: #3f6858; background: #edf7f2; font-size: 8px; line-height: 1.55; }
+.candidate-experiment-workbench .candidate-experiment-safety svg { flex: 0 0 auto; margin-top: 1px; }
+
+@media (max-width: 760px) {
+  .candidate-experiment-panel.candidate-experiment-workbench { margin-right: 10px; margin-left: 10px; padding: 12px; }
+  .candidate-experiment-workbench .candidate-experiment-heading,
+  .candidate-experiment-result-heading { align-items: stretch; flex-direction: column; }
+  .candidate-experiment-workbench .candidate-experiment-heading > em,
+  .candidate-experiment-result-heading > em { align-self: flex-start; border-top: 1px solid #aac5c6; border-left: 0; text-align: left; }
+  .candidate-experiment-workflow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .candidate-experiment-workflow li:nth-child(3)::before { display: none; }
+  .candidate-experiment-workbench .candidate-experiment-selector { grid-template-columns: 1fr; max-height: 380px; }
+  .candidate-experiment-workbench .candidate-experiment-common-spec,
+  .candidate-experiment-arm-index { grid-template-columns: 1fr; }
+  .candidate-experiment-workbench .candidate-experiment-run { justify-self: stretch; justify-content: center; width: 100%; }
+}
+
+@media (max-width: 420px) {
+  .candidate-experiment-panel.candidate-experiment-workbench { gap: 10px; padding: 10px; }
+  .candidate-experiment-workflow { grid-template-columns: 1fr; }
+  .candidate-experiment-workflow li + li::before,
+  .candidate-experiment-workflow li:nth-child(3)::before { display: block; top: -8px; left: 18px; width: 2px; height: 8px; }
+  .candidate-experiment-selection-status { grid-template-columns: 1fr; }
+  .candidate-experiment-selection-status > span { grid-template-columns: auto 1fr; align-items: baseline; gap: 6px; padding-right: 0; padding-bottom: 7px; border-right: 0; border-bottom: 1px solid #ccd9dc; }
+}

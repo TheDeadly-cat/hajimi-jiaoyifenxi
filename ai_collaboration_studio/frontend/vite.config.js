@@ -11,6 +11,13 @@ export default defineConfig({
   },
   build: {
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "react-vendor": ["react", "react-dom"],
+          "icon-vendor": ["lucide-react"],
+        },
+      },
+    },
   },
 });
-

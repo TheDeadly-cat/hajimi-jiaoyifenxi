@@ -1,0 +1,245 @@
+.provider-routing-section.provider-routing-console {
+  --routing-ink: #173f55;
+  --routing-muted: #6b7f89;
+  position: relative;
+  display: grid;
+  min-width: 0;
+  container-name: provider-routing;
+  container-type: inline-size;
+  gap: 11px;
+  padding: 13px;
+  overflow: hidden;
+  border: 1px solid #b9ccd2;
+  border-radius: 3px;
+  color: var(--routing-ink);
+  background:
+    linear-gradient(90deg, rgba(33, 87, 104, 0.12) 0 4px, transparent 4px),
+    repeating-linear-gradient(0deg, rgba(25, 63, 80, 0.035) 0 1px, transparent 1px 24px),
+    linear-gradient(145deg, #fcfefd 0%, #f0f6f5 62%, #edf3f5 100%);
+  box-shadow: 0 10px 24px rgba(29, 65, 79, 0.08), inset 0 1px 0 #fff;
+}
+
+.provider-routing-console,
+.provider-routing-console * { box-sizing: border-box; }
+
+.provider-routing-console::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 104px;
+  height: 6px;
+  background: repeating-linear-gradient(90deg, #32767e 0 8px, transparent 8px 12px);
+  content: "";
+  opacity: 0.76;
+  pointer-events: none;
+}
+.provider-routing-console > * { position: relative; z-index: 1; }
+
+.provider-routing-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #c8d7dc;
+}
+.provider-routing-heading > div { display: grid; min-width: 0; gap: 4px; }
+.provider-routing-heading > div > small { color: #627f88; font-size: 9px; font-weight: 900; letter-spacing: 0.15em; }
+.provider-routing-heading > div > strong { display: flex; align-items: center; gap: 7px; color: #173f55; font-size: 13px; }
+.provider-routing-heading > div > strong svg { flex: 0 0 auto; color: #287279; }
+.provider-routing-heading > div > p { margin: 0; color: var(--routing-muted); font-size: 10px; line-height: 1.5; }
+.provider-routing-heading > em {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 1px;
+  min-width: 82px;
+  padding: 5px 7px;
+  border-left: 1px solid #a9c0c7;
+  color: #245c68;
+  font-size: 17px;
+  font-style: normal;
+  font-weight: 900;
+  text-align: right;
+}
+.provider-routing-heading > em span { color: #778d94; font-size: 8px; letter-spacing: 0.1em; }
+
+.provider-routing-stats {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+.provider-routing-stats > span { display: grid; min-width: 0; gap: 2px; padding: 7px 8px; border: 1px solid #d2dfe2; border-top: 3px solid #6c939c; background: rgba(255, 255, 255, 0.88); }
+.provider-routing-stats small { color: #768a90; font-size: 9px; line-height: 1.3; }
+.provider-routing-stats strong { color: #285661; font-size: 15px; line-height: 1; }
+.provider-routing-stats .blocked { border-top-color: #b36c4e; }
+.provider-routing-stats .blocked strong { color: #8b4936; }
+
+.provider-routing-console .provider-route-summary {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 9px;
+  border: 1px solid #cedbdd;
+  background: rgba(248, 251, 250, 0.9);
+}
+.provider-routing-console .provider-count-chip {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid #c8dad7;
+  border-radius: 2px;
+  color: #355d5e;
+  background: #f1f8f5;
+}
+.provider-routing-console .provider-count-chip.unavailable { border-color: #dfbead; color: #814b3a; background: #fff4ef; }
+.provider-routing-console .provider-count-chip > svg { flex: 0 0 auto; }
+.provider-routing-console .provider-count-chip > span { display: grid; min-width: 0; gap: 1px; font-size: 10px; font-weight: 900; }
+.provider-routing-console .provider-count-chip small { color: inherit; font-size: 8px; font-weight: 500; opacity: 0.8; overflow-wrap: anywhere; }
+.provider-routing-console .provider-count-chip b { font-size: 13px; }
+.provider-empty-route { color: #74878d; font-size: 10px; }
+
+.provider-routing-console .openai-route-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 8px 9px;
+  border: 1px solid #e0bdac;
+  color: #844a38;
+  background: #fff4ef;
+}
+.provider-routing-console .openai-route-warning svg { flex: 0 0 auto; margin-top: 1px; }
+.provider-routing-console .openai-route-warning > span { display: grid; min-width: 0; gap: 2px; }
+.provider-routing-console .openai-route-warning strong { font-size: 10px; }
+.provider-routing-console .openai-route-warning small { font-size: 9px; line-height: 1.45; }
+
+.provider-routing-console .provider-catalog {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+.provider-routing-console .provider-catalog-row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid #d1dee1;
+  border-left: 3px solid #8ba5ac;
+  background: rgba(255, 255, 255, 0.9);
+}
+.provider-routing-console .provider-catalog-row.ready { border-left-color: #3f836b; }
+.provider-routing-console .provider-catalog-row.failed { border-left-color: #b45e46; }
+.provider-routing-console .provider-catalog-row.missing,
+.provider-routing-console .provider-catalog-row.unknown { border-left-color: #b18b4a; }
+.provider-routing-console .provider-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #8ca1a7; box-shadow: 0 0 0 3px rgba(140, 161, 167, 0.14); }
+.provider-routing-console .provider-status-dot.ready { background: #3f836b; box-shadow: 0 0 0 3px rgba(63, 131, 107, 0.14); }
+.provider-routing-console .provider-status-dot.failed { background: #b45e46; box-shadow: 0 0 0 3px rgba(180, 94, 70, 0.14); }
+.provider-routing-console .provider-status-dot.missing,
+.provider-routing-console .provider-status-dot.unknown { background: #b18b4a; box-shadow: 0 0 0 3px rgba(177, 139, 74, 0.14); }
+.provider-routing-console .provider-catalog-copy { display: grid; min-width: 0; gap: 1px; }
+.provider-routing-console .provider-catalog-copy strong { color: #2c535e; font-size: 11px; }
+.provider-routing-console .provider-catalog-copy small { color: #758a90; font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-routing-console .provider-config-state { padding: 4px 6px; border: 1px solid #cedbdd; color: #607980; background: #f4f7f7; font-size: 8px; font-weight: 900; white-space: nowrap; }
+.provider-routing-console .provider-config-state.ready { border-color: #b4d3c6; color: #33644f; background: #eff8f4; }
+.provider-routing-console .provider-config-state.failed { border-color: #deb7aa; color: #854937; background: #fff3ef; }
+.provider-routing-console .provider-catalog-row > b { color: #365d67; font-size: 13px; }
+
+.provider-preflight-envelope {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #b8d3c8;
+  background: rgba(242, 250, 246, 0.92);
+}
+.provider-preflight-envelope.failed { border-color: #dfb6aa; background: #fff5f1; }
+.provider-preflight-envelope > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.provider-preflight-envelope > header > span { display: flex; align-items: center; gap: 6px; color: #32624f; }
+.provider-preflight-envelope.failed > header > span { color: #854937; }
+.provider-preflight-envelope > header strong { font-size: 11px; }
+.provider-preflight-envelope > header em { color: #738880; font-size: 9px; font-style: normal; }
+.provider-preflight-contract { display: grid; min-width: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.provider-preflight-contract > span { display: grid; min-width: 0; gap: 2px; padding: 7px 8px; border: 1px solid #c8dbd3; background: #fff; }
+.provider-preflight-contract > span[data-contract-state="failed"] { border-color: #dfb8ac; background: #fff8f5; }
+.provider-preflight-contract small { color: #758980; font-size: 8px; }
+.provider-preflight-contract strong { color: #365f50; font-family: "Cascadia Code", Consolas, monospace; font-size: 10px; overflow-wrap: anywhere; }
+.provider-preflight-contract [data-contract-state="failed"] strong { color: #884b39; }
+.provider-routing-console .provider-preflight-routes { display: grid; min-width: 0; gap: 5px; }
+.provider-routing-console .provider-preflight-route { display: grid; min-width: 0; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; padding: 7px 8px; border: 1px solid #d3dfdc; background: #fff; }
+.provider-routing-console .provider-preflight-route.failed { border-color: #e1c0b6; }
+.provider-routing-console .provider-preflight-route > span { display: grid; min-width: 0; gap: 1px; }
+.provider-routing-console .provider-preflight-route strong { color: #345b50; font-size: 10px; overflow-wrap: anywhere; }
+.provider-routing-console .provider-preflight-route.failed strong { color: #804b3b; }
+.provider-routing-console .provider-preflight-route small { color: #748882; font-size: 9px; overflow-wrap: anywhere; }
+.provider-routing-console .provider-preflight-route em { color: #527567; font-size: 9px; font-style: normal; font-weight: 900; }
+.provider-routing-console .provider-preflight-route.failed em { color: #914e3c; }
+
+.provider-routing-console .provider-routing-actions { display: grid; min-width: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.provider-routing-console .provider-routing-actions button { display: inline-flex; min-width: 0; min-height: 38px; align-items: center; justify-content: center; gap: 6px; border-color: #779da4; color: #285d65; background: linear-gradient(180deg, #f7fbfb 0%, #e2eeee 100%); font-size: 10px; font-weight: 900; }
+.provider-routing-console .provider-routing-actions button:focus-visible { outline: 2px solid #2c737b; outline-offset: 3px; }
+.provider-routing-console .provider-routing-actions button:disabled { border-color: #ccd5d7; color: #899598; background: #eef2f2; }
+.provider-routing-console .provider-preflight-button { border-color: #4b8580; color: #235c59; background: linear-gradient(180deg, #f3faf7 0%, #dceee7 100%); }
+
+.provider-routing-console .provider-routing-feedback {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 8px 9px;
+  border: 1px solid #c5d7d0;
+  color: #3a6656;
+  background: #eff8f4;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.provider-routing-console .provider-routing-feedback.error { border-color: #dfb5aa; color: #864937; background: #fff3ef; }
+.provider-routing-console .provider-routing-feedback.warning { border-color: #dec88e; color: #765b23; background: #fff9e8; }
+.provider-routing-console .provider-routing-feedback svg { flex: 0 0 auto; margin-top: 1px; }
+.provider-routing-console .provider-routing-note { display: flex; align-items: flex-start; gap: 7px; margin: 0; padding: 9px; border: 1px solid #c6d8d3; color: #496b62; background: rgba(238, 247, 244, 0.9); font-size: 9px; line-height: 1.55; }
+.provider-routing-console .provider-routing-note svg { flex: 0 0 auto; margin-top: 1px; }
+.provider-routing-console .provider-routing-note > span { display: grid; min-width: 0; gap: 2px; }
+.provider-routing-console .provider-routing-note strong { color: #315f52; font-size: 9px; letter-spacing: 0.08em; }
+
+@container provider-routing (max-width: 520px) {
+  .provider-routing-heading { flex-direction: column; }
+  .provider-routing-heading > em { align-self: flex-start; border-top: 1px solid #a9c0c7; border-left: 0; text-align: left; }
+  .provider-routing-stats,
+  .provider-routing-console .provider-routing-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .provider-routing-console .provider-catalog { grid-template-columns: minmax(0, 1fr); }
+  .provider-routing-console .provider-preflight-button { grid-column: 1 / -1; }
+  .provider-routing-console .provider-routing-actions button { min-height: 44px; }
+}
+
+@container provider-routing (max-width: 360px) {
+  .provider-routing-console .provider-routing-actions,
+  .provider-preflight-contract { grid-template-columns: minmax(0, 1fr); }
+  .provider-routing-console .provider-preflight-button { grid-column: auto; }
+  .provider-routing-console .provider-catalog-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .provider-routing-console .provider-config-state { grid-column: 2; justify-self: start; }
+}
+
+@media (max-width: 760px) {
+  .provider-routing-heading { flex-direction: column; }
+  .provider-routing-heading > em { align-self: flex-start; border-top: 1px solid #a9c0c7; border-left: 0; text-align: left; }
+  .provider-routing-stats,
+  .provider-routing-console .provider-catalog,
+  .provider-routing-console .provider-routing-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .provider-routing-console .provider-preflight-button { grid-column: 1 / -1; }
+}
+
+@media (max-width: 460px) {
+  .provider-routing-section.provider-routing-console { padding: 10px; }
+  .provider-routing-stats,
+  .provider-routing-console .provider-catalog,
+  .provider-routing-console .provider-routing-actions,
+  .provider-preflight-contract { grid-template-columns: 1fr; }
+  .provider-routing-console .provider-preflight-button { grid-column: auto; }
+  .provider-routing-console .provider-catalog-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .provider-routing-console .provider-config-state { grid-column: 2; justify-self: start; }
+}

@@ -279,10 +279,14 @@ test("drawer integration is read-only, abortable, and opens the exact room only 
   assert.match(stylesSource, /\.action-overview-item\s*\{[^}]*content-visibility: auto/s);
 });
 
-test("exact-room navigation waits for the lazy inspector mount before focusing Action Desk", () => {
+test("exact-room navigation delegates late lazy alignment to the bounded DOM binder", () => {
   const appSource = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
   const inspectorSource = readFileSync(
     new URL("../src/components/RoomInspector.jsx", import.meta.url),
+    "utf8",
+  );
+  const navigationSource = readFileSync(
+    new URL("../src/inspectorTargetNavigation.js", import.meta.url),
     "utf8",
   );
   const deskSource = readFileSync(
@@ -293,17 +297,43 @@ test("exact-room navigation waits for the lazy inspector mount before focusing A
 
   assert.match(appSource, /scrollTargetId=\{inspectorNavigation\.targetId\}/);
   assert.match(appSource, /scrollRequestId=\{inspectorNavigation\.requestId\}/);
-  assert.match(inspectorSource, /useEffect\(\(\) => \{/);
-  assert.match(inspectorSource, /querySelector\(`#\$\{scrollTargetId\}`\)/);
-  assert.match(inspectorSource, /new globalThis\.ResizeObserver\(align\)/);
-  assert.match(inspectorSource, /new globalThis\.MutationObserver\(align\)/);
-  assert.match(inspectorSource, /mutationObserver\.observe\(inspector, \{ childList: true, subtree: true \}\)/);
-  assert.match(inspectorSource, /inspector\.scrollTop \+= targetTop - inspectorTop/);
-  assert.doesNotMatch(inspectorSource, /headerOffset/);
-  assert.match(inspectorSource, /setTimeout\(stop, 4000\)/);
-  assert.match(inspectorSource, /resolvedTarget\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(inspectorSource, /bindInspectorTargetNavigation\(inspectorRef\.current, scrollTargetId\)/);
+  assert.match(navigationSource, /new ResizeObserverClass\(align\)/);
+  assert.match(navigationSource, /new MutationObserverClass\(\(\) => \{/);
+  assert.match(navigationSource, /observeChildren\(\);\s*align\(\)/);
+  assert.match(navigationSource, /mutationObserver\.observe\(inspector, \{ childList: true, subtree: true \}\)/);
+  assert.match(navigationSource, /inspector\.scrollTop \+= offset/);
+  assert.doesNotMatch(navigationSource, /headerOffset/);
+  assert.match(navigationSource, /INSPECTOR_TARGET_NAVIGATION_LIFETIME_MS = 4000/);
+  assert.match(navigationSource, /resolvedTarget\.focus\(\{ preventScroll: true \}\)/);
   assert.match(inspectorSource, /id="inspector-paper-portfolio" tabIndex=\{-1\}/);
   assert.match(inspectorSource, /id="inspector-observations" tabIndex=\{-1\}/);
   assert.match(deskSource, /id="inspector-action-desk"[^>]*tabIndex=\{-1\}/);
   assert.match(stylesSource, /\.action-desk-panel:focus\s*\{[^}]*outline: 2px solid #78aaf0/s);
+});
+
+test("drawer mounts exact action identities through a bounded progressive window", () => {
+  const drawerSource = readFileSync(
+    new URL("../src/components/ActionOverviewDrawer.jsx", import.meta.url),
+    "utf8",
+  );
+  const stylesSource = readFileSync(
+    new URL("../src/styles/action-overview.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(drawerSource, /const ACTION_OVERVIEW_BATCH_SIZE = 6/);
+  assert.match(drawerSource, /useState\(ACTION_OVERVIEW_BATCH_SIZE\)/);
+  assert.match(drawerSource, /const mountedItems = visibleItems\.slice\(0, visibleItemLimit\)/);
+  assert.match(drawerSource, /mountedItems\.map\(\(item\) =>/);
+  assert.match(drawerSource, /key=\{item\.overviewKey\}/);
+  assert.doesNotMatch(drawerSource, /key=\{JSON\.stringify\(\[item\.overviewKey, itemIndex\]\)\}/);
+  assert.match(drawerSource, /JSON\.stringify\(\["warning", failedRoom\.roomId\]\)/);
+  assert.doesNotMatch(drawerSource, /failedRoomIndex/);
+  assert.match(drawerSource, /aria-controls=\{overviewListId\}/);
+  assert.match(drawerSource, /current \+ ACTION_OVERVIEW_BATCH_SIZE/);
+  assert.match(drawerSource, /setVisibleItemLimit\(ACTION_OVERVIEW_BATCH_SIZE\)/);
+  assert.match(stylesSource, /\.action-overview-progress\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) auto/s);
+  assert.match(stylesSource, /\.action-overview-progress > button\s*\{[^}]*min-height: 44px/s);
+  assert.match(stylesSource, /@media \(max-width: 520px\)[\s\S]*\.action-overview-progress\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
 });

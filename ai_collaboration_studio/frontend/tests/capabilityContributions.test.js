@@ -998,13 +998,17 @@ test("App and host components wire catalog contexts without current-room history
   assert.doesNotMatch(artifactSource, /hasRoomCapability/);
   assert.match(artifactSource, /workingArtifact\.plugin_registry_context/);
   assert.match(artifactSource, /disabled=\{projectWorkspaceReadOnly\}/);
-  assert.match(artifactSource, /import \{ ProjectReadinessPanel \} from "\.\/ProjectReadinessPanel"/);
-  assert.ok(artifactSource.indexOf("<ProjectReadinessPanel") < artifactSource.indexOf("<UserFinalDecisionSection"));
-  assert.ok(artifactSource.indexOf("<CandidateExperimentPanel") < artifactSource.indexOf("<UserFinalDecisionSection"));
+  assert.doesNotMatch(artifactSource, /import \{ ProjectReadinessPanel \} from "\.\/ProjectReadinessPanel"/);
+  assert.match(
+    artifactSource,
+    /const ProjectReadinessPanel = lazy\(\(\) => import\("\.\/ProjectReadinessPanel\.jsx"\)/,
+  );
+  assert.ok(artifactSource.indexOf("<ProjectReadinessPanel") < artifactSource.indexOf("<MemoUserFinalDecisionSection"));
+  assert.ok(artifactSource.indexOf("<CandidateExperimentPanel") < artifactSource.indexOf("<MemoUserFinalDecisionSection"));
   assert.doesNotMatch(inspectorSource, /hasRoomCapability/);
   assert.match(inspectorSource, /roomInspectorRegistrySource = pendingRound \|\| room/);
   assert.match(inspectorSource, /<PluginActionBoundary disabled=\{storageReadOnly\}/);
-  assert.match(experimentSource, /\|\| readOnly\s*\|\| !gate\.ready/);
+  assert.match(experimentSource, /\|\| readOnly\s*\|\| !runtimeGateReady/);
   assert.match(readinessSource, /api\.projectReadiness\(/);
   assert.doesNotMatch(readinessSource, /import\s*\(/);
 });

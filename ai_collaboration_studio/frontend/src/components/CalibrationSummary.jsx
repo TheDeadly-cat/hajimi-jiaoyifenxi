@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { calibrationMetricGate, canShowBrierScore } from "../calibrationGate";
 
 function formatPercent(value, digits = 1, signed = false) {
@@ -10,13 +11,18 @@ function hasFiniteNumber(value) {
   return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
 }
 
+function nonNegativeCount(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.floor(number) : 0;
+}
+
 
 function ScoreCell({ label, value, detail = "" }) {
   return <span><small>{label}</small><strong>{value}</strong>{detail ? <em>{detail}</em> : null}</span>;
 }
 
 
-export function CalibrationSummary({ scorecard }) {
+export const CalibrationSummary = memo(function CalibrationSummary({ scorecard }) {
   const overall = scorecard?.overall || {};
   const peer = overall.peer_relative || {};
   const last20 = scorecard?.rolling?.last_20 || {};
@@ -27,11 +33,12 @@ export function CalibrationSummary({ scorecard }) {
   const last50Gate = calibrationMetricGate(last50);
   const independence = scorecard?.independence || {};
   const scoringPopulation = scorecard?.scoring_population || {};
-  const lineageExcluded = Number(scoringPopulation.excluded_from_scoring_count || 0);
+  const lineageExcluded = nonNegativeCount(scoringPopulation.excluded_from_scoring_count);
   const methodologyRows = Object.entries(scorecard?.by_methodology || {});
   const comparisonRows = Object.entries(scorecard?.by_comparison_group || {});
-  const agentMethodologyRows = scorecard?.by_agent_methodology || [];
-  const populatedBands = (scorecard?.confidence_calibration || []).filter((row) => row.sample_count > 0);
+  const agentMethodologyRows = Array.isArray(scorecard?.by_agent_methodology) ? scorecard.by_agent_methodology : [];
+  const confidenceRows = Array.isArray(scorecard?.confidence_calibration) ? scorecard.confidence_calibration : [];
+  const populatedBands = confidenceRows.filter((row) => row.sample_count > 0);
   return (
     <>
       <div className="observation-score three-column">
@@ -71,15 +78,16 @@ export function CalibrationSummary({ scorecard }) {
                 return (
                   <span
                     key={`${row.member_id}@${row.member_version}:${row.methodology_id}@${row.methodology_version}`}
-                    title={`${row.identity || "历史 AI 身份"} · ${row.provider || "未知执行器"} / ${row.model || "默认模型"}`}
                   >
-                    <small>{row.member_name} · 身份 v{row.member_version}</small>
+                    <small>{row.member_name || "历史成员"} · 身份 v{row.member_version || "?"}</small>
                     <strong>{gate.qualified ? formatPercent(row.hit_rate_pct) : gate.progressLabel}</strong>
-                    <em>{row.methodology_id}@v{row.methodology_version}{showBrier && hasFiniteNumber(row.brier_score) ? ` · Brier ${Number(row.brier_score).toFixed(3)}` : ` · ${gate.qualified ? "AI 置信样本不足" : gate.reason}`}</em>
+                    <em>{row.methodology_id || "方法未记录"}@v{row.methodology_version || "?"}{showBrier && hasFiniteNumber(row.brier_score) ? ` · Brier ${Number(row.brier_score).toFixed(3)}` : ` · ${gate.qualified ? "AI 置信样本不足" : gate.reason}`}</em>
+                    <em className="calibration-agent-provenance">{row.identity || "历史 AI 身份"} · {row.provider || "执行器未记录"} / {row.model || "模型未记录"}</em>
                   </span>
                 );
               })}
             </div>
+            {agentMethodologyRows.length > 12 ? <p className="calibration-projection-note">当前摘要展示前 12 个 AI 身份与观察方法组合，另有 {agentMethodologyRows.length - 12} 个未展开。</p> : null}
           </> : null}
           {methodologyRows.length ? <div className="calibration-band-list">
             {methodologyRows.map(([key, row]) => {
@@ -108,6 +116,7 @@ export function CalibrationSummary({ scorecard }) {
                 );
               })}
             </div>
+            {comparisonRows.length > 12 ? <p className="calibration-projection-note">当前摘要展示前 12 个固定条件组，另有 {comparisonRows.length - 12} 个未展开。</p> : null}
           </> : null}
           {populatedBands.length ? <div className="calibration-band-list">
             {populatedBands.map((row) => {
@@ -126,4 +135,4 @@ export function CalibrationSummary({ scorecard }) {
       ) : null}
     </>
   );
-}
+});

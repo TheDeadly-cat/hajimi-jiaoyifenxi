@@ -116,7 +116,7 @@ class BackendTestLayerTests(unittest.TestCase):
         invalid_values.append(unknown_layer)
 
         wrong_version = deepcopy(self.manifest)
-        wrong_version["version"] = "backend_test_layers_v2"
+        wrong_version["version"] = "backend_test_layers_unsupported"
         invalid_values.append(wrong_version)
 
         duplicate = deepcopy(self.manifest)
@@ -134,6 +134,22 @@ class BackendTestLayerTests(unittest.TestCase):
                 runner.BackendTestLayerError
             ):
                 self._load_temporary_manifest(value)
+
+    def test_delivery_layer_is_closed_over_delivery_contract_modules(self) -> None:
+        delivery = next(
+            layer for layer in self.manifest["layers"]
+            if layer["id"] == "delivery"
+        )
+        self.assertEqual(delivery["tests"], [
+            "tests.test_ci_delivery_contract",
+            "tests.test_delivery_bootstrap",
+            "tests.test_dependency_inventory",
+            "tests.test_host_delivery_endpoints",
+            "tests.test_release_drill",
+            "tests.test_source_backup",
+            "tests.test_static_security_checks",
+            "tests.test_structured_logging",
+        ])
 
     def test_selection_preserves_legacy_modes_and_resolves_layers_without_imports(
         self,

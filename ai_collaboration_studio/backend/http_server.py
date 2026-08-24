@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import mimetypes
@@ -47,6 +48,11 @@ from .round_launch_plan import RoundLaunchPlanService
 from .round_contexts import RoundContextError
 from .stock_research_service import StockResearchError, StockResearchService
 from .storage_sample_acceptance import StorageSampleAcceptance
+from .structured_logging import (
+    classify_request_target,
+    emit_event,
+    safe_http_method,
+)
 from .store import (
     PROVIDER_OPERATION_BINDING_VERSION,
     STORE,
@@ -67,6 +73,51 @@ from .walk_forward import WalkForwardFeasibilityError
 
 LOCAL_SESSION_TOKEN = secrets.token_urlsafe(32)
 LOCAL_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
+SERVICE_ID = "ai_collaboration_studio"
+SERVICE_NAME = "AI 共创室"
+SERVICE_VERSION = "0.1.0"
+HOST_API_CONTRACT_VERSION = "host_delivery_v1"
+HOST_READINESS_SCHEMA_VERSION = "host_readiness_v1"
+HOST_VERSION_SCHEMA_VERSION = "host_version_v1"
+
+
+def frontend_build_identity() -> dict[str, Any]:
+    """Return a bounded identity for the production frontend entrypoint."""
+
+    index_path = FRONTEND_DIST / "index.html"
+    try:
+        body = index_path.read_bytes()
+    except OSError:
+        return {
+            "available": False,
+            "index_bytes": 0,
+            "index_sha256": "",
+        }
+    return {
+        "available": True,
+        "index_bytes": len(body),
+        "index_sha256": hashlib.sha256(body).hexdigest(),
+    }
+
+
+def host_version_payload() -> dict[str, Any]:
+    """Describe the local host contract without reading providers or secrets."""
+
+    return {
+        "ok": True,
+        "schema_version": HOST_VERSION_SCHEMA_VERSION,
+        "service": {
+            "id": SERVICE_ID,
+            "name": SERVICE_NAME,
+            "version": SERVICE_VERSION,
+        },
+        "api": {
+            "contract_version": HOST_API_CONTRACT_VERSION,
+            "readiness_schema_version": HOST_READINESS_SCHEMA_VERSION,
+            "version_schema_version": HOST_VERSION_SCHEMA_VERSION,
+        },
+        "frontend_build": frontend_build_identity(),
+    }
 
 
 def _is_loopback_address(value: Any) -> bool:
@@ -143,7 +194,7 @@ def _validate_member_provider_assignment(provider_id: str) -> None:
 
 
 class StudioRequestHandler(BaseHTTPRequestHandler):
-    server_version = "AICollaborationStudio/0.1"
+    server_version = f"AICollaborationStudio/{SERVICE_VERSION}"
     _formal_execution_locks_guard = threading.Lock()
     _formal_execution_locks: dict[str, threading.Lock] = {}
 
@@ -187,8 +238,75 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def log_request(self, code: Any = "-", size: Any = "-") -> None:
+        try:
+            status = int(getattr(code, "value", code))
+        except (TypeError, ValueError):
+            status = 0
+        fields: dict[str, Any] = {
+            "method": safe_http_method(getattr(self, "command", "")),
+            "path_class": classify_request_target(getattr(self, "path", "")),
+            "status": status if 100 <= status <= 599 else 0,
+        }
+        try:
+            response_bytes = int(size)
+        except (TypeError, ValueError):
+            response_bytes = -1
+        if response_bytes >= 0:
+            fields["response_bytes"] = response_bytes
+        emit_event("http_request_completed", fields=fields)
+
+    def log_error(self, format: str, *args: Any) -> None:
+        emit_event(
+            "http_handler_error",
+            severity="error",
+            fields={
+                "method": safe_http_method(getattr(self, "command", "")),
+                "path_class": classify_request_target(getattr(self, "path", "")),
+            },
+        )
+
     def log_message(self, format: str, *args: Any) -> None:
+        # Never format BaseHTTPRequestHandler messages because request lines,
+        # headers, and exception text can contain caller-controlled material.
         return
+
+    def _host_readiness_payload(self) -> dict[str, Any]:
+        startup_ready = bool(
+            getattr(self.server, "ai_studio_startup_ready", False)
+        )
+        database_ready = False
+        if startup_ready:
+            try:
+                database_ready = Path(STORE.path).is_file()
+            except (OSError, RuntimeError, TypeError, ValueError):
+                database_ready = False
+        frontend = frontend_build_identity()
+        ready = bool(
+            startup_ready
+            and database_ready
+            and frontend["available"]
+        )
+        return {
+            "ok": ready,
+            "ready": ready,
+            "status": "ready" if ready else "not_ready",
+            "schema_version": HOST_READINESS_SCHEMA_VERSION,
+            "service": {
+                "id": SERVICE_ID,
+                "name": SERVICE_NAME,
+                "version": SERVICE_VERSION,
+            },
+            "checks": {
+                "startup_gate": {"ready": startup_ready},
+                "database": {"ready": database_ready},
+                "frontend_build": {
+                    "ready": bool(frontend["available"]),
+                    "index_bytes": int(frontend["index_bytes"]),
+                    "index_sha256": str(frontend["index_sha256"]),
+                },
+            },
+        }
 
     def end_headers(self) -> None:
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
@@ -212,10 +330,35 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
+        if parsed.path in {"/api/readiness", "/api/version"} and parsed.query:
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": "Host delivery endpoints do not accept query parameters.",
+                    "error_code": "HOST_ENDPOINT_QUERY_UNSUPPORTED",
+                },
+                HTTPStatus.BAD_REQUEST,
+                cache_control="no-store",
+            )
+            return
+        if parsed.path == "/api/readiness":
+            payload = self._host_readiness_payload()
+            self._send_json(
+                payload,
+                HTTPStatus.OK if payload["ready"] else HTTPStatus.SERVICE_UNAVAILABLE,
+                cache_control="no-store",
+            )
+            return
+        if parsed.path == "/api/version":
+            self._send_json(
+                host_version_payload(),
+                cache_control="no-store",
+            )
+            return
         if parsed.path == "/api/health":
             self._send_json({
                 "ok": True,
-                "service": "AI 共创室",
+                "service": SERVICE_NAME,
                 "providers": PROVIDERS.status(),
             })
             return
@@ -998,6 +1141,16 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 convergence_state=convergence,
             )
             self._send_json({"ok": True, **room, "providers": PROVIDERS.status()})
+            return
+        if parsed.path == "/api" or parsed.path.startswith("/api/"):
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": "API endpoint not found.",
+                    "error_code": "API_NOT_FOUND",
+                },
+                HTTPStatus.NOT_FOUND,
+            )
             return
         self._serve_static(parsed.path)
 
@@ -4003,12 +4156,20 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             )
         return True
 
-    def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _send_json(
+        self,
+        payload: dict[str, Any],
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        cache_control: str | None = None,
+    ) -> None:
         body = json_bytes(payload)
         self.send_response(status)
         self._cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if cache_control:
+            self.send_header("Cache-Control", cache_control)
         if self.close_connection:
             self.send_header("Connection", "close")
         self.end_headers()
@@ -4065,23 +4226,32 @@ def run_server(
     store_path = STORE.path
     instance_owner.assert_held_for(store_path)
     server = ThreadingHTTPServer((host, port), StudioRequestHandler)
+    server.ai_studio_startup_ready = False
+    started = False
     try:
         recovery = STORE.recover_orphaned_work(instance_owner=instance_owner)
-        print(f"AI 共创室运行于 http://{host}:{port}/")
-        if (
-            recovery["recovered_chat_targets"]
-            or recovery["paused_rounds"]
-            or recovery["cancelled_rounds"]
-        ):
-            print(
-                "已恢复上次中断状态："
-                f"{recovery['recovered_chat_targets']} 个点名目标重新排队，"
-                f"{recovery['paused_rounds']} 个运行中轮次转为待恢复，"
-                f"{recovery['cancelled_rounds']} 个无有效检查点轮次安全结束。"
-            )
+        server.ai_studio_startup_ready = True
+        started = True
+        emit_event(
+            "server_started",
+            fields={
+                "bind_scope": "loopback",
+                "port": int(server.server_port),
+            },
+        )
+        recovery_counts = {
+            "recovered_chat_targets": int(
+                recovery.get("recovered_chat_targets", 0) or 0
+            ),
+            "paused_rounds": int(recovery.get("paused_rounds", 0) or 0),
+            "cancelled_rounds": int(recovery.get("cancelled_rounds", 0) or 0),
+        }
+        if any(recovery_counts.values()):
+            emit_event("server_state_recovered", fields=recovery_counts)
         try:
             server.serve_forever()
         except KeyboardInterrupt:
-            pass
+            emit_event("server_interrupt_received")
     finally:
         server.server_close()
+        emit_event("server_stopped", fields={"started": started})

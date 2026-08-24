@@ -1,5 +1,14 @@
 import { Menu, PanelLeft, Pause, Settings, Users, X } from "lucide-react";
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   api,
   resumeChatRequest as streamResumeChatRequest,
@@ -229,12 +238,31 @@ function applyArtifactUserDecisionResponse(current, roomId, data) {
   };
 }
 
+const DEFERRED_SURFACE_EXIT_MS = 240;
+
 function useDeferredActivation(active) {
   const [activated, setActivated] = useState(Boolean(active));
   useEffect(() => {
-    if (active) setActivated(true);
-  }, [active]);
+    if (active) {
+      setActivated(true);
+      return undefined;
+    }
+    if (!activated) return undefined;
+    const timer = globalThis.setTimeout(
+      () => setActivated(false),
+      DEFERRED_SURFACE_EXIT_MS,
+    );
+    return () => globalThis.clearTimeout(timer);
+  }, [active, activated]);
   return Boolean(active) || activated;
+}
+
+function useStableCallback(callback) {
+  const callbackRef = useRef(callback);
+  useLayoutEffect(() => {
+    callbackRef.current = callback;
+  }, [callback]);
+  return useCallback((...args) => callbackRef.current?.(...args), []);
 }
 
 const COMPACT_INSPECTOR_QUERY = "(max-width: 1180px)";
@@ -368,6 +396,7 @@ export default function App() {
   const inspectorToggleRef = useRef(null);
   const inspectorCloseRef = useRef(null);
   const inspectorRestoreFocusRef = useRef(null);
+  const inspectorPostCloseFocusRef = useRef(null);
   const inspectorWasOpenRef = useRef(false);
   const mobileRoomToggleRef = useRef(null);
   const roomDrawerRestoreFocusRef = useRef(null);
@@ -811,7 +840,10 @@ export default function App() {
       if (!inspectorWasOpenRef.current) return undefined;
       inspectorWasOpenRef.current = false;
       const restoreFrame = globalThis.requestAnimationFrame(() => {
+        const postCloseFocusTarget = inspectorPostCloseFocusRef.current;
+        inspectorPostCloseFocusRef.current = null;
         const restoreTarget = [
+          postCloseFocusTarget,
           inspectorRestoreFocusRef.current,
           inspectorToggleRef.current,
           mobileRoomToggleRef.current,
@@ -820,7 +852,7 @@ export default function App() {
           && target.disabled !== true
           && target.getClientRects().length > 0
         ));
-        restoreTarget?.focus({ preventScroll: true });
+        restoreTarget?.focus({ preventScroll: restoreTarget !== postCloseFocusTarget });
       });
       return () => globalThis.cancelAnimationFrame(restoreFrame);
     }
@@ -1345,8 +1377,13 @@ export default function App() {
     const nextComposer = composer.trim() ? `${composer.trim()}\n\n${text}` : text;
     changeComposer(nextComposer);
     setError("");
-    if (window.matchMedia("(max-width: 1180px)").matches) setInspectorOpen(false);
-    requestAnimationFrame(() => document.querySelector(".composer textarea")?.focus());
+    const composerTarget = document.querySelector(".composer textarea");
+    if (window.matchMedia("(max-width: 1180px)").matches) {
+      inspectorPostCloseFocusRef.current = composerTarget;
+      setInspectorOpen(false);
+    } else {
+      requestAnimationFrame(() => composerTarget?.focus());
+    }
   };
 
   const fillRoundFocusObjective = (value) => {
@@ -1385,6 +1422,13 @@ export default function App() {
     });
     setError("");
     if (messageNotice) setMessageNotice("");
+    const composerTarget = document.querySelector(".composer textarea");
+    if (window.matchMedia("(max-width: 1180px)").matches) {
+      inspectorPostCloseFocusRef.current = composerTarget;
+      setInspectorOpen(false);
+    } else {
+      requestAnimationFrame(() => composerTarget?.focus());
+    }
   };
 
   const rememberComposerMention = (member) => {
@@ -3273,6 +3317,13 @@ export default function App() {
     }
   };
 
+  const stableTimelineLoadOlder = useStableCallback(loadOlderMessages);
+  const stableTimelineSearch = useStableCallback(runMessageSearch);
+  const stableTimelineSearchMore = useStableCallback(
+    () => runMessageSearch({ append: true }),
+  );
+  const stableTimelineClearSearch = useStableCallback(clearMessageSearch);
+
   if (loading) return <div className="boot-screen">正在打开 AI 共创室…</div>;
 
   return (
@@ -3338,7 +3389,7 @@ export default function App() {
               aria-expanded={roomDrawerOpen}
               onClick={openRoomDrawer}
             ><PanelLeft size={18} /></button>
-            <strong>{room?.title || "AI 共创室"}</strong>
+            <strong title={room?.title || "AI 共创室"}>{room?.title || "AI 共创室"}</strong>
             <span><Users size={14} />{members.filter((member) => member.enabled).length} 位成员</span>
             <span className={roundBusy ? "status live" : "status"}>{roundStatusLabel}</span>
           </div>
@@ -3394,11 +3445,11 @@ export default function App() {
           historyState={messageHistory}
           searchInput={messageSearchInput}
           searchState={messageSearch}
-          onLoadOlder={loadOlderMessages}
+          onLoadOlder={stableTimelineLoadOlder}
           onSearchInput={setMessageSearchInput}
-          onSearch={() => runMessageSearch()}
-          onSearchMore={() => runMessageSearch({ append: true })}
-          onClearSearch={clearMessageSearch}
+          onSearch={stableTimelineSearch}
+          onSearchMore={stableTimelineSearchMore}
+          onClearSearch={stableTimelineClearSearch}
         />
         <Composer
           value={composer}

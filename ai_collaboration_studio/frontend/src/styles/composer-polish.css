@@ -1,0 +1,299 @@
+.composer {
+  --composer-ink: #172a42;
+  --composer-muted: #6d7c8f;
+  --composer-line: rgba(34, 75, 118, 0.14);
+  --composer-accent: #1769e0;
+  --composer-cyan: #28a9c3;
+  position: relative;
+  isolation: isolate;
+  border-color: var(--composer-line);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 254, 0.98));
+  box-shadow:
+    0 18px 46px rgba(22, 49, 82, 0.11),
+    0 2px 10px rgba(22, 49, 82, 0.055),
+    inset 0 1px rgba(255, 255, 255, 0.9);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.composer:has(.mention-menu) {
+  z-index: 4;
+}
+
+.composer::before {
+  position: absolute;
+  z-index: 0;
+  top: -1px;
+  right: 20px;
+  left: 20px;
+  height: 2px;
+  border-radius: 0 0 4px 4px;
+  background: linear-gradient(90deg, transparent, rgba(40, 169, 195, 0.58), rgba(23, 105, 224, 0.72), transparent);
+  content: "";
+  opacity: 0.42;
+  pointer-events: none;
+}
+
+.composer:focus-within {
+  border-color: rgba(23, 105, 224, 0.28);
+  box-shadow:
+    0 0 0 3px rgba(23, 105, 224, 0.075),
+    0 20px 50px rgba(20, 65, 119, 0.14),
+    inset 0 1px rgba(255, 255, 255, 0.92);
+}
+
+.composer textarea {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  caret-color: var(--composer-accent);
+  color: var(--composer-ink);
+  line-height: 1.55;
+}
+
+.composer textarea::placeholder {
+  color: #8996a6;
+  opacity: 1;
+}
+
+.composer textarea:focus-visible {
+  outline: none;
+}
+
+.composer .composer-toolbar {
+  position: relative;
+  z-index: 2;
+  border-top-color: rgba(34, 75, 118, 0.095);
+  background:
+    linear-gradient(90deg, rgba(244, 248, 252, 0.82), rgba(255, 255, 255, 0.7));
+}
+
+.composer .mention-control > .icon-button {
+  border-color: rgba(38, 78, 121, 0.14);
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 4px 12px rgba(25, 55, 89, 0.06);
+  color: #52677f;
+}
+
+.composer .mention-control > .icon-button:hover:not(:disabled),
+.composer .mention-control > .icon-button[aria-expanded="true"] {
+  border-color: rgba(23, 105, 224, 0.3);
+  background: rgba(23, 105, 224, 0.085);
+  color: var(--composer-accent);
+}
+
+.composer .mention-control > .icon-button:focus-visible {
+  outline: 3px solid rgba(23, 105, 224, 0.18);
+  outline-offset: 2px;
+}
+
+.composer-keyboard-hint {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: #8491a1;
+  font-size: 8px;
+  letter-spacing: 0.025em;
+  white-space: nowrap;
+}
+
+.composer-keyboard-hint kbd {
+  border: 1px solid rgba(49, 81, 116, 0.15);
+  border-radius: 5px;
+  padding: 2px 5px;
+  background: rgba(255, 255, 255, 0.74);
+  box-shadow: 0 1px 2px rgba(28, 50, 76, 0.06);
+  color: #5f7186;
+  font: inherit;
+  font-weight: 700;
+}
+
+.composer-keyboard-hint i {
+  width: 1px;
+  height: 10px;
+  background: rgba(55, 82, 113, 0.18);
+}
+
+.composer .composer-provider-summary {
+  border-color: rgba(184, 135, 34, 0.25);
+  background:
+    linear-gradient(180deg, rgba(255, 251, 232, 0.96), rgba(252, 246, 218, 0.92));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.76);
+  color: #7a5a13;
+  font-weight: 680;
+}
+
+.composer .composer-provider-summary.warning {
+  border-color: rgba(190, 72, 57, 0.27);
+  background: rgba(255, 239, 235, 0.94);
+  color: #9a3f32;
+}
+
+.composer .composer-actions {
+  gap: 7px;
+}
+
+.composer .composer-actions .secondary {
+  border-color: rgba(40, 78, 120, 0.13);
+  background: rgba(255, 255, 255, 0.76);
+  color: #51657d;
+}
+
+.composer .composer-actions .secondary:hover:not(:disabled) {
+  border-color: rgba(23, 105, 224, 0.23);
+  background: rgba(244, 249, 255, 0.96);
+  color: var(--composer-accent);
+}
+
+.composer .send-button {
+  border-color: rgba(18, 83, 182, 0.25);
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.14), transparent 46%),
+    linear-gradient(135deg, #2375e5, #1655c8);
+  box-shadow:
+    0 8px 18px rgba(25, 88, 178, 0.2),
+    inset 0 1px rgba(255, 255, 255, 0.2);
+}
+
+.composer .send-button:hover:not(:disabled) {
+  box-shadow:
+    0 11px 24px rgba(25, 88, 178, 0.27),
+    inset 0 1px rgba(255, 255, 255, 0.24);
+  transform: translateY(-1px);
+}
+
+.composer .composer-actions button:focus-visible {
+  outline: 3px solid rgba(23, 105, 224, 0.18);
+  outline-offset: 2px;
+}
+
+.composer .composer-actions button:disabled,
+.composer .mention-control > .icon-button:disabled {
+  box-shadow: none;
+  filter: saturate(0.58);
+  transform: none;
+}
+
+.composer .mention-menu {
+  border-color: rgba(36, 76, 118, 0.18);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(246, 250, 253, 0.99));
+  box-shadow:
+    0 24px 56px rgba(17, 42, 73, 0.22),
+    0 4px 14px rgba(17, 42, 73, 0.09),
+    inset 0 1px rgba(255, 255, 255, 0.88);
+  scrollbar-color: rgba(71, 106, 145, 0.34) transparent;
+  scrollbar-width: thin;
+}
+
+.composer .mention-menu > button {
+  border-radius: 10px;
+  transition: background-color 130ms ease, color 130ms ease;
+}
+
+.composer .mention-menu > button:hover,
+.composer .mention-menu > button:focus-visible {
+  outline: none;
+  background: linear-gradient(90deg, rgba(23, 105, 224, 0.105), rgba(40, 169, 195, 0.045));
+}
+
+.composer .mention-menu > button > span {
+  border: 2px solid rgba(255, 255, 255, 0.88);
+  box-shadow: 0 0 0 1px rgba(43, 79, 118, 0.13);
+}
+
+.composer .mention-menu strong {
+  color: #1a2f47;
+}
+
+.composer .mention-menu small {
+  color: var(--composer-muted);
+}
+
+@media (min-width: 1181px) {
+  .composer .composer-toolbar {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: "mention keyboard status actions";
+    align-items: center;
+    gap: 8px;
+  }
+
+  .composer .mention-control { grid-area: mention; }
+  .composer-keyboard-hint {
+    display: inline-flex;
+    grid-area: keyboard;
+  }
+  .composer .composer-provider-summary { grid-area: status; }
+  .composer .composer-actions {
+    grid-area: actions;
+    justify-self: end;
+  }
+}
+
+@media (max-width: 760px) {
+  .composer::before {
+    right: 12px;
+    left: 12px;
+  }
+
+  .composer .composer-toolbar {
+    background: rgba(249, 251, 254, 0.9);
+  }
+
+  .composer .mention-control { grid-area: mention; }
+  .composer .composer-provider-summary {
+    min-width: 0;
+    grid-area: status;
+  }
+  .composer .composer-actions {
+    min-width: 0;
+    grid-area: actions;
+    justify-self: end;
+  }
+
+  .composer .send-button:hover:not(:disabled) {
+    transform: none;
+  }
+}
+
+@media (max-width: 430px) {
+  .composer .composer-toolbar {
+    min-height: 0;
+    grid-template-columns: 44px minmax(0, 1fr);
+    grid-template-areas:
+      "status status"
+      "mention actions";
+    gap: 6px 8px;
+    padding-top: 6px;
+  }
+
+  .composer .composer-provider-summary {
+    width: max-content;
+    max-width: 100%;
+    justify-self: start;
+    margin: 0;
+  }
+}
+
+@media (min-width: 431px) and (max-width: 760px) {
+  .composer .composer-toolbar {
+    grid-template-columns: 44px minmax(0, 1fr) auto;
+    grid-template-areas: "mention status actions";
+    gap: 8px;
+  }
+
+  .composer .composer-provider-summary {
+    max-width: 130px;
+    justify-self: start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer,
+  .composer .mention-control > .icon-button,
+  .composer .composer-actions button,
+  .composer .mention-menu > button {
+    transition: none;
+  }
+}

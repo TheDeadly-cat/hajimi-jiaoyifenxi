@@ -10,11 +10,11 @@ const SECTION_LABELS = {
 
 const SCALAR_PATHS = [
   ["title", "产物标题", (snapshot) => snapshot?.title || ""],
-  ["status", "产物状态", (snapshot) => snapshot?.status || "DRAFT"],
+  ["status", "产物状态", (snapshot) => snapshot?.status || ""],
   ["generation_source", "生成来源", (snapshot) => snapshot?.generation_source || ""],
   ["summary", "会议摘要", (snapshot) => snapshot?.content?.summary || ""],
   ["generation_notes", "生成说明", (snapshot) => snapshot?.content?.generation_notes || ""],
-  ["decision_status", "决策状态", (snapshot) => snapshot?.content?.decision?.status || "undecided"],
+  ["decision_status", "决策状态", (snapshot) => snapshot?.content?.decision?.status || ""],
   ["preferred_option_id", "首选方案", (snapshot) => snapshot?.content?.decision?.preferred_option_id || ""],
   ["decision_rationale", "选择理由", (snapshot) => snapshot?.content?.decision?.rationale || ""],
 ];
@@ -22,7 +22,13 @@ const SCALAR_PATHS = [
 function stableValue(value) {
   if (value === null || value === undefined) return "";
   if (typeof value === "string") return value;
-  return JSON.stringify(value);
+  if (["number", "boolean", "bigint"].includes(typeof value)) return String(value);
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string" ? serialized : String(value);
+  } catch {
+    return "（无法序列化）";
+  }
 }
 
 function sectionItems(snapshot, section) {
@@ -39,8 +45,9 @@ function itemLabel(item, fallback) {
 }
 
 function itemFields(item) {
+  const source = item && typeof item === "object" && !Array.isArray(item) ? item : {};
   return Object.fromEntries(
-    Object.entries(item || {})
+    Object.entries(source)
       .filter(([key]) => !["id", "evidence"].includes(key))
       .map(([key, value]) => [key, stableValue(value)]),
   );
@@ -67,7 +74,7 @@ function compareSection(leftSnapshot, rightSnapshot, section) {
     const fieldNames = [...new Set([...Object.keys(beforeFields), ...Object.keys(afterFields)])];
     const fieldChanges = fieldNames
       .filter((field) => beforeFields[field] !== afterFields[field])
-      .map((field) => ({ field, before: beforeFields[field] || "", after: afterFields[field] || "" }));
+      .map((field) => ({ field, before: beforeFields[field] ?? "", after: afterFields[field] ?? "" }));
     const evidenceChanged = stableValue(before?.evidence || []) !== stableValue(item?.evidence || []);
     if (fieldChanges.length || evidenceChanged) {
       changed.push({
@@ -101,13 +108,15 @@ function evidenceTargets(snapshot) {
   const content = snapshot?.content || {};
   const targets = [["summary", content.summary_evidence || []]];
   for (const section of ["requirements", "risks", "conclusions", "disagreements", "unknowns", "actions"]) {
-    (content[section] || []).forEach((item, index) => {
+    const items = Array.isArray(content[section]) ? content[section] : [];
+    items.forEach((item, index) => {
       targets.push([`${section}:${item?.id || `legacy_${index}`}`, item?.evidence || []]);
     });
   }
   const decision = content.decision || {};
   targets.push(["decision", decision.evidence || []]);
-  (decision.options || []).forEach((item, index) => {
+  const options = Array.isArray(decision.options) ? decision.options : [];
+  options.forEach((item, index) => {
     targets.push([`decision_options:${item?.id || `legacy_${index}`}`, item?.evidence || []]);
   });
   const byIdentity = new Map();
@@ -170,6 +179,8 @@ export function buildArtifactVersionDiff(leftRecord, rightRecord) {
 
 export function formatArtifactVersionTime(value) {
   if (!value) return "时间未记录";
-  return new Date(Number(value)).toLocaleString("zh-CN", { hour12: false });
+  const numericValue = Number(value);
+  const date = Number.isFinite(numericValue) ? new Date(numericValue) : new Date(value);
+  if (Number.isNaN(date.getTime())) return "时间未记录";
+  return date.toLocaleString("zh-CN", { hour12: false });
 }
-

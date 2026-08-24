@@ -1,0 +1,258 @@
+/* Shared material editor: provenance-first intake and immutable version boundaries. */
+.material-dialog-backdrop-v2 {
+  background:
+    radial-gradient(circle at 82% 12%, rgba(55, 104, 137, .17), transparent 31%),
+    rgba(22, 35, 46, .57);
+  backdrop-filter: blur(7px) saturate(86%);
+}
+
+.dialog.material-dialog.material-dialog-v2 {
+  --material-ink: #273f53;
+  --material-blue: #3a6e93;
+  width: min(900px, 100%);
+  max-height: min(940px, calc(var(--visual-viewport-height, 100dvh) - max(20px, env(safe-area-inset-top)) - max(20px, env(safe-area-inset-bottom))));
+  overflow-x: hidden;
+  border-color: #adbfcb;
+  border-radius: 16px;
+  color: var(--material-ink);
+  background:
+    linear-gradient(90deg, transparent 37px, rgba(153, 87, 51, .07) 38px, transparent 39px),
+    repeating-linear-gradient(0deg, rgba(51, 92, 119, .03) 0 1px, transparent 1px 28px),
+    #f8faf9;
+  box-shadow: 0 28px 76px rgba(21, 38, 51, .25), 0 3px 12px rgba(21, 38, 51, .12);
+  container: material-editor-v2 / inline-size;
+}
+
+.material-dialog-v2 > header {
+  border-bottom-color: rgba(224, 237, 245, .2);
+  color: #f6fbfd;
+  background:
+    linear-gradient(90deg, rgba(255, 255, 255, .05) 1px, transparent 1px) 0 0 / 24px 24px,
+    linear-gradient(118deg, #203548, #2b5269 62%, #376d80);
+}
+
+.material-dialog-v2 > header strong {
+  color: #fff;
+  font-family: Bahnschrift, "Aptos Display", "Segoe UI", sans-serif;
+  font-size: clamp(16px, 2vw, 21px);
+  letter-spacing: .025em;
+}
+
+.material-dialog-v2 > header small { color: #c8d9e3; }
+.material-dialog-v2 > header .icon-button {
+  border-color: rgba(230, 240, 247, .24);
+  color: #f4f9fc;
+  background: rgba(10, 28, 40, .2);
+}
+
+.material-dialog-fields {
+  display: contents;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.material-dialog-fields > legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.material-dialog-v2 .material-mode-tabs {
+  margin: 12px 16px 0;
+  padding: 4px;
+  border: 1px solid #c5d3dc;
+  border-radius: 9px;
+  background: #edf3f6;
+}
+
+.material-dialog-v2 .material-mode-tabs button {
+  min-height: 38px;
+  border-radius: 6px;
+}
+
+.material-dialog-v2 .material-mode-tabs button.active {
+  color: #2e5f80;
+  background: #fff;
+  box-shadow: 0 2px 7px rgba(40, 67, 84, .1);
+}
+
+.material-dialog-v2 :is(input, textarea, select) {
+  min-width: 0;
+  border-color: #c2d0d9;
+  border-radius: 7px;
+  color: #2e4558;
+  background: rgba(255, 255, 255, .94);
+}
+
+.material-dialog-v2 :is(input, textarea, select):focus {
+  border-color: #6c9ab7;
+  box-shadow: 0 0 0 3px rgba(58, 111, 148, .13);
+}
+
+.material-dialog-v2 .official-supplement-intro,
+.material-dialog-v2 .material-safety-note,
+.material-dialog-v2 .material-evidence-metadata,
+.material-dialog-v2 .material-provenance,
+.material-dialog-v2 .material-version-comparison {
+  border-radius: 9px;
+}
+
+.material-dialog-v2 .official-supplement-intro {
+  border-left: 4px solid #a87336;
+}
+
+.material-dialog-v2 .official-supplement-intro > em {
+  color: #8b4a43;
+  font-size: 9px;
+  font-style: normal;
+  overflow-wrap: anywhere;
+}
+
+.material-dialog-v2 .material-file-picker > span {
+  min-height: 46px;
+  border-radius: 8px;
+}
+
+.material-dialog-v2 .material-version-comparison {
+  border-color: #bfd0db;
+  background: rgba(247, 250, 252, .94);
+}
+
+.material-version-omitted {
+  margin: 0;
+  padding: 7px 8px;
+  border: 1px solid #d7c39a;
+  border-radius: 6px;
+  color: #75592a;
+  background: #fcf8ed;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.material-operation-status {
+  min-width: 0;
+  margin: 10px 16px 0;
+  padding: 8px 9px;
+  border: 1px solid #bfd0da;
+  border-left: 4px solid #7196ad;
+  border-radius: 7px;
+  color: #526b79;
+  background: #f1f6f8;
+  font-size: 9px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.material-operation-status.busy {
+  color: #315f7b;
+  background: #edf5f8;
+}
+
+.material-operation-status.error {
+  border-color: #ddb5b0;
+  border-left-color: #a9534b;
+  color: #88443f;
+  background: #fff4f2;
+}
+
+.material-dialog-v2 .material-dialog-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  border-top: 1px solid #c7d3da;
+  background: rgba(248, 250, 249, .96);
+  backdrop-filter: blur(9px);
+}
+
+.material-dialog-v2 .material-dialog-footer button {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.material-dialog-v2[aria-busy="true"] {
+  cursor: progress;
+}
+
+.material-dialog-v2 .material-dialog-fields:disabled :is(input, textarea, select, button, label) {
+  cursor: not-allowed;
+}
+
+.material-dialog-v2 :is(button, input, textarea, select, summary, a):focus-visible {
+  outline: 3px solid rgba(75, 139, 177, .64);
+  outline-offset: 2px;
+}
+
+@container material-editor-v2 (max-width: 600px) {
+  .material-dialog-v2 .material-mode-tabs {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .material-dialog-v2 .material-mode-tabs button {
+    min-height: 44px;
+  }
+
+  .material-dialog-v2 .material-dialog-footer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .material-dialog-v2 .material-dialog-footer button {
+    width: 100%;
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 760px) {
+  .material-dialog-backdrop-v2 {
+    padding: 0;
+  }
+
+  .dialog.material-dialog.material-dialog-v2 {
+    width: 100%;
+    max-width: 100vw;
+    height: calc(var(--visual-viewport-height, 100dvh) - env(safe-area-inset-top));
+    max-height: none;
+    margin-top: env(safe-area-inset-top);
+    border: 0;
+    border-radius: 0;
+  }
+
+  .material-dialog-v2 > header {
+    padding-top: max(12px, env(safe-area-inset-top));
+  }
+
+  .material-dialog-v2 .material-mode-tabs,
+  .material-operation-status {
+    margin-right: 10px;
+    margin-left: 10px;
+  }
+}
+
+@media (forced-colors: active) {
+  .dialog.material-dialog.material-dialog-v2,
+  .material-dialog-v2 .material-mode-tabs,
+  .material-dialog-v2 .official-supplement-intro,
+  .material-dialog-v2 .material-safety-note,
+  .material-dialog-v2 .material-evidence-metadata,
+  .material-dialog-v2 .material-provenance,
+  .material-dialog-v2 .material-version-comparison,
+  .material-version-omitted,
+  .material-operation-status,
+  .material-dialog-v2 .material-dialog-footer {
+    border-color: CanvasText;
+    color: CanvasText;
+    background: Canvas;
+    box-shadow: none;
+  }
+}

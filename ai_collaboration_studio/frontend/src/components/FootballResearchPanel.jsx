@@ -9,7 +9,7 @@ import {
   ShieldCheck,
   Upload,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import "../styles/football-research.css";
 import { api } from "../api.js";
 import {
@@ -22,6 +22,9 @@ import {
   parseFootballResearchJson,
 } from "../footballResearch.js";
 
+const MAX_JSON_BYTES = 1_000_000;
+const EMPTY_CLAIMS = Object.freeze([]);
+
 const EVIDENCE_LABELS = Object.freeze({
   official_fact: "官方事实",
   media_report: "媒体信息",
@@ -31,6 +34,11 @@ const EVIDENCE_LABELS = Object.freeze({
 
 function initialRequestState() {
   return { status: "idle", view: null, error: "" };
+}
+
+function requestErrorMessage(error, fallback) {
+  const message = error instanceof Error ? error.message.trim() : "";
+  return (message || fallback).slice(0, 1_000);
 }
 
 function textValue(value, fallback = "未提供") {
@@ -83,7 +91,7 @@ function MatchFacts({ contract }) {
   return (
     <section className="football-match-card" aria-label="比赛封印">
       <header>
-        <span><ShieldCheck size={16} /><strong>比赛身份已封印</strong></span>
+        <span><ShieldCheck aria-hidden="true" size={16} /><strong>比赛身份已封印</strong></span>
         <small>所有时间均保持 UTC 原文</small>
       </header>
       <dl className="football-match-facts">
@@ -92,7 +100,7 @@ function MatchFacts({ contract }) {
         <div><dt>赛季</dt><dd>{evidenceText(match.season)}</dd></div>
         <div><dt>比赛 ID</dt><dd>{evidenceText(match.match_id)}</dd></div>
         <div><dt>开球 UTC</dt><dd>{evidenceText(match.kickoff_utc)}</dd></div>
-        <div><dt>场地</dt><dd><MapPin size={13} />{evidenceText(match.venue)}</dd></div>
+        <div><dt>场地</dt><dd><MapPin aria-hidden="true" size={13} />{evidenceText(match.venue)}</dd></div>
         <div><dt>场地 ID</dt><dd>{evidenceText(match.venue_id)}</dd></div>
         <div className="wide"><dt>数据截止 UTC</dt><dd>{textValue(contract.data_cutoff_utc)}</dd></div>
       </dl>
@@ -105,8 +113,8 @@ function FixtureHistory({ field }) {
   if (!fixtures.length) return <p className="football-empty">没有已封印赛程。</p>;
   return (
     <ol className="football-fixture-list">
-      {fixtures.map((fixture) => (
-        <li key={`${fixture.match_id}:${fixture.kickoff_utc}`}>
+      {fixtures.map((fixture, index) => (
+        <li key={JSON.stringify([fixture.match_id, fixture.kickoff_utc, index])}>
           <span><strong>{textValue(fixture.match_id)}</strong><small>{textValue(fixture.kickoff_utc)}</small></span>
           <span><em>{fixture.role === "home" ? "主场" : fixture.role === "away" ? "客场" : textValue(fixture.role)}</em><small>{textValue(fixture.venue?.venue_name)}</small></span>
         </li>
@@ -131,7 +139,7 @@ function AvailabilityRow({ label, field }) {
       {entries.length ? (
         <ul>
           {entries.map((entry, index) => (
-            <li key={`${entry.player_id || entry.player_name || label}:${index}`}>
+            <li key={JSON.stringify([label, entry.player_id, entry.player_name, index])}>
               <strong>{textValue(entry.player_name || entry.player_id)}</strong>
               <span>{textValue(entry.selection_status || entry.status, "状态未提供")}</span>
               {entry.detail ? <small>{entry.detail}</small> : null}
@@ -144,6 +152,8 @@ function AvailabilityRow({ label, field }) {
 }
 
 function TeamResearchCard({ side, team }) {
+  const bodyId = `${useId()}-team-body`;
+  const [expanded, setExpanded] = useState(true);
   const schedule = team.schedule_context || {};
   const travel = objectValue(schedule.travel);
   const last7 = objectValue(schedule.fixtures_last_7d);
@@ -155,12 +165,17 @@ function TeamResearchCard({ side, team }) {
   const results = listValue(recent.results_sequence);
   const notes = listValue(recent.performance_notes);
   return (
-    <details className="football-team-card" open>
-      <summary>
+    <details
+      className="football-team-card"
+      data-team-side={side}
+      open={expanded}
+      onToggle={(event) => setExpanded(event.currentTarget.open)}
+    >
+      <summary aria-controls={bodyId} aria-expanded={expanded}>
         <span><strong>{evidenceText(team.team_name)}</strong><small>{side === "home" ? "主队" : "客队"} · {evidenceText(team.team_id)}</small></span>
-        <ChevronDown size={16} />
+        <ChevronDown aria-hidden="true" size={16} />
       </summary>
-      <div className="football-team-body">
+      <div className="football-team-body" id={bodyId}>
         <section>
           <h4>赛程密度、旅行与主客场</h4>
           <div className="football-density-grid">
@@ -169,7 +184,7 @@ function TeamResearchCard({ side, team }) {
             <span><small>开球前休息</small><strong>{restHours === null ? "未提供" : `${restHours} 小时`}</strong></span>
           </div>
           <div className="football-travel-line">
-            <MapPin size={14} />
+            <MapPin aria-hidden="true" size={14} />
             <span>
               <strong>{textValue(travel.origin?.venue_name)} → {textValue(travel.destination?.venue_name)}</strong>
               <small>{Number.isFinite(travel.distance_km) ? `${travel.distance_km} km` : "距离未提供"} · {textValue(travel.method, "方法未提供")}</small>
@@ -195,14 +210,14 @@ function TeamResearchCard({ side, team }) {
           <h4>战术与近期表现</h4>
           <div className="football-research-notes">
             <strong>战术上下文 <EvidenceBadge field={team.tactical_context} /></strong>
-            {tactics.length ? <ul>{tactics.map((note, index) => <li key={`${index}:${note}`}>{note}</li>)}</ul> : <p>未提供</p>}
+            {tactics.length ? <ul>{tactics.map((note, index) => <li key={JSON.stringify([note, index])}>{note}</li>)}</ul> : <p>未提供</p>}
           </div>
           <div className="football-recent-results">
-            {results.map((item) => <span key={item.match_id}><small>{item.match_id}</small><strong>{item.result}</strong></span>)}
+            {results.map((item, index) => <span key={JSON.stringify([item.match_id, item.result, index])}><small>{item.match_id}</small><strong>{item.result}</strong></span>)}
           </div>
           {notes.length ? (
             <ul className="football-performance-notes">
-              {notes.map((item) => <li key={item.match_id}><strong>{item.match_id}</strong><span>{item.note}</span></li>)}
+              {notes.map((item, index) => <li key={JSON.stringify([item.match_id, item.note, index])}><strong>{item.match_id}</strong><span>{item.note}</span></li>)}
             </ul>
           ) : <p className="football-empty">没有近期表现备注。</p>}
         </section>
@@ -212,12 +227,15 @@ function TeamResearchCard({ side, team }) {
 }
 
 function EvidenceClassGrid({ claims }) {
-  const grouped = useMemo(() => Object.fromEntries(
-    FOOTBALL_EVIDENCE_CLASSES.map((evidenceClass) => [
-      evidenceClass,
-      claims.filter((claim) => claim.evidenceClass === evidenceClass),
-    ]),
-  ), [claims]);
+  const grouped = useMemo(() => {
+    const next = Object.fromEntries(
+      FOOTBALL_EVIDENCE_CLASSES.map((evidenceClass) => [evidenceClass, []]),
+    );
+    for (const claim of claims) {
+      next[claim.evidenceClass]?.push(claim);
+    }
+    return next;
+  }, [claims]);
   return (
     <section className="football-evidence-section" aria-label="证据分类">
       <header><strong>证据类别严格分离</strong><small>赔率只作为观测代理，不转换为未来胜率</small></header>
@@ -229,8 +247,8 @@ function EvidenceClassGrid({ claims }) {
               <summary><strong>{EVIDENCE_LABELS[evidenceClass]}</strong><span>{rows.length} 条</span></summary>
               {rows.length ? (
                 <ul>
-                  {rows.map((claim) => (
-                    <li key={`${claim.claimId}:${claim.path}`}>
+                  {rows.map((claim, index) => (
+                    <li key={JSON.stringify([claim.claimId, claim.path, index])}>
                       <strong>{claim.claimId}</strong>
                       <small>{claim.publicationState || "状态未提供"} · {claim.publishedAtUtc || claim.observedAtUtc || claim.asOfUtc}</small>
                       <span>{claim.publisher || "来源未提供"} · {claim.materialId || "材料未绑定"}{claim.materialVersion ? ` v${claim.materialVersion}` : ""}</span>
@@ -250,7 +268,7 @@ function FixedSafetyBoundary({ view }) {
   const raw = view.raw;
   return (
     <section className="football-safety-boundary" aria-label="足球只读安全边界">
-      <header><ShieldCheck size={16} /><strong>固定只读边界</strong></header>
+      <header><ShieldCheck aria-hidden="true" size={16} /><strong>固定只读边界</strong></header>
       <code>future_probability_available=false</code>
       <code>probability_metrics_visible=false</code>
       <code>odds_are_proxy_only=true</code>
@@ -266,7 +284,12 @@ function FixedSafetyBoundary({ view }) {
   );
 }
 
-export function FootballResearchPanel({
+const MemoMatchFacts = memo(MatchFacts);
+const MemoTeamResearchCard = memo(TeamResearchCard);
+const MemoEvidenceClassGrid = memo(EvidenceClassGrid);
+const MemoFixedSafetyBoundary = memo(FixedSafetyBoundary);
+
+export const FootballResearchPanel = memo(function FootballResearchPanel({
   room,
   activation,
   roundContextAuthorization = null,
@@ -276,11 +299,23 @@ export function FootballResearchPanel({
   const [source, setSource] = useState("");
   const [requestState, setRequestState] = useState(initialRequestState);
   const requestRef = useRef(null);
+  const fileReadGenerationRef = useRef(0);
+  const panelBodyId = useId();
   const roomId = String(room?.id || "");
+  const view = requestState.view;
+  const claims = useMemo(
+    () => (view ? footballEvidenceClaims(view.contract) : EMPTY_CLAIMS),
+    [view],
+  );
 
-  useEffect(() => () => requestRef.current?.abort(), []);
-  useEffect(() => {
+  useEffect(() => () => {
+    fileReadGenerationRef.current += 1;
     requestRef.current?.abort();
+  }, []);
+  useEffect(() => {
+    fileReadGenerationRef.current += 1;
+    requestRef.current?.abort();
+    requestRef.current = null;
     setExpanded(false);
     setSource("");
     setRequestState(initialRequestState());
@@ -288,10 +323,22 @@ export function FootballResearchPanel({
 
   if (!activation?.visible) return null;
   const active = activation.active === true;
+  const canUpdateRoundAuthorization = typeof onRoundContextAuthorizationChange === "function";
 
   const updateSource = (value) => {
-    if (roundContextAuthorization && typeof onRoundContextAuthorizationChange === "function") {
+    fileReadGenerationRef.current += 1;
+    requestRef.current?.abort();
+    requestRef.current = null;
+    if (roundContextAuthorization && canUpdateRoundAuthorization) {
       onRoundContextAuthorizationChange(null);
+    }
+    if (new Blob([value]).size > MAX_JSON_BYTES) {
+      setRequestState({
+        status: "error",
+        view: null,
+        error: "JSON 输入超过 1,000,000 字节只读检查上限。",
+      });
+      return;
     }
     setSource(value);
     setRequestState(initialRequestState());
@@ -301,27 +348,40 @@ export function FootballResearchPanel({
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
-    if (file.size > 1_000_000) {
-      setRequestState({ status: "error", view: null, error: "JSON 文件超过 1 MB 只读检查上限。" });
+    const fileReadGeneration = ++fileReadGenerationRef.current;
+    if (file.size > MAX_JSON_BYTES) {
+      setRequestState({ status: "error", view: null, error: "JSON 文件超过 1,000,000 字节只读检查上限。" });
       return;
     }
     try {
-      updateSource(await file.text());
-    } catch {
-      setRequestState({ status: "error", view: null, error: "无法在本地读取这个 JSON 文件。" });
+      const text = await file.text();
+      if (fileReadGeneration !== fileReadGenerationRef.current) return;
+      updateSource(text);
+    } catch (error) {
+      if (fileReadGeneration !== fileReadGenerationRef.current) return;
+      setRequestState({
+        status: "error",
+        view: null,
+        error: requestErrorMessage(error, "无法在本地读取这个 JSON 文件。"),
+      });
     }
   };
 
   const inspect = async () => {
     if (!active || !roomId || requestState.status === "loading") return;
-    if (roundContextAuthorization && typeof onRoundContextAuthorizationChange === "function") {
+    fileReadGenerationRef.current += 1;
+    if (roundContextAuthorization && canUpdateRoundAuthorization) {
       onRoundContextAuthorizationChange(null);
     }
     let payload;
     try {
       payload = parseFootballResearchJson(source);
     } catch (error) {
-      setRequestState({ status: "error", view: null, error: error.message });
+      setRequestState({
+        status: "error",
+        view: null,
+        error: requestErrorMessage(error, "足球材料 JSON 无法解析。"),
+      });
       return;
     }
     requestRef.current?.abort();
@@ -330,24 +390,23 @@ export function FootballResearchPanel({
     setRequestState({ status: "loading", view: null, error: "" });
     try {
       const response = await api.inspectFootballResearch(roomId, payload, controller.signal);
+      if (requestRef.current !== controller) return;
       const view = normalizeFootballResearchResponse(response, roomId);
       setRequestState(view.valid
         ? { status: "ready", view, error: "" }
         : { status: "integrity_failed", view: null, error: view.reason });
     } catch (error) {
-      if (error?.name === "AbortError") return;
+      if (controller.signal.aborted || requestRef.current !== controller || error?.name === "AbortError") return;
       setRequestState({
         status: "error",
         view: null,
-        error: error?.message || "足球材料只读检查失败。",
+        error: requestErrorMessage(error, "足球材料只读检查失败。"),
       });
     } finally {
       if (requestRef.current === controller) requestRef.current = null;
     }
   };
 
-  const view = requestState.view;
-  const claims = view ? footballEvidenceClaims(view.contract) : [];
   const authorizationState = footballRoundContextAuthorizationState(
     roundContextAuthorization,
     {
@@ -357,43 +416,62 @@ export function FootballResearchPanel({
     },
   );
   const authorizeForRound = () => {
-    if (!view?.valid || typeof onRoundContextAuthorizationChange !== "function") return;
+    if (!view?.valid || !canUpdateRoundAuthorization) return;
     try {
       onRoundContextAuthorizationChange(buildFootballRoundContextAuthorization(view, activation));
     } catch (error) {
-      setRequestState({ status: "error", view: null, error: error.message });
+      setRequestState((current) => ({
+        ...current,
+        status: "error",
+        error: requestErrorMessage(error, "无法构建下一轮上下文授权。"),
+      }));
     }
   };
+  const revokeRoundAuthorization = () => {
+    if (!canUpdateRoundAuthorization) return;
+    onRoundContextAuthorizationChange(null);
+  };
   return (
-    <section className={expanded ? "football-research-panel expanded" : "football-research-panel"} aria-label="足球只读研究检查器">
+    <section
+      className={expanded ? "football-research-panel expanded" : "football-research-panel"}
+      aria-label="足球只读研究检查器"
+      aria-busy={requestState.status === "loading"}
+    >
       <button
         type="button"
         className="football-research-toggle"
         aria-expanded={expanded}
+        aria-controls={panelBodyId}
         onClick={() => setExpanded((value) => !value)}
       >
-        <span><ShieldCheck size={16} /><strong>足球只读材料检查</strong></span>
-        <small>{active ? "精确 v2 贡献已激活" : "仅保留冻结说明"}</small>
-        <ChevronDown size={16} />
+        <span><ShieldCheck aria-hidden="true" size={16} /><strong>足球只读材料检查</strong></span>
+        <small>{active ? "精确 v2 贡献可用" : "仅保留冻结说明"}</small>
+        <ChevronDown aria-hidden="true" size={16} />
       </button>
 
       {expanded ? (
-        <div className="football-research-content">
+        <div className="football-research-content" id={panelBodyId}>
+          {requestState.status === "loading" ? (
+            <p className="football-request-status" role="status" aria-live="polite">
+              正在核验足球研究 JSON。
+            </p>
+          ) : null}
           {!active ? (
             <p className="football-panel-state warning" role="note">
-              <AlertTriangle size={16} />
+              <AlertTriangle aria-hidden="true" size={16} />
               <span><strong>当前不可执行检查</strong><small>{activation.reason}</small></span>
             </p>
           ) : (
             <>
               <p className="football-material-seal-note">
-                <Database size={15} />
+                <Database aria-hidden="true" size={15} />
                 <span><strong>只读取房间内已存在的精确材料版本</strong><small>每条声明必须绑定 material ID、版本、内容哈希与快照哈希；不调用 Provider、不读取市场、不写业务数据。</small></span>
               </p>
               <label className="football-json-input">
-                <span><FileJson2 size={15} /><strong>本地足球合同 JSON</strong></span>
+                <span><FileJson2 aria-hidden="true" size={15} /><strong>本地足球合同 JSON</strong></span>
                 <textarea
                   value={source}
+                  maxLength={MAX_JSON_BYTES}
                   onChange={(event) => updateSource(event.target.value)}
                   spellCheck="false"
                   placeholder="粘贴 football_research_contract_v1 输入，或从本机导入 .json 文件"
@@ -402,11 +480,11 @@ export function FootballResearchPanel({
               </label>
               <div className="football-json-actions">
                 <label className="secondary compact football-import-button">
-                  <Upload size={14} />从本机导入 JSON
-                  <input type="file" accept=".json,application/json" onChange={importJson} />
+                  <Upload aria-hidden="true" size={14} />从本机导入 JSON
+                  <input type="file" accept=".json,application/json" aria-label="从本机导入足球研究 JSON" onChange={importJson} />
                 </label>
-                <button className="primary compact" type="button" onClick={inspect} disabled={requestState.status === "loading" || !source.trim()}>
-                  {requestState.status === "loading" ? <LoaderCircle className="spin" size={14} /> : <Search size={14} />}
+                <button className="primary compact" type="button" onClick={inspect} disabled={requestState.status === "loading" || !roomId || !source.trim()}>
+                  {requestState.status === "loading" ? <LoaderCircle aria-hidden="true" className="spin" size={14} /> : <Search aria-hidden="true" size={14} />}
                   {requestState.status === "loading" ? "核验封印中…" : "执行只读检查"}
                 </button>
               </div>
@@ -415,14 +493,14 @@ export function FootballResearchPanel({
 
           {["error", "integrity_failed"].includes(requestState.status) ? (
             <p className="football-panel-state error" role="alert">
-              <AlertTriangle size={16} />
+              <AlertTriangle aria-hidden="true" size={16} />
               <span><strong>{requestState.status === "integrity_failed" ? "返回合同校验失败" : "检查未完成"}</strong><small>{requestState.error}</small></span>
             </p>
           ) : null}
 
           {view?.valid ? (
             <div className="football-research-result">
-              <MatchFacts contract={view.contract} />
+              <MemoMatchFacts contract={view.contract} />
               <section className={authorizationState.valid ? "football-round-context authorized" : "football-round-context"}>
                 <span>
                   <strong>{authorizationState.valid ? "已显式加入下一轮冻结上下文" : "下一轮上下文尚未授权"}</strong>
@@ -432,23 +510,24 @@ export function FootballResearchPanel({
                   type="button"
                   className="secondary compact"
                   onClick={authorizationState.valid
-                    ? () => onRoundContextAuthorizationChange?.(null)
+                    ? revokeRoundAuthorization
                     : authorizeForRound}
+                  disabled={!canUpdateRoundAuthorization}
                 >
                   {authorizationState.valid ? "撤销下一轮授权" : "显式用于下一轮"}
                 </button>
                 <p>只冻结这份已核验合同及其哈希；不会自动开始轮次，也不会授权投注或替代用户决定。</p>
               </section>
               <div className="football-team-grid">
-                <TeamResearchCard side="home" team={view.contract.teams.home} />
-                <TeamResearchCard side="away" team={view.contract.teams.away} />
+                <MemoTeamResearchCard side="home" team={view.contract.teams.home} />
+                <MemoTeamResearchCard side="away" team={view.contract.teams.away} />
               </div>
-              <EvidenceClassGrid claims={claims} />
-              <FixedSafetyBoundary view={view} />
+              <MemoEvidenceClassGrid claims={claims} />
+              <MemoFixedSafetyBoundary view={view} />
             </div>
           ) : null}
         </div>
       ) : null}
     </section>
   );
-}
+});

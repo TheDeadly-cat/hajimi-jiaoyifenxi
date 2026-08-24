@@ -5,10 +5,16 @@ import test from "node:test";
 import {
   buildCandidateExperimentRequest,
   candidateExperimentAuthorizationGate,
+  candidateExperimentControlState,
+  candidateExperimentErrorMessage,
   candidateExperimentRequestIdentity,
+  candidateExperimentSelectionFingerprint,
   candidateExperimentView,
   CANDIDATE_EXPERIMENT_AUTHORIZATION_VERSION,
+  CANDIDATE_EXPERIMENT_ARM_LIMIT,
   CANDIDATE_EXPERIMENT_COHORT_VERSION,
+  CANDIDATE_EXPERIMENT_EVIDENCE_LIMIT,
+  CANDIDATE_EXPERIMENT_ISSUE_LIMIT,
   CANDIDATE_EXPERIMENT_REQUEST_VERSION,
 } from "../src/candidateExperiment.js";
 import { buildArtifactUserDecisionRequest } from "../src/artifactUserDecision.js";
@@ -360,6 +366,48 @@ test("same semantic fingerprint retains one request id and changed semantics rot
 });
 
 
+test("selection fingerprint and control workflow fail closed until 2-6 unique candidates are bound", () => {
+  const artifact = governedArtifact();
+  assert.equal(candidateExperimentSelectionFingerprint(artifact, ["candidate_a"]), "");
+  assert.equal(
+    candidateExperimentSelectionFingerprint(artifact, ["candidate_a", "candidate_a"]),
+    "",
+  );
+  const fingerprint = candidateExperimentSelectionFingerprint(
+    artifact,
+    ["candidate_b", "candidate_a"],
+  );
+  assert.ok(fingerprint);
+
+  const authorization = candidateExperimentControlState({
+    gateReady: true,
+    selectedCandidateIds: ["candidate_b", "candidate_a"],
+    selectionFingerprint: fingerprint,
+  });
+  assert.equal(authorization.phase, "authorize");
+  assert.equal(authorization.canAcknowledge, true);
+  assert.equal(authorization.canRun, false);
+  assert.deepEqual(
+    authorization.steps.map((step) => step.status),
+    ["complete", "active", "pending", "pending"],
+  );
+
+  const review = candidateExperimentControlState({
+    gateReady: true,
+    acknowledged: true,
+    selectedCandidateIds: ["candidate_b", "candidate_a"],
+    selectionFingerprint: fingerprint,
+    resultReady: true,
+  });
+  assert.equal(review.phase, "review");
+  assert.equal(review.canRun, true);
+  assert.deepEqual(
+    review.steps.map((step) => step.status),
+    ["complete", "complete", "complete", "active"],
+  );
+});
+
+
 test("a reread cohort preserves authorization order and exposes neutral historical evidence", () => {
   const request = requestFor(["candidate_b", "candidate_a"]);
   const view = candidateExperimentView(
@@ -439,6 +487,26 @@ test("a capacity-blocked scenario is a valid historical result and never exposes
 });
 
 
+test("bounds errors and oversized cohort collections before display projection", () => {
+  assert.equal(candidateExperimentErrorMessage({ message: { unsafe: true } }, "fallback"), "fallback");
+  assert.equal(candidateExperimentErrorMessage({ message: "x".repeat(1500) }).length, 1000);
+
+  const tooManyArms = readyExperiment();
+  tooManyArms.arms = Array.from({ length: CANDIDATE_EXPERIMENT_ARM_LIMIT + 1 }, () => null);
+  assert.equal(candidateExperimentView(tooManyArms, expectedFor(requestFor())).ready, false);
+
+  const tooMuchEvidence = readyExperiment();
+  tooMuchEvidence.arms[0].evidence = Array.from({ length: CANDIDATE_EXPERIMENT_EVIDENCE_LIMIT + 1 }, () => "evidence");
+  assert.equal(candidateExperimentView(tooMuchEvidence, expectedFor(requestFor())).ready, false);
+
+  const tooManyIssues = readyExperiment();
+  tooManyIssues.issues = Array.from({ length: CANDIDATE_EXPERIMENT_ISSUE_LIMIT + 1 }, () => "issue");
+  const issueView = candidateExperimentView(tooManyIssues, expectedFor(requestFor()));
+  assert.equal(issueView.ready, false);
+  assert.equal(issueView.issues[0].code, "CANDIDATE_EXPERIMENT_ISSUE_LIMIT_EXCEEDED");
+});
+
+
 test("historical return does not affect the independent artifact user decision", () => {
   const experiment = readyExperiment();
   experiment.arms[1].scenarios[0].metrics.portfolio_cumulative_return_pct = 40;
@@ -468,18 +536,38 @@ test("panel posts then rereads, ArtifactDialog places it before the independent 
     new URL("../src/styles/artifact-dialog.css", import.meta.url),
     "utf8",
   );
+  const experimentStyles = readFileSync(
+    new URL("../src/styles/candidate-experiment.css", import.meta.url),
+    "utf8",
+  );
+  const refinementStyles = readFileSync(
+    new URL("../src/styles/candidate-experiment-refinement.css", import.meta.url),
+    "utf8",
+  );
 
   assert.ok(panelSource.indexOf("api.createCandidateExperiment") < panelSource.indexOf("api.candidateExperiment"));
   assert.match(panelSource, /requestIdentityRef/);
+  assert.match(panelSource, /coordinatorRef\.current\.inFlight/);
+  assert.match(panelSource, /runtimeGateReady/);
+  assert.match(panelSource, /CANDIDATE_SELECTOR_PAGE_SIZE = 24/);
+  assert.match(panelSource, /所有已选候选始终可见/);
   assert.match(panelSource, /"trading_calendar_sha256"/);
   assert.match(panelSource, /不产生排名、赢家、未来胜率或自动决定/);
+  assert.match(panelSource, /candidate-experiment\.css/);
+  assert.match(panelSource, /coordinatorRef\.current\.cancel\(\);[\s\S]*?selectionFingerprint/);
   assert.equal(panelSource.includes(".sort("), false);
-  assert.ok(dialogSource.indexOf("<CandidateExperimentPanel") < dialogSource.indexOf("<UserFinalDecisionSection"));
+  assert.ok(dialogSource.indexOf("<CandidateExperimentPanel") < dialogSource.indexOf("<MemoUserFinalDecisionSection"));
   assert.match(dialogSource, /footballResearchPackPresent/);
   assert.match(dialogSource, /stockResearchPackPresent/);
   assert.match(dialogSource, /frozenAndCurrentCapabilityPackIds/);
   assert.match(dialogSource, /storageCandidateExperimentAllowed\s*\?\s*\(/);
   assert.match(artifactDialogStyles, /\.candidate-experiment-table-wrap\s*\{[\s\S]*?overflow-x:\s*auto;/);
   assert.match(artifactDialogStyles, /@media \(max-width: 620px\)[\s\S]*?\.candidate-experiment-selector \{ grid-template-columns: 1fr;/);
+  assert.match(experimentStyles, /\.candidate-experiment-workbench[\s\S]*?overflow-x:\s*auto;/);
+  assert.match(experimentStyles, /\.candidate-experiment-table th:first-child\s*\{[\s\S]*?position:\s*sticky;/);
+  assert.match(experimentStyles, /@media \(max-width: 420px\)[\s\S]*?\.candidate-experiment-workflow \{ grid-template-columns: 1fr;/);
+  assert.match(refinementStyles, /candidate-experiment-neutrality-ledger/);
+  assert.match(refinementStyles, /prefers-reduced-motion/);
+  assert.match(refinementStyles, /forced-colors/);
   assert.doesNotMatch(hostStyles, /\.candidate-experiment-table-wrap\s*\{/);
 });

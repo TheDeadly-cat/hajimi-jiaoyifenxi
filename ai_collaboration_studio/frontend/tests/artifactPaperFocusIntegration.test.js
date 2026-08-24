@@ -30,11 +30,19 @@ test("artifact and paper portfolio dialogs restore their exact launch controls",
 test("all artifact and paper portfolio entry points forward the real trigger", () => {
   assert.match(
     artifactPanelSource,
-    /onGenerate\(activeSynthesizerId, event\.currentTarget\)/,
+    /const trigger = event\.currentTarget/,
   );
   assert.match(
     artifactPanelSource,
-    /onEdit\(artifact, event\.currentTarget\)/,
+    /await onGenerate\(controls\.activeSynthesizerId, trigger\)/,
+  );
+  assert.match(
+    artifactPanelSource,
+    /editArtifact\(artifact, event\.currentTarget\)/,
+  );
+  assert.match(
+    artifactPanelSource,
+    /onEdit\(artifact, trigger\)/,
   );
   assert.match(
     decisionLineageSource,
@@ -44,4 +52,3 @@ test("all artifact and paper portfolio entry points forward the real trigger", (
   assert.match(appSource, /onAddPaperPortfolio=\{openPaperPortfolio\}/);
   assert.match(appSource, /onEditPaperPortfolio=\{openPaperPortfolio\}/);
 });
-

@@ -1,0 +1,74 @@
+{
+  "schema_version": "full_backend_regression_evidence_v1",
+  "evidence_date": "2026-08-24",
+  "runner": "scripts/run_backend_tests_isolated.py",
+  "command": [
+    "python",
+    "scripts/run_backend_tests_isolated.py",
+    "--layer",
+    "full",
+    "--verbosity",
+    "1"
+  ],
+  "environment": {
+    "AI_STUDIO_SKIP_LOCAL_ENV": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "provider_and_market_credentials_cleared": true,
+    "runtime_scope": "system_temp",
+    "sqlite_scope": "explicit_temporary",
+    "dependency_downloads": 0,
+    "formal_service_started": false
+  },
+  "result": {
+    "ok": true,
+    "tests": 1266,
+    "passed": 1266,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "duration_seconds": 886.679,
+    "exit_code": 0
+  },
+  "network_isolation": {
+    "version": "backend_test_network_audit_v2",
+    "allowed_loopback_connections": 350,
+    "blocked_attempt_count": 0,
+    "child_blocked_attempt_count": 0,
+    "simulated_offline_connections": 0,
+    "non_loopback_forbidden": true,
+    "formal_ports_forbidden": [
+      8770,
+      11111
+    ]
+  },
+  "raw_log": {
+    "basename": "ai-studio-full-backend-84700235dd9741c7b8557b9ab6094adc.log",
+    "retention": "system_temp",
+    "bytes": 76045,
+    "sha256": "80d8a6ce584503e8a93b00ca4c379c599feeadd128424f3fdb546f0ca2414e08"
+  },
+  "formal_assets_after": {
+    "main_bytes": 5062656,
+    "main_sha256": "b32e88a0c0be5db2d052904221c6c85d1b1c7862fd76f45eb8df08b7ec41cc05",
+    "wal_bytes": 0,
+    "wal_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "shm_bytes": 32768,
+    "shm_sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+    "protected_ports_checked": [
+      8770,
+      11111,
+      18787
+    ],
+    "protected_listener_count": 0,
+    "project_process_count": 0,
+    "isolated_runtime_absent": true
+  },
+  "boundaries": {
+    "frontend_regression_included": false,
+    "fresh_source_dependency_resolution": false,
+    "dependency_cve_audit": false,
+    "real_provider_or_market_calls": false,
+    "formal_migration_applied": false,
+    "production_authorization": false
+  }
+}

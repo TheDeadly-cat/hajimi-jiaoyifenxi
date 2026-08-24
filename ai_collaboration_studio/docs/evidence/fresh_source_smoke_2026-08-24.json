@@ -1,0 +1,194 @@
+{
+  "schema_version": "fresh_source_smoke_evidence_v1",
+  "completed_at_utc": "2026-08-24T10:09:53.386828+00:00",
+  "source_projection": {
+    "clean_exclusions": {
+      "git": true,
+      "runtime": true,
+      "node_modules": true,
+      "dist": true
+    },
+    "archive_entries": 552,
+    "manifest_file_count": 551,
+    "total_bytes": 13332509,
+    "total_sha256": "97f80ede657a61aa3b101bb2738e3d955249e816255e6d19db5ac08263b17275",
+    "temporary_zip_bytes": 4326210,
+    "temporary_zip_sha256": "e169edf8e456a4558ea07a2d2881decb8125c0c4c6093ca46b15b5dd4468afe2",
+    "archive_create_exit_code": 0,
+    "archive_verify_exit_code": 0
+  },
+  "bootstrap": {
+    "receipt_version": "studio_bootstrap_receipt_v1",
+    "project_id": "ai_collaboration_studio",
+    "project_version": "0.1.0",
+    "dependency_downloads_authorized": true,
+    "inputs": {
+      "requirements_sha256": "8edee15d683c09b79db27d6eaec4677f5aafdc79cc2866e44d1c3ec284f9fa58",
+      "requirements_lock_sha256": "22e149f601a83f26833cff20d32cbf5aaa01242906de0d8cf9d53a6e569ea699",
+      "package_json_sha256": "b8d30d4e7f41abf97b0ea98cd3e263521d19413440fcc9190762f8c0e5fce163",
+      "package_lock_sha256": "875e3714c1a69ec74d3510afa73a82e98c0d9cac6ea168587d0ba631a7116ffc",
+      "python_lock_profile": {
+        "id": "windows_x64_cpython_3_14",
+        "compatible": true
+      }
+    },
+    "commands": [
+      {
+        "label": "create_python_venv",
+        "exit_code": 0,
+        "duration_seconds": 6.925
+      },
+      {
+        "label": "install_python_dependencies",
+        "exit_code": 0,
+        "duration_seconds": 37.826,
+        "locked_distribution_count": 10
+      },
+      {
+        "label": "install_frontend_dependencies",
+        "exit_code": 0,
+        "duration_seconds": 5.292,
+        "installed_package_count": 106
+      },
+      {
+        "label": "build_frontend_production",
+        "exit_code": 0,
+        "duration_seconds": 9.418,
+        "vite_build_seconds": 8.13
+      },
+      {
+        "label": "capture_python_resolution",
+        "exit_code": 0,
+        "duration_seconds": 0.534
+      }
+    ],
+    "python_resolution": {
+      "packages": [
+        "futu_api==10.10.7008",
+        "numpy==2.5.2",
+        "pandas==3.0.5",
+        "protobuf==7.36.0",
+        "pycryptodome==3.23.0",
+        "pypdf==6.16.2",
+        "python-dateutil==2.9.0.post0",
+        "simplejson==4.1.1",
+        "six==1.17.0",
+        "tzdata==2026.3"
+      ],
+      "matches_lock": true,
+      "sha256": "4b0b39949ab2c3e23355e2011eeb7e23b6d68f929f0d1f8bb3507f8d0837f1c2"
+    }
+  },
+  "frontend": {
+    "safe_test_files": 105,
+    "tests": 545,
+    "passed": 545,
+    "failed": 0,
+    "test_duration_seconds": 34.701,
+    "production_build": {
+      "vite_version": "6.4.3",
+      "modules_transformed": 1747,
+      "build_seconds": 8.13,
+      "index_html_bytes": 671,
+      "index_html_sha256": "25826375eb09c5a2f0ff500b80cbcf5122ef89dcebed653af3cbb239c99a47a6",
+      "main_css": {
+        "file": "index-CnQsKIag.css",
+        "kilobytes": 193.81,
+        "gzip_kilobytes": 36.02
+      },
+      "main_js": {
+        "file": "index-C1AEgPkv.js",
+        "kilobytes": 373.85,
+        "gzip_kilobytes": 112.42
+      }
+    }
+  },
+  "backend_targeted": {
+    "tests": 6,
+    "passed": 6,
+    "failed": 0,
+    "unittest_seconds": 4.88,
+    "command_duration_seconds": 7.086,
+    "network_isolation": {
+      "allowed_loopback_connections": 7,
+      "blocked_attempt_count": 0,
+      "child_blocked_attempt_count": 0,
+      "simulated_offline_connections": 0,
+      "non_loopback_forbidden": true
+    }
+  },
+  "temporary_database": {
+    "initialization_exit_code": 0,
+    "duration_seconds": 1.323
+  },
+  "runtime": {
+    "host": "127.0.0.1",
+    "random_port": 64367,
+    "readiness": {
+      "status": 200,
+      "schema_version": "host_readiness_v1",
+      "ready": true
+    },
+    "version": {
+      "status": 200,
+      "schema_version": "host_version_v1"
+    },
+    "frontend_status": 200,
+    "unknown_api_status": 404,
+    "listener_while_running": true,
+    "listener_after_stop": false,
+    "server_stdout_bytes": 987,
+    "server_stderr_bytes": 0,
+    "protected_ports_before": {
+      "8770": false,
+      "11111": false,
+      "18787": false
+    },
+    "protected_ports_while_running": {
+      "8770": false,
+      "11111": false,
+      "18787": false
+    },
+    "protected_ports_after": {
+      "8770": false,
+      "11111": false,
+      "18787": false
+    }
+  },
+  "safety": {
+    "local_env_skipped": true,
+    "provider_credentials_removed": true,
+    "formal_database_opened_by_bootstrap": false,
+    "formal_database_unchanged": true,
+    "temporary_workdir_deleted": true,
+    "project_process_count_after": 0,
+    "listener_count_after": 0
+  },
+  "formal_assets_after": {
+    "main_bytes": 5062656,
+    "main_sha256": "b32e88a0c0be5db2d052904221c6c85d1b1c7862fd76f45eb8df08b7ec41cc05",
+    "wal_bytes": 0,
+    "wal_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "shm_bytes": 32768,
+    "shm_sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+  },
+  "raw_artifacts": {
+    "retention": "system_temp",
+    "report": {
+      "bytes": 37187,
+      "sha256": "9e1b8b4ea34dc492ae94b9e3689725f0fcb1132ade1108df33c749f2f835fa02"
+    },
+    "log": {
+      "bytes": 38340,
+      "sha256": "6bb9c49bbe9bd7f4008f21dbae2ffe992ff5d80b462a1a932c0af9cb917454d3"
+    }
+  },
+  "boundaries": {
+    "full_backend_regression_in_this_smoke": false,
+    "real_provider_or_market_validation": false,
+    "browser_manual_acceptance": false,
+    "dependency_cve_audit": false,
+    "formal_migration_applied": false,
+    "production_authorization": false
+  }
+}

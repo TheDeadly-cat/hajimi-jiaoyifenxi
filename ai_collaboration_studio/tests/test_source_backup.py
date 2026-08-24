@@ -150,6 +150,7 @@ class SourceBackupTests(unittest.TestCase):
             ".git/config": "git config\n",
             "node_modules/package/index.js": "generated\n",
             "dist/bundle.js": "generated\n",
+            "frontend/.npm-cache/_logs/debug.log": "generated npm trace\n",
             "__pycache__/app.cpython-313.pyc": "cache\n",
             "nested/cache.pyc": "cache\n",
             "SeCrEtS/provider.txt": "provider-secret\n",

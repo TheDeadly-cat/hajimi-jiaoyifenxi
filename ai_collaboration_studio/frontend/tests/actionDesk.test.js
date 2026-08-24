@@ -260,16 +260,26 @@ test("panel integration cancels local reads, rereads after POST, and keys reads 
     new URL("../src/components/RoomInspector.jsx", import.meta.url),
     "utf8",
   );
+  const inspectorViewSource = readFileSync(
+    new URL("../src/roomInspectorView.js", import.meta.url),
+    "utf8",
+  );
   const appSource = readFileSync(new URL("../src/App.jsx", import.meta.url), "utf8");
 
   assert.match(panelSource, /new AbortController\(\)/);
   assert.match(panelSource, /controller\?\.abort\(\)/);
   assert.match(panelSource, /await api\.transitionActionDesk/);
-  assert.match(panelSource, /const rereadReady = await loadDesk\(\)/);
+  assert.match(
+    panelSource,
+    /const \[rereadReady\] = await Promise\.all\(\[loadDesk\(\), loadContinuations\(\)\]\)/,
+  );
   assert.match(panelSource, /\[normalizedArtifactFingerprint, normalizedRoomId\]/);
   assert.match(panelSource, /setMutation\(EMPTY_MUTATION_STATE\);\s*void loadDesk\(\)/);
   assert.match(inspectorSource, /actionDeskArtifactFingerprint/);
-  assert.match(inspectorSource, /artifact\?\.content\?\.actions/);
+  assert.match(inspectorSource, /buildRoomInspectorArtifactFingerprint/);
+  assert.match(inspectorViewSource, /ROOM_INSPECTOR_ARTIFACT_LIMIT/);
+  assert.match(inspectorViewSource, /array\(record\(artifact\.content\)\.actions\)\.length/);
+  assert.match(inspectorViewSource, /fingerprint: JSON\.stringify/);
   assert.match(inspectorSource, /<ActionDeskPanel/);
   assert.match(appSource, /const fillActionDeskComposer/);
   const callback = appSource.slice(

@@ -1,0 +1,104 @@
+name: Isolated validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-validation:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      AI_STUDIO_SKIP_LOCAL_ENV: "1"
+      FUTU_HOST: "127.0.0.1"
+      FUTU_PORT: "1"
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      DEEPSEEK_API_KEY: ""
+      GOOGLE_API_KEY: ""
+      GEMINI_API_KEY: ""
+      FUTU_PASSWORD_MD5: ""
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.14"
+          architecture: "x64"
+
+      - name: Set up Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Deterministic offline security baseline
+        shell: pwsh
+        run: >-
+          python scripts/run_static_security_checks.py
+          --report "$env:RUNNER_TEMP\static-security.json"
+
+      - name: Bootstrap locked dependencies and production frontend
+        shell: pwsh
+        run: >-
+          python scripts/bootstrap_ai_collaboration_studio.py
+          --runtime-root "$env:RUNNER_TEMP\ai-studio-bootstrap"
+          --report "$env:RUNNER_TEMP\bootstrap-receipt.json"
+          --allow-dependency-downloads
+
+      - name: Guarded frontend regression
+        shell: pwsh
+        run: npm.cmd --prefix frontend test
+
+      - name: Full isolated backend regression
+        shell: pwsh
+        run: >-
+          & "$env:RUNNER_TEMP\ai-studio-bootstrap\python\Scripts\python.exe"
+          scripts/run_backend_tests_isolated.py
+          --layer full
+          --verbosity 1
+          --durations 30
+
+      - name: Clean-source install, test, build, and startup smoke
+        shell: pwsh
+        run: >-
+          python scripts/run_fresh_source_smoke.py
+          --report "$env:RUNNER_TEMP\fresh-source-smoke.json"
+          --allow-dependency-downloads
+
+      - name: Isolated install, upgrade, and rollback drill
+        shell: pwsh
+        run: >-
+          & "$env:RUNNER_TEMP\ai-studio-bootstrap\python\Scripts\python.exe"
+          scripts/run_isolated_release_drill.py
+          --report "$env:RUNNER_TEMP\release-drill.json"
+
+      - name: Generate offline dependency inventory
+        shell: pwsh
+        run: |
+          & "$env:RUNNER_TEMP\ai-studio-bootstrap\python\Scripts\python.exe" `
+            scripts/generate_dependency_inventory.py `
+            --output "$env:RUNNER_TEMP\dependency-inventory.json"
+          & "$env:RUNNER_TEMP\ai-studio-bootstrap\python\Scripts\python.exe" `
+            scripts/generate_dependency_inventory.py `
+            --verify "$env:RUNNER_TEMP\dependency-inventory.json"
+
+      - name: Upload non-secret delivery receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: isolated-delivery-receipts
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}\static-security.json
+            ${{ runner.temp }}\bootstrap-receipt.json
+            ${{ runner.temp }}\fresh-source-smoke.json
+          ${{ runner.temp }}\release-drill.json
+          ${{ runner.temp }}\dependency-inventory.json

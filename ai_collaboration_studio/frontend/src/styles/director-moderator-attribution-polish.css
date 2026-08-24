@@ -1,0 +1,90 @@
+.director-moderator-attribution {
+  --moderator-ink: #294f68;
+  --moderator-blue: #4b7795;
+  position: relative;
+  min-width: 0;
+  container-name: moderator-attribution;
+  container-type: inline-size;
+  padding: 9px 10px;
+  border-left: 3px solid rgb(75 119 149 / 56%);
+  border-radius: 6px;
+  background:
+    linear-gradient(135deg, rgb(75 119 149 / 7%), transparent 52%),
+    rgb(255 255 255 / 86%);
+}
+
+.director-moderator-attribution.model-used { border-left-color: #3f7a70; }
+.director-moderator-attribution.model-not-used { border-left-color: #83919a; }
+.director-moderator-attribution.incomplete { border-left-color: #a67a3d; }
+.director-moderator-attribution.legacy {
+  gap: 7px;
+  color: #667787;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.director-moderator-attribution .director-moderator-head {
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.director-moderator-attribution .director-moderator-head > span { font-size: 9px; }
+.director-moderator-attribution .director-moderator-head > strong {
+  min-width: 0;
+  color: var(--moderator-ink);
+  font-size: 11px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.director-moderator-attribution .director-moderator-head > em,
+.director-moderator-attribution .director-moderator-head > b { font-size: 9px; }
+.director-moderator-attribution > p {
+  overflow: visible;
+  color: #536a7c;
+  font-size: 10px;
+  line-height: 1.5;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.director-moderator-attribution .director-moderator-route {
+  flex-wrap: wrap;
+  gap: 5px;
+  font-size: 9px;
+}
+.director-moderator-attribution .director-moderator-route code {
+  max-width: 100%;
+  overflow: visible;
+  font-size: 9px;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.director-moderator-attribution .director-moderator-route small,
+.director-moderator-attribution .director-moderator-notice {
+  font-size: 9px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+@container moderator-attribution (max-width: 320px) {
+  .director-moderator-attribution .director-moderator-head > b,
+  .director-moderator-attribution .director-moderator-route small {
+    width: 100%;
+    margin-left: 0;
+  }
+}
+
+@media (forced-colors: active) {
+  .director-moderator-attribution {
+    border-color: CanvasText;
+    color: CanvasText;
+    background: Canvas;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .director-moderator-attribution *,
+  .director-moderator-attribution *::before,
+  .director-moderator-attribution *::after { scroll-behavior: auto !important; }
+}

@@ -245,6 +245,97 @@ test("discussion audit rejects semantic overclaiming and unsafe read responses",
   assert.ok(normalizeDiscussionAudit(unsafe).errors.includes("讨论审计的只读安全边界无法验证。"));
 });
 
+test("discussion audit projection keys remain stable across reorder and unique for exact duplicates", () => {
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const fixture = auditFixture();
+  fixture.structural.response_edges.push({
+    ...fixture.structural.response_edges[0],
+    from_message_id: "message_four",
+    to_message_id: "message_three",
+  });
+  fixture.structural.response_edge_count = 2;
+
+  const reordered = clone(fixture);
+  reordered.structural.selections.reverse();
+  reordered.structural.response_edges.reverse();
+  reordered.candidate_checkpoint.candidates.reverse();
+  reordered.findings.reverse();
+
+  const forwardView = discussionAuditViewModel(fixture, { expectedTraceHash: TRACE_HASH });
+  const reorderedView = discussionAuditViewModel(reordered, { expectedTraceHash: TRACE_HASH });
+  const keysBy = (rows, identity) => Object.fromEntries(
+    rows.map((row) => [identity(row), row.projectionKey]),
+  );
+  assert.deepEqual(
+    keysBy(forwardView.selections, (row) => row.event_id),
+    keysBy(reorderedView.selections, (row) => row.event_id),
+  );
+  assert.deepEqual(
+    keysBy(forwardView.responseEdges, (row) => `${row.from_message_id}:${row.to_message_id}`),
+    keysBy(reorderedView.responseEdges, (row) => `${row.from_message_id}:${row.to_message_id}`),
+  );
+  assert.deepEqual(
+    keysBy(forwardView.checkpoint.candidates, (row) => row.id),
+    keysBy(reorderedView.checkpoint.candidates, (row) => row.id),
+  );
+  assert.deepEqual(
+    keysBy(forwardView.findings, (row) => row.code),
+    keysBy(reorderedView.findings, (row) => row.code),
+  );
+
+  const duplicateFixture = auditFixture();
+  const selection = clone(duplicateFixture.structural.selections[0]);
+  duplicateFixture.structural.selections = [selection, clone(selection)];
+  duplicateFixture.structural.selection_count = 2;
+  duplicateFixture.structural.dynamic_selection_count = 2;
+  duplicateFixture.structural.fallback_count = 0;
+  const edge = clone(duplicateFixture.structural.response_edges[0]);
+  duplicateFixture.structural.response_edges = [edge, clone(edge)];
+  duplicateFixture.structural.response_edge_count = 2;
+  const candidate = clone(duplicateFixture.candidate_checkpoint.candidates[0]);
+  duplicateFixture.candidate_checkpoint.candidates = [candidate, clone(candidate)];
+  duplicateFixture.candidate_checkpoint.candidate_count = 2;
+  const finding = clone(duplicateFixture.findings[0]);
+  duplicateFixture.findings = [finding, clone(finding)];
+
+  const duplicateView = discussionAuditViewModel(duplicateFixture, { expectedTraceHash: TRACE_HASH });
+  assert.equal(duplicateView.valid, true);
+  assert.equal(new Set(duplicateView.selections.map((row) => row.projectionKey)).size, 2);
+  assert.equal(new Set(duplicateView.responseEdges.map((row) => row.projectionKey)).size, 2);
+  assert.equal(new Set(duplicateView.checkpoint.candidates.map((row) => row.projectionKey)).size, 2);
+  assert.equal(new Set(duplicateView.findings.map((row) => row.projectionKey)).size, 2);
+});
+
+test("discussion audit UI uses bounded exact-identity windows with focus-safe progress", () => {
+  const source = readFileSync(
+    new URL("../src/components/DiscussionAuditSection.jsx", import.meta.url),
+    "utf8",
+  );
+  const styles = readFileSync(
+    new URL("../src/styles/round-execution-trace.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(source, /key=\{JSON\.stringify\(\["(?:checkpoint-candidate|audit-selection|audit-edge|audit-finding)"/);
+  assert.equal(source.match(/key=\{(?:candidate|selection|edge|finding)\.projectionKey\}/g)?.length, 4);
+  assert.match(source, /const AUDIT_SELECTION_PAGE_SIZE = 12/);
+  assert.match(source, /const AUDIT_EDGE_PAGE_SIZE = 16/);
+  assert.match(source, /const AUDIT_CANDIDATE_PAGE_SIZE = 8/);
+  assert.match(source, /const AUDIT_FINDING_PAGE_SIZE = 12/);
+  assert.equal(source.match(/className="discussion-audit-window-status" role="status"/g)?.length, 4);
+  assert.equal(source.match(/onClickCapture=\{focusAuditProgressAfterRender\}/g)?.length, 4);
+  assert.equal(source.match(/tabIndex=\{-1\}/g)?.length, 4);
+  assert.doesNotMatch(source, /defaultOpen=/);
+  assert.match(source, /open=\{selectionOpen\}[\s\S]*onToggle=\{\(event\) => setSelectionOpen\(event\.currentTarget\.open\)\}/);
+  assert.match(source, /open=\{edgeOpen\}[\s\S]*onToggle=\{\(event\) => setEdgeOpen\(event\.currentTarget\.open\)\}/);
+  assert.match(source, /aria-controls=\{selectionListId\}/);
+  assert.match(source, /aria-controls=\{edgeListId\}/);
+  assert.match(source, /aria-controls=\{candidateListId\}/);
+  assert.match(source, /aria-controls=\{findingListId\}/);
+  assert.match(styles, /\.discussion-audit-window-status progress:focus-visible/);
+  assert.match(styles, /@container discussion-audit \(max-width: 360px\)[\s\S]*\.discussion-audit-window-status/);
+});
+
 test("discussion audit state and request path stay independent from execution trace state", () => {
   assert.deepEqual(emptyDiscussionAuditState(), {
     roomId: "",
@@ -268,6 +359,10 @@ test("discussion audit state and request path stay independent from execution tr
     new URL("../src/styles/round-execution-trace.css", import.meta.url),
     "utf8",
   );
+  const modalFocusSource = readFileSync(
+    new URL("../src/useModalFocus.js", import.meta.url),
+    "utf8",
+  );
   const openHandler = appSource.slice(
     appSource.indexOf("const openRoundExecutionTrace"),
     appSource.indexOf("const retryRoundExecutionTrace"),
@@ -278,11 +373,13 @@ test("discussion audit state and request path stay independent from execution tr
   assert.match(openHandler, /void loadDiscussionAudit/);
   assert.doesNotMatch(openHandler, /Promise\.all/);
   assert.match(dialogSource, /expectedTraceHash=\{trace\.trace_hash\}/);
+  assert.match(dialogSource, /useModalFocus\(\{[\s\S]*onClose/);
   assert.match(
-    dialogSource,
-    /event\.key === "Escape"[\s\S]*event\.preventDefault\(\);[\s\S]*event\.stopPropagation\(\);[\s\S]*onClose\?\.\(\)/,
+    modalFocusSource,
+    /event\.key === "Escape"[\s\S]*event\.preventDefault\(\);[\s\S]*event\.stopPropagation\(\);[\s\S]*closeRef\.current\(\)/,
   );
   assert.match(auditSectionSource, /执行轨迹仍可独立查看/);
+  assert.match(auditSectionSource, /disabled=\{loading \|\| typeof onRetry !== "function"\} onClick=\{\(\) => onRetry\?\.\(\)\}/);
   assert.match(styles, /@media \(max-width: 760px\)[\s\S]*\.discussion-audit-core-grid \{ grid-template-columns: 1fr; \}/);
   assert.match(styles, /@media \(max-width: 620px\)[\s\S]*\.discussion-audit-candidates \{ grid-template-columns: 1fr; \}/);
 });

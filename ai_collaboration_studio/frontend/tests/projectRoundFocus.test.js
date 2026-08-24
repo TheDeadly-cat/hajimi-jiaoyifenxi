@@ -512,6 +512,10 @@ test("the host card caps visible focus rows and fills only an editable, explicit
     new URL("../src/components/ProjectRoundFocusCard.jsx", import.meta.url),
     "utf8",
   );
+  const cardStyleSource = readFileSync(
+    new URL("../src/styles/project-round-focus-polish.css", import.meta.url),
+    "utf8",
+  );
   const dialogSource = readFileSync(
     new URL("../src/components/RoundLaunchDialog.jsx", import.meta.url),
     "utf8",
@@ -521,6 +525,10 @@ test("the host card caps visible focus rows and fills only an editable, explicit
     appSource.indexOf("const changeComposer"),
     appSource.indexOf("const fillRoundFocusObjective"),
   );
+  const fillRoundFocusSource = appSource.slice(
+    appSource.indexOf("const fillRoundFocusObjective"),
+    appSource.indexOf("const rememberComposerMention"),
+  );
   const providerPreflightSource = appSource.slice(
     appSource.indexOf("const runProviderPreflight"),
     appSource.indexOf("const routeEnabledMembers"),
@@ -528,11 +536,35 @@ test("the host card caps visible focus rows and fills only an editable, explicit
 
   assert.match(cardSource, /focusItems\.slice\(0, 3\)/);
   assert.doesNotMatch(cardSource, /<details/);
+  assert.match(cardSource, /data-priority=\{primaryItem\?\.category \|\| "continuation"\}/);
+  assert.match(cardSource, /下一步 <small>NEXT PASS<\/small>/);
+  assert.match(cardSource, /const \[objectiveExpanded, setObjectiveExpanded\] = useState\(false\)/);
+  assert.match(cardSource, /aria-expanded=\{objectiveExpanded\}/);
+  assert.match(cardSource, /className="project-round-focus-objective-actions"/);
+  assert.match(cardSource, /aria-labelledby=\{focusListHeadingId\}/);
+  assert.match(cardSource, /完整缺口保留在精确确认产物中/);
+  assert.doesNotMatch(cardSource, /请打开精确确认产物/);
+  assert.match(cardSource, /aria-label="下一轮目标操作边界"/);
+  assert.match(cardSource, /只预填/);
+  assert.match(cardSource, /不自动开始/);
+  assert.match(cardSource, /用户最终决定/);
+  assert.match(cardStyleSource, /\.project-round-focus-objective > header/);
+  assert.match(cardStyleSource, /-webkit-line-clamp: 5/);
+  assert.match(cardStyleSource, /\.project-round-focus-objective-actions \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.equal(
+    (cardStyleSource.match(/\{/g) || []).length,
+    (cardStyleSource.match(/\}/g) || []).length,
+  );
+  assert.match(cardStyleSource, /\.project-round-focus-boundary \{[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(cardStyleSource, /@container project-focus \(max-width: 220px\)[\s\S]*\.project-round-focus-boundary \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+  assert.match(cardStyleSource, /@media \(forced-colors: active\)/);
   assert.match(cardSource, /pluginRegistrySnapshotSha256: view\.pluginRegistrySnapshotSha256/);
   assert.match(cardSource, /roomContextFingerprint,/);
   assert.match(cardSource, /controller\.abort\(\)/);
-  assert.match(cardSource, /\[plan\.requestKey\]/);
-  assert.match(cardSource, /不自动开始、不点名成员、不改变流程或用户最终决定/);
+  assert.match(cardSource, /\[plan\.requestKey, requestRevision\]/);
+  assert.ok((cardSource.match(/setRequestRevision\(\(current\) => current \+ 1\)/g) || []).length >= 2);
+  assert.match(cardSource, /const canFill = Boolean\([\s\S]*view\?\.valid[\s\S]*view\.kind === "preview"[\s\S]*typeof onFillObjective === "function"[\s\S]*!pendingRound/);
+  assert.match(cardSource, /disabled=\{!canFill \|\| authorizationState\.valid\}/);
   assert.match(dialogSource, /冻结的项目焦点上下文/);
   assert.match(dialogSource, /只用于预填可编辑目标/);
   assert.match(dialogSource, /不会自动开始、点名成员或替代你的最终决定/);
@@ -540,7 +572,50 @@ test("the host card caps visible focus rows and fills only an editable, explicit
   assert.doesNotMatch(appSource, /project_round_focus_authorization: context\.projectRoundFocusAuthorization/);
   assert.match(appSource, /roomContextMatches/);
   assert.doesNotMatch(changeComposerSource, /setRoundFocusAuthorization/);
+  assert.match(appSource, /const inspectorPostCloseFocusRef = useRef\(null\)/);
+  assert.match(appSource, /const postCloseFocusTarget = inspectorPostCloseFocusRef\.current/);
+  assert.match(appSource, /preventScroll: restoreTarget !== postCloseFocusTarget/);
+  assert.match(fillRoundFocusSource, /setInspectorOpen\(false\)/);
+  assert.match(fillRoundFocusSource, /inspectorPostCloseFocusRef\.current = composerTarget/);
+  assert.match(fillRoundFocusSource, /requestAnimationFrame\(\(\) => composerTarget\?\.focus\(\)\)/);
   assert.doesNotMatch(providerPreflightSource, /activeRoundFocusAuthorization/);
   assert.doesNotMatch(providerPreflightSource, /project_round_focus_authorization/);
   assert.doesNotMatch(providerPreflightSource, /焦点授权.*throw|throw.*焦点授权/);
+});
+test("single project focus action spans both desktop action columns", () => {
+  const styleSource = readFileSync(
+    new URL("../src/styles/project-round-focus-polish.css", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    styleSource,
+    /\.project-round-focus-objective-actions > :only-child \{[\s\S]*?grid-column: 1 \/ -1;/,
+  );
+});
+
+test("project focus card exposes heading, visible scope, and operation-boundary semantics", () => {
+  const cardSource = readFileSync(
+    new URL("../src/components/ProjectRoundFocusCard.jsx", import.meta.url),
+    "utf8",
+  );
+  const styleSource = readFileSync(
+    new URL("../src/styles/project-round-focus-polish.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(cardSource, /const headingId = useId\(\)/);
+  assert.match(cardSource, /aria-labelledby=\{headingId\}/);
+  assert.match(cardSource, /<h3 id=\{headingId\}>/);
+  assert.match(cardSource, /className="project-round-focus-mode"/);
+  assert.match(cardSource, /key=\{`\$\{capability\}:\$\{capabilityIndex\}`\}/);
+  assert.match(cardSource, /const totalFocusCount = view\?\.focusItems\.length \|\| 0/);
+  assert.match(cardSource, /value=\{`\$\{shownItems\.length\}\/\$\{totalFocusCount\}`\}/);
+  assert.match(cardSource, /aria-label=\{`已显示 \$\{shownItems\.length\} \/ \$\{totalFocusCount\} 条焦点`\}/);
+  assert.match(cardSource, /aria-labelledby=\{focusListHeadingId\}/);
+  assert.match(cardSource, /aria-describedby=\{boundaryId\}/);
+  assert.match(cardSource, /<div id=\{boundaryId\} className="project-round-focus-boundary"/);
+  assert.match(styleSource, /\.project-round-focus-list-heading \{[\s\S]*display: flex/);
+  assert.match(styleSource, /\.project-round-focus-list-heading data \{[\s\S]*font-variant-numeric: tabular-nums/);
+  assert.match(styleSource, /@container project-focus \(max-width: 220px\)[\s\S]*\.project-round-focus-list-heading \{ align-items: flex-start; flex-direction: column; \}/);
+  assert.match(styleSource, /@media \(forced-colors: active\)[\s\S]*\.project-round-focus-list-heading data/);
 });

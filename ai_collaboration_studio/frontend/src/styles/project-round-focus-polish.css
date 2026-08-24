@@ -1,0 +1,271 @@
+.project-round-focus-card {
+  --focus-ink: #234e64;
+  --focus-blue: #397590;
+  --focus-amber: #a97838;
+  --focus-teal: #2f756c;
+  --focus-line: rgb(57 117 144 / 18%);
+  position: relative;
+  container-name: project-focus;
+  container-type: inline-size;
+  isolation: isolate;
+  box-shadow: inset 3px 0 0 rgb(57 117 144 / 56%);
+  background:
+    radial-gradient(circle at 98% 3%, rgb(169 120 56 / 9%), transparent 27%),
+    linear-gradient(145deg, rgb(57 117 144 / 6%), transparent 48%);
+}
+
+.project-round-focus-card.read-only {
+  box-shadow: inset 3px 0 0 rgb(169 120 56 / 60%);
+  background:
+    radial-gradient(circle at 98% 3%, rgb(169 120 56 / 10%), transparent 28%),
+    linear-gradient(145deg, #fffdf7, #f8f4e9);
+}
+
+.project-round-focus-card .project-round-focus-heading {
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgb(57 117 144 / 22%);
+}
+.project-round-focus-card .project-round-focus-heading h3 {
+  margin: 0;
+  color: var(--focus-ink);
+  font-size: 14px;
+  letter-spacing: .01em;
+}
+.project-round-focus-card .project-round-focus-mode { font-size: 10px; letter-spacing: .08em; }
+
+.project-round-focus-card .project-round-focus-state,
+.project-round-focus-card .project-round-focus-source { font-size: 10px; }
+.project-round-focus-card .project-round-focus-state small,
+.project-round-focus-card .project-round-focus-source small { font-size: 9px; line-height: 1.5; }
+.project-round-focus-card .project-round-focus-state > button { flex: 0 0 auto; min-height: 38px; }
+
+.project-round-focus-card .project-round-focus-source {
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid var(--focus-line);
+  border-radius: 10px;
+  background: rgb(255 255 255 / 78%);
+}
+.project-round-focus-card .project-round-focus-source > svg { flex: 0 0 auto; margin-top: 1px; }
+.project-round-focus-card .project-round-focus-source > span { min-width: 0; }
+
+.project-round-focus-card .project-round-focus-counts {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+.project-round-focus-card .project-round-focus-counts > span {
+  position: relative;
+  padding: 9px;
+  border: 1px solid var(--focus-line);
+  border-top: 3px solid rgb(57 117 144 / 60%);
+  border-radius: 0 0 9px 9px;
+  box-shadow: 0 5px 14px rgb(35 78 100 / 5%);
+  background: rgb(255 255 255 / 88%);
+}
+.project-round-focus-card .project-round-focus-counts > span.blocker { border-top-color: rgb(169 120 56 / 78%); }
+.project-round-focus-card .project-round-focus-counts > span.evidence { border-top-color: rgb(47 117 108 / 72%); }
+.project-round-focus-card .project-round-focus-counts small { color: #667d86; font-size: 9px; letter-spacing: .04em; }
+.project-round-focus-card .project-round-focus-counts strong { font-size: 18px; font-variant-numeric: tabular-nums; }
+
+.project-round-focus-card .project-round-focus-list { gap: 6px; }
+.project-round-focus-card .project-round-focus-item {
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid rgb(57 117 144 / 14%);
+  border-radius: 9px;
+  background: rgb(255 255 255 / 68%);
+}
+.project-round-focus-card .project-round-focus-item.blocker { border-left: 3px solid rgb(169 120 56 / 68%); }
+.project-round-focus-card .project-round-focus-item.evidence { border-left: 3px solid rgb(47 117 108 / 62%); }
+.project-round-focus-card .project-round-focus-item.structural { border-left: 3px solid rgb(57 117 144 / 62%); }
+.project-round-focus-card .project-round-focus-item strong { font-size: 11px; line-height: 1.55; }
+.project-round-focus-card .project-round-focus-item small { color: #71838a; font-size: 9px; }
+.project-round-focus-card .project-round-focus-capabilities em { padding: 3px 6px; font-size: 8px; }
+.project-round-focus-card .project-round-focus-empty,
+.project-round-focus-card .project-round-focus-more,
+.project-round-focus-card .project-round-focus-boundary,
+.project-round-focus-card .project-round-focus-frozen-note { font-size: 9px; line-height: 1.55; }
+
+.project-round-focus-card .project-round-focus-list-heading {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding-top: 2px;
+}
+.project-round-focus-card .project-round-focus-list-heading > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.project-round-focus-card .project-round-focus-list-heading strong {
+  color: var(--focus-ink);
+  font-size: 11px;
+  letter-spacing: .04em;
+}
+.project-round-focus-card .project-round-focus-list-heading small {
+  color: #6f858e;
+  font-size: 9px;
+  line-height: 1.4;
+}
+.project-round-focus-card .project-round-focus-list-heading data {
+  flex: 0 0 auto;
+  min-width: 54px;
+  padding: 5px 8px;
+  border: 1px solid rgb(57 117 144 / 20%);
+  border-radius: 999px;
+  color: #426879;
+  font-size: 10px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  background: rgb(246 250 251 / 92%);
+}
+
+.project-round-focus-card .project-round-focus-objective {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  padding: 12px 12px 12px 14px;
+  border: 1px solid rgb(57 117 144 / 24%);
+  border-left: 4px solid rgb(57 117 144 / 72%);
+  border-radius: 11px;
+  box-shadow: 0 8px 22px rgb(35 78 100 / 8%);
+  background:
+    linear-gradient(120deg, rgb(57 117 144 / 10%), transparent 52%),
+    rgb(255 255 255 / 94%);
+}
+.project-round-focus-card .project-round-focus-objective[data-priority="blocker"] { border-left-color: rgb(169 120 56 / 82%); }
+.project-round-focus-card .project-round-focus-objective[data-priority="evidence"] { border-left-color: rgb(47 117 108 / 78%); }
+.project-round-focus-card .project-round-focus-objective > header { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.project-round-focus-card .project-round-focus-objective > header > span {
+  color: var(--focus-ink);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .06em;
+}
+.project-round-focus-card .project-round-focus-objective > header > span small {
+  margin-left: 4px;
+  color: #78909a;
+  font-size: 8px;
+  letter-spacing: .12em;
+}
+.project-round-focus-card .project-round-focus-objective > header > em {
+  padding: 3px 7px;
+  border: 1px solid rgb(57 117 144 / 18%);
+  border-radius: 999px;
+  color: #55727e;
+  font-size: 8px;
+  background: rgb(255 255 255 / 76%);
+}
+.project-round-focus-card .project-round-focus-objective > p {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.project-round-focus-card .project-round-focus-objective > p.is-collapsed {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+  line-clamp: 5;
+}
+.project-round-focus-card .project-round-focus-objective-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+.project-round-focus-card .project-round-focus-objective-actions > button {
+  width: 100%;
+  min-height: 38px;
+  justify-content: center;
+}
+.project-round-focus-card .project-round-focus-objective-toggle {
+  border: 1px solid rgb(57 117 144 / 24%);
+  color: #476d7c;
+  background: rgb(246 250 251 / 84%);
+}
+.project-round-focus-card .project-round-focus-more {
+  margin-top: 0;
+  padding: 8px 9px;
+  border: 1px dashed rgb(57 117 144 / 22%);
+  border-radius: 8px;
+  color: #607985;
+  background: rgb(246 250 251 / 82%);
+}
+.project-round-focus-card .project-round-focus-boundary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid rgb(169 120 56 / 22%);
+  border-radius: 9px;
+  color: #6f5b38;
+  background: rgb(169 120 56 / 16%);
+}
+.project-round-focus-card .project-round-focus-boundary > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px;
+  background: #fffaf0;
+}
+.project-round-focus-card .project-round-focus-boundary strong { font-size: 10px; }
+.project-round-focus-card .project-round-focus-boundary small { color: #867352; font-size: 9px; line-height: 1.4; }
+
+.project-round-focus-card :is(button, input, textarea):focus-visible {
+  outline: 3px solid rgb(57 117 144 / 32%);
+  outline-offset: 2px;
+}
+
+@container project-focus (max-width: 420px) {
+  .project-round-focus-card .project-round-focus-heading { align-items: flex-start; flex-direction: column; }
+  .project-round-focus-card .project-round-focus-mode { align-self: flex-start; }
+  .project-round-focus-card .project-round-focus-state { flex-wrap: wrap; }
+  .project-round-focus-card .project-round-focus-state > button {
+    width: 100%;
+    min-height: 44px;
+    justify-self: stretch;
+    justify-content: center;
+  }
+  .project-round-focus-card .project-round-focus-objective > header { align-items: flex-start; flex-direction: column; }
+  .project-round-focus-card .project-round-focus-objective > header > em { align-self: flex-start; }
+}
+
+@container project-focus (max-width: 240px) {
+  .project-round-focus-card .project-round-focus-objective-actions { grid-template-columns: minmax(0, 1fr); }
+  .project-round-focus-card .project-round-focus-objective-actions > button { min-height: 44px; }
+}
+
+@container project-focus (max-width: 220px) {
+  .project-round-focus-card .project-round-focus-counts { grid-template-columns: minmax(0, 1fr); }
+  .project-round-focus-card .project-round-focus-list-heading { align-items: flex-start; flex-direction: column; }
+  .project-round-focus-card .project-round-focus-boundary { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (forced-colors: active) {
+  .project-round-focus-card,
+  .project-round-focus-card .project-round-focus-source,
+  .project-round-focus-card .project-round-focus-counts > span,
+  .project-round-focus-card .project-round-focus-item,
+  .project-round-focus-card .project-round-focus-objective,
+  .project-round-focus-card .project-round-focus-objective-toggle,
+  .project-round-focus-card .project-round-focus-list-heading data,
+  .project-round-focus-card .project-round-focus-more,
+  .project-round-focus-card .project-round-focus-boundary,
+  .project-round-focus-card .project-round-focus-boundary > span,
+  .project-round-focus-card .project-round-focus-objective > header > em {
+    border-color: CanvasText;
+    color: CanvasText;
+    background: Canvas;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-round-focus-card *,
+  .project-round-focus-card *::before,
+  .project-round-focus-card *::after { scroll-behavior: auto !important; }
+}
+.project-round-focus-card .project-round-focus-objective-actions > :only-child {
+  grid-column: 1 / -1;
+}

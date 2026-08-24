@@ -1,16 +1,13 @@
 import { ArrowDown, ArrowUp, CheckSquare, Database, FilePlus2, FlaskConical, GitBranch, History, Link2, Network, Pause, Play, RotateCcw, ShieldCheck, SlidersHorizontal, UserPlus, Users, X } from "lucide-react";
-import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
+import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { directorSourceLabel } from "../directorDecision";
 import { ArtifactPanel } from "./ArtifactPanel";
 import { ActionDeskPanel } from "./ActionDeskPanel";
 import { ConvergenceCard } from "./ConvergenceCard";
-import { DecisionLineagePanel } from "./DecisionLineagePanel";
-import { MarketSnapshotCard } from "./MarketSnapshotCard";
 import { ProviderRoutingPanel } from "./ProviderRoutingPanel";
 import { DirectorModeratorAttribution } from "./DirectorModeratorAttribution";
 import { RoundExecutionTraceSummary } from "./RoundExecutionTraceSummary";
 import { buildProviderRouteSummary } from "../providerRouting";
-import { StorageSampleAcceptanceCard } from "./StorageSampleAcceptanceCard";
 import { ProjectRoundFocusCard } from "./ProjectRoundFocusCard";
 import { materialPromptQuarantine, materialSourceLabel } from "../materials";
 import {
@@ -23,11 +20,39 @@ import { roomDomainCapabilityLabels } from "../roomCapabilities";
 import { deriveRoundAvailability } from "../roundAvailability";
 import { meetingReadinessAnnouncementText } from "../liveRegionAnnouncements";
 import { policiesEqual, stageLabel } from "../workflowPolicy";
+import { bindInspectorTargetNavigation } from "../inspectorTargetNavigation";
+import {
+  ROOM_INSPECTOR_ARCHIVED_MEMBER_LIMIT,
+  ROOM_INSPECTOR_ARCHIVED_MEMBER_STEP,
+  ROOM_INSPECTOR_INITIAL_ARCHIVED_MEMBER_LIMIT,
+  ROOM_INSPECTOR_INITIAL_MATERIAL_LIMIT,
+  ROOM_INSPECTOR_INITIAL_MEMBER_LIMIT,
+  ROOM_INSPECTOR_MATERIAL_LIMIT,
+  ROOM_INSPECTOR_MATERIAL_STEP,
+  ROOM_INSPECTOR_MEMBER_LIMIT,
+  ROOM_INSPECTOR_MEMBER_STEP,
+  buildCurrentRoundDirectorDecisions,
+  buildRoomInspectorArtifactFingerprint,
+  buildRoomInspectorListProjection,
+  buildRoomInspectorProviderIndex,
+  buildRoomInspectorWorkflowProjection,
+  inspectWalkForwardFootprint,
+  roomInspectorErrorMessage,
+  safeRoomInspectorColor,
+  safeRoomInspectorText,
+} from "../roomInspectorView";
+import "../styles/room-inspector-refinement.css";
 
 const ObservationPanel = lazy(() => import("./ObservationPanel.jsx")
   .then((module) => ({ default: module.ObservationPanel })));
 const PaperPortfolioPanel = lazy(() => import("./PaperPortfolioPanel.jsx")
   .then((module) => ({ default: module.PaperPortfolioPanel })));
+const DecisionLineagePanel = lazy(() => import("./DecisionLineagePanel.jsx")
+  .then((module) => ({ default: module.DecisionLineagePanel })));
+const MarketSnapshotCard = lazy(() => import("./MarketSnapshotCard.jsx")
+  .then((module) => ({ default: module.MarketSnapshotCard })));
+const StorageSampleAcceptanceCard = lazy(() => import("./StorageSampleAcceptanceCard.jsx")
+  .then((module) => ({ default: module.StorageSampleAcceptanceCard })));
 
 function InspectorPanelFallback({ label }) {
   return (
@@ -55,15 +80,15 @@ function PluginActionBoundary({ disabled, label, children }) {
   );
 }
 
-export function RoomInspector({
+export const RoomInspector = memo(function RoomInspector({
   room,
   pluginRegistry,
   pluginLifecycle,
-  members,
+  members = [],
   archivedMembers = [],
-  providers,
+  providers = [],
   templateWorkflowPolicy,
-  roundState,
+  roundState = {},
   directorDecisions = [],
   latestRound,
   pendingRound,
@@ -77,16 +102,16 @@ export function RoomInspector({
   marketLoading,
   marketReadinessLoading,
   marketGate,
-  materials,
-  artifacts,
+  materials = [],
+  artifacts = [],
   artifactLoading,
   decisionPackages = [],
-  observations,
-  reflections,
-  paperPortfolios,
-  walkForwardRunsByPortfolio,
-  walkForwardLoadingByPortfolio,
-  walkForwardErrorsByPortfolio,
+  observations = [],
+  reflections = [],
+  paperPortfolios = [],
+  walkForwardRunsByPortfolio = {},
+  walkForwardLoadingByPortfolio = {},
+  walkForwardErrorsByPortfolio = {},
   candidateComparison,
   candidateComparisonLoading,
   candidateComparisonError,
@@ -142,66 +167,59 @@ export function RoomInspector({
   scrollRequestId = 0,
 }) {
   const inspectorRef = useRef(null);
+  const roundActionRef = useRef(false);
+  const [memberLimit, setMemberLimit] = useState(ROOM_INSPECTOR_INITIAL_MEMBER_LIMIT);
+  const [archivedMemberLimit, setArchivedMemberLimit] = useState(
+    ROOM_INSPECTOR_INITIAL_ARCHIVED_MEMBER_LIMIT,
+  );
+  const [materialLimit, setMaterialLimit] = useState(ROOM_INSPECTOR_INITIAL_MATERIAL_LIMIT);
+  const [pendingRoundAction, setPendingRoundAction] = useState("");
+  const [roundActionError, setRoundActionError] = useState("");
   useEffect(() => {
-    const inspector = inspectorRef.current;
-    if (!inspector || !scrollTargetId || !scrollRequestId) return undefined;
-
-    let animationFrame = 0;
-    let lifetimeTimer = 0;
-    let stopped = false;
-    let focused = false;
-    let target = null;
-    let observer = null;
-    let mutationObserver = null;
-    const stop = () => {
-      if (stopped) return;
-      stopped = true;
-      globalThis.cancelAnimationFrame?.(animationFrame);
-      globalThis.clearTimeout(lifetimeTimer);
-      observer?.disconnect();
-      mutationObserver?.disconnect();
-    };
-    const resolveTarget = () => {
-      if (target?.isConnected) return target;
-      target = inspector.querySelector(`#${scrollTargetId}`);
-      return target;
-    };
-    const align = () => {
-      if (stopped) return;
-      const resolvedTarget = resolveTarget();
-      if (!resolvedTarget) return;
-      globalThis.cancelAnimationFrame?.(animationFrame);
-      animationFrame = globalThis.requestAnimationFrame(() => {
-        if (stopped) return;
-        const inspectorTop = inspector.getBoundingClientRect().top;
-        const targetTop = resolvedTarget.getBoundingClientRect().top;
-        inspector.scrollTop += targetTop - inspectorTop;
-        if (!focused) {
-          resolvedTarget.focus({ preventScroll: true });
-          focused = true;
-        }
-      });
-    };
-
-    if (globalThis.ResizeObserver) {
-      observer = new globalThis.ResizeObserver(align);
-      Array.from(inspector.children).forEach((child) => observer.observe(child));
-    }
-    if (globalThis.MutationObserver) {
-      mutationObserver = new globalThis.MutationObserver(align);
-      mutationObserver.observe(inspector, { childList: true, subtree: true });
-    }
-    align();
-    lifetimeTimer = globalThis.setTimeout(stop, 4000);
-    return stop;
+    if (!scrollTargetId || !scrollRequestId) return undefined;
+    return bindInspectorTargetNavigation(inspectorRef.current, scrollTargetId);
   }, [scrollRequestId, scrollTargetId]);
-  const providerReady = roundProviderReady ?? providers.some((provider) => provider.configured);
+  useEffect(() => {
+    setMemberLimit(ROOM_INSPECTOR_INITIAL_MEMBER_LIMIT);
+    setArchivedMemberLimit(ROOM_INSPECTOR_INITIAL_ARCHIVED_MEMBER_LIMIT);
+    setMaterialLimit(ROOM_INSPECTOR_INITIAL_MATERIAL_LIMIT);
+    setRoundActionError("");
+  }, [room?.id]);
+  const listProjection = useMemo(
+    () => buildRoomInspectorListProjection({
+      members,
+      archivedMembers,
+      materials,
+      memberLimit,
+      archivedMemberLimit,
+      materialLimit,
+    }),
+    [
+      archivedMemberLimit,
+      archivedMembers,
+      materialLimit,
+      materials,
+      memberLimit,
+      members,
+    ],
+  );
+  const providerIndex = useMemo(
+    () => buildRoomInspectorProviderIndex(providers),
+    [providers],
+  );
+  const boundedMembers = listProjection.members.boundedRows;
+  const providerReady = roundProviderReady
+    ?? providerIndex.rows.some((provider) => provider.configured === true);
   const roundBusy = roundState.running || roundState.pausing;
-  const roundAvailability = deriveRoundAvailability({
-    pending_round: pendingRound,
-    pending_round_checkpoint: pendingRoundCheckpoint,
-  });
-  const memberLifecycleLocked = roundBusy || roundAvailability.hasPendingRound;
+  const roundControlBusy = roundBusy || Boolean(pendingRoundAction);
+  const roundAvailability = useMemo(
+    () => deriveRoundAvailability({
+      pending_round: pendingRound,
+      pending_round_checkpoint: pendingRoundCheckpoint,
+    }),
+    [pendingRound, pendingRoundCheckpoint],
+  );
+  const memberLifecycleLocked = roundControlBusy || roundAvailability.hasPendingRound;
   const pausedRoundPending = roundAvailability.pausedRoundPending;
   const canResume = roundAvailability.canResume;
   const workflowReady = workflowConfiguration?.ready ?? true;
@@ -237,17 +255,11 @@ export function RoomInspector({
   const visibleTraceState = roundExecutionTraceState?.roundId === currentRoundId
     ? roundExecutionTraceState
     : null;
-  const currentRoundDirectorDecisions = useMemo(
-    () => directorDecisions
-      .filter((decision) => !currentRoundId || decision.round_id === currentRoundId)
-      .slice()
-      .sort((left, right) => (
-        new Date(left.created_at).getTime() - new Date(right.created_at).getTime()
-        || (Number(left.sequence_no) || 0) - (Number(right.sequence_no) || 0)
-        || String(left.id).localeCompare(String(right.id))
-      )),
+  const directorDecisionProjection = useMemo(
+    () => buildCurrentRoundDirectorDecisions(directorDecisions, currentRoundId),
     [currentRoundId, directorDecisions],
   );
+  const currentRoundDirectorDecisions = directorDecisionProjection.rows;
   const persistedDirectorDecision = currentRoundDirectorDecisions.at(-1);
   const directorDecision = roundState.directorDecision || (persistedDirectorDecision ? {
     action: persistedDirectorDecision.action,
@@ -260,10 +272,17 @@ export function RoomInspector({
     workspaceFocus: persistedDirectorDecision.workspace_focus,
     moderatorContext: persistedDirectorDecision.moderator_context || null,
   } : null);
-  const workflowPolicy = room?.workflow_policy;
+  const workflowProjection = useMemo(
+    () => buildRoomInspectorWorkflowProjection(room?.workflow_policy),
+    [room?.workflow_policy],
+  );
+  const workflowPolicy = workflowProjection.workflowPolicy;
   const templateDefault = policiesEqual(workflowPolicy, templateWorkflowPolicy);
-  const requiredCoverage = workflowPolicy?.required_coverage || [];
-  const routeSummary = buildProviderRouteSummary(members, providers);
+  const requiredCoverage = workflowProjection.requiredCoverage;
+  const routeSummary = useMemo(
+    () => buildProviderRouteSummary(boundedMembers, providerIndex.rows),
+    [boundedMembers, providerIndex.rows],
+  );
   const roomInspectorRegistrySource = pendingRound || room;
   const roomInspectorSlot = useMemo(
     () => resolveHostOwnedSlot({
@@ -289,8 +308,11 @@ export function RoomInspector({
   const stockRoomScopeSymbols = Array.isArray(room?.stock_room_scope?.symbols)
     ? room.stock_room_scope.symbols
     : [];
-  const walkForwardHistoryExists = Object.values(walkForwardRunsByPortfolio || {})
-    .some((runs) => Array.isArray(runs) && runs.length > 0);
+  const walkForwardFootprint = useMemo(
+    () => inspectWalkForwardFootprint(walkForwardRunsByPortfolio),
+    [walkForwardRunsByPortfolio],
+  );
+  const walkForwardHistoryExists = walkForwardFootprint.hasHistory;
   const storageHistoricalFootprint = Boolean(
     storageSampleAcceptance
     || decisionPackages.length
@@ -328,24 +350,101 @@ export function RoomInspector({
     || marketStatus
     || marketReadiness,
   );
-  const domainCapabilityLabels = roomDomainCapabilityLabels(room);
-  const actionDeskArtifactFingerprint = useMemo(
-    () => [...(Array.isArray(artifacts) ? artifacts : [])]
-      .map((artifact) => [
-        String(artifact?.id || ""),
-        Number(artifact?.version || 0),
-        String(artifact?.status || ""),
-        Array.isArray(artifact?.content?.actions) ? artifact.content.actions.length : 0,
-      ].join(":"))
-      .sort()
-      .join("|"),
+  const rawDomainCapabilityLabels = useMemo(
+    () => roomDomainCapabilityLabels(room),
+    [room],
+  );
+  const domainCapabilityLabels = Array.isArray(rawDomainCapabilityLabels)
+    ? rawDomainCapabilityLabels.slice(0, 20)
+    : [];
+  const domainCapabilityOmittedCount = Array.isArray(rawDomainCapabilityLabels)
+    ? Math.max(0, rawDomainCapabilityLabels.length - domainCapabilityLabels.length)
+    : 0;
+  const artifactFingerprintProjection = useMemo(
+    () => buildRoomInspectorArtifactFingerprint(artifacts),
     [artifacts],
   );
+  const actionDeskArtifactFingerprint = artifactFingerprintProjection.fingerprint;
+  const projectionWarnings = [
+    listProjection.members.hardLimited
+      ? listProjection.members.hardOmittedCount + " 名成员超出安全投影上限"
+      : "",
+    listProjection.archivedMembers.hardLimited
+      ? listProjection.archivedMembers.hardOmittedCount + " 名归档成员未投影"
+      : "",
+    listProjection.materials.hardLimited
+      ? listProjection.materials.hardOmittedCount + " 条资料未投影"
+      : "",
+    providerIndex.projectionLimited
+      ? providerIndex.omittedCount + " 个 Provider 未进入本地索引"
+      : "",
+    directorDecisionProjection.projectionLimited
+      ? directorDecisionProjection.omittedCount + " 条较早主持决定未排序"
+      : "",
+    artifactFingerprintProjection.projectionLimited
+      ? artifactFingerprintProjection.omittedCount + " 个较早工件未进入指纹"
+      : "",
+    workflowProjection.stageProjectionLimited || workflowProjection.coverageProjectionLimited
+      ? "流程阶段或必须覆盖项超过本地展示上限"
+      : "",
+    walkForwardFootprint.projectionLimited
+      ? "walk-forward 桶超过扫描上限，保守保留历史工作区"
+      : "",
+    domainCapabilityOmittedCount
+      ? domainCapabilityOmittedCount + " 个房间能力标签未投影"
+      : "",
+  ].filter(Boolean);
+
+  const runRoomAction = async (action, handler, fallback, ...args) => {
+    if (roundActionRef.current || typeof handler !== "function") return false;
+    roundActionRef.current = true;
+    setPendingRoundAction(action);
+    setRoundActionError("");
+    try {
+      await Promise.resolve(handler(...args));
+      return true;
+    } catch (error) {
+      setRoundActionError(roomInspectorErrorMessage(error, fallback));
+      return false;
+    } finally {
+      roundActionRef.current = false;
+      setPendingRoundAction((current) => current === action ? "" : current);
+    }
+  };
+
   return (
-    <aside className="room-inspector" ref={inspectorRef}>
-      <section className="inspector-section objective-section" id="inspector-rooms">
+    <aside className="room-inspector room-inspector-workbench" ref={inspectorRef}>
+      <nav className="room-inspector-section-nav" aria-label="房间信息分区">
+        <a href="#inspector-rooms">目标</a>
+        <a href="#inspector-project-focus">结构</a>
+        <a href="#inspector-convergence">门禁</a>
+        <a href="#inspector-members">成员</a>
+        <a href="#inspector-materials">资料</a>
+        <a href="#inspector-artifacts">产物</a>
+      </nav>
+      <section className="inspector-section objective-section" id="inspector-rooms" tabIndex={-1} aria-label="本轮目标">
         <div className="section-heading"><strong>本轮目标</strong><span>{room?.category || "通用共创"}</span></div>
         <p>{room?.objective || "等待用户定义目标。"}</p>
+        <div className="room-inspector-integrity-ledger" role="list" aria-label="检查面板本地投影状态">
+          <span role="listitem">
+            <small>ACTIVE MEMBERS</small>
+            <strong>{listProjection.members.visibleCount} / {listProjection.members.sourceCount}</strong>
+          </span>
+          <span role="listitem">
+            <small>MATERIALS</small>
+            <strong>{listProjection.materials.visibleCount} / {listProjection.materials.sourceCount}</strong>
+          </span>
+          <span role="listitem">
+            <small>STORAGE CONTRACT</small>
+            <strong>{storageReadOnly ? "只读保留" : storageWorkspaceVisible ? "宿主可用" : "未接入"}</strong>
+          </span>
+        </div>
+        {projectionWarnings.length ? (
+          <div className="room-inspector-projection-note" role="note">
+            <ShieldCheck size={14} aria-hidden="true" />
+            <span><strong>本地投影上限已启用。</strong>{projectionWarnings.join("；")}。</span>
+          </div>
+        ) : null}
         <div className="room-capability-strip" aria-label="房间能力">
           {domainCapabilityLabels.map((label) => <span key={label}>{label}</span>)}
         </div>
@@ -366,34 +465,94 @@ export function RoomInspector({
         <div className={pausedRoundPending ? "round-controls pending-round" : "round-controls"}>
           <button
             className="primary"
-            onClick={(event) => onStartRound?.(event.currentTarget)}
-            disabled={roundBusy || routingBusy || endingRound || !canStart}
-            title={!canStart ? startBlockReason : "检查模型执行器并开始新一轮"}
+            onClick={(event) => {
+              void runRoomAction(
+                "start",
+                onStartRound,
+                "开始讨论失败。",
+                event.currentTarget,
+              );
+            }}
+            disabled={
+              roundControlBusy
+              || routingBusy
+              || endingRound
+              || !canStart
+              || typeof onStartRound !== "function"
+            }
+            aria-busy={pendingRoundAction === "start"}
+            title={
+              typeof onStartRound !== "function"
+                ? "开始讨论处理器不可用"
+                : !canStart ? startBlockReason : "检查模型执行器并开始新一轮"
+            }
           >
-            <Play size={15} />开始一轮
+            <Play size={15} />{pendingRoundAction === "start" ? "正在开始…" : "开始一轮"}
           </button>
           {roundState.running ? (
             <button
               className="secondary compact"
-              onClick={onPause}
-              disabled={roundState.pausing || !roundState.roundId}
+              onClick={() => {
+                void runRoomAction("pause", onPause, "暂停讨论失败。");
+              }}
+              disabled={
+                roundState.pausing
+                || !roundState.roundId
+                || Boolean(pendingRoundAction)
+                || typeof onPause !== "function"
+              }
+              aria-busy={pendingRoundAction === "pause"}
               title="将在当前成员发言结束后的安全检查点暂停；已完成内容会保留。"
-            ><Pause size={15} />{roundState.pausing ? "正在暂停…" : "暂停讨论"}</button>
+            ><Pause size={15} />{roundState.pausing || pendingRoundAction === "pause" ? "正在暂停…" : "暂停讨论"}</button>
           ) : pausedRoundPending ? (
             <span className={canResume ? "pending-round-actions" : "pending-round-actions single"}>
               {canResume ? (
-                <button className="secondary compact" type="button" onClick={onResumeRound} disabled={routingBusy || !providerReady || endingRound} title="沿用冻结证据截面，从最后成功检查点继续">
-                  <RotateCcw size={15} />继续上次
+                <button
+                  className="secondary compact"
+                  type="button"
+                  onClick={() => {
+                    void runRoomAction("resume", onResumeRound, "恢复暂停轮失败。");
+                  }}
+                  disabled={
+                    routingBusy
+                    || !providerReady
+                    || endingRound
+                    || Boolean(pendingRoundAction)
+                    || typeof onResumeRound !== "function"
+                  }
+                  aria-busy={pendingRoundAction === "resume"}
+                  title="沿用冻结证据截面，从最后成功检查点继续"
+                >
+                  <RotateCcw size={15} />{pendingRoundAction === "resume" ? "正在恢复…" : "继续上次"}
                 </button>
               ) : null}
               {roundAvailability.canEnd ? (
-                <button className="secondary compact round-cancel-button" type="button" onClick={onEndRound} disabled={endingRound || routingBusy} title="明确结束暂停轮；已完成消息和审计记录仍会保留">
-                  <X size={15} />{endingRound ? "正在结束…" : "结束本轮"}
+                <button
+                  className="secondary compact round-cancel-button"
+                  type="button"
+                  onClick={() => {
+                    void runRoomAction("end", onEndRound, "结束暂停轮失败。");
+                  }}
+                  disabled={
+                    endingRound
+                    || routingBusy
+                    || Boolean(pendingRoundAction)
+                    || typeof onEndRound !== "function"
+                  }
+                  aria-busy={pendingRoundAction === "end"}
+                  title="明确结束暂停轮；已完成消息和审计记录仍会保留"
+                >
+                  <X size={15} />{endingRound || pendingRoundAction === "end" ? "正在结束…" : "结束本轮"}
                 </button>
               ) : null}
             </span>
           ) : <button className="secondary compact" disabled><Pause size={15} />暂停</button>}
         </div>
+        {roundActionError ? (
+          <div className="room-inspector-action-error" role="alert">
+            <X size={14} aria-hidden="true" />{roundActionError}
+          </div>
+        ) : null}
         <div className={`meeting-readiness ${marketGate?.severity === "critical" ? "critical" : canStart && providerCheckStatus === "ready" ? "ready" : canStart ? "pending" : "blocked"}`}>
           <div className="screen-reader-announcer" role="status" aria-live="polite" aria-atomic="true">
             {meetingReadinessAnnouncementText({
@@ -453,11 +612,9 @@ export function RoomInspector({
         {!providerReady && <div className="provider-warning">{roundProviderBlockReason || "当前没有可用模型执行器"}</div>}
       </section>
 
-      <ConvergenceCard convergence={convergence} running={roundState.running} />
-
       <ProjectRoundFocusCard
         room={room}
-        members={members}
+        members={boundedMembers}
         artifacts={artifacts}
         pendingRound={pendingRound}
         slot={roomInspectorSlot}
@@ -466,10 +623,12 @@ export function RoomInspector({
         onFillObjective={onFillRoundFocusObjective}
       />
 
+      <ConvergenceCard convergence={convergence} running={roundState.running} />
+
       <ProviderRoutingPanel
         room={room}
-        members={members}
-        providers={providers}
+        members={boundedMembers}
+        providers={providerIndex.rows}
         roundRunning={roundBusy}
         routingBusy={routingBusy}
         onRouteMembers={onRouteMembers}
@@ -479,7 +638,12 @@ export function RoomInspector({
       <section className="inspector-section workflow-summary-section" id="inspector-workflow">
         <div className="section-heading">
           <strong><SlidersHorizontal size={15} />讨论流程</strong>
-          <button className="text-action" type="button" onClick={onEditWorkflowPolicy}>设置</button>
+          <button
+            className="text-action"
+            type="button"
+            disabled={typeof onEditWorkflowPolicy !== "function"}
+            onClick={() => onEditWorkflowPolicy?.()}
+          >设置</button>
         </div>
         {workflowPolicy ? (
           <>
@@ -490,11 +654,11 @@ export function RoomInspector({
               {roundBusy ? <small>修改从下一轮生效</small> : null}
             </div>
             <div className="workflow-stage-path" aria-label="讨论阶段顺序">
-              {workflowPolicy.stage_order.map((stage, index) => (
+              {workflowProjection.stageOrder.map((stage, index) => (
                 <span key={stage}>
                   <b>{stageLabel(stage)}</b>
                   <small>至少 {workflowPolicy.minimum_stage_coverage?.[stage] || 1} 位</small>
-                  {index < workflowPolicy.stage_order.length - 1 ? <i>→</i> : null}
+                  {index < workflowProjection.stageOrder.length - 1 ? <i>→</i> : null}
                 </span>
               ))}
             </div>
@@ -529,31 +693,37 @@ export function RoomInspector({
 
       {storageContribution?.present || storageSampleAcceptance ? (
         <PluginActionBoundary disabled={storageReadOnly} label="存储产业样板验收">
-          <StorageSampleAcceptanceCard acceptance={storageSampleAcceptance} />
+          <Suspense fallback={<InspectorPanelFallback label="存储产业样板验收" />}>
+            <StorageSampleAcceptanceCard acceptance={storageSampleAcceptance} />
+          </Suspense>
         </PluginActionBoundary>
       ) : null}
 
       {decisionLineageVisible ? (
         <PluginActionBoundary disabled={storageReadOnly} label="决策研究谱系">
-          <section className="inspector-section compact-section" id="inspector-decision-lineage">
-            <DecisionLineagePanel
-              decisionPackages={decisionPackages}
-              members={members}
-              paperPortfolios={paperPortfolios}
-              observations={observations}
-              walkForwardRunsByPortfolio={walkForwardRunsByPortfolio}
-              onCreatePortfolio={onAddPaperPortfolioFromDecision}
-              onCreateObservation={onAddObservationFromDecision}
-              onBindObservation={onBindObservationDecisionLineage}
-            />
-          </section>
+          <Suspense fallback={<InspectorPanelFallback label="决策研究谱系" />}>
+            <section className="inspector-section compact-section" id="inspector-decision-lineage">
+              <DecisionLineagePanel
+                decisionPackages={decisionPackages}
+                members={boundedMembers}
+                paperPortfolios={paperPortfolios}
+                observations={observations}
+                walkForwardRunsByPortfolio={walkForwardRunsByPortfolio}
+                onCreatePortfolio={onAddPaperPortfolioFromDecision}
+                onCreateObservation={onAddObservationFromDecision}
+                onBindObservation={onBindObservationDecisionLineage}
+              />
+            </section>
+          </Suspense>
         </PluginActionBoundary>
       ) : null}
 
       <section className="inspector-section">
         <div className="section-heading">
           <strong>本轮动态调度</strong>
-          <span>{currentRoundDirectorDecisions.length} 次 · {roundState.running && roundState.stage ? stageLabel(roundState.stage) : roundState.running ? "进行中" : "成员状态"}</span>
+          <span>
+            {currentRoundDirectorDecisions.length}{directorDecisionProjection.projectionLimited ? "+" : ""} 次 · {roundState.running && roundState.stage ? stageLabel(roundState.stage) : roundState.running ? "进行中" : "成员状态"}
+          </span>
         </div>
         <RoundExecutionTraceSummary
           roundId={currentRoundId}
@@ -569,14 +739,14 @@ export function RoomInspector({
             <div className="director-decision-head">
               <GitBranch size={14} />
               <span>{directorDecision.action === "finish" ? "主持建议" : "下一位"}</span>
-              <strong>{directorDecision.action === "finish" ? "结束本轮并交由用户复核" : directorDecision.member?.name || "等待成员"}</strong>
-              <em>{directorSourceLabel(directorDecision.source)} · {stageLabel(directorDecision.stage || "flexible")}</em>
+              <strong>{directorDecision.action === "finish" ? "结束本轮并交由用户复核" : safeRoomInspectorText(directorDecision.member?.name, 160) || "等待成员"}</strong>
+              <em>{directorSourceLabel(safeRoomInspectorText(directorDecision.source, 80))} · {stageLabel(safeRoomInspectorText(directorDecision.stage, 80) || "flexible")}</em>
             </div>
-            <p>{directorDecision.reason}</p>
+            <p>{safeRoomInspectorText(directorDecision.reason, 2000) || "未提供调度理由。"}</p>
             {directorDecision.workspaceFocus ? (
               <div className="director-workspace-focus">
                 <span>正在补齐</span>
-                <strong>{directorDecision.workspaceFocus.title}</strong>
+                <strong>{safeRoomInspectorText(directorDecision.workspaceFocus.title, 300) || "未命名工作区"}</strong>
               </div>
             ) : null}
             <DirectorModeratorAttribution context={directorDecision.moderatorContext} />
@@ -585,37 +755,56 @@ export function RoomInspector({
           <div className="director-decision-empty">开始一轮后，这里会显示主持人选择下一位成员的理由与调度来源。</div>
         )}
         <ol className="speaker-order">
-          {members.filter((member) => member.enabled).map((member, index) => {
-            const status = roundState.memberStatus[member.id] || "queued";
+          {listProjection.members.visibleRows.filter((member) => member.enabled).map((member, index) => {
+            const memberId = safeRoomInspectorText(member.id, 240);
+            const memberName = safeRoomInspectorText(member.name, 160) || "未命名成员";
+            const status = roundState.memberStatus?.[memberId] || "queued";
             return (
-              <li key={member.id} className={status}>
+              <li key={(memberId || "speaker") + "-" + index} className={status}>
                 <span className="speaker-state-dot" title={`安全回退顺序 ${index + 1}`} />
-                <span className="mini-avatar" style={{ background: member.avatar_color }}>{member.name.slice(0, 1)}</span>
-                <span className="speaker-copy"><strong>{member.name}</strong><small>{statusText(status)}</small></span>
+                <span className="mini-avatar" style={{ background: safeRoomInspectorColor(member.avatar_color) }}>{memberName.slice(0, 1)}</span>
+                <span className="speaker-copy"><strong>{memberName}</strong><small>{statusText(status)}</small></span>
               </li>
             );
           })}
         </ol>
       </section>
 
-      <section className="inspector-section" id="inspector-members">
+      <section className="inspector-section" id="inspector-members" tabIndex={-1} aria-label="成员与身份">
         <div className="section-heading">
           <strong><Users size={15} />成员与身份</strong>
-          <button className="text-action" onClick={onAddMember}><UserPlus size={14} />添加</button>
+          <button
+            className="text-action"
+            type="button"
+            disabled={typeof onAddMember !== "function"}
+            onClick={() => onAddMember?.()}
+          ><UserPlus size={14} />添加</button>
         </div>
         <div className="member-list">
-          {members.map((member, index) => {
-            const memberProviderId = String(member.provider || "openai").toLowerCase();
-            const memberProvider = providers.find((provider) => String(provider.id).toLowerCase() === memberProviderId);
-            const providerName = memberProvider?.name || memberProviderId;
-            const modelName = member.model || memberProvider?.model || "默认模型";
+          {listProjection.members.visibleRows.map((member, index) => {
+            const memberId = safeRoomInspectorText(member.id, 240);
+            const memberName = safeRoomInspectorText(member.name, 160) || "未命名成员";
+            const memberProviderId = (
+              safeRoomInspectorText(member.provider, 160) || "openai"
+            ).toLowerCase();
+            const memberProvider = providerIndex.providerMap.get(memberProviderId);
+            const providerName = safeRoomInspectorText(memberProvider?.name, 160)
+              || memberProviderId;
+            const modelName = safeRoomInspectorText(member.model, 160)
+              || safeRoomInspectorText(memberProvider?.model, 160)
+              || "默认模型";
             return (
-              <div key={member.id} className={memberProviderId === "openai" ? "member-row uses-openai" : "member-row"}>
-                <button className="member-main" onClick={() => onEditMember(member)}>
-                  <span className="mini-avatar" style={{ background: member.avatar_color }}>{member.name.slice(0, 1)}</span>
+              <div key={(memberId || "member") + "-" + index} className={memberProviderId === "openai" ? "member-row uses-openai" : "member-row"}>
+                <button
+                  className="member-main"
+                  type="button"
+                  disabled={typeof onEditMember !== "function"}
+                  onClick={() => onEditMember?.(member)}
+                >
+                  <span className="mini-avatar" style={{ background: safeRoomInspectorColor(member.avatar_color) }}>{memberName.slice(0, 1)}</span>
                   <span>
-                    <strong>{member.name}</strong>
-                    <small>{stageLabel(member.workflow_stage || "flexible")} · {member.identity}</small>
+                    <strong>{memberName}</strong>
+                    <small>{stageLabel(safeRoomInspectorText(member.workflow_stage, 80) || "flexible")} · {safeRoomInspectorText(member.identity, 300) || "未设置身份"}</small>
                     <small className={memberProviderId === "openai" ? "member-provider-line warning" : "member-provider-line"} title={`${providerName} · ${modelName}`}>
                       {providerName} · {modelName}
                     </small>
@@ -623,29 +812,57 @@ export function RoomInspector({
                   <i className={member.enabled ? "online" : "offline"} />
                 </button>
                 <span className="member-order-actions">
-                  <button type="button" className="member-history-button" title="查看身份版本历史" aria-label={`查看${member.name}的身份版本历史`} onClick={() => onViewMemberHistory(member)}><History size={13} /></button>
-                  <button title="向前移动" disabled={index === 0 || roundBusy} onClick={() => onMoveMember(member.id, -1)}><ArrowUp size={13} /></button>
-                  <button title="向后移动" disabled={index === members.length - 1 || roundBusy} onClick={() => onMoveMember(member.id, 1)}><ArrowDown size={13} /></button>
+                  <button type="button" className="member-history-button" title="查看身份版本历史" aria-label={`查看${memberName}的身份版本历史`} disabled={typeof onViewMemberHistory !== "function"} onClick={() => onViewMemberHistory?.(member)}><History size={13} /></button>
+                  <button type="button" title="向前移动" disabled={!memberId || index === 0 || roundControlBusy || typeof onMoveMember !== "function"} onClick={() => onMoveMember?.(memberId, -1)}><ArrowUp size={13} /></button>
+                  <button type="button" title="向后移动" disabled={!memberId || index === listProjection.members.boundedRows.length - 1 || roundControlBusy || typeof onMoveMember !== "function"} onClick={() => onMoveMember?.(memberId, 1)}><ArrowDown size={13} /></button>
                 </span>
               </div>
             );
           })}
         </div>
-        {archivedMembers.length ? (
+        {listProjection.members.moreAvailable ? (
+          <button
+            className="inspector-list-more"
+            type="button"
+            onClick={() => setMemberLimit((current) => Math.min(
+              current + ROOM_INSPECTOR_MEMBER_STEP,
+              ROOM_INSPECTOR_MEMBER_LIMIT,
+            ))}
+          >
+            展开更多成员 · 当前 {listProjection.members.visibleCount} / {listProjection.members.boundedCount}
+          </button>
+        ) : null}
+        {listProjection.archivedMembers.sourceCount ? (
           <details className="archived-member-list">
-            <summary>已归档成员（{archivedMembers.length}）</summary>
+            <summary>已归档成员（{listProjection.archivedMembers.sourceCount}）</summary>
             <div>
-              {archivedMembers.map((member) => (
-                <article key={member.id}>
-                  <span className="mini-avatar" style={{ background: member.avatar_color }}>{member.name.slice(0, 1)}</span>
-                  <span><strong>{member.name}</strong><small>身份版本 v{member.version} · 历史记录保留</small></span>
+              {listProjection.archivedMembers.visibleRows.map((member, index) => {
+                const memberId = safeRoomInspectorText(member.id, 240);
+                const memberName = safeRoomInspectorText(member.name, 160) || "未命名成员";
+                return (
+                <article key={(memberId || "archived-member") + "-" + index}>
+                  <span className="mini-avatar" style={{ background: safeRoomInspectorColor(member.avatar_color) }}>{memberName.slice(0, 1)}</span>
+                  <span><strong>{memberName}</strong><small>身份版本 v{Number.isSafeInteger(member.version) && member.version > 0 ? member.version : 1} · 历史记录保留</small></span>
                   <span className="archived-member-actions">
-                    <button className="text-action" type="button" onClick={() => onViewMemberHistory(member)}><History size={13} />历史</button>
-                    <button className="text-action" type="button" disabled={memberLifecycleLocked} title={memberLifecycleLocked ? "当前轮次运行或暂停中，结束后才能恢复成员" : "恢复为活动成员"} onClick={() => onRestoreMember(member)}><RotateCcw size={13} />恢复</button>
+                    <button className="text-action" type="button" disabled={typeof onViewMemberHistory !== "function"} onClick={() => onViewMemberHistory?.(member)}><History size={13} />历史</button>
+                    <button className="text-action" type="button" disabled={memberLifecycleLocked || typeof onRestoreMember !== "function"} title={memberLifecycleLocked ? "当前轮次运行或暂停中，结束后才能恢复成员" : "恢复为活动成员"} onClick={() => onRestoreMember?.(member)}><RotateCcw size={13} />恢复</button>
                   </span>
                 </article>
-              ))}
+                );
+              })}
             </div>
+            {listProjection.archivedMembers.moreAvailable ? (
+              <button
+                className="inspector-list-more"
+                type="button"
+                onClick={() => setArchivedMemberLimit((current) => Math.min(
+                  current + ROOM_INSPECTOR_ARCHIVED_MEMBER_STEP,
+                  ROOM_INSPECTOR_ARCHIVED_MEMBER_LIMIT,
+                ))}
+              >
+                展开更多归档成员 · 当前 {listProjection.archivedMembers.visibleCount} / {listProjection.archivedMembers.boundedCount}
+              </button>
+            ) : null}
           </details>
         ) : null}
       </section>
@@ -697,55 +914,73 @@ export function RoomInspector({
         </PluginActionBoundary>
       ) : null}
 
-      <section className="inspector-section compact-section" id="inspector-materials">
+      <section className="inspector-section compact-section" id="inspector-materials" tabIndex={-1} aria-label="共享资料">
         <div className="section-heading">
           <strong><Database size={15} />共享资料</strong>
           <button className="text-action" onClick={onAddMaterial}><FilePlus2 size={14} />添加</button>
         </div>
         {marketWorkspaceVisible ? (
           <PluginActionBoundary disabled={storageReadOnly} label="存储产业只读市场资料">
-            <MarketSnapshotCard
-              roomId={room.id}
-              snapshot={marketSnapshot}
-              status={marketStatus}
-              readiness={marketReadiness}
-              loading={marketLoading}
-              readinessLoading={marketReadinessLoading}
-              gate={marketGate}
-              onRefresh={onRefreshMarket}
-              onRefreshReadiness={onRefreshMarketReadiness}
-              onFreezeOfficialEvidence={onFreezeOfficialEvidence}
-              onAddOfficialSupplement={onAddOfficialSupplement}
-            />
+            <Suspense fallback={<InspectorPanelFallback label="存储产业只读市场资料" />}>
+              <MarketSnapshotCard
+                roomId={room?.id}
+                snapshot={marketSnapshot}
+                status={marketStatus}
+                readiness={marketReadiness}
+                loading={marketLoading}
+                readinessLoading={marketReadinessLoading}
+                gate={marketGate}
+                onRefresh={onRefreshMarket}
+                onRefreshReadiness={onRefreshMarketReadiness}
+                onFreezeOfficialEvidence={onFreezeOfficialEvidence}
+                onAddOfficialSupplement={onAddOfficialSupplement}
+              />
+            </Suspense>
           </PluginActionBoundary>
         ) : null}
-        {materials.length > 0 ? (
+        {listProjection.materials.sourceCount > 0 ? (
           <div className="material-list">
-            {materials.map((material) => {
+            {listProjection.materials.visibleRows.map((material, index) => {
               const quarantine = materialPromptQuarantine(material);
+              const materialId = safeRoomInspectorText(material.id, 240);
+              const materialTitle = safeRoomInspectorText(material.title, 300) || "未命名资料";
               return (
                 <button
                   className={`material-row${quarantine.quarantined ? " quarantined" : ""}`}
-                  key={material.id}
-                  onClick={() => onEditMaterial(material)}
+                  type="button"
+                  key={(materialId || "material") + "-" + index}
+                  disabled={typeof onEditMaterial !== "function"}
+                  onClick={() => onEditMaterial?.(material)}
                   title={quarantine.quarantined
                     ? `原文保留在本机，但不会发送给 AI。标记：${quarantine.labels.join("、")}`
                     : ""}
                 >
-                  <span><strong>{material.title}</strong><small>{materialSourceLabel(material)} · v{material.version}{material.metadata?.truncated ? " · 已截断" : ""}</small></span>
-                  {material.source_url ? <Link2 size={13} /> : <span className="material-id">{material.id.slice(-5)}</span>}
+                  <span><strong>{materialTitle}</strong><small>{materialSourceLabel(material)} · v{Number.isSafeInteger(material.version) && material.version > 0 ? material.version : 1}{material.metadata?.truncated ? " · 已截断" : ""}</small></span>
+                  {safeRoomInspectorText(material.source_url, 4000) ? <Link2 size={13} /> : <span className="material-id">{materialId.slice(-5) || "LOCAL"}</span>}
                 </button>
               );
             })}
           </div>
         ) : <div className="empty-resource">尚未添加可引用资料</div>}
+        {listProjection.materials.moreAvailable ? (
+          <button
+            className="inspector-list-more"
+            type="button"
+            onClick={() => setMaterialLimit((current) => Math.min(
+              current + ROOM_INSPECTOR_MATERIAL_STEP,
+              ROOM_INSPECTOR_MATERIAL_LIMIT,
+            ))}
+          >
+            展开更多资料 · 当前 {listProjection.materials.visibleCount} / {listProjection.materials.boundedCount}
+          </button>
+        ) : null}
       </section>
 
-      <section className="inspector-section compact-section" id="inspector-artifacts">
+      <section className="inspector-section compact-section" id="inspector-artifacts" tabIndex={-1} aria-label="结论与待办">
         <div className="section-heading"><strong><CheckSquare size={15} />结论与待办</strong></div>
         <ArtifactPanel
           artifacts={artifacts}
-          members={members}
+          members={boundedMembers}
           loading={artifactLoading}
           generationDisabled={roundBusy}
           generationDisabledReason="本轮讨论仍在进行；请等待轮次结束后再整理，避免生成不完整纪要。"
@@ -761,4 +996,4 @@ export function RoomInspector({
       />
     </aside>
   );
-}
+});

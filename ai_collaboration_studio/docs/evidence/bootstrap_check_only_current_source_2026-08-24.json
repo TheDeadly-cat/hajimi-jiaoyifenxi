@@ -1,0 +1,63 @@
+{
+  "schema_version": "bootstrap_check_only_evidence_v1",
+  "evidence_date": "2026-08-24",
+  "source_backup_binding": {
+    "archive_basename": "ai_collaboration_studio-source-20260824T091756Z-012726e0e71e.zip",
+    "archive_sha256": "79ebb56f97eec8a91bec8549e1ddb3d0701ae358a72998b064aceca202bd5ece",
+    "source_total_sha256": "012726e0e71e8c75100708355a5619751a5601b33b07527ec3b6aeef589c3c11",
+    "source_file_count": 550
+  },
+  "command": [
+    "python",
+    "scripts/bootstrap_ai_collaboration_studio.py",
+    "--project-root",
+    ".",
+    "--runtime-root",
+    "<SYSTEM_TEMP_EXCLUSIVE>",
+    "--report",
+    "<SYSTEM_TEMP_EXCLUSIVE>.json",
+    "--check-only"
+  ],
+  "result": {
+    "ok": true,
+    "exit_code": 0,
+    "receipt_version": "studio_bootstrap_receipt_v1",
+    "project_id": "ai_collaboration_studio",
+    "project_version": "0.1.0",
+    "check_only": true,
+    "dependency_downloads_authorized": false
+  },
+  "inputs": {
+    "requirements_sha256": "8edee15d683c09b79db27d6eaec4677f5aafdc79cc2866e44d1c3ec284f9fa58",
+    "requirements_lock_sha256": "22e149f601a83f26833cff20d32cbf5aaa01242906de0d8cf9d53a6e569ea699",
+    "package_json_sha256": "b8d30d4e7f41abf97b0ea98cd3e263521d19413440fcc9190762f8c0e5fce163",
+    "package_lock_sha256": "875e3714c1a69ec74d3510afa73a82e98c0d9cac6ea168587d0ba631a7116ffc",
+    "python_requirements_fully_pinned": true,
+    "python_locked_distribution_count": 10,
+    "python_lock_profile": {
+      "id": "windows_x64_cpython_3_14",
+      "compatible": true,
+      "host_platform": "win32",
+      "host_python": "3.14",
+      "host_machine": "amd64"
+    }
+  },
+  "safety": {
+    "local_env_skipped": true,
+    "provider_credentials_removed": true,
+    "application_started": false,
+    "formal_database_opened": false,
+    "runtime_root_created": false,
+    "report_file_created": false,
+    "protected_listener_count_after": 0,
+    "project_process_count_after": 0
+  },
+  "boundaries": {
+    "dependency_resolution_performed": false,
+    "dependency_downloads_performed": false,
+    "production_frontend_build_performed": false,
+    "application_startup_performed": false,
+    "formal_migration_applied": false,
+    "production_authorization": false
+  }
+}

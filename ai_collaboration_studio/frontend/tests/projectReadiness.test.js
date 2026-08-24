@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
   normalizeProjectReadinessResponse,
+  projectReadinessErrorMessage,
   PROJECT_READINESS_INSPECT_ACTION,
   PROJECT_READINESS_PROJECTION_VERSION,
   PROJECT_READINESS_RESOLUTION_VERSION,
   projectReadinessLoadPlan,
+  projectReadinessPresentation,
 } from "../src/projectReadiness.js";
 import { PROJECT_READINESS_VIEW_MODEL_SCHEMA_VERSION } from "../src/capabilityContributions.js";
 
@@ -284,6 +287,26 @@ test("strict readiness response exposes metrics only for exact bindings and zero
   assert.equal(view.evidenceGaps.length, 1);
 });
 
+test("readiness presentation keeps blockers first without upgrading authority", () => {
+  const plan = projectReadinessLoadPlan(fixture());
+  const view = normalizeProjectReadinessResponse(responseFixture(plan), plan.expected);
+  const presentation = projectReadinessPresentation(view);
+
+  assert.equal(presentation.visible, true);
+  assert.equal(presentation.state, "blocked");
+  assert.equal(presentation.totalGapCount, 3);
+  assert.deepEqual(
+    presentation.groups.map((group) => [group.key, group.order, group.status, group.count]),
+    [
+      ["blockers", "01", "hold", 1],
+      ["structural", "02", "open", 1],
+      ["evidence", "03", "open", 1],
+    ],
+  );
+  assert.match(presentation.description, /不构成批准/);
+  assert.equal(projectReadinessPresentation({ valid: false }).visible, false);
+});
+
 test("identity, hash, resolution, safety, budget, and metric drift hides the entire projection", () => {
   const plan = projectReadinessLoadPlan(fixture());
   const mutations = [
@@ -294,6 +317,7 @@ test("identity, hash, resolution, safety, budget, and metric drift hides the ent
     (value) => { value.projection.plugin_registry_snapshot_sha256 = "3".repeat(64); },
     (value) => { value.projection.resolution.contribution.contract_sha256 = "3".repeat(64); },
     (value) => { value.projection.resolution.adapter.adapter_id = "other"; },
+    (value) => { value.projection.resolution.adapter.adapter_id = "PROJECT_READINESS"; },
     (value) => { value.projection.resolution.port.port_id = "core.user_decision/v1"; },
     (value) => { value.projection.resolution.port.input_schema_sha256 = "3".repeat(64); },
     (value) => { value.projection.resolution.port.provider_call_budget = 1; },
@@ -323,4 +347,79 @@ test("identity, hash, resolution, safety, budget, and metric drift hides the ent
     assert.deepEqual(view.blockers, []);
     assert.deepEqual(view.evidenceGaps, []);
   }
+});
+
+test("request identity is delimiter-safe and contract text fails closed when oversized", () => {
+  const input = fixture();
+  input.room.id = "room|one";
+  input.artifact.id = "artifact|one";
+  const plan = projectReadinessLoadPlan(input);
+  assert.deepEqual(JSON.parse(plan.requestKey).slice(0, 2), ["room|one", "artifact|one"]);
+
+  const response = responseFixture(plan);
+  response.projection.blockers[0].message = "x".repeat(1001);
+  const view = normalizeProjectReadinessResponse(response, plan.expected);
+  assert.equal(view.valid, false);
+  assert.deepEqual(view.blockers, []);
+});
+
+test("readiness errors are bounded and the dossier keeps progressive responsive contracts", () => {
+  assert.equal(projectReadinessErrorMessage({ message: { unsafe: true } }, "fallback"), "fallback");
+  assert.equal(projectReadinessErrorMessage({ message: "x".repeat(1500) }).length, 1000);
+
+  const component = readFileSync(
+    new URL("../src/components/ProjectReadinessPanel.jsx", import.meta.url),
+    "utf8",
+  );
+  const styles = readFileSync(
+    new URL("../src/styles/project-readiness-refinement.css", import.meta.url),
+    "utf8",
+  );
+  assert.match(component, /GAP_PAGE_SIZE = 40/);
+  assert.match(component, /COMPACT_GAP_PAGE_SIZE = 16/);
+  assert.match(component, /COMPACT_GAP_QUERY = "\(max-width: 620px\)"/);
+  assert.match(component, /READINESS_REQUEST_CACHE_LIMIT = 32/);
+  assert.match(component, /cachedProjectReadinessRequest/);
+  assert.match(component, /visibleRows\.length/);
+  assert.match(component, /projectReadinessErrorMessage/);
+  assert.match(component, /artifactSnapshotSha256.*evidenceGraphSha256.*group\.key/);
+  assert.match(component, /const requestKey = plan\.requestKey/);
+  assert.doesNotMatch(component, /\}, \[plan\]\);/);
+  assert.match(component, /aria-labelledby=\{headingId\}/);
+  assert.match(component, /project-readiness-gate-jump/);
+  assert.match(component, /project-readiness-gap-toggle/);
+  assert.match(component, /project-readiness-locator/);
+  assert.match(component, /READ-ONLY LOCATOR/);
+  assert.match(component, /onCompositionEnd=\{\(event\) => finishGapQueryComposition/);
+  assert.match(component, /仅筛选当前只读视图/);
+  assert.doesNotMatch(component, /event\.key !== "Enter" && event\.key !== " "/);
+  assert.match(
+    component,
+    /type="button"\s+className="project-readiness-gap-toggle"[\s\S]*?aria-controls=\{bodyId\}[\s\S]*?aria-expanded=\{expanded\}[\s\S]*?onClick=\{\(\) => onToggle\(group\.key\)\}/,
+  );
+  assert.doesNotMatch(
+    component,
+    /className="project-readiness-gap-toggle"[\s\S]{0,500}onKeyDown=/,
+  );
+  assert.doesNotMatch(component, /onKeyDown=\{toggleFromKeyboard\}/);
+  assert.match(component, /hidden=\{!expanded\}/);
+  assert.match(
+    component,
+    /onClick=\{\(\) => revealGate\(group\.key,\s*sectionId\)\}/,
+  );
+  assert.match(component, /--readiness-list-progress/);
+  assert.match(component, /data-list-action=\{listComplete \? "collapse" : "more"\}/);
+  assert.match(component, /setRowLimit\(pageSize\)/);
+  assert.match(component, /moreButtonRef\.current\?\.scrollIntoView/);
+  assert.match(component, /media\.addEventListener\("change", syncPageSize\)/);
+  assert.match(component, /media\.addListener\(syncPageSize\)/);
+  assert.match(component, /aria-live="polite"/);
+  assert.match(styles, /project-readiness-gap-group:target/);
+  assert.match(styles, /project-readiness-gap-body\[hidden\]/);
+  assert.match(styles, /project-readiness-locator-status\[data-empty="true"\]/);
+  assert.match(styles, /project-readiness-gate-jump/);
+  assert.match(styles, /min-width: 44px/);
+  assert.match(styles, /@media \(max-width: 620px\)/);
+  assert.match(styles, /prefers-reduced-motion/);
+  assert.match(styles, /forced-colors/);
 });

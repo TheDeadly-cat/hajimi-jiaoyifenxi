@@ -25,11 +25,14 @@ test("compact room inspector owns initial focus and traps both tab directions", 
   assert.match(appSource, /window\.removeEventListener\("keydown", trapFocus\)/);
 });
 
-test("closing the room inspector restores focus to its exact trigger", () => {
+test("closing the room inspector restores its trigger or an explicit post-close target", () => {
   assert.match(appSource, /ref=\{inspectorToggleRef\}/);
   assert.match(appSource, /ref=\{inspectorCloseRef\}/);
   assert.match(appSource, /inspectorWasOpenRef\.current = false/);
+  assert.match(appSource, /const inspectorPostCloseFocusRef = useRef\(null\)/);
+  assert.match(appSource, /const postCloseFocusTarget = inspectorPostCloseFocusRef\.current/);
+  assert.match(appSource, /inspectorPostCloseFocusRef\.current = null/);
   assert.match(appSource, /inspectorRestoreFocusRef\.current/);
   assert.match(appSource, /target\.getClientRects\(\)\.length > 0/);
-  assert.match(appSource, /restoreTarget\?\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(appSource, /restoreTarget\?\.focus\(\{ preventScroll: restoreTarget !== postCloseFocusTarget \}\)/);
 });

@@ -1,5 +1,5 @@
 {
-  "version": "backend_test_layers_v1",
+  "version": "backend_test_layers_v2",
   "layers": [
     {
       "id": "migration",
@@ -19,7 +19,7 @@
     },
     {
       "id": "core",
-      "description": "Fast host-kernel, protocol, launch, ledger, safety, local HTTP, and source-backup gates.",
+      "description": "Fast host-kernel, protocol, launch, ledger, safety, and local HTTP gates.",
       "selection": "modules",
       "tests": [
         "tests.test_backend_test_layers",
@@ -35,7 +35,6 @@
         "tests.test_round_launch_plan",
         "tests.test_round_objective_validation",
         "tests.test_server_pause",
-        "tests.test_source_backup",
         "tests.test_turn_contract",
         "tests.test_turn_envelope",
         "tests.test_workflow_policy",
@@ -66,6 +65,23 @@
         "tests.test_stock_research_service",
         "tests.test_stock_room_scope",
         "tests.test_stock_round_context_e2e"
+      ],
+      "start_directory": "",
+      "pattern": ""
+    },
+    {
+      "id": "delivery",
+      "description": "Bootstrap, host delivery, CI, source-backup, static-security, structured-log, and release lifecycle gates.",
+      "selection": "modules",
+      "tests": [
+        "tests.test_ci_delivery_contract",
+        "tests.test_delivery_bootstrap",
+        "tests.test_dependency_inventory",
+        "tests.test_host_delivery_endpoints",
+        "tests.test_release_drill",
+        "tests.test_source_backup",
+        "tests.test_static_security_checks",
+        "tests.test_structured_logging"
       ],
       "start_directory": "",
       "pattern": ""

@@ -51,7 +51,10 @@ test("four primary modal surfaces use the shared focus contract", () => {
   assert.match(dialogsSource, /aria-label="关闭新建房间"/);
   assert.match(dialogsSource, /open: open && initializedForOpen\.current/);
   assert.doesNotMatch(dialogsSource, /ref=\{titleInputRef\} autoFocus/);
-  assert.match(settingsSource, /onClose: busy \? null : onClose/);
+  assert.match(settingsSource, /const canClose = typeof onClose === "function"/);
+  assert.match(settingsSource, /const requestClose = \(\) => \{\s*if \(busy \|\| !canClose\) return/);
+  assert.match(settingsSource, /onClose: busy \|\| !canClose \? null : requestClose/);
+  assert.match(settingsSource, /disabled=\{busy \|\| !canClose\}/);
   assert.doesNotMatch(settingsSource, /ref=\{titleInputRef\} autoFocus/);
   assert.match(overviewSource, /tabIndex=\{-1\}/);
   assert.match(roundLaunchSource, /initialFocusRef: closeButtonRef/);
@@ -70,9 +73,12 @@ test("four primary modal surfaces use the shared focus contract", () => {
   assert.match(appSource, /launchTrigger \|\| document\.activeElement/);
   assert.match(appSource, /activeLaunchTrigger !== document\.body/);
   assert.match(appSource, /restoreFocusRef=\{roundLaunchRestoreFocusRef\}/);
-  for (const source of [composerSource, inspectorSource]) {
-    assert.match(source, /onStartRound\?\.\(event\.currentTarget\)/);
-  }
+  assert.match(composerSource, /onStartRound\?\.\(event\.currentTarget\)/);
+  assert.match(
+    inspectorSource,
+    /runRoomAction\([\s\S]*"start",[\s\S]*onStartRound,[\s\S]*event\.currentTarget/,
+  );
+  assert.match(inspectorSource, /handler\(\.\.\.args\)/);
   assert.match(appSource, /roundLaunchOpenRef\.current = roundLaunchOpen/);
   assert.ok((appSource.match(/if \(roundLaunchOpenRef\.current\) return/g) || []).length >= 2);
   assert.equal((appSource.match(/restoreFocusRef=\{mobileRoomToggleRef\}/g) || []).length, 2);

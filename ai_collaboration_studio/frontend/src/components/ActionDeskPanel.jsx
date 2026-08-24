@@ -9,7 +9,7 @@ import {
   Save,
   ShieldCheck,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import {
   ACTION_DESK_STATE_LABELS,
@@ -25,10 +25,17 @@ import {
   newActionContinuationClientRequestId,
   normalizeActionDeskContinuationsResponse,
 } from "../actionContinuation";
+import "../styles/action-desk-polish.css";
 
 const EMPTY_LOAD_STATE = Object.freeze({ status: "idle", desk: null, error: "" });
 const EMPTY_MUTATION_STATE = Object.freeze({ status: "idle", sourceKey: "", error: "" });
 const EMPTY_CONTINUATION_STATE = Object.freeze({ status: "idle", view: null, error: "" });
+const ACTION_DESK_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+});
 
 function shortHash(value) {
   const hash = String(value || "").trim();
@@ -38,12 +45,7 @@ function shortHash(value) {
 function formatTimestamp(value) {
   const timestamp = Number(value);
   if (!Number.isFinite(timestamp) || !Number.isFinite(new Date(timestamp).getTime())) return "时间未核验";
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(timestamp));
+  return ACTION_DESK_TIMESTAMP_FORMATTER.format(new Date(timestamp));
 }
 
 function formFromRow(row) {
@@ -85,7 +87,7 @@ function ActionSource({ row }) {
 function RedactedRow({ kind }) {
   return (
     <article className="action-desk-row integrity-failed" role="alert">
-      <AlertTriangle size={16} />
+      <AlertTriangle aria-hidden="true" size={16} />
       <span>
         <strong>{kind === "candidate" ? "候选待办来源损坏" : "行动项完整性无法确认"}</strong>
         <small>来源、状态和可编辑字段已隐藏；不会用当前产物或相邻条目替代。</small>
@@ -125,8 +127,8 @@ function CandidateCard({ row, form, locked, saving, onChange, onAdopt }) {
         </label>
       </div>
       <div className="action-desk-actions">
-        <button className="primary compact" type="button" onClick={onAdopt} disabled={locked}>
-          {saving ? <LoaderCircle className="spin" size={14} /> : <CheckCircle2 size={14} />}
+        <button className="primary compact" type="button" onClick={onAdopt} disabled={locked} aria-busy={saving}>
+          {saving ? <LoaderCircle aria-hidden="true" className="spin" size={14} /> : <CheckCircle2 aria-hidden="true" size={14} />}
           {saving ? "正在采纳…" : "采纳到行动台"}
         </button>
       </div>
@@ -138,7 +140,7 @@ function ContinuationCard({ row, relation, candidates, form, locked, saving, onC
   if (relation?.valid) {
     return (
       <div className="action-desk-continuation linked" role="status">
-        <span className="action-desk-continuation-heading"><Link2 size={13} /><strong>已建立显式延续</strong></span>
+        <span className="action-desk-continuation-heading"><Link2 aria-hidden="true" size={13} /><strong>已建立显式延续</strong></span>
         <small>旧版 v{relation.source.artifactVersion} · {relation.source.actionId} → 新版 v{relation.target.artifactVersion} · {relation.target.actionId}</small>
         {relation.reason ? <small>用户说明：{relation.reason}</small> : null}
         <em>旧行动状态不会自动转移，新行动仍需单独采纳。</em>
@@ -148,14 +150,14 @@ function ContinuationCard({ row, relation, candidates, form, locked, saving, onC
   if (!candidates.length) {
     return (
       <div className="action-desk-continuation unavailable" role="note">
-        <span className="action-desk-continuation-heading"><GitBranch size={13} /><strong>可建立新版延续</strong></span>
+        <span className="action-desk-continuation-heading"><GitBranch aria-hidden="true" size={13} /><strong>可建立新版延续</strong></span>
         <small>当前没有同一产物谱系中更高版本的确认待办候选。</small>
       </div>
     );
   }
   return (
     <div className="action-desk-continuation form" aria-label="建立新版行动延续">
-      <span className="action-desk-continuation-heading"><GitBranch size={13} /><strong>旧版行动 → 新版行动</strong></span>
+      <span className="action-desk-continuation-heading"><GitBranch aria-hidden="true" size={13} /><strong>旧版行动 → 新版行动</strong></span>
       <small>只建立来源关系；不会采纳新版、复制状态或修改旧行动。</small>
       <label>
         选择新版确认待办
@@ -171,8 +173,8 @@ function ContinuationCard({ row, relation, candidates, form, locked, saving, onC
         延续说明（可选）
         <textarea value={form.reason} onChange={(event) => onChange("reason", event.target.value)} placeholder="说明为什么认为新版是同一后续事项" disabled={locked} />
       </label>
-      <button className="secondary compact" type="button" onClick={onSubmit} disabled={locked || !form.targetKey}>
-        {saving ? <LoaderCircle className="spin" size={13} /> : <Link2 size={13} />}
+      <button className="secondary compact" type="button" onClick={onSubmit} disabled={locked || !form.targetKey} aria-busy={saving}>
+        {saving ? <LoaderCircle aria-hidden="true" className="spin" size={13} /> : <Link2 aria-hidden="true" size={13} />}
         {saving ? "正在确认…" : "确认建立延续关系"}
       </button>
     </div>
@@ -242,10 +244,10 @@ function ItemCard({ row, form, locked, saving, onChange, onSave, onFillComposer,
       </div>
       <div className="action-desk-actions">
         <button className="secondary compact" type="button" onClick={onFillComposer} disabled={locked}>
-          <MessageSquareText size={14} />填入讨论框
+          <MessageSquareText aria-hidden="true" size={14} />填入讨论框
         </button>
-        <button className="primary compact" type="button" onClick={onSave} disabled={locked}>
-          {saving ? <LoaderCircle className="spin" size={14} /> : <Save size={14} />}
+        <button className="primary compact" type="button" onClick={onSave} disabled={locked} aria-busy={saving}>
+          {saving ? <LoaderCircle aria-hidden="true" className="spin" size={14} /> : <Save aria-hidden="true" size={14} />}
           {saving ? "正在保存…" : "保存行动项"}
         </button>
       </div>
@@ -253,7 +255,7 @@ function ItemCard({ row, form, locked, saving, onChange, onSave, onFillComposer,
   );
 }
 
-export function ActionDeskPanel({ roomId, artifactFingerprint = "", onFillComposer }) {
+export const ActionDeskPanel = memo(function ActionDeskPanel({ roomId, artifactFingerprint = "", onFillComposer }) {
   const normalizedRoomId = String(roomId || "").trim();
   const normalizedArtifactFingerprint = String(artifactFingerprint || "");
   const activeRoomIdRef = useRef(normalizedRoomId);
@@ -386,8 +388,7 @@ export function ActionDeskPanel({ roomId, artifactFingerprint = "", onFillCompos
     try {
       await api.transitionActionDesk(targetRoomId, payload, controller.signal);
       if (controller.signal.aborted || activeRoomIdRef.current !== targetRoomId) return;
-      const rereadReady = await loadDesk();
-      await loadContinuations();
+      const [rereadReady] = await Promise.all([loadDesk(), loadContinuations()]);
       if (controller.signal.aborted || activeRoomIdRef.current !== targetRoomId) return;
       setMutation(rereadReady
         ? EMPTY_MUTATION_STATE
@@ -458,9 +459,15 @@ export function ActionDeskPanel({ roomId, artifactFingerprint = "", onFillCompos
   const counts = desk?.countsVisible ? desk.counts : null;
   const continuationView = continuationState.view;
   return (
-    <section className="inspector-section action-desk-panel" id="inspector-action-desk" aria-label="独立行动台" tabIndex={-1}>
+    <section
+      className="inspector-section action-desk-panel"
+      id="inspector-action-desk"
+      aria-label="独立行动台"
+      aria-busy={loadState.status === "loading" || continuationState.status === "loading" || mutation.status === "loading"}
+      tabIndex={-1}
+    >
       <header className="action-desk-heading">
-        <span><ClipboardList size={16} /><strong>独立行动台</strong></span>
+        <span><ClipboardList aria-hidden="true" size={16} /><strong>独立行动台</strong></span>
         <em>确认产物待办</em>
       </header>
       <p className="action-desk-intro">
@@ -468,18 +475,18 @@ export function ActionDeskPanel({ roomId, artifactFingerprint = "", onFillCompos
       </p>
 
       {loadState.status === "loading" ? (
-        <p className="action-desk-state" aria-live="polite"><LoaderCircle className="spin" size={15} />正在读取精确行动来源……</p>
+        <p className="action-desk-state" role="status" aria-live="polite"><LoaderCircle aria-hidden="true" className="spin" size={15} />正在读取精确行动来源……</p>
       ) : null}
       {loadState.status === "error" ? (
         <p className="action-desk-state error" role="alert">
-          <AlertTriangle size={15} />
+          <AlertTriangle aria-hidden="true" size={15} />
           <span><strong>行动台读取失败</strong><small>{loadState.error}</small></span>
           <button className="secondary compact" type="button" onClick={() => void loadDesk()}>重试</button>
         </p>
       ) : null}
       {loadState.status === "integrity_failed" ? (
         <p className="action-desk-state error" role="alert">
-          <AlertTriangle size={15} />
+          <AlertTriangle aria-hidden="true" size={15} />
           <span>
             <strong>行动台完整性或安全边界校验失败</strong>
             <small>全部候选、行动项和计数已隐藏；不会用当前产物替代。</small>
@@ -488,13 +495,14 @@ export function ActionDeskPanel({ roomId, artifactFingerprint = "", onFillCompos
       ) : null}
       {continuationState.status === "error" ? (
         <p className="action-desk-state warning" role="note">
-          <AlertTriangle size={15} />
+          <AlertTriangle aria-hidden="true" size={15} />
           <span><strong>新版延续记录暂不可用</strong><small>{continuationState.error}</small></span>
+          <button className="secondary compact" type="button" onClick={() => void loadContinuations()}>重试</button>
         </p>
       ) : null}
       {continuationState.status === "integrity_failed" ? (
         <p className="action-desk-state warning" role="note">
-          <AlertTriangle size={15} />
+          <AlertTriangle aria-hidden="true" size={15} />
           <span><strong>延续谱系完整性无法确认</strong><small>已隐藏新版关系；旧行动状态保持原样。</small></span>
         </p>
       ) : null}
@@ -511,7 +519,7 @@ export function ActionDeskPanel({ roomId, artifactFingerprint = "", onFillCompos
             </div>
           ) : (
             <p className="action-desk-state warning" role="note">
-              <AlertTriangle size={15} />条目状态或来源损坏，汇总计数已隐藏。
+              <AlertTriangle aria-hidden="true" size={15} />条目状态或来源损坏，汇总计数已隐藏。
             </p>
           )}
 
@@ -584,15 +592,15 @@ export function ActionDeskPanel({ roomId, artifactFingerprint = "", onFillCompos
 
           {mutation.status === "error" ? (
             <p className="action-desk-state error" role="alert">
-              <AlertTriangle size={15} />{mutation.error}
+              <AlertTriangle aria-hidden="true" size={15} />{mutation.error}
             </p>
           ) : null}
         </>
       ) : null}
 
       <p className="action-desk-boundary">
-        <ShieldCheck size={14} />只管理本地共创待办，不执行外部写入、不自动开始讨论、不替代用户最终决定。
+        <ShieldCheck aria-hidden="true" size={14} />只管理本地共创待办，不执行外部写入、不自动开始讨论、不替代用户最终决定。
       </p>
     </section>
   );
-}
+});

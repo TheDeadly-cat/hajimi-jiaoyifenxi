@@ -1,0 +1,221 @@
+{
+  "schema": "ai_collaboration_studio_dependency_cve_audit_v1",
+  "generated_at_utc": "2026-08-24T11:25:38.989Z",
+  "objective": "Read-only dependency CVE audit with vulnerability database access",
+  "safety": {
+    "dependency_or_lockfile_changes": false,
+    "audit_fix_executed": false,
+    "install_location": "system temporary runtime only",
+    "formal_database_opened": false,
+    "formal_service_started": false,
+    "provider_or_market_connection": false
+  },
+  "inputs": {
+    "requirements_lock_win_py314": {
+      "path": "requirements-lock-win-py314.txt",
+      "bytes": 1091,
+      "sha256": "22e149f601a83f26833cff20d32cbf5aaa01242906de0d8cf9d53a6e569ea699"
+    },
+    "requirements": {
+      "path": "requirements.txt",
+      "bytes": 38,
+      "sha256": "8edee15d683c09b79db27d6eaec4677f5aafdc79cc2866e44d1c3ec284f9fa58"
+    },
+    "frontend_package_lock": {
+      "path": "frontend/package-lock.json",
+      "bytes": 80032,
+      "sha256": "875e3714c1a69ec74d3510afa73a82e98c0d9cac6ea168587d0ba631a7116ffc",
+      "lockfile_version": 3
+    },
+    "frontend_package_json": {
+      "path": "frontend/package.json",
+      "bytes": 674,
+      "sha256": "b8d30d4e7f41abf97b0ea98cd3e263521d19413440fcc9190762f8c0e5fce163"
+    }
+  },
+  "scanners": {
+    "python": {
+      "name": "pip-audit",
+      "version": "2.10.1",
+      "modes": [
+        {
+          "vulnerability_service": "pypi",
+          "require_hashes": true,
+          "no_deps": true,
+          "exit_code": 0
+        },
+        {
+          "vulnerability_service": "osv",
+          "require_hashes": true,
+          "no_deps": true,
+          "exit_code": 0
+        }
+      ]
+    },
+    "javascript": {
+      "name": "npm audit",
+      "npm_version": "11.13.0",
+      "package_lock_only": true,
+      "ignore_scripts": true,
+      "audit_level": "low",
+      "registry": "https://registry.npmjs.org/",
+      "exit_code": 1,
+      "exit_code_meaning": "Known vulnerabilities reported"
+    }
+  },
+  "results": {
+    "python": {
+      "dependency_count": 10,
+      "vulnerability_count": 0,
+      "pypi_advisory_database_count": 0,
+      "osv_database_count": 0,
+      "packages": [
+        "futu-api==10.10.7008",
+        "numpy==2.5.2",
+        "pandas==3.0.5",
+        "protobuf==7.36.0",
+        "pycryptodome==3.23.0",
+        "pypdf==6.16.2",
+        "python-dateutil==2.9.0.post0",
+        "simplejson==4.1.1",
+        "six==1.17.0",
+        "tzdata==2026.3"
+      ]
+    },
+    "npm": {
+      "dependency_metadata": {
+        "production": 7,
+        "development": 149,
+        "optional": 52,
+        "total": 155
+      },
+      "vulnerability_metadata": {
+        "low": 0,
+        "moderate": 1,
+        "high": 1,
+        "critical": 0,
+        "total": 2
+      }
+    }
+  },
+  "dependency_chain": {
+    "root_direct_dev_dependency": "vite==6.4.3",
+    "transitive_dev_dependency": "postcss==8.5.20",
+    "nested_transitive_dev_dependency": "nanoid==3.3.16",
+    "chain": "frontend root -> vite 6.4.3 -> postcss 8.5.20 -> nanoid 3.3.16",
+    "all_findings_marked_dev_only_in_lockfile": true
+  },
+  "findings": [
+    {
+      "package": "nanoid",
+      "installed_version": "3.3.16",
+      "direct": false,
+      "dev_only": true,
+      "advisory": "GHSA-2v37-7h3g-55p8",
+      "cve": "CVE-2026-67213",
+      "upstream_severity": "high",
+      "npm_feed_cvss_v31": {
+        "score": 5.9,
+        "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H"
+      },
+      "current_github_advisory_cvss_v4_score": 8.2,
+      "affected": "<3.3.18 in the locked 3.x line",
+      "patched": "3.3.18",
+      "vulnerability": "customAlphabet/customRandom can loop indefinitely when called with size 0",
+      "validation": {
+        "disposition": "confirmed_lockfile_finding_reduced_current_reachability",
+        "attacker_input": "An attacker-controlled size value equal to 0",
+        "sink": "Unbounded generator loop causing denial of service",
+        "required_preconditions": [
+          "A reachable caller uses customAlphabet or customRandom",
+          "The caller forwards attacker-controlled size 0"
+        ],
+        "project_evidence": [
+          "No direct nanoid, customAlphabet, or customRandom reference was found in frontend source, scripts, or configuration",
+          "The package is a dev-only transitive dependency under PostCSS",
+          "No current application-runtime input path to the vulnerable API was demonstrated"
+        ],
+        "residual_risk": "A future or hidden build-tool call path could become reachable; upgrade remains required for dependency hygiene"
+      },
+      "reference": "https://github.com/advisories/GHSA-2v37-7h3g-55p8"
+    },
+    {
+      "package": "postcss",
+      "installed_version": "8.5.20",
+      "direct": false,
+      "dev_only": true,
+      "advisory": "GHSA-fxqj-rqcc-2cmp",
+      "cve": "CVE-2026-69153",
+      "upstream_severity": "moderate",
+      "npm_feed_cvss": {
+        "score": 0,
+        "vector": null,
+        "note": "Registry feed did not provide a usable score/vector"
+      },
+      "current_github_advisory_cvss_v4_score": 6.3,
+      "affected": "<=8.5.22",
+      "patched": "8.5.23",
+      "vulnerability": "External sourceMappingURL processing without a from option can read an arbitrary .map file",
+      "validation": {
+        "disposition": "confirmed_lockfile_finding_conditional_build_pipeline_reachability",
+        "attacker_input": "Untrusted CSS containing a crafted external sourceMappingURL",
+        "sink": "Local .map file read and potential disclosure during CSS processing",
+        "required_preconditions": [
+          "The build pipeline processes attacker-controlled CSS",
+          "PostCSS is invoked without a from option",
+          "A readable target .map path is addressable from the build context"
+        ],
+        "project_evidence": [
+          "No direct postcss or sourceMappingURL reference was found in frontend source, scripts, or configuration",
+          "The package is reached through the Vite dev/build toolchain and is marked dev-only",
+          "The validated project build consumes repository-controlled frontend assets; no untrusted CSS ingestion path was identified"
+        ],
+        "residual_risk": "Build or CI workflows that later ingest untrusted CSS could satisfy the advisory preconditions"
+      },
+      "reference": "https://github.com/advisories/GHSA-fxqj-rqcc-2cmp"
+    }
+  ],
+  "source_reachability_check": {
+    "tool": "ripgrep",
+    "patterns": [
+      "nanoid",
+      "customAlphabet",
+      "customRandom",
+      "postcss",
+      "sourceMappingURL"
+    ],
+    "scope": "frontend excluding node_modules, dist, package-lock.json, and docs",
+    "result": "NO_MATCHES",
+    "nature": "static bounded validation; no exploit proof-of-concept executed"
+  },
+  "raw_report_fingerprints": {
+    "pip_audit_pypi_json": {
+      "bytes": 597,
+      "sha256": "c5d453e95336a4ccc7f83bed511d3588328420ee16b19346cc6f08b0039f839b"
+    },
+    "pip_audit_osv_json": {
+      "bytes": 597,
+      "sha256": "c5d453e95336a4ccc7f83bed511d3588328420ee16b19346cc6f08b0039f839b"
+    },
+    "npm_audit_json": {
+      "bytes": 2046,
+      "sha256": "ef7e743b5b17442c2ae9854657916fa4535a2af91eff7a72eae4d4285095ea62"
+    },
+    "scanner_install_log": {
+      "bytes": 6731,
+      "sha256": "e064fe9f5c58392afacb5d03054aebb8fd0ea12e2bd8dd9ca3560e1c1e51e89a"
+    },
+    "location": "system temporary runtime; absolute path intentionally omitted"
+  },
+  "remediation": {
+    "status": "not_applied",
+    "recommendation": "In a separately authorized dependency change, regenerate the lock so PostCSS resolves to at least 8.5.23 and Nano ID 3.x resolves to at least 3.3.18, then rerun both audits, the guarded frontend regression, production build, and browser acceptance",
+    "compatibility_note": "The existing semver ranges reported by the lock graph admit both patched versions; this audit did not mutate or install into the project"
+  },
+  "boundaries": [
+    "A clean known-vulnerability result is database- and time-bounded and does not prove the absence of unknown vulnerabilities",
+    "An upstream advisory severity and a project-specific reachability assessment are separate claims",
+    "No unbounded-loop or arbitrary-file-read proof-of-concept was executed",
+    "This is not a repository-wide security scan, SBOM attestation, exploitability certification, production authorization, or provider/market validation"
+  ]
+}

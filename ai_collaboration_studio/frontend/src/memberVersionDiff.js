@@ -8,8 +8,8 @@ const FIELD_READERS = [
   ["workflow_stage", "工作流阶段", (snapshot) => textValue(snapshot.workflow_stage)],
   ["provider", "模型服务商", (snapshot) => textValue(snapshot.provider)],
   ["model", "模型", (snapshot) => textValue(snapshot.model)],
-  ["enabled", "参与状态", (snapshot) => (snapshot.enabled ? "参与讨论" : "暂停参与")],
-  ["archived", "生命周期", (snapshot) => (isArchived(snapshot) ? "已归档" : "活动")],
+  ["enabled", "参与状态", (snapshot) => memberParticipationState(snapshot)],
+  ["archived", "生命周期", (snapshot) => memberLifecycleState(snapshot)],
   ["avatar_color", "头像颜色", (snapshot) => textValue(snapshot.avatar_color)],
 ];
 
@@ -18,9 +18,31 @@ function textValue(value) {
   return typeof value === "string" ? value : String(value);
 }
 
-function isArchived(snapshot) {
-  const archivedAt = Number(snapshot?.archived_at || 0);
-  return snapshot?.archived === true || (Number.isFinite(archivedAt) && archivedAt > 0);
+function finiteArchiveTimestamp(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || !value.trim()) return null;
+  const numeric = Number(value.trim());
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+export function memberParticipationState(record) {
+  const snapshot = memberVersionSnapshot(record);
+  const enabled = Object.hasOwn(snapshot, "enabled") ? snapshot.enabled : record?.enabled;
+  if (enabled === true) return "参与讨论";
+  if (enabled === false) return "暂停参与";
+  return "参与状态未记录";
+}
+
+export function memberLifecycleState(record) {
+  const snapshot = memberVersionSnapshot(record);
+  const archived = Object.hasOwn(snapshot, "archived") ? snapshot.archived : record?.archived;
+  const archivedAtValue = Object.hasOwn(snapshot, "archived_at")
+    ? snapshot.archived_at
+    : record?.archived_at;
+  const archivedAt = finiteArchiveTimestamp(archivedAtValue);
+  if (archived === true || (archivedAt !== null && archivedAt > 0)) return "已归档";
+  if (archived === false || archivedAt === 0) return "活动";
+  return "生命周期未记录";
 }
 
 function parseCapabilities(value) {

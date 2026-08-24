@@ -1,0 +1,223 @@
+.icon-rail {
+  --rail-ink: #dce9f7;
+  --rail-muted: #8da2ba;
+  --rail-accent: #4f95ff;
+  --rail-cyan: #45c8d8;
+  z-index: 40;
+  isolation: isolate;
+  overflow: visible;
+  border-right: 1px solid rgba(153, 190, 226, 0.12);
+  background:
+    radial-gradient(circle at 42% 4%, rgba(65, 135, 229, 0.23), transparent 27%),
+    linear-gradient(180deg, #162a42 0%, #112237 58%, #0d1c2f 100%);
+  box-shadow: 8px 0 24px rgba(12, 29, 49, 0.1);
+}
+
+.icon-rail::before {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(144, 190, 231, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(144, 190, 231, 0.035) 1px, transparent 1px);
+  background-size: 16px 16px;
+  content: "";
+  pointer-events: none;
+}
+
+.icon-rail > * {
+  position: relative;
+  z-index: 1;
+}
+
+.icon-rail .brand-mark {
+  position: relative;
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border: 1px solid rgba(174, 218, 255, 0.28);
+  border-radius: 13px;
+  overflow: hidden;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.21), transparent 44%),
+    linear-gradient(145deg, #387ce2, #2358be);
+  box-shadow:
+    0 10px 22px rgba(4, 20, 42, 0.3),
+    inset 0 1px rgba(255, 255, 255, 0.2);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 820;
+  letter-spacing: 0.06em;
+}
+
+.icon-rail .brand-mark::after {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 5px;
+  height: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 999px;
+  background: var(--rail-cyan);
+  box-shadow: 0 0 0 3px rgba(69, 200, 216, 0.14);
+  content: "";
+}
+
+.icon-rail .rail-actions {
+  position: relative;
+  gap: 10px;
+  padding-top: 11px;
+}
+
+.icon-rail .rail-actions::before {
+  position: absolute;
+  top: 0;
+  right: 10px;
+  left: 10px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(151, 197, 237, 0.2), transparent);
+  content: "";
+  pointer-events: none;
+}
+
+.icon-rail .rail-button {
+  position: relative;
+  display: grid;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 13px;
+  overflow: visible;
+  background: transparent;
+  color: var(--rail-muted);
+  touch-action: manipulation;
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
+}
+
+.icon-rail .rail-button:hover:not(:disabled) {
+  border-color: rgba(132, 184, 232, 0.17);
+  background: rgba(130, 178, 222, 0.09);
+  color: var(--rail-ink);
+  transform: translateY(-1px);
+}
+
+.icon-rail .rail-button svg {
+  transition:
+    filter 160ms ease,
+    transform 160ms ease;
+}
+
+.icon-rail .rail-button:hover:not(:disabled) svg,
+.icon-rail .rail-button:focus-visible svg {
+  transform: scale(1.06);
+}
+
+.icon-rail .rail-button.active {
+  border-color: rgba(106, 178, 255, 0.31);
+  background:
+    linear-gradient(145deg, rgba(79, 149, 255, 0.24), rgba(69, 200, 216, 0.08));
+  box-shadow:
+    0 8px 20px rgba(2, 18, 39, 0.24),
+    inset 0 1px rgba(211, 235, 255, 0.1);
+  color: #eef8ff;
+}
+
+.icon-rail .rail-button.active svg {
+  filter: drop-shadow(0 0 7px rgba(94, 198, 235, 0.38));
+}
+
+.icon-rail .rail-button.active::before {
+  position: absolute;
+  top: 11px;
+  right: -11px;
+  bottom: 11px;
+  width: 3px;
+  border-radius: 4px 0 0 4px;
+  background: linear-gradient(180deg, var(--rail-cyan), var(--rail-accent));
+  box-shadow: 0 0 12px rgba(69, 200, 216, 0.54);
+  content: "";
+}
+
+.icon-rail .rail-button:focus-visible {
+  outline: 3px solid rgba(91, 166, 255, 0.35);
+  outline-offset: 2px;
+  border-color: rgba(147, 204, 255, 0.56);
+  color: #fff;
+}
+
+.icon-rail .rail-button::after {
+  position: absolute;
+  z-index: 90;
+  top: 50%;
+  left: calc(100% + 13px);
+  border: 1px solid rgba(133, 178, 218, 0.2);
+  border-radius: 9px;
+  padding: 7px 9px;
+  background: rgba(13, 30, 50, 0.96);
+  box-shadow: 0 10px 28px rgba(5, 17, 31, 0.25);
+  color: #eff7ff;
+  content: attr(data-label);
+  font-size: 10px;
+  font-weight: 680;
+  letter-spacing: 0.035em;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-5px, -50%);
+  transition: opacity 140ms ease, transform 140ms ease;
+  white-space: nowrap;
+}
+
+.icon-rail .rail-button:hover::after,
+.icon-rail .rail-button:focus-visible::after {
+  opacity: 1;
+  transform: translate(0, -50%);
+}
+
+.icon-rail .rail-actions:has(.rail-button:focus-visible)
+  .rail-button:hover:not(:focus-visible)::after {
+  opacity: 0;
+  transform: translate(-5px, -50%);
+}
+
+@media (max-width: 760px) {
+  .icon-rail .rail-button:hover:not(:disabled) {
+    transform: none;
+  }
+
+  .icon-rail .rail-button.active::before {
+    top: -1px;
+    right: 10px;
+    bottom: auto;
+    left: 10px;
+    width: auto;
+    height: 3px;
+    border-radius: 0 0 4px 4px;
+    background: linear-gradient(90deg, var(--rail-cyan), var(--rail-accent));
+  }
+
+  .icon-rail .rail-button::after {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .icon-rail .rail-button,
+  .icon-rail .rail-button::after,
+  .icon-rail .rail-button svg {
+    transition: none;
+  }
+
+  .icon-rail .rail-button:hover:not(:disabled) svg,
+  .icon-rail .rail-button:focus-visible svg {
+    transform: none;
+  }
+}

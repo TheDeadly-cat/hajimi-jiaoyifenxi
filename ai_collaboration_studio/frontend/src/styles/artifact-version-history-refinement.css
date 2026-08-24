@@ -1,0 +1,106 @@
+.artifact-section-diff > .artifact-section-diff-heading {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 14px;
+  align-items: baseline;
+}
+
+.artifact-section-diff > .artifact-section-diff-heading > b {
+  color: #263e50;
+  font-size: 12px;
+}
+
+.artifact-section-diff > .artifact-section-diff-heading > small {
+  color: #718493;
+  font: 700 9px/1.35 "IBM Plex Mono", "Cascadia Mono", monospace;
+  text-align: right;
+}
+
+.artifact-section-diff-rows {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.artifact-section-diff-rows > :is(em, details) {
+  min-width: 0;
+  margin: 0;
+}
+
+.artifact-section-diff-rows > em {
+  display: block;
+  padding: 8px 10px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  font-size: 10px;
+  font-style: normal;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.artifact-section-diff-rows > em.added {
+  color: #376d5c;
+  background: #edf8f2;
+}
+
+.artifact-section-diff-rows > em.removed {
+  color: #965050;
+  background: #fff1f1;
+}
+
+.artifact-section-diff-rows > details {
+  overflow: hidden;
+  border: 1px solid #d9e1e6;
+  border-radius: 9px;
+  background: #fbfcfd;
+}
+
+.artifact-section-diff-rows > details > summary {
+  min-height: 42px;
+  padding: 10px 12px;
+  color: #40596d;
+  font-size: 10px;
+  font-weight: 750;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.artifact-section-diff-rows > details[open] > summary {
+  border-bottom: 1px solid #dfe6eb;
+  background: #f1f5f7;
+}
+
+.artifact-section-diff-rows > details > div,
+.artifact-section-diff-rows > details > small {
+  margin: 9px 11px;
+}
+
+.artifact-section-diff-control {
+  min-height: 44px;
+  justify-self: start;
+  margin-top: 2px;
+  border-style: dashed;
+}
+
+@container (max-width: 560px) {
+  .artifact-section-diff > .artifact-section-diff-heading {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .artifact-section-diff > .artifact-section-diff-heading > small {
+    text-align: left;
+  }
+
+  .artifact-section-diff-control {
+    justify-content: center;
+    width: 100%;
+  }
+}
+
+@media (forced-colors: active) {
+  .artifact-section-diff-rows > :is(em, details),
+  .artifact-section-diff-control {
+    border-color: CanvasText;
+  }
+}

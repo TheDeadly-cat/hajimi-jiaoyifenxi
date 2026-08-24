@@ -1,13 +1,37 @@
 const CHAT_ANNOUNCEMENT_LIMIT = 120;
+const CHAT_SENDER_LIMIT = 48;
+const MESSAGE_ID_LIMIT = 240;
+const GRAPHEME_SEGMENTER = typeof Intl !== "undefined" && typeof Intl.Segmenter === "function"
+  ? new Intl.Segmenter("zh", { granularity: "grapheme" })
+  : null;
+
+function normalizedAnnouncementText(value) {
+  if (typeof value !== "string") return "";
+  return value
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function boundedAnnouncementText(value, limit) {
+  const normalized = normalizedAnnouncementText(value);
+  const segments = GRAPHEME_SEGMENTER
+    ? [...GRAPHEME_SEGMENTER.segment(normalized)].map(({ segment }) => segment)
+    : Array.from(normalized);
+  return segments.length > limit ? `${segments.slice(0, limit).join("")}…` : normalized;
+}
+
+function stableMessageId(value) {
+  if (typeof value !== "string") return "";
+  const normalized = value.trim();
+  return normalized && normalized.length <= MESSAGE_ID_LIMIT ? normalized : "";
+}
 
 function messageAnnouncementText(message) {
-  const sender = String(message?.sender_name || (message?.sender_type === "system" ? "系统" : "协作成员")).trim()
-    || "协作成员";
-  const normalized = String(message?.content || "").replace(/\s+/g, " ").trim();
-  if (!normalized) return `新消息，${sender}。`;
-  const content = normalized.length > CHAT_ANNOUNCEMENT_LIMIT
-    ? `${normalized.slice(0, CHAT_ANNOUNCEMENT_LIMIT)}…`
-    : normalized;
+  const senderFallback = message?.sender_type === "system" ? "系统" : "协作成员";
+  const sender = boundedAnnouncementText(message?.sender_name, CHAT_SENDER_LIMIT) || senderFallback;
+  const content = boundedAnnouncementText(message?.content, CHAT_ANNOUNCEMENT_LIMIT);
+  if (!content) return `新消息，${sender}。`;
   return `新消息，${sender}：${content}`;
 }
 
@@ -22,28 +46,32 @@ export function nextChatAnnouncementState(previous, {
   searchActive = false,
   historyLoading = false,
 }) {
-  const prior = previous || {};
+  const prior = previous && typeof previous === "object" ? previous : {};
   const list = Array.isArray(messages) ? messages : [];
   const tail = tailMessage(list);
-  const tailId = String(tail?.id || "");
-  const contextId = String(roomId || "");
+  const tailId = stableMessageId(tail?.id);
+  const contextId = stableMessageId(roomId);
   const next = {
     initialized: true,
     roomId: contextId,
     tailId,
     historyLoading: Boolean(historyLoading),
   };
-  const contextChanged = !prior.initialized || String(prior.roomId || "") !== contextId;
+  const contextChanged = prior.initialized !== true || stableMessageId(prior.roomId) !== contextId;
   if (contextChanged || searchActive) {
     return { next, announcement: null, clear: true };
   }
-  if (tailId === String(prior.tailId || "")) {
+  const tailIdCount = tailId
+    ? list.reduce((count, message) => count + (stableMessageId(message?.id) === tailId ? 1 : 0), 0)
+    : 0;
+  if (!tailId || tailIdCount !== 1) return { next, announcement: null, clear: true };
+  if (tailId === stableMessageId(prior.tailId)) {
     return { next, announcement: null, clear: false };
   }
-  const previousTailId = String(prior.tailId || "");
+  const previousTailId = stableMessageId(prior.tailId);
   const previousTailStillLoaded = !previousTailId
-    || list.some((message) => String(message?.id || "") === previousTailId);
-  if (!tailId || !previousTailStillLoaded) return { next, announcement: null, clear: true };
+    || list.some((message) => stableMessageId(message?.id) === previousTailId);
+  if (!previousTailStillLoaded) return { next, announcement: null, clear: true };
   return {
     next,
     clear: false,
@@ -55,11 +83,8 @@ export function nextChatAnnouncementState(previous, {
 }
 
 function compactAnnouncementText(value, fallback) {
-  const normalized = String(value || "").replace(/\s+/g, " ").trim();
-  const content = normalized || fallback;
-  return content.length > CHAT_ANNOUNCEMENT_LIMIT
-    ? `${content.slice(0, CHAT_ANNOUNCEMENT_LIMIT)}…`
-    : content;
+  return boundedAnnouncementText(value, CHAT_ANNOUNCEMENT_LIMIT)
+    || boundedAnnouncementText(fallback, CHAT_ANNOUNCEMENT_LIMIT);
 }
 
 function announcementClause(value, fallback) {
@@ -74,9 +99,9 @@ export function meetingReadinessAnnouncementText({
   providerStatus = "idle",
   reason = "",
 } = {}) {
-  const roleText = workflowReady ? "角色已覆盖" : "角色有缺口";
-  const marketText = marketRequired
-    ? `；Futu ${marketReady ? "已就绪" : marketState === "checking" ? "检查中" : "未就绪"}`
+  const roleText = workflowReady === true ? "角色已覆盖" : "角色有缺口";
+  const marketText = marketRequired === true
+    ? `；Futu ${marketReady === true ? "已就绪" : marketState === "checking" ? "检查中" : "未就绪"}`
     : "";
   const providerText = providerStatus === "ready"
     ? "模型检查通过"
@@ -101,9 +126,9 @@ export function storageAcceptanceAnnouncementText(model = {}) {
 
 export function convergenceAnnouncementText(convergence) {
   if (!convergence) return "收敛状态：正在计算。";
-  const status = convergence.can_present_candidate_best
+  const status = convergence.can_present_candidate_best === true
     ? "候选方案可供用户复核"
-    : convergence.can_host_finish
+    : convergence.can_host_finish === true
       ? "讨论可结束，等待用户复核"
       : "尚未达到收敛条件";
   const firstBlocker = Array.isArray(convergence.blockers) ? convergence.blockers[0] : null;

@@ -38,6 +38,7 @@ _BACKUP_VERSION_RE = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}")
 
 _EXCLUDED_DIRECTORY_NAMES = frozenset({
     ".git",
+    ".npm-cache",
     "runtime",
     "node_modules",
     "dist",

@@ -1,0 +1,157 @@
+.convergence-section {
+  --convergence-ink: #244c61;
+  --convergence-blue: #3c748c;
+  --convergence-amber: #a87534;
+  --convergence-danger: #a9574d;
+  position: relative;
+  container-name: convergence-card;
+  container-type: inline-size;
+  isolation: isolate;
+  box-shadow: inset 3px 0 0 rgb(60 116 140 / 52%);
+  background:
+    radial-gradient(circle at 98% 4%, rgb(168 117 52 / 8%), transparent 27%),
+    linear-gradient(145deg, rgb(60 116 140 / 6%), transparent 48%);
+}
+
+.convergence-section[data-convergence-tone="review"] { box-shadow: inset 3px 0 0 rgb(168 117 52 / 60%); }
+.convergence-section[data-convergence-tone="blocked"] { box-shadow: inset 3px 0 0 rgb(169 87 77 / 55%); }
+.convergence-section .section-heading { padding-bottom: 8px; border-bottom: 1px solid rgb(60 116 140 / 20%); }
+.convergence-section .section-heading strong { color: var(--convergence-ink); font-size: 14px; }
+.convergence-section .convergence-badge { font-size: 9px; }
+.convergence-section .convergence-badge.candidate {
+  border-color: #a8c6d3;
+  color: #315f75;
+  background: #eaf3f6;
+}
+.convergence-section .convergence-badge.review {
+  border-color: #d8c18e;
+  color: #775a27;
+  background: #fff7e5;
+}
+.convergence-section .convergence-badge.blocked {
+  border-color: #d9b2ad;
+  color: #814943;
+  background: #fff3f1;
+}
+
+.convergence-section .convergence-overview {
+  padding: 10px;
+  border-left: 3px solid var(--convergence-blue);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 88%);
+}
+.convergence-section .convergence-overview.review { border-left-color: var(--convergence-amber); }
+.convergence-section .convergence-overview.blocked { border-left-color: var(--convergence-danger); }
+.convergence-section .convergence-overview strong { font-size: 12px; }
+.convergence-section .convergence-overview small { font-size: 10px; line-height: 1.55; }
+
+.convergence-section .convergence-progress {
+  display: grid;
+  gap: 6px;
+  padding: 9px 10px;
+  border: 1px solid rgb(60 116 140 / 20%);
+  border-radius: 6px;
+  background: rgb(255 255 255 / 72%);
+}
+.convergence-section .convergence-progress > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.convergence-section .convergence-progress span {
+  color: #617985;
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+}
+.convergence-section .convergence-progress data {
+  color: #315f75;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+.convergence-section .convergence-progress progress {
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  appearance: none;
+  background: #e3ecef;
+}
+.convergence-section .convergence-progress progress::-webkit-progress-bar {
+  border-radius: 999px;
+  background: #e3ecef;
+}
+.convergence-section .convergence-progress progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: linear-gradient(90deg, #477d92, #58a2ad);
+}
+.convergence-section .convergence-progress progress::-moz-progress-bar {
+  border-radius: 999px;
+  background: linear-gradient(90deg, #477d92, #58a2ad);
+}
+.convergence-section .convergence-progress > small {
+  color: #71838b;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.convergence-section .convergence-primary-blocker em { font-size: 9px; }
+.convergence-section .convergence-primary-blocker strong { font-size: 11px; }
+.convergence-section .convergence-primary-blocker small { font-size: 9px; line-height: 1.5; }
+.convergence-section .convergence-next span { font-size: 9px; }
+.convergence-section .convergence-next strong { font-size: 11px; line-height: 1.55; }
+.convergence-section .convergence-gate strong { font-size: 11px; }
+.convergence-section .convergence-gate small { font-size: 10px; line-height: 1.5; }
+.convergence-section .convergence-blockers strong { font-size: 10px; }
+.convergence-section .convergence-blockers small { font-size: 9px; line-height: 1.5; }
+.convergence-section .convergence-details > summary { min-height: 44px; }
+.convergence-section .convergence-boundary {
+  padding: 8px 9px;
+  border: 1px solid #d8c99f;
+  border-left: 3px solid var(--convergence-amber);
+  border-radius: 5px;
+  color: #6f5932;
+  background: #fff9e9;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.convergence-section :is(summary, button):focus-visible {
+  outline: 3px solid rgb(60 116 140 / 32%);
+  outline-offset: 2px;
+}
+
+@container convergence-card (max-width: 380px) {
+  .convergence-section .section-heading { align-items: flex-start; flex-direction: column; }
+  .convergence-section .convergence-badge { align-self: flex-start; }
+  .convergence-section .convergence-details > summary {
+    grid-template-columns: minmax(0, 1fr) 14px;
+    align-items: center;
+  }
+  .convergence-section .convergence-details > summary > span,
+  .convergence-section .convergence-details > summary > small { grid-column: 1; }
+  .convergence-section .convergence-details > summary::after { grid-column: 2; grid-row: 1 / span 2; }
+  .convergence-section .convergence-progress > div { align-items: flex-start; flex-direction: column; gap: 3px; }
+}
+
+@media (forced-colors: active) {
+  .convergence-section,
+  .convergence-section .convergence-overview,
+  .convergence-section .convergence-progress,
+  .convergence-section .convergence-boundary {
+    border-color: CanvasText;
+    color: CanvasText;
+    background: Canvas;
+  }
+  .convergence-section .convergence-progress progress { forced-color-adjust: auto; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .convergence-section *,
+  .convergence-section *::before,
+  .convergence-section *::after { scroll-behavior: auto !important; }
+}

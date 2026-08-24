@@ -1,0 +1,346 @@
+.room-inspector.room-inspector-workbench {
+  --inspector-ledger-ink: #214f63;
+  --inspector-ledger-muted: #6f838b;
+  min-width: 0;
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
+  background:
+    linear-gradient(90deg, rgba(42, 89, 108, 0.055) 0 2px, transparent 2px),
+    linear-gradient(160deg, rgba(249, 252, 251, 0.98), rgba(236, 244, 243, 0.96));
+  scrollbar-color: #84a6b1 #e5edef;
+  scrollbar-width: thin;
+}
+
+.room-inspector-workbench,
+.room-inspector-workbench * { box-sizing: border-box; }
+
+.room-inspector-section-nav { display: none; }
+
+.room-inspector-workbench .room-inspector-integrity-ledger {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 9px 0;
+  border: 1px solid #c3d3d7;
+  background:
+    repeating-linear-gradient(90deg, rgba(42, 91, 111, 0.035) 0 1px, transparent 1px 18px),
+    rgba(255, 255, 255, 0.82);
+}
+
+.room-inspector-workbench .room-inspector-integrity-ledger > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding: 8px;
+  border-right: 1px solid #d1dddf;
+}
+
+.room-inspector-workbench .room-inspector-integrity-ledger > span:last-child {
+  border-right: 0;
+}
+
+.room-inspector-workbench .room-inspector-integrity-ledger small {
+  color: var(--inspector-ledger-muted);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+}
+
+.room-inspector-workbench .room-inspector-integrity-ledger strong {
+  color: var(--inspector-ledger-ink);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.room-inspector-workbench .room-inspector-projection-note,
+.room-inspector-workbench .room-inspector-action-error {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 7px 0;
+  padding: 8px 9px;
+  border: 1px solid #d6c79e;
+  border-left: 3px solid #a97a39;
+  color: #765a2d;
+  background: #fff9e9;
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.room-inspector-workbench .room-inspector-action-error {
+  border-color: #ddb9ae;
+  border-left-color: #b55f47;
+  color: #844b3b;
+  background: #fff3ef;
+}
+
+.room-inspector-workbench .room-inspector-projection-note svg,
+.room-inspector-workbench .room-inspector-action-error svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.room-inspector-workbench .inspector-list-more {
+  width: 100%;
+  min-height: 38px;
+  margin-top: 7px;
+  border: 1px dashed #9fb9c2;
+  border-radius: 2px;
+  color: #315f70;
+  background: rgba(244, 249, 249, 0.9);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.room-inspector-workbench .inspector-list-more:hover:not(:disabled) {
+  border-style: solid;
+  background: #eaf3f4;
+}
+
+.room-inspector-workbench button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.room-inspector-workbench button:focus-visible,
+.room-inspector-workbench summary:focus-visible,
+.room-inspector-workbench [tabindex="-1"]:focus-visible {
+  outline: 2px solid #2e718b;
+  outline-offset: 3px;
+}
+
+.room-inspector-workbench .member-main > span,
+.room-inspector-workbench .material-row > span {
+  min-width: 0;
+}
+
+.room-inspector-workbench .member-main strong,
+.room-inspector-workbench .member-main small,
+.room-inspector-workbench .material-row strong,
+.room-inspector-workbench .material-row small {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 430px) {
+  .room-inspector-workbench .room-inspector-integrity-ledger {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .room-inspector-workbench .room-inspector-integrity-ledger > span:nth-child(2) {
+    border-right: 0;
+  }
+  .room-inspector-workbench .room-inspector-integrity-ledger > span:last-child {
+    grid-column: 1 / -1;
+    border-top: 1px solid #d1dddf;
+  }
+  .room-inspector-workbench .inspector-list-more {
+    min-height: 44px;
+    font-size: 11px;
+  }
+  .room-inspector-workbench .room-inspector-projection-note,
+  .room-inspector-workbench .room-inspector-action-error {
+    font-size: 10px;
+  }
+}
+
+@media (max-width: 760px) {
+  .room-inspector-section-nav {
+    position: sticky;
+    z-index: 6;
+    top: 0;
+    display: flex;
+    min-width: 0;
+    gap: 4px;
+    overflow-x: auto;
+    padding-block: 6px;
+    padding-left: max(8px, env(safe-area-inset-left));
+    padding-right: max(8px, env(safe-area-inset-right));
+    border-bottom: 1px solid #bfd0d5;
+    background: rgba(244, 249, 248, 0.98);
+    box-shadow: 0 4px 12px rgba(35, 67, 78, 0.08);
+    scrollbar-color: #84a6b1 transparent;
+    scrollbar-width: thin;
+    scroll-snap-type: x proximity;
+  }
+
+  .room-inspector-section-nav a {
+    display: inline-flex;
+    flex: 0 0 auto;
+    min-width: 48px;
+    min-height: 44px;
+    align-items: center;
+    justify-content: center;
+    scroll-snap-align: start;
+    border: 1px solid #c4d4d8;
+    border-radius: 999px;
+    color: #315f70;
+    background: rgba(255, 255, 255, 0.88);
+    font-size: 10px;
+    font-weight: 800;
+    text-decoration: none;
+  }
+
+  .room-inspector-section-nav a:active {
+    background: #dcebed;
+  }
+
+.room-inspector-section-nav {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(44px, 1fr));
+  gap: 1px;
+  padding-inline: 0;
+}
+
+.room-inspector-section-nav a {
+  min-width: 44px;
+  width: auto;
+}
+
+.room-inspector-workbench:has(#inspector-rooms:target) .room-inspector-section-nav a[href="#inspector-rooms"],
+.room-inspector-workbench:has(#inspector-project-focus:target) .room-inspector-section-nav a[href="#inspector-project-focus"],
+.room-inspector-workbench:has(#inspector-convergence:target) .room-inspector-section-nav a[href="#inspector-convergence"],
+  .room-inspector-workbench:has(#inspector-members:target) .room-inspector-section-nav a[href="#inspector-members"],
+  .room-inspector-workbench:has(#inspector-materials:target) .room-inspector-section-nav a[href="#inspector-materials"],
+  .room-inspector-workbench:has(#inspector-artifacts:target) .room-inspector-section-nav a[href="#inspector-artifacts"] {
+    border-color: #5e94a2;
+    color: #174d60;
+    background: #dcebed;
+    box-shadow: inset 0 -2px 0 #4c8797;
+  }
+
+  .room-inspector-section-nav a:focus-visible {
+    outline: 2px solid #2e718b;
+    outline-offset: 2px;
+  }
+
+  .room-inspector-workbench [id^="inspector-"] {
+    scroll-margin-top: 72px;
+  }
+
+  .room-inspector-workbench .round-controls button {
+    min-height: 44px;
+  }
+
+  .room-inspector-workbench .section-heading .text-action {
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+    padding-inline: 8px;
+  }
+}
+
+@media (max-width: 760px) and (max-height: 600px) {
+  .room-inspector-workbench .objective-section {
+    padding-block: 10px;
+  }
+
+  .room-inspector-workbench .objective-section .section-heading {
+    margin-bottom: 6px;
+  }
+
+  .room-inspector-workbench .objective-section > p {
+    margin-bottom: 8px;
+    line-height: 1.55;
+  }
+
+  .room-inspector-workbench .room-inspector-integrity-ledger {
+    margin-block: 6px;
+  }
+
+  .room-inspector-workbench .objective-section .room-capability-strip {
+    margin-bottom: 8px;
+  }
+
+  .room-inspector-workbench .objective-section .meeting-readiness,
+  .room-inspector-workbench .objective-section .round-provider-preview {
+    margin-top: 6px;
+  }
+}
+
+@media (forced-colors: active) {
+  .room-inspector.room-inspector-workbench,
+  .room-inspector-workbench .room-inspector-integrity-ledger,
+  .room-inspector-workbench .room-inspector-projection-note,
+  .room-inspector-workbench .room-inspector-action-error,
+  .room-inspector-workbench .inspector-list-more {
+    border-color: CanvasText;
+    color: CanvasText;
+    background: Canvas;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room-inspector.room-inspector-workbench { scroll-behavior: auto; }
+}
+
+/* Desktop inspector section index */
+@media (min-width: 701px) {
+  #root:has(.app-shell.inspector-open) {
+    overflow: clip;
+  }
+
+  .room-inspector-section-nav {
+    position: sticky;
+    top: 0;
+    z-index: 8;
+    isolation: isolate;
+    display: grid;
+    grid-template-columns: repeat(6, minmax(44px, 1fr));
+    gap: 4px;
+    padding: 8px 10px;
+    overflow: hidden;
+    border-bottom: 1px solid #b9ced0;
+    background: linear-gradient(180deg, rgba(248, 251, 250, 0.98), rgba(237, 245, 244, 0.96));
+    box-shadow: 0 8px 18px rgba(32, 67, 75, 0.1);
+    backdrop-filter: blur(12px);
+  }
+
+  .room-inspector-section-nav a {
+    display: inline-flex;
+    min-width: 44px;
+    min-height: 44px;
+    box-sizing: border-box;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #c5d5d5;
+    border-radius: 999px;
+    color: #365761;
+    background: rgba(255, 255, 255, 0.78);
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 750;
+    line-height: 1;
+    letter-spacing: 0.02em;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: border-color 140ms ease, color 140ms ease, background-color 140ms ease;
+  }
+
+  .room-inspector-section-nav a:hover {
+    border-color: #7da3aa;
+    color: #234f5d;
+    background: #eef6f5;
+  }
+
+  .room-inspector-section-nav a:focus-visible {
+    outline: 3px solid rgba(48, 112, 128, 0.28);
+    outline-offset: 2px;
+  }
+
+  .room-inspector-workbench:has(#inspector-rooms:target) .room-inspector-section-nav a[href="#inspector-rooms"],
+  .room-inspector-workbench:has(#inspector-project-focus:target) .room-inspector-section-nav a[href="#inspector-project-focus"],
+  .room-inspector-workbench:has(#inspector-convergence:target) .room-inspector-section-nav a[href="#inspector-convergence"],
+  .room-inspector-workbench:has(#inspector-members:target) .room-inspector-section-nav a[href="#inspector-members"],
+  .room-inspector-workbench:has(#inspector-materials:target) .room-inspector-section-nav a[href="#inspector-materials"],
+  .room-inspector-workbench:has(#inspector-artifacts:target) .room-inspector-section-nav a[href="#inspector-artifacts"] {
+    border-color: #5e94a2;
+    color: #174d60;
+    background: #dcebed;
+    box-shadow: inset 0 -2px 0 #4c8797;
+  }
+
+  .room-inspector-workbench {
+    scroll-padding-top: 68px;
+  }
+}

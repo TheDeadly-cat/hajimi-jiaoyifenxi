@@ -12,6 +12,12 @@ import {
   roundExecutionTraceAnchorState,
   roundExecutionTraceSummaryText,
 } from "../src/roundExecutionTrace.js";
+import {
+  roundTraceDialogProjection,
+  roundTraceDisplayText,
+  roundTraceErrorMessage,
+  roundTraceEventWindow,
+} from "../src/roundExecutionTraceDialogUi.js";
 
 const TRACE_HASH = "a".repeat(64);
 
@@ -544,4 +550,41 @@ test("trace UI renders the director sub-budget, candidate projection, and anchor
   assert.match(dialogSource, /锚点序列/);
   assert.match(dialogSource, /当前快照/);
   assert.match(summarySource, /roundExecutionTraceAnchorState/);
+});
+
+test("trace dialog projection normalizes display input and bounds the mounted event window", () => {
+  const projected = roundTraceDialogProjection(traceFixture());
+  assert.equal(projected.ready, true);
+  const malformed = roundTraceDialogProjection({ valid: true, events: "not-an-array" });
+  assert.equal(malformed.ready, false);
+  assert.equal(roundTraceDisplayText({ unsafe: true }, "fallback"), "fallback");
+  assert.equal(roundTraceErrorMessage({ message: { unsafe: true } }, "safe error"), "safe error");
+  const windowed = roundTraceEventWindow(
+    Array.from({ length: 230 }, (_, index) => ({ event_id: `event_${index}` })),
+    100,
+  );
+  assert.equal(windowed.visibleCount, 100);
+  assert.equal(windowed.hiddenCount, 130);
+  assert.equal(windowed.nextCount, 200);
+});
+
+test("trace dialog shares modal focus and owns safe-area, reduced-motion, and local reveal contracts", () => {
+  const dialogSource = readFileSync(
+    new URL("../src/components/RoundExecutionTraceDialog.jsx", import.meta.url),
+    "utf8",
+  );
+  const dialogStyles = readFileSync(
+    new URL("../src/styles/round-execution-trace.css", import.meta.url),
+    "utf8",
+  );
+  assert.match(dialogSource, /import \{ useModalFocus \} from "\.\.\/useModalFocus"/);
+  assert.match(dialogSource, /useModalFocus\(\{[\s\S]*containerRef: dialogRef,[\s\S]*initialFocusRef: closeButtonRef/);
+  assert.doesNotMatch(dialogSource, /querySelectorAll\(/);
+  assert.match(dialogSource, /useMemo\(\(\) => roundTraceDialogProjection\(trace\), \[trace\]\)/);
+  assert.match(dialogSource, /useEffect\(\(\) => \{\s*setVisibleEventCount\(ROUND_TRACE_INITIAL_EVENT_WINDOW\);\s*\}, \[open, trace\?\.trace_hash\]\)/);
+  assert.match(dialogSource, /data-rendered-event-count=\{eventWindow\.visibleCount\}/);
+  assert.match(dialogSource, /显示更多已载入步骤/);
+  assert.match(dialogStyles, /\.round-trace-window-status\s*\{/);
+  assert.match(dialogStyles, /env\(safe-area-inset-top\)/);
+  assert.match(dialogStyles, /prefers-reduced-motion: reduce/);
 });

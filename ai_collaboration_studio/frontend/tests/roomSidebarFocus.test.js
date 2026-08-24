@@ -37,9 +37,11 @@ test("closed compact inspector is absent from the modal accessibility tree", () 
 
 test("sidebar keeps searchable room semantics and a restrained workspace hierarchy", () => {
   assert.match(sidebarSource, /aria-label="搜索房间"/);
-  assert.match(sidebarSource, /aria-current=\{room\.id === activeRoomId \? "page" : undefined\}/);
+  assert.match(sidebarSource, /const active = room\.id === activeRoomId;/);
+  assert.match(sidebarSource, /aria-current=\{active \? "page" : undefined\}/);
   assert.match(sidebarSource, /协作空间/);
-  assert.match(sidebarSource, /\{visibleRoomCount\} 个可见/);
+  assert.match(sidebarSource, /id="room-search-status" role="status" aria-live="polite"/);
+  assert.match(sidebarSource, /\{resultSummary\}/);
   assert.match(styles, /\.sidebar-brand > span small/);
   assert.match(styles, /\.sidebar-section-label small/);
 });
