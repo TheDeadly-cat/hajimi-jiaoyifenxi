@@ -64,6 +64,12 @@ class StructuredLoggingUnitTests(unittest.TestCase):
             structured_logging.classify_request_target("/assets/app.js?q=secret"),
             "frontend:asset",
         )
+        self.assertEqual(
+            structured_logging.classify_request_target(
+                "/api/integration/manifest?ignored=secret"
+            ),
+            "api:integration",
+        )
 
 
 class StructuredHttpLoggingTests(unittest.TestCase):

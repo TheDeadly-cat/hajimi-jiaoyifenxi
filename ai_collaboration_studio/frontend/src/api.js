@@ -26,6 +26,36 @@ async function jsonRequest(path, options = {}) {
 export const api = {
   bootstrap: (roomId = "") => jsonRequest(`/api/bootstrap${roomId ? `?room=${encodeURIComponent(roomId)}` : ""}`),
   room: (roomId) => jsonRequest(`/api/rooms/${encodeURIComponent(roomId)}`),
+  latestManualChatGPT: (roomId) => jsonRequest(
+    `/api/rooms/${encodeURIComponent(roomId)}/chatgpt-collaborations/latest`,
+  ),
+  listManualChatGPT: (roomId, limit = 30) => jsonRequest(
+    `/api/rooms/${encodeURIComponent(roomId)}/chatgpt-collaborations?limit=${encodeURIComponent(limit)}`,
+  ),
+  createManualChatGPT: (roomId, payload) => jsonRequest(
+    `/api/rooms/${encodeURIComponent(roomId)}/chatgpt-collaborations`,
+    { method: "POST", body: JSON.stringify(payload) },
+  ),
+  dispatchManualChatGPT: (roomId, sessionId) => jsonRequest(
+    `/api/rooms/${encodeURIComponent(roomId)}/chatgpt-collaborations/${encodeURIComponent(sessionId)}/dispatch`,
+    { method: "POST", body: "{}" },
+  ),
+  importManualChatGPT: (roomId, sessionId, content) => jsonRequest(
+    `/api/rooms/${encodeURIComponent(roomId)}/chatgpt-collaborations/${encodeURIComponent(sessionId)}/imports`,
+    { method: "POST", body: JSON.stringify({ content }) },
+  ),
+  runManualChatGPTReview: (roomId, sessionId, payload) => jsonRequest(
+    `/api/rooms/${encodeURIComponent(roomId)}/chatgpt-collaborations/${encodeURIComponent(sessionId)}/api-reviews`,
+    { method: "POST", body: JSON.stringify(payload) },
+  ),
+  recoverManualChatGPTReview: (roomId, sessionId, payload) => jsonRequest(
+    `/api/rooms/${encodeURIComponent(roomId)}/chatgpt-collaborations/${encodeURIComponent(sessionId)}/api-reviews/recover`,
+    { method: "POST", body: JSON.stringify(payload) },
+  ),
+  freezeManualChatGPT: (roomId, sessionId, payload) => jsonRequest(
+    `/api/rooms/${encodeURIComponent(roomId)}/chatgpt-collaborations/${encodeURIComponent(sessionId)}/freeze`,
+    { method: "POST", body: JSON.stringify(payload) },
+  ),
   roomPluginRegistry: (roomId) => jsonRequest(
     `/api/rooms/${encodeURIComponent(roomId)}/plugin-registry`,
   ),

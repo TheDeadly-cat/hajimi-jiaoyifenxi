@@ -10,6 +10,7 @@ from .decision_lineage import canonical_sha256
 
 PLUGIN_REGISTRY_CATALOG_VERSION_V1 = "plugin_registry_catalog_v1"
 PLUGIN_REGISTRY_CATALOG_VERSION_V2 = "plugin_registry_catalog_v2"
+PLUGIN_REGISTRY_CATALOG_VERSION_V3 = "plugin_registry_catalog_v3"
 PLUGIN_REGISTRY_CATALOG_VERSION = PLUGIN_REGISTRY_CATALOG_VERSION_V2
 PLUGIN_REGISTRY_SNAPSHOT_VERSION = "plugin_registry_snapshot_v1"
 PLUGIN_REGISTRY_SNAPSHOT_VERSION_V1 = PLUGIN_REGISTRY_SNAPSHOT_VERSION
@@ -36,6 +37,22 @@ FIXED_PLUGIN_SAFETY = {
     "can_replace_user_decision": False,
     "arbitrary_code_loading_allowed": False,
     "user_final_decision_required": True,
+}
+
+PLUGIN_REGISTRY_CONTRACT_KINDS = (
+    "capability_pack",
+    "domain_adapter",
+    "domain_adapter_port",
+    "ui_contribution",
+    "ui_view_model_schema",
+)
+
+# Historical contracts are deliberately separate from the mutable current
+# implementation maps above.  When a built-in contract advances, its exact
+# sealed predecessor is appended here before the current pointer changes.  The
+# v2 catalog and room snapshot builders never consult this ledger.
+_PLUGIN_REGISTRY_HISTORICAL_CONTRACTS: dict[str, list[dict[str, Any]]] = {
+    kind: [] for kind in PLUGIN_REGISTRY_CONTRACT_KINDS
 }
 
 HOST_UI_VIEW_MODEL_SCHEMAS: dict[str, dict[str, Any]] = {
@@ -1750,6 +1767,554 @@ def plugin_registry_catalog() -> dict[str, Any]:
     return payload
 
 
+_V3_CONTRACT_KIND_FIELDS: dict[str, tuple[str, str, str, bool]] = {
+    "capability_pack": ("id", "pack_version", "manifest_sha256", True),
+    "domain_adapter": (
+        "adapter_id",
+        "adapter_version",
+        "contract_sha256",
+        True,
+    ),
+    "domain_adapter_port": (
+        "port_id",
+        "port_version",
+        "contract_sha256",
+        True,
+    ),
+    "ui_contribution": (
+        "contribution_id",
+        "contribution_version",
+        "contract_sha256",
+        True,
+    ),
+    # A view-model schema's component key is its stable host renderer identity;
+    # schema_version is the exact immutable contract version.
+    "ui_view_model_schema": (
+        "component_key",
+        "schema_version",
+        "schema_sha256",
+        False,
+    ),
+}
+
+
+def _v3_current_contracts() -> dict[str, list[dict[str, Any]]]:
+    current = plugin_registry_catalog()
+    return {
+        "capability_pack": deepcopy(current["capability_packs"]),
+        "domain_adapter": deepcopy(current["domain_adapters"]),
+        "domain_adapter_port": deepcopy(current["domain_adapter_ports"]),
+        "ui_contribution": deepcopy(current["ui_contributions"]),
+        "ui_view_model_schema": deepcopy(current["ui_view_model_schemas"]),
+    }
+
+
+def _v3_exact_native_text(value: Any, *, field: str, maximum: int = 240) -> str:
+    if type(value) is not str or not value or value != value.strip() or len(value) > maximum:
+        raise PluginRegistryError(f"{field} must be exact non-empty text.")
+    return value
+
+
+def _v3_validate_contract_shape(kind: str, contract: dict[str, Any]) -> None:
+    if kind == "capability_pack":
+        manifest_version = str(contract.get("manifest_version") or "")
+        required = _PACK_MANIFEST_COMMON_KEYS | {"manifest_sha256"}
+        if manifest_version == CAPABILITY_PACK_MANIFEST_VERSION_V2:
+            required |= {"domain_adapter_port_requirements"}
+        elif manifest_version != CAPABILITY_PACK_MANIFEST_VERSION_V1:
+            raise PluginRegistryError("v3 capability-pack manifest version is unsupported.")
+        _require_exact_keys(
+            contract,
+            required=required,
+            optional=(
+                {"system_managed", "scope"}
+                if manifest_version == CAPABILITY_PACK_MANIFEST_VERSION_V1
+                else None
+            ),
+            identity="v3 capability-pack contract",
+        )
+        _validate_safety(contract, identity=str(contract.get("id") or ""))
+        return
+    if kind == "domain_adapter":
+        contract_version = str(contract.get("contract_version") or "")
+        if contract_version == DOMAIN_ADAPTER_CONTRACT_VERSION_V1:
+            required = _DOMAIN_ADAPTER_V1_KEYS | {"contract_sha256"}
+        elif contract_version == DOMAIN_ADAPTER_CONTRACT_VERSION_V2:
+            required = _DOMAIN_ADAPTER_V2_KEYS | {"contract_sha256"}
+        else:
+            raise PluginRegistryError("v3 domain-adapter contract version is unsupported.")
+        _require_exact_keys(
+            contract,
+            required=required,
+            identity="v3 domain-adapter contract",
+        )
+        _validate_safety(contract, identity=str(contract.get("adapter_id") or ""))
+        return
+    if kind == "domain_adapter_port":
+        if contract.get("contract_version") != DOMAIN_ADAPTER_PORT_CONTRACT_VERSION:
+            raise PluginRegistryError("v3 domain-adapter port version is unsupported.")
+        _require_exact_keys(
+            contract,
+            required=(
+                _DOMAIN_ADAPTER_PORT_KEYS
+                | {
+                    "input_schema_sha256",
+                    "output_schema_sha256",
+                    "contract_sha256",
+                }
+            ),
+            identity="v3 domain-adapter port contract",
+        )
+        _validate_safety(contract, identity=str(contract.get("port_id") or ""))
+        return
+    if kind == "ui_contribution":
+        contract_version = str(contract.get("contract_version") or "")
+        if contract_version == UI_CONTRIBUTION_CONTRACT_VERSION_V1:
+            required = _UI_CONTRIBUTION_COMMON_KEYS | {"contract_sha256"}
+        elif contract_version == UI_CONTRIBUTION_CONTRACT_VERSION_V2:
+            required = (
+                _UI_CONTRIBUTION_COMMON_KEYS
+                | {"source_port", "view_model", "contract_sha256"}
+            )
+        else:
+            raise PluginRegistryError("v3 UI-contribution contract version is unsupported.")
+        _require_exact_keys(
+            contract,
+            required=required,
+            identity="v3 UI-contribution contract",
+        )
+        _validate_safety(
+            contract,
+            identity=str(contract.get("contribution_id") or ""),
+        )
+        return
+    if kind == "ui_view_model_schema":
+        _require_exact_keys(
+            contract,
+            required={
+                "schema_version",
+                "component_key",
+                "type",
+                "required",
+                "fields",
+                "additional_properties",
+                "schema_sha256",
+            },
+            identity="v3 UI view-model schema",
+        )
+        if contract.get("type") != "object" or contract.get("additional_properties") is not False:
+            raise PluginRegistryError("v3 UI view-model schema must remain closed.")
+        return
+    raise PluginRegistryError(f"Unknown plugin registry contract kind: {kind}.")
+
+
+def _v3_contract_identity(
+    kind: str,
+    value: Any,
+) -> tuple[str, str, str, dict[str, Any]]:
+    if kind not in _V3_CONTRACT_KIND_FIELDS:
+        raise PluginRegistryError(f"Unknown plugin registry contract kind: {kind}.")
+    if type(value) is not dict:
+        raise PluginRegistryError(f"v3 {kind} contract must be an object.")
+    contract = deepcopy(value)
+    stable_field, version_field, hash_field, is_semver = _V3_CONTRACT_KIND_FIELDS[kind]
+    stable_id = _v3_exact_native_text(
+        contract.get(stable_field),
+        field=f"{kind}.{stable_field}",
+    )
+    exact_version = _v3_exact_native_text(
+        contract.get(version_field),
+        field=f"{kind}.{version_field}",
+    )
+    if is_semver and _semver(
+        exact_version,
+        field=f"{kind}.{stable_id}.{version_field}",
+    ) != exact_version:
+        raise PluginRegistryError(f"{kind}.{stable_id} version is not canonical.")
+    contract_sha256 = _v3_exact_native_text(
+        contract.get(hash_field),
+        field=f"{kind}.{stable_id}.{hash_field}",
+        maximum=64,
+    )
+    if not SHA256_PATTERN.fullmatch(contract_sha256):
+        raise PluginRegistryError(f"{kind}.{stable_id} contract hash is invalid.")
+    _v3_validate_contract_shape(kind, contract)
+    unsigned = deepcopy(contract)
+    unsigned.pop(hash_field, None)
+    if canonical_sha256(unsigned) != contract_sha256:
+        raise PluginRegistryError(
+            f"{kind} ({stable_id}, {exact_version}) contract hash is invalid."
+        )
+    return stable_id, exact_version, contract_sha256, contract
+
+
+def _v3_contract_entry(
+    *,
+    kind: str,
+    stable_id: str,
+    exact_version: str,
+    contract_sha256: str,
+    contract: dict[str, Any],
+    previous_entry_sha256: str,
+) -> dict[str, Any]:
+    entry = {
+        "exact_version": exact_version,
+        "contract_sha256": contract_sha256,
+        "previous_entry_sha256": previous_entry_sha256,
+        "contract": deepcopy(contract),
+    }
+    entry["entry_sha256"] = canonical_sha256({
+        "kind": kind,
+        "stable_id": stable_id,
+        **entry,
+    })
+    return entry
+
+
+def _build_plugin_registry_catalog_v3(
+    historical_contracts: Any,
+) -> dict[str, Any]:
+    if type(historical_contracts) is not dict or set(historical_contracts) != set(
+        PLUGIN_REGISTRY_CONTRACT_KINDS
+    ):
+        raise PluginRegistryError("v3 historical contract ledger has an invalid closed shape.")
+    current_by_kind = _v3_current_contracts()
+    histories_payload: dict[str, list[dict[str, Any]]] = {}
+    latest_payload: dict[str, list[dict[str, Any]]] = {}
+    for kind in PLUGIN_REGISTRY_CONTRACT_KINDS:
+        raw_history = historical_contracts.get(kind)
+        if type(raw_history) is not list:
+            raise PluginRegistryError(f"v3 {kind} history must be an append-only list.")
+        grouped: dict[str, list[tuple[str, str, dict[str, Any]]]] = {}
+        seen_identity_hashes: dict[tuple[str, str], str] = {}
+        for raw_contract in [*deepcopy(raw_history), *current_by_kind[kind]]:
+            stable_id, exact_version, contract_sha256, contract = _v3_contract_identity(
+                kind,
+                raw_contract,
+            )
+            identity = (stable_id, exact_version)
+            previous_hash = seen_identity_hashes.get(identity)
+            if previous_hash is not None:
+                if previous_hash != contract_sha256:
+                    raise PluginRegistryError(
+                        f"v3 {kind} identity {identity} has conflicting hashes."
+                    )
+                raise PluginRegistryError(
+                    f"v3 {kind} identity {identity} is duplicated."
+                )
+            seen_identity_hashes[identity] = contract_sha256
+            grouped.setdefault(stable_id, []).append(
+                (exact_version, contract_sha256, contract)
+            )
+
+        kind_histories: list[dict[str, Any]] = []
+        kind_latest: list[dict[str, Any]] = []
+        _stable_field, _version_field, _hash_field, is_semver = (
+            _V3_CONTRACT_KIND_FIELDS[kind]
+        )
+        for stable_id in sorted(grouped):
+            versions: list[dict[str, Any]] = []
+            previous_entry_sha256 = ""
+            previous_semver: tuple[int, int, int] | None = None
+            for exact_version, contract_sha256, contract in grouped[stable_id]:
+                if is_semver:
+                    current_semver = _semver_tuple(
+                        exact_version,
+                        field=f"v3.{kind}.{stable_id}.exact_version",
+                    )
+                    if previous_semver is not None and current_semver <= previous_semver:
+                        raise PluginRegistryError(
+                            f"v3 {kind} history for {stable_id} is not append-only."
+                        )
+                    previous_semver = current_semver
+                entry = _v3_contract_entry(
+                    kind=kind,
+                    stable_id=stable_id,
+                    exact_version=exact_version,
+                    contract_sha256=contract_sha256,
+                    contract=contract,
+                    previous_entry_sha256=previous_entry_sha256,
+                )
+                versions.append(entry)
+                previous_entry_sha256 = str(entry["entry_sha256"])
+            history = {
+                "stable_id": stable_id,
+                "versions": versions,
+                "history_head_sha256": previous_entry_sha256,
+            }
+            kind_histories.append(history)
+            latest = versions[-1]
+            kind_latest.append({
+                "stable_id": stable_id,
+                "exact_version": latest["exact_version"],
+                "contract_sha256": latest["contract_sha256"],
+                "history_head_sha256": latest["entry_sha256"],
+            })
+        histories_payload[kind] = kind_histories
+        latest_payload[kind] = kind_latest
+
+    payload = {
+        "version": PLUGIN_REGISTRY_CATALOG_VERSION_V3,
+        "room_kernel_version": ROOM_KERNEL_VERSION,
+        "histories": histories_payload,
+        "latest_aliases": latest_payload,
+        "safety": deepcopy(FIXED_PLUGIN_SAFETY),
+    }
+    payload["catalog_sha256"] = canonical_sha256(payload)
+    return validate_plugin_registry_catalog_v3(payload)
+
+
+def plugin_registry_catalog_v3() -> dict[str, Any]:
+    """Return an exact-version, append-only view without changing v2 callers."""
+
+    return _build_plugin_registry_catalog_v3(
+        deepcopy(_PLUGIN_REGISTRY_HISTORICAL_CONTRACTS)
+    )
+
+
+def validate_plugin_registry_catalog_v3(value: Any) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise PluginRegistryError("Plugin registry catalog v3 must be an exact object.")
+    catalog = _require_exact_keys(
+        value,
+        required={
+            "version",
+            "room_kernel_version",
+            "histories",
+            "latest_aliases",
+            "safety",
+            "catalog_sha256",
+        },
+        identity="plugin registry catalog v3",
+    )
+    if catalog.get("version") != PLUGIN_REGISTRY_CATALOG_VERSION_V3:
+        raise PluginRegistryError("Plugin registry catalog v3 version is unsupported.")
+    if catalog.get("room_kernel_version") != ROOM_KERNEL_VERSION:
+        raise PluginRegistryError("Plugin registry catalog v3 kernel version drifted.")
+    histories = _require_exact_keys(
+        catalog.get("histories"),
+        required=set(PLUGIN_REGISTRY_CONTRACT_KINDS),
+        identity="plugin registry catalog v3 histories",
+    )
+    latest_aliases = _require_exact_keys(
+        catalog.get("latest_aliases"),
+        required=set(PLUGIN_REGISTRY_CONTRACT_KINDS),
+        identity="plugin registry catalog v3 latest aliases",
+    )
+    if catalog.get("safety") != FIXED_PLUGIN_SAFETY:
+        raise PluginRegistryError("Plugin registry catalog v3 safety drifted.")
+
+    for kind in PLUGIN_REGISTRY_CONTRACT_KINDS:
+        kind_histories = histories.get(kind)
+        kind_aliases = latest_aliases.get(kind)
+        if type(kind_histories) is not list or type(kind_aliases) is not list:
+            raise PluginRegistryError(f"Plugin registry v3 {kind} indexes are invalid.")
+        seen_stable_ids: set[str] = set()
+        expected_aliases: list[dict[str, Any]] = []
+        previous_stable_id = ""
+        for history in kind_histories:
+            history = _require_exact_keys(
+                history,
+                required={"stable_id", "versions", "history_head_sha256"},
+                identity=f"plugin registry v3 {kind} history",
+            )
+            stable_id = _v3_exact_native_text(
+                history.get("stable_id"),
+                field=f"plugin registry v3 {kind} stable_id",
+            )
+            if stable_id in seen_stable_ids or (
+                previous_stable_id and stable_id <= previous_stable_id
+            ):
+                raise PluginRegistryError(f"Plugin registry v3 {kind} histories are ambiguous.")
+            seen_stable_ids.add(stable_id)
+            previous_stable_id = stable_id
+            versions = history.get("versions")
+            if type(versions) is not list or not versions:
+                raise PluginRegistryError(f"Plugin registry v3 {kind} history is empty.")
+            seen_versions: dict[str, str] = {}
+            previous_entry_sha256 = ""
+            previous_semver: tuple[int, int, int] | None = None
+            is_semver = _V3_CONTRACT_KIND_FIELDS[kind][3]
+            for raw_entry in versions:
+                entry = _require_exact_keys(
+                    raw_entry,
+                    required={
+                        "exact_version",
+                        "contract_sha256",
+                        "previous_entry_sha256",
+                        "contract",
+                        "entry_sha256",
+                    },
+                    identity=f"plugin registry v3 {kind} version entry",
+                )
+                exact_version = _v3_exact_native_text(
+                    entry.get("exact_version"),
+                    field=f"plugin registry v3 {kind} exact_version",
+                )
+                contract_sha256 = _v3_exact_native_text(
+                    entry.get("contract_sha256"),
+                    field=f"plugin registry v3 {kind} contract_sha256",
+                    maximum=64,
+                )
+                if not SHA256_PATTERN.fullmatch(contract_sha256):
+                    raise PluginRegistryError(
+                        f"Plugin registry v3 {kind} contract hash is invalid."
+                    )
+                prior_identity_hash = seen_versions.get(exact_version)
+                if prior_identity_hash is not None:
+                    if prior_identity_hash != contract_sha256:
+                        raise PluginRegistryError(
+                            f"Plugin registry v3 {kind} exact identity has conflicting hashes."
+                        )
+                    raise PluginRegistryError(
+                        f"Plugin registry v3 {kind} exact identity is duplicated."
+                    )
+                seen_versions[exact_version] = contract_sha256
+                if entry.get("previous_entry_sha256") != previous_entry_sha256:
+                    raise PluginRegistryError(
+                        f"Plugin registry v3 {kind} append-only chain is invalid."
+                    )
+                resolved_id, resolved_version, resolved_hash, contract = (
+                    _v3_contract_identity(kind, entry.get("contract"))
+                )
+                if (
+                    resolved_id != stable_id
+                    or resolved_version != exact_version
+                    or resolved_hash != contract_sha256
+                ):
+                    raise PluginRegistryError(
+                        f"Plugin registry v3 {kind} exact contract binding is invalid."
+                    )
+                if is_semver:
+                    current_semver = _semver_tuple(
+                        exact_version,
+                        field=f"plugin registry v3 {kind} exact_version",
+                    )
+                    if previous_semver is not None and current_semver <= previous_semver:
+                        raise PluginRegistryError(
+                            f"Plugin registry v3 {kind} history is not append-only."
+                        )
+                    previous_semver = current_semver
+                expected_entry = _v3_contract_entry(
+                    kind=kind,
+                    stable_id=stable_id,
+                    exact_version=exact_version,
+                    contract_sha256=contract_sha256,
+                    contract=contract,
+                    previous_entry_sha256=previous_entry_sha256,
+                )
+                if entry != expected_entry:
+                    raise PluginRegistryError(
+                        f"Plugin registry v3 {kind} entry seal is invalid."
+                    )
+                previous_entry_sha256 = str(entry["entry_sha256"])
+            if history.get("history_head_sha256") != previous_entry_sha256:
+                raise PluginRegistryError(
+                    f"Plugin registry v3 {kind} history head is invalid."
+                )
+            latest = versions[-1]
+            expected_aliases.append({
+                "stable_id": stable_id,
+                "exact_version": latest["exact_version"],
+                "contract_sha256": latest["contract_sha256"],
+                "history_head_sha256": latest["entry_sha256"],
+            })
+        if kind_aliases != expected_aliases:
+            raise PluginRegistryError(
+                f"Plugin registry v3 {kind} latest aliases are invalid."
+            )
+
+    supplied_sha256 = _v3_exact_native_text(
+        catalog.get("catalog_sha256"),
+        field="plugin registry catalog v3 catalog_sha256",
+        maximum=64,
+    )
+    if not SHA256_PATTERN.fullmatch(supplied_sha256):
+        raise PluginRegistryError("Plugin registry catalog v3 hash is invalid.")
+    unsigned = deepcopy(catalog)
+    unsigned.pop("catalog_sha256", None)
+    if canonical_sha256(unsigned) != supplied_sha256:
+        raise PluginRegistryError("Plugin registry catalog v3 seal is invalid.")
+    return deepcopy(catalog)
+
+
+def resolve_plugin_registry_contract_exact(
+    kind: Any,
+    stable_id: Any,
+    exact_version: Any,
+    *,
+    catalog: Any | None = None,
+) -> dict[str, Any]:
+    clean_kind = _v3_exact_native_text(kind, field="contract kind", maximum=80)
+    if clean_kind not in PLUGIN_REGISTRY_CONTRACT_KINDS:
+        raise PluginRegistryError(f"Unknown plugin registry contract kind: {clean_kind}.")
+    clean_stable_id = _v3_exact_native_text(stable_id, field="stable_id")
+    clean_exact_version = _v3_exact_native_text(exact_version, field="exact_version")
+    trusted = (
+        plugin_registry_catalog_v3()
+        if catalog is None
+        else validate_plugin_registry_catalog_v3(catalog)
+    )
+    for history in trusted["histories"][clean_kind]:
+        if history["stable_id"] != clean_stable_id:
+            continue
+        for entry in history["versions"]:
+            if entry["exact_version"] == clean_exact_version:
+                return {
+                    "kind": clean_kind,
+                    "stable_id": clean_stable_id,
+                    **deepcopy(entry),
+                }
+        raise PluginRegistryError(
+            f"Unknown exact plugin registry version: "
+            f"({clean_kind}, {clean_stable_id}, {clean_exact_version})."
+        )
+    raise PluginRegistryError(
+        f"Unknown plugin registry stable identity: ({clean_kind}, {clean_stable_id})."
+    )
+
+
+def resolve_plugin_registry_contract_latest(
+    kind: Any,
+    stable_id: Any,
+    *,
+    catalog: Any | None = None,
+) -> dict[str, Any]:
+    clean_kind = _v3_exact_native_text(kind, field="contract kind", maximum=80)
+    if clean_kind not in PLUGIN_REGISTRY_CONTRACT_KINDS:
+        raise PluginRegistryError(f"Unknown plugin registry contract kind: {clean_kind}.")
+    clean_stable_id = _v3_exact_native_text(stable_id, field="stable_id")
+    trusted = (
+        plugin_registry_catalog_v3()
+        if catalog is None
+        else validate_plugin_registry_catalog_v3(catalog)
+    )
+    alias = next(
+        (
+            item
+            for item in trusted["latest_aliases"][clean_kind]
+            if item["stable_id"] == clean_stable_id
+        ),
+        None,
+    )
+    if alias is None:
+        raise PluginRegistryError(
+            f"Unknown plugin registry stable identity: ({clean_kind}, {clean_stable_id})."
+        )
+    resolved = resolve_plugin_registry_contract_exact(
+        clean_kind,
+        clean_stable_id,
+        alias["exact_version"],
+        catalog=trusted,
+    )
+    if (
+        resolved["contract_sha256"] != alias["contract_sha256"]
+        or resolved["entry_sha256"] != alias["history_head_sha256"]
+    ):
+        raise PluginRegistryError("Plugin registry latest alias binding is invalid.")
+    return resolved
+
+
 def _resolve_pack_ids(
     selected_pack_ids: Iterable[str],
     manifests: dict[str, dict[str, Any]],
@@ -2585,6 +3150,8 @@ __all__ = [
     "PLUGIN_REGISTRY_CATALOG_VERSION",
     "PLUGIN_REGISTRY_CATALOG_VERSION_V1",
     "PLUGIN_REGISTRY_CATALOG_VERSION_V2",
+    "PLUGIN_REGISTRY_CATALOG_VERSION_V3",
+    "PLUGIN_REGISTRY_CONTRACT_KINDS",
     "PLUGIN_REGISTRY_SNAPSHOT_VERSION",
     "PLUGIN_REGISTRY_SNAPSHOT_VERSION_V1",
     "PLUGIN_REGISTRY_SNAPSHOT_VERSION_V2",
@@ -2594,5 +3161,9 @@ __all__ = [
     "UI_CONTRIBUTION_CONTRACT_VERSION_V2",
     "build_room_plugin_registry_snapshot",
     "plugin_registry_catalog",
+    "plugin_registry_catalog_v3",
+    "resolve_plugin_registry_contract_exact",
+    "resolve_plugin_registry_contract_latest",
+    "validate_plugin_registry_catalog_v3",
     "validate_room_plugin_registry_snapshot",
 ]

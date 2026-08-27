@@ -24,22 +24,49 @@ from .candidate_experiment import (
     CandidateExperimentService,
 )
 from .candidate_simulation_contract import CandidateSimulationContractError
-from .config import DEFAULT_PROVIDER, FRONTEND_DIST, HOST, PORT
+from .config import (
+    DEFAULT_PROVIDER,
+    FRONTEND_DIST,
+    HOST,
+    PORT,
+    PROJECT_CAPABILITY_SIGNING_SECRET,
+)
 from .discussion_audit import (
     DiscussionAuditConflict,
     project_discussion_audit,
 )
 from .execution_boundary import ExecutionBoundaryViolation, ensure_safe_api_path
 from .football_research_service import FootballResearchError, FootballResearchService
+from .integration_manifest import (
+    PLUGIN_REGISTRY_CATALOG_V3_PATH,
+    STUDIO_INTEGRATION_MANIFEST_PATH,
+    build_studio_integration_manifest,
+)
 from .instance_ownership import DatabaseInstanceOwner
 from .material_ingest import MATERIAL_INGEST
+from .manual_chatgpt import ManualChatGPTError, ManualChatGPTService
 from .market.storage_service import STORAGE_MARKET
 from .market.readiness import STORAGE_READINESS
 from .observation_service import OBSERVATIONS
 from .orchestrator import ORCHESTRATOR
 from .paper_portfolio_service import PaperPortfolioService
 from .plugin_lifecycle import PluginLifecycleError
+from .plugin_registry import plugin_registry_catalog_v3
 from .project_readiness import ProjectReadinessError, ProjectReadinessService
+from .project_invocation import (
+    PROJECT_INVOCATION_ACTION_INTAKE,
+    PROJECT_INVOCATION_ACTION_RESULT_READ,
+    PROJECT_INVOCATION_INTAKE_PATH,
+    ProjectCapabilityAuthorizer,
+    ProjectCapabilityClaims,
+    ProjectInvocationError,
+    normalize_project_invocation_envelope,
+    project_invocation_semantics,
+)
+from .project_integration_service import (
+    ProjectIntegrationError,
+    ProjectIntegrationService,
+)
 from .project_round_focus import ProjectRoundFocusError, ProjectRoundFocusService
 from .provider_call_ledger import ProviderCallLedger
 from .provider_preflight import ProviderPreflightService
@@ -57,6 +84,7 @@ from .store import (
     PROVIDER_OPERATION_BINDING_VERSION,
     STORE,
     MessageRoutingConflict,
+    ProjectInvocationStoreError,
     RoundExecutionTraceConflict,
 )
 from .turn_envelope import (
@@ -78,7 +106,41 @@ SERVICE_NAME = "AI 共创室"
 SERVICE_VERSION = "0.1.0"
 HOST_API_CONTRACT_VERSION = "host_delivery_v1"
 HOST_READINESS_SCHEMA_VERSION = "host_readiness_v1"
-HOST_VERSION_SCHEMA_VERSION = "host_version_v1"
+HOST_VERSION_SCHEMA_VERSION = "host_version_v2"
+
+
+def _backend_build_identity_at_startup() -> dict[str, Any]:
+    """Freeze a path-free digest of the Python host source loaded at startup."""
+
+    project_root = Path(__file__).resolve().parents[1]
+    candidates = [project_root / "server.py"]
+    candidates.extend((project_root / "backend").rglob("*.py"))
+    relative_paths = sorted(
+        path.relative_to(project_root).as_posix() for path in candidates
+    )
+    digest = hashlib.sha256()
+    try:
+        for relative_path in relative_paths:
+            body = (project_root / relative_path).read_bytes()
+            file_sha256 = hashlib.sha256(body).hexdigest()
+            digest.update(relative_path.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(file_sha256.encode("ascii"))
+            digest.update(b"\n")
+    except OSError:
+        return {
+            "available": False,
+            "source_file_count": 0,
+            "source_sha256": "",
+        }
+    return {
+        "available": True,
+        "source_file_count": len(relative_paths),
+        "source_sha256": digest.hexdigest(),
+    }
+
+
+BACKEND_BUILD_IDENTITY_AT_STARTUP = _backend_build_identity_at_startup()
 
 
 def frontend_build_identity() -> dict[str, Any]:
@@ -116,6 +178,7 @@ def host_version_payload() -> dict[str, Any]:
             "readiness_schema_version": HOST_READINESS_SCHEMA_VERSION,
             "version_schema_version": HOST_VERSION_SCHEMA_VERSION,
         },
+        "backend_build": dict(BACKEND_BUILD_IDENTITY_AT_STARTUP),
         "frontend_build": frontend_build_identity(),
     }
 
@@ -165,6 +228,33 @@ def storage_sample_acceptance(
 
 def json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def project_capability_claims_sha256(claims: ProjectCapabilityClaims) -> str:
+    """Seal verified claim semantics without retaining the bearer token."""
+
+    projection = {
+        "version": "project_capability_claims_digest_v1",
+        "audience": claims.audience,
+        "caller_id": claims.caller_id,
+        "project_id": claims.project_id,
+        "room_id": claims.room_id,
+        "actions": list(claims.actions),
+        "client_request_id": claims.client_request_id,
+        "request_sha256": claims.request_sha256,
+        "issued_at": claims.issued_at,
+        "expires_at": claims.expires_at,
+        "token_id": claims.token_id,
+    }
+    return hashlib.sha256(
+        json.dumps(
+            projection,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _member_provider_id(value: Any) -> str:
@@ -326,11 +416,25 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        project_result_match = re.fullmatch(
+            r"/api/integration/project-invocations/([^/]+)/result",
+            parsed.path,
+        )
+        if project_result_match:
+            self._handle_project_invocation_result(
+                parsed,
+                project_result_match.group(1),
+            )
+            return
         if not self._guard_request():
             return
-        parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
-        if parsed.path in {"/api/readiness", "/api/version"} and parsed.query:
+        if parsed.path in {
+            "/api/readiness",
+            "/api/version",
+            STUDIO_INTEGRATION_MANIFEST_PATH,
+        } and parsed.query:
             self._send_json(
                 {
                     "ok": False,
@@ -352,6 +456,34 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/version":
             self._send_json(
                 host_version_payload(),
+                cache_control="no-store",
+            )
+            return
+        if parsed.path == STUDIO_INTEGRATION_MANIFEST_PATH:
+            self._send_json(
+                build_studio_integration_manifest(
+                    service_id=SERVICE_ID,
+                    service_name=SERVICE_NAME,
+                    service_version=SERVICE_VERSION,
+                    host_api_contract_version=HOST_API_CONTRACT_VERSION,
+                ),
+                cache_control="no-store",
+            )
+            return
+        if parsed.path == PLUGIN_REGISTRY_CATALOG_V3_PATH:
+            if parsed.query:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "Plugin registry catalog does not accept query parameters.",
+                        "error_code": "PLUGIN_REGISTRY_QUERY_UNSUPPORTED",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                    cache_control="no-store",
+                )
+                return
+            self._send_json(
+                {"ok": True, "catalog": plugin_registry_catalog_v3()},
                 cache_control="no-store",
             )
             return
@@ -411,6 +543,82 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._send_json({"ok": True, "action_desk_overview": overview})
+            return
+        manual_chatgpt_latest_match = re.fullmatch(
+            r"/api/rooms/([^/]+)/chatgpt-collaborations/latest",
+            parsed.path,
+        )
+        if manual_chatgpt_latest_match:
+            try:
+                session = ManualChatGPTService(STORE).latest(
+                    manual_chatgpt_latest_match.group(1)
+                )
+            except ManualChatGPTError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json({"ok": True, "manual_chatgpt": session})
+            return
+        manual_chatgpt_list_match = re.fullmatch(
+            r"/api/rooms/([^/]+)/chatgpt-collaborations",
+            parsed.path,
+        )
+        if manual_chatgpt_list_match:
+            if set(query) - {"limit"}:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "ChatGPT 协作任务列表只接受 limit。",
+                        "code": "MANUAL_CHATGPT_LIST_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                limit = int((query.get("limit") or ["30"])[0])
+                sessions = ManualChatGPTService(STORE).list(
+                    manual_chatgpt_list_match.group(1),
+                    limit=limit,
+                )
+            except (TypeError, ValueError, ManualChatGPTError) as exc:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "code": getattr(
+                            exc,
+                            "code",
+                            "MANUAL_CHATGPT_LIST_REQUEST_INVALID",
+                        ),
+                    },
+                    HTTPStatus(getattr(exc, "status", 400)),
+                )
+                return
+            self._send_json({"ok": True, "manual_chatgpt_sessions": sessions})
+            return
+        manual_chatgpt_record_match = re.fullmatch(
+            r"/api/rooms/([^/]+)/chatgpt-collaborations/([^/]+)",
+            parsed.path,
+        )
+        if manual_chatgpt_record_match:
+            room_id, session_id = manual_chatgpt_record_match.groups()
+            try:
+                session = ManualChatGPTService(STORE).get(room_id, session_id)
+            except ManualChatGPTError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            if session is None:
+                self._send_json(
+                    {"ok": False, "error": "ChatGPT 协作任务不存在。"},
+                    HTTPStatus.NOT_FOUND,
+                )
+                return
+            self._send_json({"ok": True, "manual_chatgpt": session})
             return
         action_desk_continuations_match = re.fullmatch(
             r"/api/rooms/([^/]+)/action-desk/continuations",
@@ -1156,6 +1364,9 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == PROJECT_INVOCATION_INTAKE_PATH:
+            self._handle_project_invocation_intake(parsed)
+            return
         football_research_match = re.fullmatch(
             r"/api/rooms/([^/]+)/football-research/inspect",
             parsed.path,
@@ -1171,6 +1382,10 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         ):
             return
         is_file_import = bool(re.fullmatch(r"/api/rooms/[^/]+/materials/import-file", parsed.path))
+        is_manual_chatgpt_import = bool(re.fullmatch(
+            r"/api/rooms/[^/]+/chatgpt-collaborations/[^/]+/imports",
+            parsed.path,
+        ))
         carries_round_context = bool(re.fullmatch(
             r"/api/rooms/[^/]+/(?:round-launch-plan|providers/preflight|rounds/stream)",
             parsed.path,
@@ -1181,6 +1396,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 if is_file_import
                 else 1_000_000
                 if readonly_research_match is not None or carries_round_context
+                else 256_000
+                if is_manual_chatgpt_import
                 else 128_000
             )
         )
@@ -1233,6 +1450,275 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._send_json({"ok": True, "stock_research": view_model})
+            return
+        manual_chatgpt_create_match = re.fullmatch(
+            r"/api/rooms/([^/]+)/chatgpt-collaborations",
+            parsed.path,
+        )
+        if manual_chatgpt_create_match:
+            if not set(payload).issubset({"objective", "mode"}):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "ChatGPT 协作创建请求只接受 objective 和 mode。",
+                        "code": "MANUAL_CHATGPT_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                session = ManualChatGPTService(STORE).create(
+                    manual_chatgpt_create_match.group(1),
+                    objective=payload.get("objective"),
+                    mode=payload.get("mode", "standard"),
+                )
+            except LookupError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc)},
+                    HTTPStatus.NOT_FOUND,
+                )
+                return
+            except ManualChatGPTError as exc:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "code": exc.code,
+                        "issues": [item.as_dict() for item in exc.issues],
+                    },
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json(
+                {"ok": True, "manual_chatgpt": session},
+                HTTPStatus.CREATED,
+            )
+            return
+        manual_chatgpt_dispatch_match = re.fullmatch(
+            r"/api/rooms/([^/]+)/chatgpt-collaborations/([^/]+)/dispatch",
+            parsed.path,
+        )
+        if manual_chatgpt_dispatch_match:
+            if payload:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "复制/打开确认请求不接受额外字段。",
+                        "code": "MANUAL_CHATGPT_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            room_id, session_id = manual_chatgpt_dispatch_match.groups()
+            try:
+                session = ManualChatGPTService(STORE).dispatch(room_id, session_id)
+            except LookupError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc)},
+                    HTTPStatus.NOT_FOUND,
+                )
+                return
+            except ManualChatGPTError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json({"ok": True, "manual_chatgpt": session})
+            return
+        manual_chatgpt_import_match = re.fullmatch(
+            r"/api/rooms/([^/]+)/chatgpt-collaborations/([^/]+)/imports",
+            parsed.path,
+        )
+        if manual_chatgpt_import_match:
+            if set(payload) != {"content"} or not isinstance(payload.get("content"), str):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "ChatGPT 导入请求必须只包含字符串 content。",
+                        "code": "MANUAL_CHATGPT_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            room_id, session_id = manual_chatgpt_import_match.groups()
+            try:
+                session = ManualChatGPTService(STORE).import_result(
+                    room_id,
+                    session_id,
+                    payload["content"],
+                )
+            except LookupError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc)},
+                    HTTPStatus.NOT_FOUND,
+                )
+                return
+            except ManualChatGPTError as exc:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "code": exc.code,
+                        "issues": [item.as_dict() for item in exc.issues],
+                    },
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json({
+                "ok": True,
+                "accepted": session.get("state") == "API_REVIEW",
+                "manual_chatgpt": session,
+            })
+            return
+        manual_chatgpt_review_match = re.fullmatch(
+            r"/api/rooms/([^/]+)/chatgpt-collaborations/([^/]+)/api-reviews",
+            parsed.path,
+        )
+        if manual_chatgpt_review_match:
+            allowed_fields = {
+                "provider", "model", "client_request_id", "expected_result_sha256",
+            }
+            if (
+                set(payload) != allowed_fields
+                or not all(isinstance(payload.get(field), str) for field in allowed_fields)
+            ):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "独立 API 审查请求字段不完整或类型无效。",
+                        "code": "MANUAL_CHATGPT_REVIEW_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            room_id, session_id = manual_chatgpt_review_match.groups()
+            try:
+                session = ManualChatGPTService(
+                    STORE,
+                    providers=PROVIDERS,
+                ).run_api_review(
+                    room_id,
+                    session_id,
+                    provider_id=payload["provider"],
+                    model=payload["model"],
+                    client_request_id=payload["client_request_id"],
+                    expected_result_sha256=payload["expected_result_sha256"],
+                )
+            except LookupError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc)},
+                    HTTPStatus.NOT_FOUND,
+                )
+                return
+            except ManualChatGPTError as exc:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "code": exc.code,
+                        "issues": [item.as_dict() for item in exc.issues],
+                    },
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json({"ok": True, "manual_chatgpt": session})
+            return
+        manual_chatgpt_review_recovery_match = re.fullmatch(
+            r"/api/rooms/([^/]+)/chatgpt-collaborations/([^/]+)/api-reviews/recover",
+            parsed.path,
+        )
+        if manual_chatgpt_review_recovery_match:
+            allowed_fields = {"expected_result_sha256", "acknowledgement"}
+            if (
+                set(payload) != allowed_fields
+                or not all(
+                    type(payload.get(field)) is str for field in allowed_fields
+                )
+            ):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "审查恢复请求字段不完整或类型无效。",
+                        "code": "MANUAL_CHATGPT_REVIEW_RECOVERY_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            room_id, session_id = manual_chatgpt_review_recovery_match.groups()
+            try:
+                session = ManualChatGPTService(STORE).recover_api_review(
+                    room_id,
+                    session_id,
+                    expected_result_sha256=payload["expected_result_sha256"],
+                    acknowledgement=payload["acknowledgement"],
+                )
+            except LookupError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc)},
+                    HTTPStatus.NOT_FOUND,
+                )
+                return
+            except ManualChatGPTError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json({"ok": True, "manual_chatgpt": session})
+            return
+        manual_chatgpt_freeze_match = re.fullmatch(
+            r"/api/rooms/([^/]+)/chatgpt-collaborations/([^/]+)/freeze",
+            parsed.path,
+        )
+        if manual_chatgpt_freeze_match:
+            allowed_fields = {
+                "expected_result_sha256",
+                "decision_card_sha256",
+                "selected_option_id",
+                "acknowledgement",
+            }
+            if (
+                set(payload) != allowed_fields
+                or not all(isinstance(payload.get(field), str) for field in allowed_fields)
+            ):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "用户冻结请求字段不完整或类型无效。",
+                        "code": "MANUAL_CHATGPT_FREEZE_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            room_id, session_id = manual_chatgpt_freeze_match.groups()
+            try:
+                session = ManualChatGPTService(STORE).freeze_decision(
+                    room_id,
+                    session_id,
+                    expected_result_sha256=payload["expected_result_sha256"],
+                    decision_card_sha256=payload["decision_card_sha256"],
+                    selected_option_id=payload["selected_option_id"],
+                    acknowledgement=payload["acknowledgement"],
+                )
+            except LookupError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc)},
+                    HTTPStatus.NOT_FOUND,
+                )
+                return
+            except ManualChatGPTError as exc:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "code": exc.code,
+                        "issues": [item.as_dict() for item in exc.issues],
+                    },
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json({"ok": True, "manual_chatgpt": session})
             return
         if parsed.path == "/api/plugin-registry/lifecycle-events/preview":
             try:
@@ -4103,6 +4589,349 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         self._discard_rejected_request_body()
         self._send_json(payload, status)
         return False
+
+    def _project_capability_transport(
+        self,
+        *,
+        action: str,
+        require_json: bool,
+    ) -> tuple[
+        ProjectCapabilityAuthorizer,
+        str,
+        ProjectCapabilityClaims,
+    ] | None:
+        """Authenticate the dedicated integration plane without UI-token fallback."""
+
+        if not self._guard_request(require_same_origin=True):
+            return None
+        if require_json:
+            content_type = str(self.headers.get("Content-Type") or "").split(
+                ";", 1
+            )[0].strip().lower()
+            if content_type != "application/json":
+                self._reject_guarded_request(
+                    {
+                        "ok": False,
+                        "error": "Project invocation writes require application/json.",
+                        "error_code": "PROJECT_INVOCATION_CONTENT_TYPE_INVALID",
+                    },
+                    HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                )
+                return None
+
+        # A browser bootstrap token is deliberately invalid on this plane. Reject
+        # ambiguous dual credentials even when the bearer itself would verify.
+        if self.headers.get_all("X-AI-Studio-Token", []):
+            self._reject_guarded_request(
+                {
+                    "ok": False,
+                    "error": "The project capability credential is missing or invalid.",
+                    "error_code": "PROJECT_CAPABILITY_UNAUTHORIZED",
+                },
+                HTTPStatus.UNAUTHORIZED,
+            )
+            return None
+
+        authorizations = self.headers.get_all("Authorization", [])
+        if len(authorizations) != 1:
+            self._reject_guarded_request(
+                {
+                    "ok": False,
+                    "error": "The project capability credential is missing or invalid.",
+                    "error_code": "PROJECT_CAPABILITY_UNAUTHORIZED",
+                },
+                HTTPStatus.UNAUTHORIZED,
+            )
+            return None
+        authorization = authorizations[0]
+        match = re.fullmatch(r"Bearer ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)", authorization)
+        if not match:
+            self._reject_guarded_request(
+                {
+                    "ok": False,
+                    "error": "The project capability credential is missing or invalid.",
+                    "error_code": "PROJECT_CAPABILITY_UNAUTHORIZED",
+                },
+                HTTPStatus.UNAUTHORIZED,
+            )
+            return None
+        try:
+            authorizer = ProjectCapabilityAuthorizer(
+                PROJECT_CAPABILITY_SIGNING_SECRET
+            )
+        except ProjectInvocationError:
+            self._reject_guarded_request(
+                {
+                    "ok": False,
+                    "error": "Project invocation capability verification is unavailable.",
+                    "error_code": "PROJECT_CAPABILITY_UNAVAILABLE",
+                },
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return None
+        token = match.group(1)
+        try:
+            claims = authorizer.authorize(token, action=action)
+        except ProjectInvocationError as exc:
+            self._reject_guarded_request(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_code": exc.code,
+                },
+                HTTPStatus(exc.status),
+            )
+            return None
+        return authorizer, token, claims
+
+    def _handle_project_invocation_intake(self, parsed: Any) -> None:
+        authenticated = self._project_capability_transport(
+            action=PROJECT_INVOCATION_ACTION_INTAKE,
+            require_json=True,
+        )
+        if authenticated is None:
+            return
+        authorizer, token, _ = authenticated
+        if parsed.query or parsed.params or parsed.fragment:
+            self._reject_guarded_request(
+                {
+                    "ok": False,
+                    "error": "Project invocation intake does not accept URL parameters.",
+                    "error_code": "PROJECT_INVOCATION_QUERY_UNSUPPORTED",
+                },
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+        payload = self._read_json(max_bytes=256_000)
+        if payload is None:
+            return
+        try:
+            envelope = normalize_project_invocation_envelope(payload)
+            claims = authorizer.authorize(
+                token,
+                caller_id=envelope["caller_id"],
+                project_id=envelope["project_id"],
+                room_id=envelope["room_id"],
+                action=PROJECT_INVOCATION_ACTION_INTAKE,
+                client_request_id=envelope["client_request_id"],
+                request_sha256=envelope["request_sha256"],
+            )
+
+            def reauthorize() -> None:
+                authorizer.authorize(
+                    token,
+                    caller_id=envelope["caller_id"],
+                    project_id=envelope["project_id"],
+                    room_id=envelope["room_id"],
+                    action=PROJECT_INVOCATION_ACTION_INTAKE,
+                    client_request_id=envelope["client_request_id"],
+                    request_sha256=envelope["request_sha256"],
+                )
+
+            invocation, created = STORE.create_project_invocation(
+                envelope,
+                request_semantics=project_invocation_semantics(envelope),
+                authorization={
+                    "authorization_sha256": project_capability_claims_sha256(
+                        claims
+                    ),
+                    "jti": claims.token_id,
+                    "expires_at": claims.expires_at,
+                },
+                reauthorize=reauthorize,
+            )
+        except ProjectInvocationError as exc:
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_code": exc.code,
+                },
+                HTTPStatus(exc.status),
+                cache_control="no-store",
+            )
+            return
+        except ProjectInvocationStoreError as exc:
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_code": exc.code,
+                },
+                HTTPStatus(exc.status),
+                cache_control="no-store",
+            )
+            return
+        self._send_json(
+            {
+                "ok": True,
+                "created": created,
+                "invocation": invocation,
+            },
+            HTTPStatus.CREATED if created else HTTPStatus.OK,
+            cache_control="no-store",
+        )
+
+    def _handle_project_invocation_result(
+        self,
+        parsed: Any,
+        client_request_id: str,
+    ) -> None:
+        authenticated = self._project_capability_transport(
+            action=PROJECT_INVOCATION_ACTION_RESULT_READ,
+            require_json=False,
+        )
+        if authenticated is None:
+            return
+        authorizer, token, _ = authenticated
+        if parsed.query or parsed.params or parsed.fragment:
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": "Project invocation result reads do not accept URL parameters.",
+                    "error_code": "PROJECT_INVOCATION_QUERY_UNSUPPORTED",
+                },
+                HTTPStatus.BAD_REQUEST,
+                cache_control="no-store",
+            )
+            return
+        try:
+            claims = authorizer.authorize(
+                token,
+                action=PROJECT_INVOCATION_ACTION_RESULT_READ,
+                client_request_id=client_request_id,
+            )
+            details = STORE.get_project_invocation_details(
+                caller_id=claims.caller_id,
+                project_id=claims.project_id,
+                client_request_id=claims.client_request_id,
+            )
+            if details is None:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "Project invocation was not found.",
+                        "error_code": "PROJECT_INVOCATION_NOT_FOUND",
+                    },
+                    HTTPStatus.NOT_FOUND,
+                    cache_control="no-store",
+                )
+                return
+            invocation = details["invocation"]
+            semantics = details["request_semantics"]
+            if (
+                invocation.get("caller_id") != claims.caller_id
+                or invocation.get("project_id") != claims.project_id
+                or invocation.get("client_request_id")
+                != claims.client_request_id
+                or invocation.get("request_sha256") != claims.request_sha256
+                or (invocation.get("room_binding") or {}).get("room_id")
+                != claims.room_id
+            ):
+                raise ProjectInvocationStoreError(
+                    "项目调用结果授权与持久化身份不一致。",
+                    code="PROJECT_INVOCATION_INTEGRITY_FAILED",
+                )
+
+            room_binding = invocation.get("room_binding") or {}
+            room_id = str(room_binding.get("room_id") or "")
+            room_version = STORE.get_room_version_record(
+                room_id,
+                int(room_binding.get("settings_version") or 0),
+            )
+            if room_version is None:
+                raise ProjectInvocationStoreError(
+                    "项目调用创建时的房间版本不可用。",
+                    code="PROJECT_INVOCATION_INTEGRITY_FAILED",
+                )
+
+            manual_session = ManualChatGPTService(STORE).latest(room_id)
+            artifact_version = None
+            artifacts = STORE.list_artifacts(room_id)
+            if artifacts:
+                latest_artifact = artifacts[0]
+                artifact_version = STORE.get_artifact_version(
+                    room_id,
+                    str(latest_artifact.get("id") or ""),
+                    int(latest_artifact.get("version") or 0),
+                )
+            result = ProjectIntegrationService.project_result(
+                semantics,
+                studio_snapshot=room_version,
+                manual_session=manual_session,
+                artifact=artifact_version,
+            )
+            result_bytes = len(json_bytes(result))
+            result_budget = int(
+                (semantics.get("budget") or {}).get("max_result_bytes") or 0
+            )
+            if result_budget <= 0 or result_bytes > result_budget:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "The portable result exceeds the invocation result budget.",
+                        "error_code": "PROJECT_INVOCATION_RESULT_BUDGET_EXCEEDED",
+                        "result_bytes": result_bytes,
+                        "max_result_bytes": result_budget,
+                    },
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    cache_control="no-store",
+                )
+                return
+            # Close the read/expiry race immediately before returning data.
+            authorizer.authorize(
+                token,
+                caller_id=claims.caller_id,
+                project_id=claims.project_id,
+                room_id=claims.room_id,
+                action=PROJECT_INVOCATION_ACTION_RESULT_READ,
+                client_request_id=claims.client_request_id,
+                request_sha256=claims.request_sha256,
+            )
+        except ProjectInvocationError as exc:
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_code": exc.code,
+                },
+                HTTPStatus(exc.status),
+                cache_control="no-store",
+            )
+            return
+        except ProjectInvocationStoreError as exc:
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_code": exc.code,
+                },
+                HTTPStatus(exc.status),
+                cache_control="no-store",
+            )
+            return
+        except (ManualChatGPTError, ProjectIntegrationError, ValueError) as exc:
+            error_code = str(
+                getattr(exc, "code", "PROJECT_INVOCATION_RESULT_INVALID")
+            )
+            error_status = int(getattr(exc, "status", HTTPStatus.CONFLICT))
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "error_code": error_code,
+                },
+                HTTPStatus(error_status),
+                cache_control="no-store",
+            )
+            return
+        self._send_json(
+            {
+                "ok": True,
+                "result": result,
+            },
+            cache_control="no-store",
+        )
 
     def _guard_request(self, *, mutating: bool = False, require_same_origin: bool = False) -> bool:
         client_host = (

@@ -1,5 +1,6 @@
-import { ClipboardList, Plus, Search, X } from "lucide-react";
+import { ClipboardList, PawPrint, Plus, Search, X } from "lucide-react";
 import { useMemo, useRef } from "react";
+import dutyCatArt from "../assets/duty-cat.png";
 import { groupedRooms } from "../roomCategories";
 import { useModalFocus } from "../useModalFocus";
 import "../styles/room-sidebar-polish.css";
@@ -67,7 +68,13 @@ export function RoomSidebar({
       tabIndex={mobileModal && mobileOpen ? -1 : undefined}
     >
       <div className="sidebar-brand">
-        <span id="room-sidebar-title"><small>协作空间</small>AI 共创室</span>
+        <span id="room-sidebar-title" className="sidebar-brand-copy">
+          <small><PawPrint size={10} aria-hidden="true" />值班协作空间</small>
+          AI 共创室
+        </span>
+        <span className="sidebar-cat-perch" aria-hidden="true">
+          <img src={dutyCatArt} alt="" decoding="async" />
+        </span>
         <button ref={closeButtonRef} className="icon-button sidebar-mobile-close" type="button" aria-label="关闭房间列表" onClick={onClose}><X size={18} /></button>
       </div>
       <button className="primary wide" type="button" onClick={(event) => onCreate(event.currentTarget)}><Plus size={17} />新建房间</button>

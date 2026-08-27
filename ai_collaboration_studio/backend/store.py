@@ -370,6 +370,15 @@ class MessageRoutingConflict(ValueError):
     """The client view of a member or running round is stale."""
 
 
+class ProjectInvocationStoreError(ValueError):
+    """A project invocation cannot be replayed or persisted safely."""
+
+    def __init__(self, message: str, *, code: str, status: int = 409) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.status = int(status)
+
+
 class ProviderCallBudgetExceeded(RuntimeError):
     """A persisted execution run has no provider-call reservations remaining."""
 
@@ -1056,6 +1065,202 @@ class StudioStore:
                     FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,
                     FOREIGN KEY(material_id) REFERENCES materials(id)
                 );
+                CREATE TABLE IF NOT EXISTS manual_chatgpt_sessions (
+                    id TEXT PRIMARY KEY,
+                    room_id TEXT NOT NULL,
+                    round_id TEXT NOT NULL UNIQUE,
+                    mode TEXT NOT NULL CHECK(mode IN ('quick','standard','deep')),
+                    state TEXT NOT NULL CHECK(state IN (
+                        'DRAFT','BUNDLE_READY','WAITING_FOR_CHATGPT',
+                        'RESULT_IMPORTED','VALIDATING','API_REVIEW',
+                        'READY_FOR_DECISION','FROZEN','CONTEXT_STALE',
+                        'IMPORT_REJECTED','BUDGET_BLOCKED','NEEDS_USER_ACTION'
+                    )),
+                    objective TEXT NOT NULL,
+                    bundle_json TEXT NOT NULL,
+                    bundle_sha256 TEXT NOT NULL CHECK(length(bundle_sha256)=64),
+                    context_sha256 TEXT NOT NULL CHECK(length(context_sha256)=64),
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    result_sha256 TEXT NOT NULL DEFAULT ''
+                        CHECK(length(result_sha256) IN (0,64)),
+                    declared_model TEXT NOT NULL DEFAULT '',
+                    declared_model_trusted INTEGER NOT NULL DEFAULT 0
+                        CHECK(declared_model_trusted=0),
+                    last_issues_json TEXT NOT NULL DEFAULT '[]',
+                    event_sequence INTEGER NOT NULL DEFAULT 0
+                        CHECK(event_sequence >= 0),
+                    event_head_sha256 TEXT NOT NULL DEFAULT ''
+                        CHECK(length(event_head_sha256) IN (0,64)),
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    frozen_at INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(room_id) REFERENCES rooms(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS manual_chatgpt_events (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    sequence_no INTEGER NOT NULL CHECK(sequence_no > 0),
+                    from_state TEXT NOT NULL,
+                    to_state TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    previous_event_sha256 TEXT NOT NULL DEFAULT ''
+                        CHECK(length(previous_event_sha256) IN (0,64)),
+                    event_sha256 TEXT NOT NULL CHECK(length(event_sha256)=64),
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(session_id,sequence_no),
+                    FOREIGN KEY(session_id) REFERENCES manual_chatgpt_sessions(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(room_id) REFERENCES rooms(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS manual_chatgpt_review_runs (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL UNIQUE,
+                    room_id TEXT NOT NULL,
+                    provider_execution_run_id TEXT NOT NULL UNIQUE,
+                    client_request_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    requested_model TEXT NOT NULL DEFAULT '',
+                    mode TEXT NOT NULL CHECK(mode IN ('quick','standard','deep')),
+                    status TEXT NOT NULL CHECK(status IN (
+                        'RUNNING','COMPLETED','FAILED','BUDGET_BLOCKED'
+                    )),
+                    expected_calls INTEGER NOT NULL CHECK(expected_calls BETWEEN 2 AND 4),
+                    completed_calls INTEGER NOT NULL DEFAULT 0
+                        CHECK(completed_calls BETWEEN 0 AND expected_calls),
+                    plan_json TEXT NOT NULL,
+                    plan_sha256 TEXT NOT NULL CHECK(length(plan_sha256)=64),
+                    error_code TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    completed_at INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(session_id,client_request_id),
+                    FOREIGN KEY(session_id) REFERENCES manual_chatgpt_sessions(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(room_id) REFERENCES rooms(id) ON DELETE CASCADE,
+                    FOREIGN KEY(provider_execution_run_id) REFERENCES provider_execution_runs(id)
+                );
+                CREATE TABLE IF NOT EXISTS manual_chatgpt_api_reviews (
+                    id TEXT PRIMARY KEY,
+                    review_run_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    review_index INTEGER NOT NULL CHECK(review_index BETWEEN 1 AND 4),
+                    review_kind TEXT NOT NULL CHECK(review_kind IN (
+                        'fact_check','counterargument','risk_review','evidence_audit'
+                    )),
+                    provider TEXT NOT NULL,
+                    requested_model TEXT NOT NULL DEFAULT '',
+                    response_model TEXT NOT NULL DEFAULT '',
+                    independence_classification TEXT NOT NULL CHECK(
+                        independence_classification IN (
+                            'same_model_independent_call',
+                            'different_provider_independent_opinion'
+                        )
+                    ),
+                    provider_attempt_id TEXT NOT NULL UNIQUE,
+                    request_sha256 TEXT NOT NULL CHECK(length(request_sha256)=64),
+                    review_json TEXT NOT NULL,
+                    review_sha256 TEXT NOT NULL CHECK(length(review_sha256)=64),
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(review_run_id,review_index),
+                    UNIQUE(session_id,review_kind),
+                    FOREIGN KEY(review_run_id) REFERENCES manual_chatgpt_review_runs(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(session_id) REFERENCES manual_chatgpt_sessions(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(room_id) REFERENCES rooms(id) ON DELETE CASCADE,
+                    FOREIGN KEY(provider_attempt_id) REFERENCES provider_call_attempts(id)
+                );
+                CREATE TABLE IF NOT EXISTS manual_chatgpt_decisions (
+                    session_id TEXT PRIMARY KEY,
+                    room_id TEXT NOT NULL,
+                    review_run_id TEXT NOT NULL UNIQUE,
+                    result_sha256 TEXT NOT NULL CHECK(length(result_sha256)=64),
+                    reviews_sha256 TEXT NOT NULL CHECK(length(reviews_sha256)=64),
+                    decision_card_json TEXT NOT NULL,
+                    decision_card_sha256 TEXT NOT NULL UNIQUE
+                        CHECK(length(decision_card_sha256)=64),
+                    selected_option_id TEXT NOT NULL DEFAULT '',
+                    confirmation_json TEXT NOT NULL DEFAULT '{}',
+                    confirmation_sha256 TEXT NOT NULL DEFAULT ''
+                        CHECK(length(confirmation_sha256) IN (0,64)),
+                    created_at INTEGER NOT NULL,
+                    frozen_at INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(session_id) REFERENCES manual_chatgpt_sessions(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(room_id) REFERENCES rooms(id) ON DELETE CASCADE,
+                    FOREIGN KEY(review_run_id) REFERENCES manual_chatgpt_review_runs(id)
+                );
+                CREATE TABLE IF NOT EXISTS manual_chatgpt_review_recoveries (
+                    id TEXT PRIMARY KEY,
+                    record_version TEXT NOT NULL
+                        CHECK(record_version='manual_chatgpt_review_recovery_v1'),
+                    session_id TEXT NOT NULL,
+                    room_id TEXT NOT NULL,
+                    previous_review_run_id TEXT NOT NULL UNIQUE,
+                    previous_provider_execution_run_id TEXT NOT NULL,
+                    previous_run_snapshot_json TEXT NOT NULL,
+                    previous_run_snapshot_sha256 TEXT NOT NULL
+                        CHECK(length(previous_run_snapshot_sha256)=64),
+                    acknowledgement TEXT NOT NULL CHECK(
+                        acknowledgement='REAUTHORIZE_ORPHANED_ZERO_CALL_REVIEW'
+                    ),
+                    created_at INTEGER NOT NULL,
+                    FOREIGN KEY(session_id) REFERENCES manual_chatgpt_sessions(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY(room_id) REFERENCES rooms(id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS project_invocation_intakes (
+                    id TEXT PRIMARY KEY,
+                    record_version TEXT NOT NULL
+                        CHECK(record_version='project_invocation_intake_v1'),
+                    envelope_version TEXT NOT NULL
+                        CHECK(envelope_version='project_invocation_envelope_v1'),
+                    caller_id TEXT NOT NULL CHECK(length(caller_id) BETWEEN 1 AND 80),
+                    project_id TEXT NOT NULL CHECK(length(project_id) BETWEEN 1 AND 160),
+                    client_request_id TEXT NOT NULL
+                        CHECK(length(client_request_id) BETWEEN 1 AND 160),
+                    request_sha256 TEXT NOT NULL CHECK(length(request_sha256)=64),
+                    source_item_id TEXT NOT NULL DEFAULT '',
+                    source_revision TEXT NOT NULL DEFAULT '',
+                    result_profile TEXT NOT NULL CHECK(
+                        result_profile IN (
+                            'decision_v1','research_report_v1','artifact_draft_v1'
+                        )
+                    ),
+                    request_semantics_json TEXT NOT NULL,
+                    request_semantics_sha256 TEXT NOT NULL
+                        CHECK(length(request_semantics_sha256)=64),
+                    retention_policy TEXT NOT NULL CHECK(
+                        retention_policy IN (
+                            'project_default','no_payload_retention',
+                            'ephemeral_24h','bounded_days'
+                        )
+                    ),
+                    payload_retention_allowed INTEGER NOT NULL
+                        CHECK(payload_retention_allowed IN (0,1)),
+                    room_payload_persisted INTEGER NOT NULL
+                        CHECK(room_payload_persisted IN (0,1)),
+                    retention_expires_at INTEGER NOT NULL DEFAULT 0
+                        CHECK(retention_expires_at >= 0),
+                    room_id TEXT NOT NULL UNIQUE,
+                    room_settings_version INTEGER NOT NULL
+                        CHECK(room_settings_version > 0),
+                    room_snapshot_sha256 TEXT NOT NULL
+                        CHECK(length(room_snapshot_sha256)=64),
+                    creation_authorization_sha256 TEXT NOT NULL
+                        CHECK(length(creation_authorization_sha256)=64),
+                    creation_capability_jti_sha256 TEXT NOT NULL
+                        CHECK(length(creation_capability_jti_sha256)=64),
+                    creation_capability_expires_at INTEGER NOT NULL
+                        CHECK(creation_capability_expires_at > 0),
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(caller_id,project_id,client_request_id),
+                    FOREIGN KEY(room_id,room_settings_version)
+                        REFERENCES room_versions(room_id,version) ON DELETE RESTRICT
+                );
                 CREATE TABLE IF NOT EXISTS artifacts (
                     id TEXT PRIMARY KEY,
                     room_id TEXT NOT NULL,
@@ -1371,6 +1576,24 @@ class StudioStore:
                     ON material_official_attestations(room_id, confirmed_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_artifacts_room_time ON artifacts(room_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_artifact_versions_artifact ON artifact_versions(artifact_id, version DESC);
+                CREATE INDEX IF NOT EXISTS idx_manual_chatgpt_sessions_room
+                    ON manual_chatgpt_sessions(room_id,created_at DESC,id DESC);
+                CREATE INDEX IF NOT EXISTS idx_manual_chatgpt_events_session
+                    ON manual_chatgpt_events(session_id,sequence_no);
+                CREATE INDEX IF NOT EXISTS idx_manual_chatgpt_review_runs_room
+                    ON manual_chatgpt_review_runs(room_id,created_at DESC,id DESC);
+                CREATE INDEX IF NOT EXISTS idx_manual_chatgpt_api_reviews_session
+                    ON manual_chatgpt_api_reviews(session_id,review_index);
+                CREATE INDEX IF NOT EXISTS idx_manual_chatgpt_review_recoveries_session
+                    ON manual_chatgpt_review_recoveries(session_id,created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_project_invocation_project_time
+                    ON project_invocation_intakes(
+                        caller_id,project_id,created_at DESC,id DESC
+                    );
+                CREATE INDEX IF NOT EXISTS idx_project_invocation_source_item
+                    ON project_invocation_intakes(
+                        caller_id,project_id,source_item_id,source_revision
+                    ) WHERE source_item_id<>'';
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_artifact_versions_entity_version
                     ON artifact_versions(artifact_id, version);
                 CREATE INDEX IF NOT EXISTS idx_artifact_evidence_artifact ON artifact_evidence(artifact_id, item_key);
@@ -2060,6 +2283,13 @@ class StudioStore:
                    VALUES('provider_call_ledger_member_routes_v3',?)""",
                 (now_ms(),),
             )
+            connection.execute(
+                """INSERT OR IGNORE INTO schema_migrations(key,applied_at)
+                   VALUES('manual_chatgpt_api_review_v1',?)""",
+                (now_ms(),),
+            )
+            self._apply_manual_chatgpt_review_recovery_migration(connection)
+            self._apply_project_invocation_intake_migration(connection)
             self._apply_artifact_generation_key_migration(connection)
             self._apply_room_capability_pack_migration(connection)
             self._apply_storage_turn_contract_pack_migration(connection)
@@ -2081,6 +2311,116 @@ class StudioStore:
             self._apply_material_versions_identity_migration(connection)
             self._apply_artifact_evidence_review_events_migration(connection)
             self._backfill_room_versions(connection)
+
+    @staticmethod
+    def _apply_manual_chatgpt_review_recovery_migration(
+        connection: sqlite3.Connection,
+    ) -> None:
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS manual_chatgpt_review_recoveries (
+                   id TEXT PRIMARY KEY,
+                   record_version TEXT NOT NULL
+                       CHECK(record_version='manual_chatgpt_review_recovery_v1'),
+                   session_id TEXT NOT NULL,
+                   room_id TEXT NOT NULL,
+                   previous_review_run_id TEXT NOT NULL UNIQUE,
+                   previous_provider_execution_run_id TEXT NOT NULL,
+                   previous_run_snapshot_json TEXT NOT NULL,
+                   previous_run_snapshot_sha256 TEXT NOT NULL
+                       CHECK(length(previous_run_snapshot_sha256)=64),
+                   acknowledgement TEXT NOT NULL CHECK(
+                       acknowledgement='REAUTHORIZE_ORPHANED_ZERO_CALL_REVIEW'
+                   ),
+                   created_at INTEGER NOT NULL,
+                   FOREIGN KEY(session_id) REFERENCES manual_chatgpt_sessions(id)
+                       ON DELETE CASCADE,
+                   FOREIGN KEY(room_id) REFERENCES rooms(id) ON DELETE CASCADE
+               )"""
+        )
+        connection.execute(
+            """CREATE INDEX IF NOT EXISTS idx_manual_chatgpt_review_recoveries_session
+                 ON manual_chatgpt_review_recoveries(session_id,created_at DESC)"""
+        )
+        connection.execute(
+            """INSERT OR IGNORE INTO schema_migrations(key,applied_at)
+               VALUES('manual_chatgpt_review_recovery_v1',?)""",
+            (now_ms(),),
+        )
+
+    @staticmethod
+    def _apply_project_invocation_intake_migration(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Add the immutable, room-version-bound external invocation ledger."""
+
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS project_invocation_intakes (
+                   id TEXT PRIMARY KEY,
+                   record_version TEXT NOT NULL
+                       CHECK(record_version='project_invocation_intake_v1'),
+                   envelope_version TEXT NOT NULL
+                       CHECK(envelope_version='project_invocation_envelope_v1'),
+                   caller_id TEXT NOT NULL CHECK(length(caller_id) BETWEEN 1 AND 80),
+                   project_id TEXT NOT NULL CHECK(length(project_id) BETWEEN 1 AND 160),
+                   client_request_id TEXT NOT NULL
+                       CHECK(length(client_request_id) BETWEEN 1 AND 160),
+                   request_sha256 TEXT NOT NULL CHECK(length(request_sha256)=64),
+                   source_item_id TEXT NOT NULL DEFAULT '',
+                   source_revision TEXT NOT NULL DEFAULT '',
+                   result_profile TEXT NOT NULL CHECK(
+                       result_profile IN (
+                           'decision_v1','research_report_v1','artifact_draft_v1'
+                       )
+                   ),
+                   request_semantics_json TEXT NOT NULL,
+                   request_semantics_sha256 TEXT NOT NULL
+                       CHECK(length(request_semantics_sha256)=64),
+                   retention_policy TEXT NOT NULL CHECK(
+                       retention_policy IN (
+                           'project_default','no_payload_retention',
+                           'ephemeral_24h','bounded_days'
+                       )
+                   ),
+                   payload_retention_allowed INTEGER NOT NULL
+                       CHECK(payload_retention_allowed IN (0,1)),
+                   room_payload_persisted INTEGER NOT NULL
+                       CHECK(room_payload_persisted IN (0,1)),
+                   retention_expires_at INTEGER NOT NULL DEFAULT 0
+                       CHECK(retention_expires_at >= 0),
+                   room_id TEXT NOT NULL UNIQUE,
+                   room_settings_version INTEGER NOT NULL
+                       CHECK(room_settings_version > 0),
+                   room_snapshot_sha256 TEXT NOT NULL
+                       CHECK(length(room_snapshot_sha256)=64),
+                   creation_authorization_sha256 TEXT NOT NULL
+                       CHECK(length(creation_authorization_sha256)=64),
+                   creation_capability_jti_sha256 TEXT NOT NULL
+                       CHECK(length(creation_capability_jti_sha256)=64),
+                   creation_capability_expires_at INTEGER NOT NULL
+                       CHECK(creation_capability_expires_at > 0),
+                   created_at INTEGER NOT NULL,
+                   UNIQUE(caller_id,project_id,client_request_id),
+                   FOREIGN KEY(room_id,room_settings_version)
+                       REFERENCES room_versions(room_id,version) ON DELETE RESTRICT
+               )"""
+        )
+        connection.execute(
+            """CREATE INDEX IF NOT EXISTS idx_project_invocation_project_time
+                 ON project_invocation_intakes(
+                     caller_id,project_id,created_at DESC,id DESC
+                 )"""
+        )
+        connection.execute(
+            """CREATE INDEX IF NOT EXISTS idx_project_invocation_source_item
+                 ON project_invocation_intakes(
+                     caller_id,project_id,source_item_id,source_revision
+                 ) WHERE source_item_id<>''"""
+        )
+        connection.execute(
+            """INSERT OR IGNORE INTO schema_migrations(key,applied_at)
+               VALUES('project_invocation_intake_v1',?)""",
+            (now_ms(),),
+        )
 
     @staticmethod
     def _ensure_column(
@@ -22303,19 +22643,18 @@ class StudioStore:
             raise ValueError("stock_room_scope 规范化结果无法验证")
         return normalized, canonical_sha256(normalized)
 
-    def create_room(
+    def _prepare_room_creation(
         self,
+        *,
         title: str,
         objective: str,
-        domain: str = "",
-        category: str = "",
-        template_id: str = "open_collaboration",
-        workflow_policy: dict[str, Any] | None = None,
-        capability_pack_ids: list[str] | None = None,
-        stock_room_scope: dict[str, Any] | None = None,
+        domain: str,
+        category: str,
+        template_id: str,
+        workflow_policy: dict[str, Any] | None,
+        capability_pack_ids: list[str] | None,
+        stock_room_scope: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        room_id = new_id("room")
-        timestamp = now_ms()
         template = get_room_template(template_id)
         clean_template_id = str(template["id"])
         clean_domain = (domain.strip() or str(template["domain"]))[:60]
@@ -22340,54 +22679,628 @@ class StudioStore:
             if workflow_policy is not None
             else default_workflow_policy(clean_template_id)
         )
+        return {
+            "title": title.strip()[:80] or "未命名房间",
+            "objective": objective.strip()[:2000],
+            "domain": clean_domain,
+            "category": clean_category,
+            "template_id": clean_template_id,
+            "capability_pack_ids": clean_pack_ids,
+            "workflow_policy": clean_policy,
+            "stock_room_scope": clean_stock_room_scope,
+            "stock_room_scope_sha256": stock_room_scope_sha256,
+        }
+
+    def _insert_room_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        room_id: str,
+        prepared: dict[str, Any],
+        timestamp: int,
+        binding_source: str,
+    ) -> dict[str, Any]:
+        clean_pack_ids = list(prepared["capability_pack_ids"])
+        if connection.execute(
+            "SELECT 1 FROM rooms WHERE id=?",
+            (room_id,),
+        ).fetchone():
+            raise ProjectInvocationStoreError(
+                "目标房间身份已存在，不能建立新的项目调用绑定。",
+                code="PROJECT_INVOCATION_ROOM_ID_CONFLICT",
+            )
+        if clean_pack_ids:
+            self._require_plugin_lifecycle_catalog_integrity_connection(connection)
+        plugin_registry_snapshot = build_room_plugin_registry_snapshot(clean_pack_ids)
+        plugin_lifecycle_resolution = build_lifecycle_resolution(
+            plugin_registry_snapshot,
+            self._plugin_lifecycle_state_map(connection),
+            binding_source=binding_source,
+        )
+        connection.execute(
+            """INSERT INTO rooms(
+                id,title,objective,domain,category,template_id,capability_packs_json,
+                plugin_registry_snapshot_json,plugin_lifecycle_resolution_json,
+                plugin_lifecycle_resolution_sha256,discussion_mode,
+                workflow_policy_json,stock_room_scope_json,
+                stock_room_scope_sha256,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,'dynamic',?,?,?,?,?)""",
+            (
+                room_id,
+                prepared["title"],
+                prepared["objective"],
+                prepared["domain"],
+                prepared["category"],
+                prepared["template_id"],
+                json.dumps(clean_pack_ids, ensure_ascii=False),
+                json.dumps(plugin_registry_snapshot, ensure_ascii=False),
+                json.dumps(plugin_lifecycle_resolution, ensure_ascii=False),
+                str(plugin_lifecycle_resolution["resolution_sha256"]),
+                json.dumps(prepared["workflow_policy"], ensure_ascii=False),
+                json.dumps(
+                    prepared["stock_room_scope"],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                prepared["stock_room_scope_sha256"],
+                timestamp,
+                timestamp,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM rooms WHERE id=?",
+            (room_id,),
+        ).fetchone()
+        if not row:
+            raise RuntimeError("房间写入后无法读取。")
+        room = self._room_dict(row)
+        self._record_room_version(connection, room, timestamp)
+        self._insert_template_members(
+            connection,
+            room_id,
+            str(prepared["template_id"]),
+            timestamp,
+        )
+        return room
+
+    def create_room(
+        self,
+        title: str,
+        objective: str,
+        domain: str = "",
+        category: str = "",
+        template_id: str = "open_collaboration",
+        workflow_policy: dict[str, Any] | None = None,
+        capability_pack_ids: list[str] | None = None,
+        stock_room_scope: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        room_id = new_id("room")
+        timestamp = now_ms()
+        prepared = self._prepare_room_creation(
+            title=title,
+            objective=objective,
+            domain=domain,
+            category=category,
+            template_id=template_id,
+            workflow_policy=workflow_policy,
+            capability_pack_ids=capability_pack_ids,
+            stock_room_scope=stock_room_scope,
+        )
         with self._lock, closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
-            if clean_pack_ids:
-                self._require_plugin_lifecycle_catalog_integrity_connection(
-                    connection
-                )
-            plugin_registry_snapshot = build_room_plugin_registry_snapshot(clean_pack_ids)
-            plugin_lifecycle_resolution = build_lifecycle_resolution(
-                plugin_registry_snapshot,
-                self._plugin_lifecycle_state_map(connection),
+            self._insert_room_connection(
+                connection,
+                room_id=room_id,
+                prepared=prepared,
+                timestamp=timestamp,
                 binding_source="room_create",
             )
+        return self.room_snapshot(room_id) or {}
+
+    @staticmethod
+    def _project_invocation_projection_connection(
+        connection: sqlite3.Connection,
+        row: sqlite3.Row | dict[str, Any],
+    ) -> dict[str, Any]:
+        data = dict(row)
+        try:
+            semantics = json.loads(str(data.get("request_semantics_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ProjectInvocationStoreError(
+                "项目调用语义记录无法解析。",
+                code="PROJECT_INVOCATION_INTEGRITY_FAILED",
+            ) from exc
+        stored_semantics_sha256 = str(
+            data.get("request_semantics_sha256") or ""
+        ).lower()
+        if (
+            type(semantics) is not dict
+            or not re.fullmatch(r"[0-9a-f]{64}", stored_semantics_sha256)
+            or canonical_sha256(semantics) != stored_semantics_sha256
+        ):
+            raise ProjectInvocationStoreError(
+                "项目调用语义封印不完整。",
+                code="PROJECT_INVOCATION_INTEGRITY_FAILED",
+            )
+        source = semantics.get("source")
+        if type(source) is not dict:
+            source = {}
+        data_handling = semantics.get("data_handling")
+        if type(data_handling) is not dict:
+            data_handling = {}
+        retention_policy = str(data_handling.get("retention_policy") or "")
+        retention_days = data_handling.get("retention_days")
+        if retention_policy == "project_default":
+            expected_payload_retention_allowed = 1
+            expected_room_payload_persisted = 1
+            expected_retention_expires_at = 0
+        elif retention_policy == "no_payload_retention":
+            expected_payload_retention_allowed = 0
+            expected_room_payload_persisted = 0
+            expected_retention_expires_at = 0
+        elif retention_policy == "ephemeral_24h":
+            expected_payload_retention_allowed = 1
+            expected_room_payload_persisted = 0
+            expected_retention_expires_at = int(data.get("created_at") or 0) + 86_400_000
+        elif (
+            retention_policy == "bounded_days"
+            and type(retention_days) is int
+            and 1 <= retention_days <= 365
+        ):
+            expected_payload_retention_allowed = 1
+            expected_room_payload_persisted = 0
+            expected_retention_expires_at = (
+                int(data.get("created_at") or 0) + retention_days * 86_400_000
+            )
+        else:
+            raise ProjectInvocationStoreError(
+                "项目调用保留策略记录无效。",
+                code="PROJECT_INVOCATION_INTEGRITY_FAILED",
+            )
+        retention_fields_match = bool(
+            str(data.get("retention_policy") or "") == retention_policy
+            and int(data.get("payload_retention_allowed") or 0)
+            == expected_payload_retention_allowed
+            and int(data.get("room_payload_persisted") or 0)
+            == expected_room_payload_persisted
+            and int(data.get("retention_expires_at") or 0)
+            == expected_retention_expires_at
+        )
+        identity_matches = bool(
+            semantics.get("envelope_version") == data.get("envelope_version")
+            and semantics.get("caller_id") == data.get("caller_id")
+            and semantics.get("project_id") == data.get("project_id")
+            and semantics.get("client_request_id") == data.get("client_request_id")
+            and semantics.get("request_sha256") == data.get("request_sha256")
+            and source.get("item_id") == data.get("source_item_id")
+            and source.get("revision") == data.get("source_revision")
+            and semantics.get("result_profile") == data.get("result_profile")
+            and semantics.get("room_id") == data.get("room_id")
+        )
+        room_version = connection.execute(
+            """SELECT snapshot_json,snapshot_sha256 FROM room_versions
+                 WHERE room_id=? AND version=?""",
+            (
+                str(data.get("room_id") or ""),
+                int(data.get("room_settings_version") or 0),
+            ),
+        ).fetchone()
+        room_exists = connection.execute(
+            "SELECT 1 FROM rooms WHERE id=?",
+            (str(data.get("room_id") or ""),),
+        ).fetchone()
+        room_version_ok = False
+        room_snapshot: dict[str, Any] = {}
+        if room_version:
+            try:
+                room_snapshot = json.loads(str(room_version["snapshot_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                room_snapshot = {}
+            room_version_ok = bool(
+                type(room_snapshot) is dict
+                and room_snapshot
+                and canonical_sha256(room_snapshot)
+                == str(room_version["snapshot_sha256"] or "")
+                == str(data.get("room_snapshot_sha256") or "")
+            )
+        room_spec = semantics.get("room_spec")
+        if type(room_spec) is not dict:
+            room_spec = {}
+        if expected_room_payload_persisted:
+            payload_storage_matches = bool(
+                type(room_snapshot.get("title")) is str
+                and hashlib.sha256(room_snapshot["title"].encode("utf-8")).hexdigest()
+                == room_spec.get("title_sha256")
+                and type(room_snapshot.get("objective")) is str
+                and hashlib.sha256(
+                    room_snapshot["objective"].encode("utf-8")
+                ).hexdigest()
+                == room_spec.get("objective_sha256")
+            )
+        else:
+            payload_storage_matches = bool(
+                room_snapshot.get("title")
+                == f"受保护项目调用 {str(data.get('request_sha256') or '')[:8]}"
+                and room_snapshot.get("objective")
+                == "调用方正文未由 Studio 保留；仅保存来源哈希与调用边界。"
+            )
+        if (
+            not identity_matches
+            or not retention_fields_match
+            or not payload_storage_matches
+            or not room_exists
+            or not room_version_ok
+        ):
+            raise ProjectInvocationStoreError(
+                "项目调用与创建房间版本的不可变绑定已损坏。",
+                code="PROJECT_INVOCATION_INTEGRITY_FAILED",
+            )
+        if (
+            expected_retention_expires_at > 0
+            and now_ms() >= expected_retention_expires_at
+        ):
+            raise ProjectInvocationStoreError(
+                "项目调用的有界保留期已结束。",
+                code="PROJECT_INVOCATION_RETENTION_EXPIRED",
+                status=410,
+            )
+        return {
+            "version": "project_invocation_intake_v1",
+            "id": str(data.get("id") or ""),
+            "envelope_version": str(data.get("envelope_version") or ""),
+            "caller_id": str(data.get("caller_id") or ""),
+            "project_id": str(data.get("project_id") or ""),
+            "client_request_id": str(data.get("client_request_id") or ""),
+            "request_sha256": str(data.get("request_sha256") or ""),
+            "source": copy.deepcopy(source),
+            "result_profile": str(data.get("result_profile") or ""),
+            "workflow_kind": str(semantics.get("workflow_kind") or ""),
+            "domain_context": copy.deepcopy(semantics.get("domain_context") or {}),
+            "input_manifest": copy.deepcopy(semantics.get("input_manifest") or {}),
+            "retention": {
+                **copy.deepcopy(data_handling),
+                "payload_retention_allowed": bool(
+                    expected_payload_retention_allowed
+                ),
+                "room_payload_persisted": bool(expected_room_payload_persisted),
+                "expires_at": expected_retention_expires_at,
+            },
+            "budget": copy.deepcopy(semantics.get("budget") or {}),
+            "user_confirmation": copy.deepcopy(
+                semantics.get("user_confirmation") or {}
+            ),
+            "room_binding": {
+                "room_id": str(data.get("room_id") or ""),
+                "settings_version": int(data.get("room_settings_version") or 0),
+                "snapshot_sha256": str(data.get("room_snapshot_sha256") or ""),
+            },
+            "creation_authorization": {
+                "authorization_sha256": str(
+                    data.get("creation_authorization_sha256") or ""
+                ),
+                "capability_jti_sha256": str(
+                    data.get("creation_capability_jti_sha256") or ""
+                ),
+                "expires_at": int(
+                    data.get("creation_capability_expires_at") or 0
+                ),
+            },
+            "created_at": int(data.get("created_at") or 0),
+            "safety": {
+                "provider_calls_performed": 0,
+                "market_reads_performed": 0,
+                "business_writes_performed": 0,
+                "execution_capability": "none",
+                "live_trading_allowed": False,
+                "betting_allowed": False,
+                "can_autonomously_decide": False,
+                "user_final_decision_required": True,
+            },
+        }
+
+    def create_project_invocation(
+        self,
+        envelope: dict[str, Any],
+        *,
+        request_semantics: dict[str, Any],
+        authorization: dict[str, Any],
+        reauthorize: Any = None,
+    ) -> tuple[dict[str, Any], bool]:
+        semantics_sha256 = canonical_sha256(request_semantics)
+        request_sha256 = str(envelope.get("request_sha256") or "").lower()
+        authorization_sha256 = str(
+            authorization.get("authorization_sha256") or ""
+        ).lower()
+        capability_jti = str(authorization.get("jti") or "")
+        capability_jti_sha256 = hashlib.sha256(
+            capability_jti.encode("utf-8")
+        ).hexdigest()
+        capability_expires_at = authorization.get("expires_at")
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", request_sha256)
+            or not re.fullmatch(r"[0-9a-f]{64}", semantics_sha256)
+            or not re.fullmatch(r"[0-9a-f]{64}", authorization_sha256)
+            or not capability_jti
+            or type(capability_expires_at) is not int
+            or capability_expires_at <= 0
+        ):
+            raise ProjectInvocationStoreError(
+                "项目调用的授权封印无效。",
+                code="PROJECT_INVOCATION_AUTHORIZATION_INVALID",
+                status=400,
+            )
+        caller_id = str(envelope.get("caller_id") or "")
+        project_id = str(envelope.get("project_id") or "")
+        client_request_id = str(envelope.get("client_request_id") or "")
+        room_id = str(envelope.get("room_id") or "")
+        source = envelope.get("source") or {}
+        room_spec = envelope.get("room_spec") or {}
+        timestamp = now_ms()
+        data_handling = envelope.get("data_handling") or {}
+        retention_policy = str(data_handling.get("retention_policy") or "")
+        retention_days = data_handling.get("retention_days")
+        if retention_policy == "project_default":
+            payload_retention_allowed = 1
+            room_payload_persisted = 1
+            retention_expires_at = 0
+        elif retention_policy == "no_payload_retention":
+            payload_retention_allowed = 0
+            room_payload_persisted = 0
+            retention_expires_at = 0
+        elif retention_policy == "ephemeral_24h":
+            payload_retention_allowed = 1
+            room_payload_persisted = 0
+            retention_expires_at = timestamp + 86_400_000
+        elif (
+            retention_policy == "bounded_days"
+            and type(retention_days) is int
+            and 1 <= retention_days <= 365
+        ):
+            payload_retention_allowed = 1
+            room_payload_persisted = 0
+            retention_expires_at = timestamp + retention_days * 86_400_000
+        else:
+            raise ProjectInvocationStoreError(
+                "项目调用的保留策略无效。",
+                code="PROJECT_INVOCATION_RETENTION_INVALID",
+                status=400,
+            )
+        with self._lock, closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if callable(reauthorize):
+                reauthorize()
+            existing = connection.execute(
+                """SELECT * FROM project_invocation_intakes
+                     WHERE caller_id=? AND project_id=? AND client_request_id=?""",
+                (caller_id, project_id, client_request_id),
+            ).fetchone()
+            if existing:
+                projection = self._project_invocation_projection_connection(
+                    connection,
+                    existing,
+                )
+                if (
+                    str(existing["request_sha256"] or "") != request_sha256
+                    or str(existing["request_semantics_sha256"] or "")
+                    != semantics_sha256
+                    or json.loads(str(existing["request_semantics_json"] or "{}"))
+                    != request_semantics
+                    or str(existing["room_id"] or "") != room_id
+                ):
+                    raise ProjectInvocationStoreError(
+                        "client_request_id 已用于不同的项目调用语义。",
+                        code="PROJECT_INVOCATION_IDEMPOTENCY_CONFLICT",
+                    )
+                return projection, False
+
+            try:
+                prepared = self._prepare_room_creation(
+                    title=(
+                        f"受保护项目调用 {request_sha256[:8]}"
+                        if not room_payload_persisted
+                        else str(room_spec.get("title") or "")
+                    ),
+                    objective=(
+                        "调用方正文未由 Studio 保留；仅保存来源哈希与调用边界。"
+                        if not room_payload_persisted
+                        else str(room_spec.get("objective") or "")
+                    ),
+                    domain=str(room_spec.get("domain") or ""),
+                    category=str(room_spec.get("category") or ""),
+                    template_id=str(
+                        room_spec.get("template_id") or "open_collaboration"
+                    ),
+                    workflow_policy=(
+                        room_spec.get("workflow_policy")
+                        if "workflow_policy" in room_spec
+                        else None
+                    ),
+                    capability_pack_ids=(
+                        room_spec.get("capability_pack_ids")
+                        if "capability_pack_ids" in room_spec
+                        else None
+                    ),
+                    stock_room_scope=(
+                        room_spec.get("stock_room_scope")
+                        if "stock_room_scope" in room_spec
+                        else None
+                    ),
+                )
+            except ValueError as exc:
+                raise ProjectInvocationStoreError(
+                    "项目调用请求了宿主无法精确解析的房间合同。",
+                    code="PROJECT_INVOCATION_ROOM_CONTRACT_UNSUPPORTED",
+                    status=400,
+                ) from exc
+            requested_template_id = str(
+                room_spec.get("template_id") or "open_collaboration"
+            )
+            requested_category = str(room_spec.get("category") or "")
+            requested_pack_ids = list(
+                room_spec.get("capability_pack_ids") or []
+            )
+            if (
+                prepared["template_id"] != requested_template_id
+                or prepared["category"] != requested_category
+                or prepared["capability_pack_ids"] != requested_pack_ids
+            ):
+                raise ProjectInvocationStoreError(
+                    "项目调用房间合同不能由宿主静默回退或改写。",
+                    code="PROJECT_INVOCATION_ROOM_CONTRACT_UNSUPPORTED",
+                    status=400,
+                )
+            self._insert_room_connection(
+                connection,
+                room_id=room_id,
+                prepared=prepared,
+                timestamp=timestamp,
+                binding_source="project_invocation",
+            )
+            room_version = connection.execute(
+                """SELECT version,snapshot_sha256 FROM room_versions
+                     WHERE room_id=? ORDER BY version DESC LIMIT 1""",
+                (room_id,),
+            ).fetchone()
+            if not room_version:
+                raise RuntimeError("项目调用创建房间后缺少初始版本。")
             connection.execute(
-                """INSERT INTO rooms(
-                    id,title,objective,domain,category,template_id,capability_packs_json,
-                    plugin_registry_snapshot_json,plugin_lifecycle_resolution_json,
-                    plugin_lifecycle_resolution_sha256,discussion_mode,
-                    workflow_policy_json,stock_room_scope_json,
-                    stock_room_scope_sha256,created_at,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,'dynamic',?,?,?,?,?)""",
-                (
-                    room_id,
-                    title.strip()[:80] or "未命名房间",
-                    objective.strip()[:2000],
-                    clean_domain,
-                    clean_category,
-                    clean_template_id,
-                    json.dumps(clean_pack_ids, ensure_ascii=False),
-                    json.dumps(plugin_registry_snapshot, ensure_ascii=False),
-                    json.dumps(plugin_lifecycle_resolution, ensure_ascii=False),
-                    str(plugin_lifecycle_resolution["resolution_sha256"]),
-                    json.dumps(clean_policy, ensure_ascii=False),
-                    json.dumps(
-                        clean_stock_room_scope,
+                """INSERT INTO project_invocation_intakes(
+                       id,record_version,envelope_version,caller_id,project_id,
+                       client_request_id,request_sha256,source_item_id,
+                       source_revision,result_profile,request_semantics_json,
+                       request_semantics_sha256,retention_policy,
+                       payload_retention_allowed,room_payload_persisted,
+                       retention_expires_at,room_id,room_settings_version,
+                       room_snapshot_sha256,creation_authorization_sha256,
+                       creation_capability_jti_sha256,
+                       creation_capability_expires_at,created_at
+               ) VALUES(
+                   :id,:record_version,:envelope_version,:caller_id,:project_id,
+                   :client_request_id,:request_sha256,:source_item_id,
+                   :source_revision,:result_profile,:request_semantics_json,
+                   :request_semantics_sha256,:retention_policy,
+                   :payload_retention_allowed,:room_payload_persisted,
+                   :retention_expires_at,:room_id,:room_settings_version,
+                   :room_snapshot_sha256,:creation_authorization_sha256,
+                   :creation_capability_jti_sha256,
+                   :creation_capability_expires_at,:created_at
+               )""",
+                {
+                    "id": new_id("project_invocation"),
+                    "record_version": "project_invocation_intake_v1",
+                    "envelope_version": str(envelope.get("version") or ""),
+                    "caller_id": caller_id,
+                    "project_id": project_id,
+                    "client_request_id": client_request_id,
+                    "request_sha256": request_sha256,
+                    "source_item_id": str(source.get("item_id") or ""),
+                    "source_revision": str(source.get("revision") or ""),
+                    "result_profile": str(envelope.get("result_profile") or ""),
+                    "request_semantics_json": json.dumps(
+                        request_semantics,
                         ensure_ascii=False,
                         sort_keys=True,
                         separators=(",", ":"),
+                        allow_nan=False,
                     ),
-                    stock_room_scope_sha256,
-                    timestamp,
-                    timestamp,
-                ),
+                    "request_semantics_sha256": semantics_sha256,
+                    "retention_policy": retention_policy,
+                    "payload_retention_allowed": payload_retention_allowed,
+                    "room_payload_persisted": room_payload_persisted,
+                    "retention_expires_at": retention_expires_at,
+                    "room_id": room_id,
+                    "room_settings_version": int(room_version["version"]),
+                    "room_snapshot_sha256": str(
+                        room_version["snapshot_sha256"] or ""
+                    ),
+                    "creation_authorization_sha256": authorization_sha256,
+                    "creation_capability_jti_sha256": capability_jti_sha256,
+                    "creation_capability_expires_at": capability_expires_at,
+                    "created_at": timestamp,
+                },
             )
-            row = connection.execute("SELECT * FROM rooms WHERE id=?", (room_id,)).fetchone()
-            if row:
-                self._record_room_version(connection, self._room_dict(row), timestamp)
-            self._insert_template_members(connection, room_id, clean_template_id, timestamp)
-        return self.room_snapshot(room_id) or {}
+            created = connection.execute(
+                """SELECT * FROM project_invocation_intakes
+                     WHERE caller_id=? AND project_id=? AND client_request_id=?""",
+                (caller_id, project_id, client_request_id),
+            ).fetchone()
+            if not created:
+                raise RuntimeError("项目调用写入后无法读取。")
+            return self._project_invocation_projection_connection(
+                connection,
+                created,
+            ), True
+
+    def get_project_invocation(
+        self,
+        *,
+        caller_id: str,
+        project_id: str,
+        client_request_id: str,
+    ) -> dict[str, Any] | None:
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN")
+            row = connection.execute(
+                """SELECT * FROM project_invocation_intakes
+                     WHERE caller_id=? AND project_id=? AND client_request_id=?""",
+                (caller_id, project_id, client_request_id),
+            ).fetchone()
+            return (
+                self._project_invocation_projection_connection(connection, row)
+                if row
+                else None
+            )
+
+    def get_project_invocation_details(
+        self,
+        *,
+        caller_id: str,
+        project_id: str,
+        client_request_id: str,
+    ) -> dict[str, Any] | None:
+        """Return one verified public projection plus its redacted semantics.
+
+        This host-internal read is used to build portable results. The semantics
+        record contains only hashes, bounded metadata, policy, and identifiers;
+        title/objective plaintext and bearer material were never persisted there.
+        """
+
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN")
+            row = connection.execute(
+                """SELECT * FROM project_invocation_intakes
+                     WHERE caller_id=? AND project_id=? AND client_request_id=?""",
+                (caller_id, project_id, client_request_id),
+            ).fetchone()
+            if not row:
+                return None
+            invocation = self._project_invocation_projection_connection(
+                connection,
+                row,
+            )
+            try:
+                semantics = json.loads(
+                    str(row["request_semantics_json"] or "{}")
+                )
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ProjectInvocationStoreError(
+                    "项目调用语义记录无法解析。",
+                    code="PROJECT_INVOCATION_INTEGRITY_FAILED",
+                ) from exc
+            if (
+                type(semantics) is not dict
+                or canonical_sha256(semantics)
+                != str(row["request_semantics_sha256"] or "")
+            ):
+                raise ProjectInvocationStoreError(
+                    "项目调用语义封印不完整。",
+                    code="PROJECT_INVOCATION_INTEGRITY_FAILED",
+                )
+            return {
+                "invocation": invocation,
+                "request_semantics": copy.deepcopy(semantics),
+            }
 
     def update_room(self, room_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         """Update room metadata, capability packs, and validated workflow policy.

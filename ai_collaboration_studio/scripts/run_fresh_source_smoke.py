@@ -487,7 +487,7 @@ def run_smoke(source_root: Path) -> dict[str, Any]:
             version_json = json.loads(version["body"])
             unknown_json = json.loads(unknown["body"])
             require(readiness_json.get("ready") is True, "readiness contract is not ready")
-            require(version_json.get("schema_version") == "host_version_v1", "version contract drifted")
+            require(version_json.get("schema_version") == "host_version_v2", "version contract drifted")
             require(frontend["status"] == 200 and frontend["content_type"].startswith("text/html"), "production frontend was not served")
             require(unknown["status"] == 404 and unknown_json.get("error_code") == "API_NOT_FOUND", "unknown API fallback regressed")
             runtime_result = {

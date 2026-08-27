@@ -99,6 +99,8 @@ import { DeferredSurfaceFallback } from "./DeferredSurfaceFallback.js";
 
 const ActionOverviewDrawer = lazy(() => import("./components/ActionOverviewDrawer.jsx")
   .then((module) => ({ default: module.ActionOverviewDrawer })));
+const ChatGPTCollaborationDialog = lazy(() => import("./components/ChatGPTCollaborationDialog.jsx")
+  .then((module) => ({ default: module.ChatGPTCollaborationDialog })));
 const ArtifactDialog = lazy(() => import("./components/ArtifactDialog.jsx")
   .then((module) => ({ default: module.ArtifactDialog })));
 const CreateRoomDialog = lazy(() => import("./components/Dialogs.jsx")
@@ -319,6 +321,7 @@ export default function App() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [roomDrawerOpen, setRoomDrawerOpen] = useState(false);
   const [actionOverviewOpen, setActionOverviewOpen] = useState(false);
+  const [chatGPTCollaborationOpen, setChatGPTCollaborationOpen] = useState(false);
   const [railSection, setRailSection] = useState("rooms");
   const [inspectorNavigation, setInspectorNavigation] = useState({
     targetId: "",
@@ -356,6 +359,7 @@ export default function App() {
     () => emptyDiscussionAuditState(),
   );
   const actionOverviewActivated = useDeferredActivation(actionOverviewOpen);
+  const chatGPTCollaborationActivated = useDeferredActivation(chatGPTCollaborationOpen);
   const inspectorActivated = useDeferredActivation(inspectorOpen);
   const roundLaunchActivated = useDeferredActivation(roundLaunch.status !== "idle");
   const roundExecutionTraceActivated = useDeferredActivation(roundExecutionTrace.open);
@@ -401,6 +405,7 @@ export default function App() {
   const mobileRoomToggleRef = useRef(null);
   const roomDrawerRestoreFocusRef = useRef(null);
   const roundLaunchRestoreFocusRef = useRef(null);
+  const chatGPTCollaborationRestoreFocusRef = useRef(null);
   const roundLaunchSuccessFocusRef = useRef(null);
   const observationRestoreFocusRef = useRef(null);
   const reflectionRestoreFocusRef = useRef(null);
@@ -1903,6 +1908,18 @@ export default function App() {
         roundLaunchControlRef.current.controller = null;
       }
     }
+  };
+
+  const startChatGPTCollaboration = (launchTrigger) => {
+    if (!room || roundBusy || chatGPTCollaborationOpen) return;
+    const activeTrigger = launchTrigger || document.activeElement;
+    chatGPTCollaborationRestoreFocusRef.current = (
+      activeTrigger
+      && activeTrigger !== document.body
+      && typeof activeTrigger.focus === "function"
+    ) ? activeTrigger : null;
+    setError("");
+    setChatGPTCollaborationOpen(true);
   };
 
   const startRound = async (launchTrigger) => {
@@ -3457,6 +3474,7 @@ export default function App() {
           onMention={rememberComposerMention}
           onSend={sendMessage}
           onStartRound={startRound}
+          onStartChatGPT={startChatGPTCollaboration}
           disabled={messageSending || roundState.pausing || (roundState.running && !roundState.roundId)}
           roundDisabled={roundBusy || roundLaunchOpen || providerRoutingBusy || !canAttemptNewRound}
           roundStatusLabel={roundLaunch.status === "loading"
@@ -3473,6 +3491,12 @@ export default function App() {
             ? "完成或关闭当前启动确认单后，才能再次发起。"
             : newRoundBlockReason || "点击后先读取冻结计划，不会立即调用 Provider。"}
           members={members}
+          chatGPTDisabled={roundBusy || chatGPTCollaborationOpen}
+          chatGPTStatusTitle={chatGPTCollaborationOpen
+            ? "ChatGPT 协作席位已打开。"
+            : roundBusy
+              ? "当前讨论轮次进行中，暂不能打开 ChatGPT 协作席位。"
+              : "打开人工 ChatGPT 协作席位；可在弹窗中填写研究问题，不会自动调用 Provider。"}
         />
       </main>
       <button
@@ -3613,6 +3637,23 @@ export default function App() {
           />
         </Suspense> : null}
       </div>
+      {chatGPTCollaborationActivated ? <Suspense fallback={(
+        <DeferredSurfaceFallback
+          label="ChatGPT 协作席位"
+          dialog
+          open={chatGPTCollaborationOpen}
+          onClose={() => setChatGPTCollaborationOpen(false)}
+          restoreFocusRef={chatGPTCollaborationRestoreFocusRef}
+        />
+      )}>
+        <ChatGPTCollaborationDialog
+          open={chatGPTCollaborationOpen}
+          roomId={room?.id || ""}
+          initialObjective={composer.trim() || room?.objective || ""}
+          restoreFocusRef={chatGPTCollaborationRestoreFocusRef}
+          onClose={() => setChatGPTCollaborationOpen(false)}
+        />
+      </Suspense> : null}
       {roundLaunchActivated ? <Suspense fallback={(
         <DeferredSurfaceFallback
           label="启动确认"

@@ -22,6 +22,10 @@ from xml.etree import ElementTree
 
 from .market.earnings_materials import curated_official_material_candidate
 from .market.ir_releases import IR_FEEDS
+from .presentation_package import (
+    PPTX_CONTENT_TYPE,
+    build_pptx_ingest_package,
+)
 from .store import OFFICIAL_MATERIAL_ELIGIBLE_ERROR_CODES, STORE, StudioStore
 
 
@@ -42,6 +46,7 @@ ALLOWED_WEB_MIME_TYPES = {
     "application/xml",
     "text/xml",
     "application/pdf",
+    PPTX_CONTENT_TYPE,
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
 TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".html", ".htm", ".xml"}
@@ -239,6 +244,33 @@ def extract_material(raw: bytes, filename: str, content_type: str = "") -> Extra
     elif extension == ".docx" or mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         text = extract_docx(raw)
         method = "docx_xml"
+    elif extension == ".pptx" or mime_type == PPTX_CONTENT_TYPE:
+        package_filename = (
+            safe_name
+            if extension == ".pptx"
+            else f"{Path(safe_name).stem or 'presentation'}.pptx"
+        )
+        package = build_pptx_ingest_package(raw, filename=package_filename)
+        text = str(package["extracted_text"])
+        first_slide = package["presentation"]["slides"][0]
+        first_lines = [
+            line.strip()
+            for line in str(first_slide.get("text") or "").splitlines()
+            if line.strip()
+        ]
+        if first_lines:
+            title = first_lines[0][:120]
+        extra.update({
+            "pptx_ingest_package_version": package["schema_version"],
+            "pptx_ingest_package_sha256": package["package_sha256"],
+            "pptx_slide_count": package["presentation"]["slide_count"],
+            "pptx_external_relationship_count": package["presentation"][
+                "external_relationship_count"
+            ],
+            "pptx_ingest_package": package,
+            "_source_truncated": bool(package["text_truncated"]),
+        })
+        method = "pptx_zip_xml_v1"
     elif extension == ".pdf" or mime_type == "application/pdf":
         text, page_count = extract_pdf(raw)
         extra["page_count"] = page_count
@@ -254,11 +286,13 @@ def extract_material(raw: bytes, filename: str, content_type: str = "") -> Extra
         text = normalize_text(decode_text(raw, charset))
         method = "decoded_text"
     else:
-        raise ValueError("暂不支持此文件类型；当前支持 TXT、MD、CSV、TSV、JSON、HTML、XML、DOCX、PDF")
+        raise ValueError("暂不支持此文件类型；当前支持 TXT、MD、CSV、TSV、JSON、HTML、XML、DOCX、PPTX、PDF")
 
     if not text.strip():
         raise ValueError("没有提取到可供 AI 使用的文本")
-    truncated = len(text) > MAX_EXTRACTED_CHARS
+    truncated = len(text) > MAX_EXTRACTED_CHARS or bool(
+        extra.pop("_source_truncated", False)
+    )
     text = text[:MAX_EXTRACTED_CHARS].rstrip()
     metadata = {
         "original_name": safe_name,

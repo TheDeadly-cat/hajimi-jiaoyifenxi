@@ -41,6 +41,10 @@ def _load_local_env() -> None:
                     "GLM_MODEL",
                     "AI_STUDIO_DEFAULT_PROVIDER",
                     "AI_STUDIO_DISABLED_PROVIDERS",
+                    "AI_STUDIO_MANUAL_CHATGPT_REVIEW_RATE_LABEL",
+                    "AI_STUDIO_MANUAL_CHATGPT_REVIEW_INPUT_USD_PER_MILLION",
+                    "AI_STUDIO_MANUAL_CHATGPT_REVIEW_OUTPUT_USD_PER_MILLION",
+                    "AI_STUDIO_PROJECT_CAPABILITY_SIGNING_SECRET",
                     "FUTU_HOST",
                     "FUTU_PORT",
                     "FUTU_CACHE_TTL_SECONDS",
@@ -114,6 +118,10 @@ DISABLED_PROVIDER_IDS = _deployment_disabled_provider_ids(
 )
 HOST = os.getenv("AI_STUDIO_HOST", "127.0.0.1")
 PORT = int(os.getenv("AI_STUDIO_PORT", "8770"))
+PROJECT_CAPABILITY_SIGNING_SECRET = os.getenv(
+    "AI_STUDIO_PROJECT_CAPABILITY_SIGNING_SECRET",
+    "",
+)
 FUTU_HOST = os.getenv("FUTU_HOST", "127.0.0.1")
 FUTU_PORT = int(os.getenv("FUTU_PORT", "11111"))
 FUTU_CACHE_TTL_SECONDS = max(1.0, float(os.getenv("FUTU_CACHE_TTL_SECONDS", "5")))

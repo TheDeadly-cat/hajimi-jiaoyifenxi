@@ -100,5 +100,5 @@ jobs:
             ${{ runner.temp }}\static-security.json
             ${{ runner.temp }}\bootstrap-receipt.json
             ${{ runner.temp }}\fresh-source-smoke.json
-          ${{ runner.temp }}\release-drill.json
-          ${{ runner.temp }}\dependency-inventory.json
+            ${{ runner.temp }}\release-drill.json
+            ${{ runner.temp }}\dependency-inventory.json

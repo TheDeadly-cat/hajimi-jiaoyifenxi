@@ -146,7 +146,7 @@
   color: var(--composer-accent);
 }
 
-.composer .send-button {
+.composer .chatgpt-button {
   border-color: rgba(18, 83, 182, 0.25);
   background:
     linear-gradient(145deg, rgba(255, 255, 255, 0.14), transparent 46%),
@@ -156,11 +156,25 @@
     inset 0 1px rgba(255, 255, 255, 0.2);
 }
 
-.composer .send-button:hover:not(:disabled) {
+.composer .chatgpt-button:hover:not(:disabled) {
   box-shadow:
     0 11px 24px rgba(25, 88, 178, 0.27),
     inset 0 1px rgba(255, 255, 255, 0.24);
   transform: translateY(-1px);
+}
+
+.composer .send-button {
+  border-color: rgba(40, 78, 120, 0.13);
+  background: rgba(255, 255, 255, 0.8);
+  box-shadow: none;
+  color: #405975;
+}
+
+.composer .send-button:hover:not(:disabled) {
+  border-color: rgba(23, 105, 224, 0.23);
+  background: rgba(244, 249, 255, 0.96);
+  color: var(--composer-accent);
+  transform: none;
 }
 
 .composer .composer-actions button:focus-visible {
@@ -252,7 +266,7 @@
     justify-self: end;
   }
 
-  .composer .send-button:hover:not(:disabled) {
+  .composer .chatgpt-button:hover:not(:disabled) {
     transform: none;
   }
 }

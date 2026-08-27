@@ -98,6 +98,7 @@ test("chat, sidebar and composer stay eager while heavy host surfaces use direct
   for (const component of [
     "ActionOverviewDrawer",
     "ArtifactDialog",
+    "ChatGPTCollaborationDialog",
     "FootballResearchPanel",
     "PaperPortfolioDialog",
     "RoundExecutionTraceDialog",
@@ -123,9 +124,11 @@ test("deferred surfaces activate on open and remain mounted through a bounded ex
   assert.match(appSource, /return Boolean\(active\) \|\| activated/);
   assert.match(appSource, /const inspectorActivated = useDeferredActivation\(inspectorOpen\)/);
   assert.match(appSource, /const artifactActivated = useDeferredActivation\(Boolean\(editingArtifact\)\)/);
+  assert.match(appSource, /const chatGPTCollaborationActivated = useDeferredActivation\(chatGPTCollaborationOpen\)/);
   assert.match(appSource, /const paperPortfolioActivated = useDeferredActivation\(Boolean\(editingPaperPortfolio\)\)/);
   assert.match(appSource, /\{inspectorActivated \? <Suspense/);
   assert.match(appSource, /\{artifactActivated \? <Suspense/);
+  assert.match(appSource, /\{chatGPTCollaborationActivated \? <Suspense/);
   assert.match(appSource, /\{paperPortfolioActivated \? <Suspense/);
 });
 
@@ -135,8 +138,8 @@ test("every lazy host surface has an explicit Suspense fallback", () => {
   assert.match(deferredFallbackSource, /export function DeferredSurfaceFallback/);
   const lazyCount = (appSource.match(/= lazy\(/g) || []).length;
   const suspenseCount = (appSource.match(/<Suspense fallback=/g) || []).length;
-  assert.equal(lazyCount, 16);
-  assert.equal(suspenseCount, 16);
+  assert.equal(lazyCount, 17);
+  assert.equal(suspenseCount, 17);
 });
 
 test("football and stock panel CSS follows the corresponding lazy module", () => {

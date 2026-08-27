@@ -47,6 +47,7 @@ _API_RESOURCE_CLASSES = frozenset({
     "action-desk",
     "bootstrap",
     "health",
+    "integration",
     "market",
     "materials",
     "models",

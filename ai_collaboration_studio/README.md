@@ -138,14 +138,17 @@ python server.py
 
 打开：`http://127.0.0.1:8770/`
 
-桌面快捷方式为 `AI 共创室 - 交易分析.lnk`，入口脚本使用 `scripts/start_ai_collaboration_studio.ps1`：若 8770 上已经是通过宿主 readiness 契约识别的本项目服务则直接打开；否则在后台启动服务并等待 readiness 通过。若端口被其他程序、旧版服务或未就绪实例占用，入口会失败关闭，不结束或替换现有进程。入口本身不调用 Provider、Futu 或任何交易接口。
+桌面快捷方式为 `AI 共创室 - 交易分析.lnk`，入口脚本使用 `scripts/start_ai_collaboration_studio.ps1`：若 8770 上已经是同时通过 readiness、host version 与 `studio_integration_manifest_v2` 契约识别的当前项目服务则直接打开；否则在后台启动服务并等待三项检查通过。若端口被其他程序、旧版服务或未就绪实例占用，入口会失败关闭，不结束或替换现有进程。新源码需要迁移或存在恢复缺口时，launcher 会从自己本次创建的日志中只分类错误类型并提示重新执行精确 `preview → prepare → 授权 → apply`，不会自动迁移、复用旧授权或展示数据库内容。入口本身不调用 Provider、Futu 或任何交易接口。
 
 宿主交付端点均为只读 JSON，且不探测 Provider、不返回密钥、数据库路径或会话令牌：
 
 - `GET /api/health` 只证明进程存活，不代表数据库、恢复流程或 production frontend 已就绪。
 - `GET /api/readiness` 使用 `host_readiness_v1`；只有启动所有权/迁移 gate 已完成、当前数据库句柄仍存在且 `frontend/dist/index.html` 可读时才返回 `200` 与 `ready: true`，否则返回 `503`。
-- `GET /api/version` 使用 `host_version_v1`，返回产品 `0.1.0`、宿主 API 契约版本及 production frontend `index.html` 的字节数和 SHA256。
+- `GET /api/version` 使用 `host_version_v2`，返回产品 `0.1.0`、宿主 API 契约版本、进程启动时冻结的无路径后端源码 SHA256，以及 production frontend `index.html` 的字节数和 SHA256。launcher 会把冻结指纹与当前磁盘源码比较，拒绝把“旧后端 + 新前端”识别为当前就绪实例。
+- `GET /api/integration/manifest` 使用 `studio_integration_manifest_v2`，只从编译期合同生成自哈希的能力发现清单：列出 kernel/registry、能力包、Manual ChatGPT、只读 MCP、版本化插件目录、PPTX 包合同、项目接入与便携结果的 schema hash，以及固定安全边界；它不读数据库、Provider、市场、环境秘密或本地路径。外部写入只允许使用独立、短时、请求绑定的 project capability 调用 `POST /api/integration/project-invocations`，且仅能原子创建项目专属房间与 intake；`/api/bootstrap` 的前端会话凭据不会被该入口接受。
 - 未注册的 `/api` GET 路径返回 JSON `404 / API_NOT_FOUND`，不会落入前端 SPA fallback 形成伪 `200 text/html`。
+
+算命、交易、PPT、足球等项目的正确接入面、结果档案与 scoped capability 路线见 [`docs/cross_project_collaboration_architecture.md`](docs/cross_project_collaboration_architecture.md)；最小调用流程见 [`docs/project_invocation_quickstart.md`](docs/project_invocation_quickstart.md)。现阶段保持 iframe 与跨域写入关闭；发现清单、只读 MCP 和项目接入 capability 是三个不同权限层。
 
 服务会从项目目录及父目录的 `.env.local` 安全读取模型密钥。密钥不会发送到前端，也不会写入 SQLite。当前没有可用模型执行器时，界面明确显示不可用状态，不生成伪造回复。
 
@@ -410,6 +413,96 @@ python scripts/run_isolated_12_role_e2e.py `
 
 真实模式只注册 DeepSeek 与豆包，OpenAI 路由会在网络请求前硬拒绝；不重试、不跨 Provider 回退，Futu 强制抓取一次且必须 MU、SNDK、WDC、STX 4/4 `ready`。逐行还会失败关闭明确的 `suspended=true` 或异常 `security_status`；历史记录缺少该字段保持兼容，只有 `NORMAL` 或以 `.NORMAL` 结尾的枚举文本被视为显式正常。在任何 DeepSeek/豆包会前探测或付费生成调用前，该快照的 `evidence` 还必须是字典、`evidence.state=ready`，且递归检查所有嵌套层级时不得有任何非空 `source_errors`；否则立即以 `MARKET_GATE_FAILED` 停止，Provider 调用计数保持为 0。任一成员失败会停止轮次并跳过产物生成；产物只生成一次，禁止 `template_fallback`，脚本不会调用任何确认接口。标准输出和可选 `--report-file` 都只包含不带提示、正文、上游错误体或密钥的 JSON 摘要；报告文件必须使用尚不存在的 `.json` 路径，脚本不会覆盖旧审计记录。
 
+### Manual ChatGPT 与独立只读 MCP 网关
+
+Manual ChatGPT 协作任务把当前房间投影为冻结的 `compact_room_bundle_v2`，按 `quick / standard / deep` 分别规划 1/2/3 个 ChatGPT 回合与 2/3/4 次独立 API 审查。多个 Panel 必须在同一 ChatGPT 会话中按提示分别发送回复，最后一个回合才合并并输出唯一 JSON，避免把一次回答里的多个 Panel 块误计成多次调用；这仍只是人工操作协议，导入不能证明真实模型来源或回合独立性。标准模式的 12 角色契约测试使用正式 `us_storage_committee` 模板，要求两个 Panel 各自按冻结顺序完整覆盖同一组 12 个角色且不重复，随后只执行三次假 API 审查并由用户确认冻结；12 个角色始终是分析视角，不会膨胀成 12 次 Provider 调用。界面的上下文 Token 只是确定性规划估算，不声称等同任一模型 tokenizer；API 成本只在三项费率假设完整有效时估算，始终排除人工 ChatGPT 订阅并标记为非账单。每个状态只派生一个页脚主动作；导入拒绝态不会再额外显示一个重复校验按钮。“复制任务包并打开 ChatGPT”使用指向固定 `https://chatgpt.com/` 的原生链接和 `noopener noreferrer`，同一次用户点击同步触发剪贴板复制及后端 dispatch，比脚本弹窗更符合浏览器的新页策略；进入等待态后仍保留手动打开提示，不把浏览器策略冒充系统可控结果。人工导入只接受一个 JSON 对象，可以去除单个 Markdown 围栏，但会在任意嵌套层级拒绝重复键和 `NaN / Infinity`，并报告精确 JSONPath；模型名仍是用户声明，导入通过也只进入 `API_REVIEW`，不会直接形成最终决定。
+
+在 `API_REVIEW`，用户必须显式选择 Provider/模型路由并绑定当前 `result_sha256`。后端先冻结一次幂等调用计划和恰好 2/3/4 次的 Provider 账本预算，然后为 `fact_check / counterargument / risk_review / evidence_audit` 中对应模式的审查类型逐次发起真实独立调用；不做额外会前探测、重试、Provider 回退或预算退款。每次调用都有不同的 Provider attempt、请求哈希、闭合 JSON 契约、响应身份与哈希记录；同一回答里的多角色视角永远不会计入独立调用。任一调用失败、身份不符、格式无效、越界引用或账本异常都会失败关闭到 `NEEDS_USER_ACTION` 或 `BUDGET_BLOCKED`，不能生成可冻结决定。
+
+全部审查通过后，确定性内核只从冻结导入结果和审查记录生成 `manual_chatgpt_decision_card_v1`：保留导入选项与其来源，不把 ChatGPT 的建议冒充系统推荐，并汇总阻断项、非阻断项与开放问题。存在 blocking finding 时仍停在 `NEEDS_USER_ACTION`；只有无阻断项才进入 `READY_FOR_DECISION`。最终冻结要求用户选择决定、确认研究只读边界，并同时提交当前结果哈希与决定卡哈希；冻结本身不会再次调用 Provider，也不会授权交易或外部执行。相关新表由 `manual_chatgpt_api_review_v1` migration 管理；现有正式库缺表时接口只返回 `MANUAL_CHATGPT_MIGRATION_REQUIRED`，不会在运行时自动迁移，正式 migration apply 仍需单独授权。
+
+渲染验收使用 `python scripts/run_isolated_manual_chatgpt_qa.py --lifetime-seconds 600`。默认从 `API_REVIEW` 起步；需要核对前半段时，可显式加入 `--initial-state bundle-ready`、`waiting` 或 `import-rejected`。runner 会把有效导入夹具仅写入自身系统临时目录，并在首行 JSON 中返回临时路径，供浏览器 QA 走真实粘贴/修复流程；进程自然退出后夹具与临时 SQLite 一并删除。该 runner 只创建系统临时 SQLite、确定性假审查通道和随机 `127.0.0.1` 服务；`--help` 不会启动 fixture，达到 `FROZEN` 后自动停服，并始终受 1–3600 秒硬生命周期约束。只有确需在冻结后继续检查时才显式加入 `--keep-open-after-frozen`，硬超时仍保留。它不加载正式密钥、不连接 Provider/Futu/OpenD/市场，也不代表正式迁移或外部权限已经授权。
+
+`backend/readonly_mcp_gateway.py` 是与主 HTTP 宿主分离的 MCP Streamable HTTP 只读端点，只提供 `get_room_bundle`、`get_evidence_chunk`、`get_round_status`、`get_import_contract`。每个工具都声明 `readOnlyHint=true / destructiveHint=false / openWorldHint=false`；服务端仍会独立执行 HMAC capability 鉴权、房间与轮次绑定、TTL、速率、请求/响应大小、Origin、完整性与字段白名单检查。它只通过 SQLite `mode=ro + query_only` 读取已存在的协作记录，不初始化 schema，不暴露任务导入、Provider、行情、文件或写数据库能力；受保护端口 `8770 / 11111` 与非 `127.0.0.1` 绑定会在启动前拒绝。
+
+网关授权秘密只从独立进程环境读取，不会从 `.env.local` 自动加载。以下命令仅是未来经授权后的操作说明，本次实现与测试不会对正式数据库执行；`--database` 必须指向已经具备相应 schema 的现有文件，旧库迁移仍是单独授权事项：
+
+```powershell
+$env:AI_STUDIO_SKIP_LOCAL_ENV = "1"
+$env:AI_STUDIO_MCP_TOKEN_SIGNING_SECRET = "<至少 32 字节的随机秘密>"
+python -m backend.readonly_mcp_gateway mint-token `
+  --database "<existing.sqlite3>" `
+  --room-id "<room_id>" `
+  --round-id "<round_id>" `
+  --ttl-seconds 300
+python -m backend.readonly_mcp_gateway serve `
+  --database "<existing.sqlite3>" `
+  --host 127.0.0.1 `
+  --port 8769
+```
+
+`GET /mcp` 明确返回 405，因为当前网关不发起服务器到客户端的 SSE；每条 JSON-RPC 请求使用 `POST /mcp`，客户端需同时接受 `application/json` 与 `text/event-stream`。`get_round_status` 的 v2 投影会只读核验独立 API 审查账本和决定链，报告真实的计划数、完成数、状态与调用独立性，但不返回审查正文，也不为查询新增 Provider 调用。OpenAI 官方的 [Secure MCP Tunnel 文档](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) 说明它通过出站 HTTPS 连接私有 MCP，无需开放入站端口；Tunnel 的 Platform 权限、运行时 API Key、目标 workspace 关联和 ChatGPT developer mode 是分开的授权条件。当前项目只完成本地只读 Streamable HTTP 网关与隔离测试，尚未声称已取得这些权限或完成真实 Tunnel 接入。
+
+`backend.secure_mcp_tunnel_preflight` 把上述条件进一步拆成可审计的只读预检：`Tunnels Read`、`Tunnels Use`、`tunnel_id`、运行时 API Key、目标 ChatGPT workspace 关联、developer mode、`tunnel-client`、出站 HTTPS、本地 MCP 可达性，以及 `doctor` 的 healthy/ready/connected 状态。它只接受闭合的布尔证明状态，不接受或返回任何密钥、Token、`tunnel_id` 原文；`Tunnels Manage` 只影响创建或编辑 Tunnel，不会被误写成使用已有 Tunnel 的必要条件。报告用 `evidence_sha256` 绑定规范化输入，分别给出 `ready_to_run_doctor` 与 `runtime_connection_verified_by_declared_evidence`，并始终保留 `external_permission_truth_verified=false`，因此用户声明、运行态诊断和外部授权事实不会被混成一个 READY。该命令不读数据库、不启动 MCP 或 `tunnel-client`、不发网络请求，也不创建 Tunnel：
+
+```powershell
+$env:AI_STUDIO_SKIP_LOCAL_ENV = "1"
+python -m backend.secure_mcp_tunnel_preflight `
+  --evidence-file "<reviewed-boolean-preflight-evidence.json>"
+```
+
+第四批提供两个同样独立、只读的本地报告命令。日报读取已有 SQLite 记录，汇总最新未完成房间、全部 `WAITING_FOR_CHATGPT`、`CONTEXT_STALE`、按年龄标记但不改状态的任务包、待核验/争议引用，以及昨日 Provider 账本中实际记录的 Token、耗时与费用。只有 `cost_usd` 会汇总为美元；只有 `cost` 的旧记录继续标为“单位未知”，缺失费用绝不当作零。Manual ChatGPT 包内费率只生成单独的“独立 API 审查计划估算”，不冒充昨日实付。
+
+```powershell
+$env:AI_STUDIO_SKIP_LOCAL_ENV = "1"
+python -m backend.manual_chatgpt_operations daily-summary `
+  --database "<existing.sqlite3>" `
+  --timezone Asia/Shanghai `
+  --waiting-expiry-hours 24 `
+  --max-items 50 `
+  --format markdown
+
+python -m backend.manual_chatgpt_operations scheduled-task-contract `
+  --timezone Asia/Shanghai `
+  --local-time 09:00
+
+$env:AI_STUDIO_OPERATIONS_DATABASE = "<operator-approved-existing.sqlite3>"
+python -m backend.manual_chatgpt_operations scheduled-daily-summary `
+  --timezone Asia/Shanghai
+
+python -m backend.manual_chatgpt_operations ab-replay `
+  --dataset "<reviewed-20-to-30-case-dataset.json>"
+
+python -m backend.manual_chatgpt_operations historical-ab-status `
+  --source-directory "<in-progress-reviewed-source-snapshots>"
+
+python -m backend.manual_chatgpt_operations historical-ab-export-b-arm `
+  --database "<operator-approved-existing.sqlite3>" `
+  --room-id "<room_id>" `
+  --round-id "<manual_chatgpt_round_id>"
+
+python -m backend.manual_chatgpt_operations historical-ab-compose-v3 `
+  --database "<operator-approved-existing.sqlite3>" `
+  --case-id "<case_id>" `
+  --baseline-arm "<reviewed-a-arm.json>" `
+  --baseline-room-id "<legacy_room_id>" `
+  --baseline-round-id "<legacy_round_id>" `
+  --room-id "<manual_chatgpt_room_id>" `
+  --round-id "<manual_chatgpt_round_id>" `
+  --b-human-operation-minutes "<reviewed-active-minutes>" `
+  --acknowledgement I_REVIEWED_BOTH_AB_ARMS
+
+python -m backend.manual_chatgpt_operations historical-ab-replay `
+  --source-directory "<20-to-30-reviewed-source-snapshots>" `
+  --dataset-id "<reviewed-dataset-id>"
+```
+
+`daily-summary` 默认仍输出闭合 JSON，便于下游自动化；`--format markdown` 输出适合 Scheduled Tasks 直接展示的确定性运营摘要。Markdown 渲染前会复核报告 SHA-256 与零写入、零 Provider、零市场、零导入边界，转义房间标题等动态文本，并继续把缺失费用标为“不可用”而不是零。`scheduled-task-contract` 生成不含数据库路径、带哈希封印的桌面任务建议、提示与命令契约，并保持 `external_task_created=false`；它不写死账户任务数量或模型可用性。`scheduled-daily-summary` 只从操作员单独绑定的 `AI_STUDIO_OPERATIONS_DATABASE` 读取路径，并强制 `AI_STUDIO_SKIP_LOCAL_ENV=1`，缺一项就在数据库连接前失败。它们都不会自行创建 Scheduled Task 或扩大本地项目、数据库权限；正式任务仍需用户在 ChatGPT Scheduled 界面明确创建并复核首轮运行。
+
+A/B 引擎强制 20–30 个唯一 Case，并分别保存每项指标的 `measured / recorded / estimated / projected / unavailable` 依据。主指标是人工操作分钟、模型调用数和 API 美元成本；输入字符、估算 Token、等待时间用于诊断；引用通过率与最终结论变化率是质量护栏。`historical-ab-export-b-arm` 可从另行授权的现有 SQLite 只读导出一个完整性通过、已冻结的新流程 B 臂：ChatGPT Panel 数仍按人工协议标为 `projected`，API 审查来自账本，人工操作分钟保持不可用，输出不含数据库路径且明确不是完整 A/B Case。当前 `historical-ab-compose-v3` 把一个已人工复核的旧流程 A 臂文件、冻结 B 臂和操作员复核的 B 侧主动操作分钟只读组合为 `manual_chatgpt_ab_source_snapshot_v3`；A 臂人工时间只能是正数 `measured/recorded`，B 臂固定为正数 `recorded`，明确不从墙钟推断，命令只输出 stdout，不写 Case 文件。`historical-ab-status` 可在收集未满 20 个 Case 时只读检查目录，逐项复用最终回放的闭合 schema、大小、读中变化、Case 与逐臂来源唯一性校验，并报告距离最低样本数和最大容量；它不创建、修复或改写快照。状态还会按模型调用数、输入字符、估算 Token、API 美元成本、等待时间、人工操作分钟、引用通过率和结论变化逐项返回 A/B 可用 Case、可比 Case、覆盖率与 basis 分布；缺失值和引用零分母都不按零处理，覆盖率只作描述，不新增默认达标线。20–30 个条目全部有效时返回 `ready_for_replay=true`；没有 v1 共享身份时可返回 `ready_for_dual_arm_replay=true`；只有全部为 v3 且八项指标覆盖完整时才返回 `ready_for_complete_ab_replay=true`。旧 v1/v2 文件继续只读兼容，但不会被提升到其不具备的证据层级。`historical-ab-replay` 验证本地快照内容、Case 与逐臂绑定，但仍不会把用户提供的计时、人工复核或“历史来源”标签冒充外部事实认证。下降比例和结论变化阈值只从数据集显式 `targets` 读取，系统没有默认“已达标”数值。测试中的 24 Case 仍是合成契约夹具，只证明计算、哈希绑定和失败关闭路径；它不是正式历史回放结果。完整口径见 `docs/manual_chatgpt_operations.md`。
+
+OpenAI 官方的 [Scheduled tasks 文档](https://learn.chatgpt.com/docs/automations) 区分了运行位置：桌面端 Scheduled Tasks 可以使用本地项目，并在项目目录或隔离工作树运行，但需要电脑保持开机且 ChatGPT 桌面应用持续运行；Web Scheduled Tasks 可以使用上传上下文和已连接工具，却不能直接操作电脑上的本地目录。这里交付的是可被明确授权的只读日报命令；未授予本地项目与数据库读取权限时，任务只能发送运营提醒或经另行授权的只读 MCP 取数。系统不写死 Pro 任务数量或可用模型限制，实际可用性以当前产品界面、workspace 管理策略和官方文档为准。
+
 ## 验证
 
 ```powershell
@@ -454,10 +547,14 @@ npm.cmd --prefix frontend run build
 - `backend/observation_service.py`：用户确认、真实基准、交易日到期结算与防未来数据验证。
 - `backend/store.py`：同时保存结果绑定的反思草稿、版本历史和用户确认状态。
 - `backend/material_ingest.py`：安全网页抓取、文件文本解析、哈希和来源元数据。
+- `backend/project_invocation.py` / `backend/project_integration_service.py`：外部项目 scoped capability、确定性 intake 与只读便携结果投影。
+- `backend/collaboration_result.py`：决定、研究与产物三类版本化结果档案。
+- `backend/presentation_package.py`：不执行宏、不抓取外链的 PPTX 包解析与渲染验收合同。
 - `backend/store.py`：同时负责资料版本与消息引用关系。
 - `backend/artifact_service.py`：会议纪要生成、结构校验和无模型时的诚实回退。
 - `backend/providers/`：模型适配器。
 - `frontend/`：React 客户端。
 - `docs/architecture_v2.md`：当前目标架构与升级顺序。
+- `docs/cross_project_collaboration_architecture.md` / `docs/project_invocation_quickstart.md`：跨项目边界、调用流程和正式启用前置条件。
 - `docs/open_source_upgrade_map.md`：TradingAgents、AI Hedge Fund、FinRobot、LangGraph 等方案的机制复用与许可边界。
 - `docs/industry_proxy_boundary.md`：官方月度行业代理、派生口径与不能外推到单家公司或即时报价的边界。

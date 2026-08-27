@@ -76,7 +76,7 @@ class DependencyInventoryTests(unittest.TestCase):
                 "ecosystem": "npm",
                 "lockfile_version": 3,
                 "path": "frontend/package-lock.json",
-                "sha256": "875e3714c1a69ec74d3510afa73a82e98c0d9cac6ea168587d0ba631a7116ffc",
+                "sha256": "3483d12256cb3005c350cb00deed8ee61fe7e0a916bb2c95394404bd8a1305f1",
             },
         ])
         self.assertFalse(first["boundaries"]["vulnerabilities_evaluated"])

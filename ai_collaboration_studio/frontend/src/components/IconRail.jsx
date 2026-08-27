@@ -1,4 +1,4 @@
-import { Folder, MessageSquare, Sparkles, Users } from "lucide-react";
+import { Folder, MessageSquare, PawPrint, Sparkles, Users } from "lucide-react";
 import "../styles/icon-rail-polish.css";
 
 const items = [
@@ -42,7 +42,9 @@ function moveRailFocus(event) {
 export function IconRail({ activeSection, onNavigate, onPreloadInspector }) {
   return (
     <nav className="icon-rail" aria-label="全局导航">
-      <div className="brand-mark" role="img" aria-label="AI 共创室">AI</div>
+      <div className="brand-mark" role="img" aria-label="AI 共创室·值班喵">
+        <PawPrint size={22} strokeWidth={2.1} aria-hidden="true" />
+      </div>
       <div className="rail-actions">
         {items.map(({ icon: Icon, label, section }) => (
           <button

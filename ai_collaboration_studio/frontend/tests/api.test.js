@@ -11,6 +11,99 @@ function jsonResponse(payload = { ok: true }) {
   };
 }
 
+test("manual ChatGPT collaboration keeps reads and mutations on encoded room/session routes", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const createPayload = { objective: "比较候选方案", mode: "standard" };
+  const reviewPayload = {
+    provider: "openai",
+    model: "gpt-test",
+    client_request_id: "review-one",
+    expected_result_sha256: "a".repeat(64),
+  };
+  const freezePayload = {
+    expected_result_sha256: "a".repeat(64),
+    decision_card_sha256: "b".repeat(64),
+    selected_option_id: "option_1",
+    acknowledgement: "RESEARCH_ONLY_USER_DECISION",
+  };
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    return jsonResponse({ ok: true, manual_chatgpt: {} });
+  };
+  try {
+    await api.latestManualChatGPT("room/一");
+    await api.createManualChatGPT("room/一", createPayload);
+    await api.dispatchManualChatGPT("room/一", "session/二");
+    await api.importManualChatGPT("room/一", "session/二", "{\"version\":\"manual_chatgpt_result_v1\"}");
+    await api.runManualChatGPTReview("room/一", "session/二", reviewPayload);
+    await api.freezeManualChatGPT("room/一", "session/二", freezePayload);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(requests[0].path, "/api/rooms/room%2F%E4%B8%80/chatgpt-collaborations/latest");
+  assert.equal(requests[0].options.method, undefined);
+  assert.equal(requests[1].path, "/api/rooms/room%2F%E4%B8%80/chatgpt-collaborations");
+  assert.equal(requests[1].options.method, "POST");
+  assert.deepEqual(JSON.parse(requests[1].options.body), createPayload);
+  assert.equal(
+    requests[2].path,
+    "/api/rooms/room%2F%E4%B8%80/chatgpt-collaborations/session%2F%E4%BA%8C/dispatch",
+  );
+  assert.equal(requests[2].options.method, "POST");
+  assert.deepEqual(JSON.parse(requests[2].options.body), {});
+  assert.equal(
+    requests[3].path,
+    "/api/rooms/room%2F%E4%B8%80/chatgpt-collaborations/session%2F%E4%BA%8C/imports",
+  );
+  assert.equal(requests[3].options.method, "POST");
+  assert.deepEqual(JSON.parse(requests[3].options.body), {
+    content: "{\"version\":\"manual_chatgpt_result_v1\"}",
+  });
+  assert.equal(
+    requests[4].path,
+    "/api/rooms/room%2F%E4%B8%80/chatgpt-collaborations/session%2F%E4%BA%8C/api-reviews",
+  );
+  assert.deepEqual(JSON.parse(requests[4].options.body), reviewPayload);
+  assert.equal(
+    requests[5].path,
+    "/api/rooms/room%2F%E4%B8%80/chatgpt-collaborations/session%2F%E4%BA%8C/freeze",
+  );
+  assert.deepEqual(JSON.parse(requests[5].options.body), freezePayload);
+});
+
+test("manual ChatGPT history and zero-call recovery use bounded encoded routes", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const recoveryPayload = {
+    expected_result_sha256: "c".repeat(64),
+    acknowledgement: "REAUTHORIZE_ZERO_CALL_ORPHANED_REVIEW",
+  };
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    return jsonResponse({ ok: true, manual_chatgpt_sessions: [] });
+  };
+  try {
+    await api.listManualChatGPT("room/一", 12);
+    await api.recoverManualChatGPTReview("room/一", "session/二", recoveryPayload);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(
+    requests[0].path,
+    "/api/rooms/room%2F%E4%B8%80/chatgpt-collaborations?limit=12",
+  );
+  assert.equal(requests[0].options.method, undefined);
+  assert.equal(
+    requests[1].path,
+    "/api/rooms/room%2F%E4%B8%80/chatgpt-collaborations/session%2F%E4%BA%8C/api-reviews/recover",
+  );
+  assert.equal(requests[1].options.method, "POST");
+  assert.deepEqual(JSON.parse(requests[1].options.body), recoveryPayload);
+});
+
 test("room plugin registry uses the encoded read-only route", async () => {
   const originalFetch = globalThis.fetch;
   let request;

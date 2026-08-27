@@ -8,11 +8,14 @@ export function Composer({
   onMention,
   onSend,
   onStartRound,
+  onStartChatGPT,
   disabled,
   roundDisabled = false,
   roundStatusLabel = "",
   roundStatusWarning = false,
   roundStatusTitle = "",
+  chatGPTDisabled = false,
+  chatGPTStatusTitle = "",
   members,
 }) {
   const [mentionOpen, setMentionOpen] = useState(false);
@@ -144,9 +147,19 @@ export function Composer({
             onClick={(event) => onStartRound?.(event.currentTarget)}
             disabled={disabled || roundDisabled}
           >
-            <Sparkles size={16} />开始一轮
+            <Sparkles size={16} />API 轮次
           </button>
-          <button className="primary send-button" type="button" onClick={submit} disabled={disabled || !value.trim()}>
+          <button
+            className="primary chatgpt-button"
+            type="button"
+            onClick={(event) => onStartChatGPT?.(event.currentTarget)}
+            disabled={disabled || chatGPTDisabled}
+            title={chatGPTStatusTitle || "打开人工 ChatGPT 协作席位；可在弹窗中填写研究问题，不会自动调用 Provider。"}
+            aria-label="打开人工 ChatGPT 协作席位"
+          >
+            <Sparkles size={16} />ChatGPT 协作
+          </button>
+          <button className="secondary send-button" type="button" onClick={submit} disabled={disabled || !value.trim()}>
             <Send size={16} />发送
           </button>
         </div>

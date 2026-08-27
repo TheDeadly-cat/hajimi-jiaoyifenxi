@@ -7,6 +7,7 @@ from pathlib import Path
 QA_SCRIPT_NAMES = (
     "run_isolated_action_desk_qa.py",
     "run_isolated_candidate_experiment_qa.py",
+    "run_isolated_manual_chatgpt_qa.py",
     "run_isolated_project_readiness_qa.py",
     "run_isolated_project_round_focus_qa.py",
 )
