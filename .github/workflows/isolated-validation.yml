@@ -96,12 +96,36 @@ jobs:
       - name: Generate offline dependency inventory
         shell: pwsh
         run: |
-          & "$env:AI_STUDIO_BOOTSTRAP_ROOT\python\Scripts\python.exe" `
+          $inventoryPath = Join-Path ([System.IO.Path]::GetTempPath()) (
+            "ai-studio-dependency-inventory-" +
+            [System.Guid]::NewGuid().ToString("N") +
+            ".json"
+          )
+          $inventoryPython = "$env:AI_STUDIO_BOOTSTRAP_ROOT\python\Scripts\python.exe"
+          & $inventoryPython `
             scripts/generate_dependency_inventory.py `
-            --output "$env:RUNNER_TEMP\dependency-inventory.json"
-          & "$env:AI_STUDIO_BOOTSTRAP_ROOT\python\Scripts\python.exe" `
+            --output "$inventoryPath"
+          if ($LASTEXITCODE -ne 0) {
+            throw "dependency inventory generation failed with exit code $LASTEXITCODE"
+          }
+          & $inventoryPython `
             scripts/generate_dependency_inventory.py `
-            --verify "$env:RUNNER_TEMP\dependency-inventory.json"
+            --verify "$inventoryPath"
+          if ($LASTEXITCODE -ne 0) {
+            throw "dependency inventory source verification failed with exit code $LASTEXITCODE"
+          }
+          $artifactPath = Join-Path $env:RUNNER_TEMP "dependency-inventory.json"
+          [System.IO.File]::Copy(
+            $inventoryPath,
+            $artifactPath,
+            $false
+          )
+          & $inventoryPython `
+            scripts/generate_dependency_inventory.py `
+            --verify "$artifactPath"
+          if ($LASTEXITCODE -ne 0) {
+            throw "dependency inventory artifact verification failed with exit code $LASTEXITCODE"
+          }
 
       - name: Upload non-secret delivery receipts
         if: always()

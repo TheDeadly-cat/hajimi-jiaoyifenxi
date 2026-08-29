@@ -93,7 +93,6 @@ class CIWorkflowContractTests(unittest.TestCase):
             '--runtime-root "$env:AI_STUDIO_BOOTSTRAP_ROOT"',
             workflow,
         )
-        self.assertEqual(workflow.count("$env:AI_STUDIO_BOOTSTRAP_ROOT"), 5)
         self.assertNotIn("$env:RUNNER_TEMP\\ai-studio-bootstrap", workflow)
         self.assertIn("npm.cmd --prefix frontend test", workflow)
         self.assertIn("scripts/run_backend_tests_isolated.py", workflow)
@@ -103,7 +102,82 @@ class CIWorkflowContractTests(unittest.TestCase):
         self.assertIn("release-drill.json", workflow)
         self.assertIn("scripts/generate_dependency_inventory.py", workflow)
         self.assertIn("dependency-inventory.json", workflow)
-        self.assertIn('--verify "$env:RUNNER_TEMP\\dependency-inventory.json"', workflow)
+        inventory_start = workflow.index(
+            "      - name: Generate offline dependency inventory"
+        )
+        inventory_end = workflow.index(
+            "      - name: Upload non-secret delivery receipts",
+            inventory_start,
+        )
+        inventory_step = workflow[inventory_start:inventory_end]
+        inventory_output = '--output "$inventoryPath"'
+        inventory_verify = '--verify "$inventoryPath"'
+        native_guard = "if ($LASTEXITCODE -ne 0)"
+        exclusive_copy = "[System.IO.File]::Copy("
+        artifact_verify = '--verify "$artifactPath"'
+        self.assertEqual(
+            inventory_step.count("scripts/generate_dependency_inventory.py"),
+            3,
+        )
+        self.assertEqual(inventory_step.count("$inventoryPython"), 4)
+        self.assertEqual(inventory_step.count("$inventoryPath"), 4)
+        self.assertEqual(inventory_step.count(native_guard), 3)
+        self.assertEqual(inventory_step.count(exclusive_copy), 1)
+        self.assertIn("[System.IO.Path]::GetTempPath()", inventory_step)
+        for failure_message in (
+            "dependency inventory generation failed",
+            "dependency inventory source verification failed",
+            "dependency inventory artifact verification failed",
+        ):
+            self.assertIn(
+                f'throw "{failure_message} with exit code $LASTEXITCODE"',
+                inventory_step,
+            )
+        self.assertIn('"ai-studio-dependency-inventory-" +', inventory_step)
+        self.assertIn(
+            '[System.Guid]::NewGuid().ToString("N")',
+            inventory_step,
+        )
+        self.assertIn(
+            '$artifactPath = Join-Path $env:RUNNER_TEMP "dependency-inventory.json"',
+            inventory_step,
+        )
+        self.assertIn(
+            "$inventoryPath,\n            $artifactPath,\n            $false",
+            inventory_step,
+        )
+        generation_guard = inventory_step.index(
+            native_guard,
+            inventory_step.index(inventory_output),
+        )
+        source_verify = inventory_step.index(inventory_verify, generation_guard)
+        source_guard = inventory_step.index(native_guard, source_verify)
+        copy_call = inventory_step.index(exclusive_copy, source_guard)
+        copied_verify = inventory_step.index(artifact_verify, copy_call)
+        artifact_guard = inventory_step.index(native_guard, copied_verify)
+        self.assertLess(generation_guard, source_verify)
+        self.assertLess(source_verify, source_guard)
+        self.assertLess(source_guard, copy_call)
+        self.assertLess(copy_call, copied_verify)
+        self.assertLess(copied_verify, artifact_guard)
+        self.assertNotIn("--project-root", inventory_step)
+        self.assertNotIn("$env:GITHUB_ENV", inventory_step)
+        self.assertNotIn(
+            '$inventoryPath = Join-Path $env:RUNNER_TEMP',
+            inventory_step,
+        )
+        self.assertNotIn("Copy-Item", inventory_step)
+        self.assertNotIn("$true", inventory_step)
+        self.assertNotIn(
+            '--output "$env:RUNNER_TEMP\\dependency-inventory.json"',
+            inventory_step,
+        )
+        upload_step = workflow[inventory_end:]
+        self.assertIn(
+            "${{ runner.temp }}\\dependency-inventory.json",
+            upload_step,
+        )
+        self.assertNotIn("$inventoryPath", upload_step)
         self.assertEqual(workflow.count("--allow-dependency-downloads"), 2)
         self.assertNotIn("node --test", workflow)
         self.assertNotIn("python -m unittest", workflow)
