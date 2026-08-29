@@ -17,7 +17,8 @@ async function jsonRequest(path, options = {}) {
     const requestError = new Error(data.error || `请求失败：${response.status}`);
     requestError.code = typeof data.code === "string" ? data.code : "";
     requestError.status = response.status;
-    requestError.details = data.diagnostic || data.details || null;
+    requestError.details = data.diagnostic || data.details || data.issues || null;
+    requestError.issues = Array.isArray(data.issues) ? data.issues.slice(0, 50) : [];
     throw requestError;
   }
   return data;
@@ -26,6 +27,60 @@ async function jsonRequest(path, options = {}) {
 export const api = {
   bootstrap: (roomId = "") => jsonRequest(`/api/bootstrap${roomId ? `?room=${encodeURIComponent(roomId)}` : ""}`),
   room: (roomId) => jsonRequest(`/api/rooms/${encodeURIComponent(roomId)}`),
+  listSourceInbox: ({ state = "", query = "", limit = 100, signal } = {}) => {
+    const parameters = new URLSearchParams({ limit: String(limit) });
+    if (state) parameters.set("state", state);
+    if (query) parameters.set("q", query);
+    return jsonRequest(`/api/monitoring/inbox?${parameters.toString()}`, { signal });
+  },
+  sourceInboxItem: (itemId, signal) => jsonRequest(
+    `/api/monitoring/events/${encodeURIComponent(itemId)}`,
+    { signal },
+  ),
+  importSourceInbox: (content, signal) => jsonRequest(
+    "/api/monitoring/imports/chatgpt",
+    { method: "POST", body: JSON.stringify({ content }), signal },
+  ),
+  acknowledgeSourceInboxItem: (itemId, expectedStateVersion, signal) => jsonRequest(
+    `/api/monitoring/events/${encodeURIComponent(itemId)}/acknowledge`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        expected_state_version: expectedStateVersion,
+        acknowledgement: true,
+      }),
+      signal,
+    },
+  ),
+  attachSourceInboxItem: (itemId, roomId, expectedStateVersion, signal) => jsonRequest(
+    `/api/monitoring/events/${encodeURIComponent(itemId)}/attach`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: roomId,
+        expected_state_version: expectedStateVersion,
+      }),
+      signal,
+    },
+  ),
+  createSourceInboxRoundDraft: (
+    itemId,
+    roomId,
+    expectedStateVersion,
+    objective = "",
+    signal,
+  ) => jsonRequest(
+    `/api/monitoring/events/${encodeURIComponent(itemId)}/round-draft`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        room_id: roomId,
+        expected_state_version: expectedStateVersion,
+        ...(objective ? { objective } : {}),
+      }),
+      signal,
+    },
+  ),
   latestManualChatGPT: (roomId) => jsonRequest(
     `/api/rooms/${encodeURIComponent(roomId)}/chatgpt-collaborations/latest`,
   ),

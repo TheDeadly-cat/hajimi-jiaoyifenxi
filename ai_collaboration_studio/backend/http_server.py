@@ -74,6 +74,8 @@ from .providers.registry import PROVIDERS
 from .round_launch_plan import RoundLaunchPlanService
 from .round_contexts import RoundContextError
 from .stock_research_service import StockResearchError, StockResearchService
+from .source_inbox_contracts import SourceInboxContractError
+from .source_inbox_service import SourceInboxError, SourceInboxService
 from .storage_sample_acceptance import StorageSampleAcceptance
 from .structured_logging import (
     classify_request_target,
@@ -107,6 +109,13 @@ SERVICE_VERSION = "0.1.0"
 HOST_API_CONTRACT_VERSION = "host_delivery_v1"
 HOST_READINESS_SCHEMA_VERSION = "host_readiness_v1"
 HOST_VERSION_SCHEMA_VERSION = "host_version_v2"
+
+
+def _is_source_inbox_path(path: str) -> bool:
+    return bool(
+        path in {"/api/monitoring/inbox", "/api/monitoring/imports/chatgpt"}
+        or re.fullmatch(r"/api/monitoring/events/[^/]+(?:/(?:acknowledge|attach|round-draft))?", path)
+    )
 
 
 def _backend_build_identity_at_startup() -> dict[str, Any]:
@@ -413,6 +422,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         self._cors_headers()
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-AI-Studio-Token")
+        if _is_source_inbox_path(urlparse(self.path).path):
+            self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
     def do_GET(self) -> None:
@@ -543,6 +554,77 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._send_json({"ok": True, "action_desk_overview": overview})
+            return
+        if parsed.path == "/api/monitoring/inbox":
+            source_query = parse_qs(parsed.query, keep_blank_values=True)
+            if (
+                set(source_query) - {"state", "q", "limit"}
+                or any(len(values) != 1 for values in source_query.values())
+            ):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "来源收件箱只接受 state、q 和 limit。",
+                        "code": "SOURCE_INBOX_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                limit = int((source_query.get("limit") or ["100"])[0])
+                inbox = SourceInboxService(STORE).list_items(
+                    state=(source_query.get("state") or [""])[0],
+                    query=(source_query.get("q") or [""])[0],
+                    limit=limit,
+                )
+            except (TypeError, ValueError, SourceInboxError) as exc:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "code": getattr(exc, "code", "SOURCE_INBOX_REQUEST_INVALID"),
+                    },
+                    HTTPStatus(getattr(exc, "status", 400)),
+                )
+                return
+            self._send_json({"ok": True, "source_inbox": inbox})
+            return
+        source_inbox_item_match = re.fullmatch(
+            r"/api/monitoring/events/([^/]+)",
+            parsed.path,
+        )
+        if source_inbox_item_match:
+            if parsed.query:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "来源事件详情不接受查询参数。",
+                        "code": "SOURCE_INBOX_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                item = SourceInboxService(STORE).get_item(
+                    source_inbox_item_match.group(1)
+                )
+            except SourceInboxError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            if item is None:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "来源事件不存在。",
+                        "code": "SOURCE_INBOX_NOT_FOUND",
+                    },
+                    HTTPStatus.NOT_FOUND,
+                )
+                return
+            self._send_json({"ok": True, "source_item": item})
             return
         manual_chatgpt_latest_match = re.fullmatch(
             r"/api/rooms/([^/]+)/chatgpt-collaborations/latest",
@@ -1386,6 +1468,14 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             r"/api/rooms/[^/]+/chatgpt-collaborations/[^/]+/imports",
             parsed.path,
         ))
+        is_source_inbox_import = parsed.path == "/api/monitoring/imports/chatgpt"
+        is_source_inbox_request = bool(
+            is_source_inbox_import
+            or re.fullmatch(
+                r"/api/monitoring/events/[^/]+/(?:acknowledge|attach|round-draft)",
+                parsed.path,
+            )
+        )
         carries_round_context = bool(re.fullmatch(
             r"/api/rooms/[^/]+/(?:round-launch-plan|providers/preflight|rounds/stream)",
             parsed.path,
@@ -1398,10 +1488,145 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 if readonly_research_match is not None or carries_round_context
                 else 256_000
                 if is_manual_chatgpt_import
+                else 512_000
+                if is_source_inbox_import
                 else 128_000
-            )
+            ),
+            strict=is_source_inbox_request,
         )
         if payload is None:
+            return
+        if is_source_inbox_import:
+            if set(payload) != {"content"} or type(payload.get("content")) is not str:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "来源导入请求必须只包含字符串 content。",
+                        "code": "SOURCE_INBOX_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                result = SourceInboxService(STORE).import_packet(payload["content"])
+            except SourceInboxContractError as exc:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "code": exc.code,
+                        "issues": [item.as_dict() for item in exc.issues],
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            except SourceInboxError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json(
+                {"ok": True, "source_import": result},
+                HTTPStatus.OK if result["idempotent_replay"] else HTTPStatus.CREATED,
+            )
+            return
+        source_inbox_ack_match = re.fullmatch(
+            r"/api/monitoring/events/([^/]+)/acknowledge",
+            parsed.path,
+        )
+        if source_inbox_ack_match:
+            if set(payload) != {"expected_state_version", "acknowledgement"}:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "已阅确认字段不完整或包含额外字段。",
+                        "code": "SOURCE_INBOX_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                item = SourceInboxService(STORE).acknowledge(
+                    source_inbox_ack_match.group(1),
+                    expected_state_version=payload.get("expected_state_version"),
+                    acknowledgement=payload.get("acknowledgement"),
+                )
+            except SourceInboxError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json({"ok": True, "source_item": item})
+            return
+        source_inbox_attach_match = re.fullmatch(
+            r"/api/monitoring/events/([^/]+)/attach",
+            parsed.path,
+        )
+        if source_inbox_attach_match:
+            if set(payload) != {"room_id", "expected_state_version"}:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "来源附加请求字段不完整或包含额外字段。",
+                        "code": "SOURCE_INBOX_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                result = SourceInboxService(STORE).attach_to_room(
+                    source_inbox_attach_match.group(1),
+                    room_id=payload.get("room_id"),
+                    expected_state_version=payload.get("expected_state_version"),
+                )
+            except SourceInboxError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json(
+                {"ok": True, **result},
+                HTTPStatus.OK if result["idempotent_replay"] else HTTPStatus.CREATED,
+            )
+            return
+        source_inbox_draft_match = re.fullmatch(
+            r"/api/monitoring/events/([^/]+)/round-draft",
+            parsed.path,
+        )
+        if source_inbox_draft_match:
+            if not set(payload).issubset({"room_id", "expected_state_version", "objective"}) or (
+                set(payload) - {"objective"}
+                != {"room_id", "expected_state_version"}
+            ) or ("objective" in payload and type(payload.get("objective")) is not str):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "轮次草稿请求字段不完整或包含额外字段。",
+                        "code": "SOURCE_INBOX_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                result = SourceInboxService(STORE).create_round_draft(
+                    source_inbox_draft_match.group(1),
+                    room_id=payload.get("room_id"),
+                    expected_state_version=payload.get("expected_state_version"),
+                    objective=payload.get("objective", ""),
+                )
+            except SourceInboxError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json(
+                {"ok": True, **result},
+                HTTPStatus.OK if result["idempotent_replay"] else HTTPStatus.CREATED,
+            )
             return
         if football_research_match:
             if set(payload) != {"payload"}:
@@ -4508,7 +4733,12 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         )
         return skip_provider_ids
 
-    def _read_json(self, *, max_bytes: int = 128_000) -> dict[str, Any] | None:
+    def _read_json(
+        self,
+        *,
+        max_bytes: int = 128_000,
+        strict: bool = False,
+    ) -> dict[str, Any] | None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -4517,11 +4747,30 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "请求内容为空或过大"}, HTTPStatus.BAD_REQUEST)
             return None
         try:
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            raw = self.rfile.read(length).decode("utf-8")
+            if strict:
+                def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+                    output: dict[str, Any] = {}
+                    for key, value in pairs:
+                        if key in output:
+                            raise ValueError("duplicate JSON key")
+                        output[key] = value
+                    return output
+
+                def reject_constant(_value: str) -> None:
+                    raise ValueError("non-finite JSON number")
+
+                payload = json.loads(
+                    raw,
+                    object_pairs_hook=unique_object,
+                    parse_constant=reject_constant,
+                )
+            else:
+                payload = json.loads(raw)
         except Exception:
             self._send_json({"ok": False, "error": "JSON 格式无效"}, HTTPStatus.BAD_REQUEST)
             return None
-        if not isinstance(payload, dict):
+        if type(payload) is not dict:
             self._send_json({"ok": False, "error": "请求必须是 JSON 对象"}, HTTPStatus.BAD_REQUEST)
             return None
         return payload
@@ -4992,6 +5241,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         *,
         cache_control: str | None = None,
     ) -> None:
+        if cache_control is None and _is_source_inbox_path(urlparse(self.path).path):
+            cache_control = "no-store"
         body = json_bytes(payload)
         self.send_response(status)
         self._cors_headers()

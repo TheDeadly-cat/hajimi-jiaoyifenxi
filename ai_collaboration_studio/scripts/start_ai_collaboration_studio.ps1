@@ -23,6 +23,20 @@ function Show-LauncherError {
     ) | Out-Null
 }
 
+function Get-FileSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha256.ComputeHash($stream)
+    } finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
+    return -join ($digest | ForEach-Object { $_.ToString("x2") })
+}
+
 function Get-BackendSourceSha256 {
     $relativePaths = @("server.py")
     $relativePaths += Get-ChildItem `
@@ -38,7 +52,7 @@ function Get-BackendSourceSha256 {
     $fingerprint = [System.Text.StringBuilder]::new()
     foreach ($relativePath in $orderedPaths) {
         $sourcePath = Join-Path $projectRoot $relativePath.Replace("/", "\")
-        $fileSha256 = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $fileSha256 = Get-FileSha256 -Path $sourcePath
         [void]$fingerprint.Append($relativePath)
         [void]$fingerprint.Append([char]0)
         [void]$fingerprint.Append($fileSha256)
@@ -71,7 +85,7 @@ function Test-StudioReady {
             $version.backend_build.available -eq $true -and `
             $version.backend_build.source_sha256 -eq $expectedBackendSourceSha256 -and `
             $manifest.ok -eq $true -and `
-            $manifest.version -eq "studio_integration_manifest_v2"
+            $manifest.schema_version -eq "studio_integration_manifest_v2"
     } catch {
         return $false
     }
@@ -170,7 +184,12 @@ $logHint
 try {
     $expectedBackendSourceSha256 = Get-BackendSourceSha256
 } catch {
-    Show-LauncherError "The launcher could not compute the current backend source identity. No service was started."
+    $sourceIdentityError = $_.Exception.Message
+    Show-LauncherError @"
+The launcher could not compute the current backend source identity. No service was started.
+
+Diagnostic: $sourceIdentityError
+"@
     exit 1
 }
 

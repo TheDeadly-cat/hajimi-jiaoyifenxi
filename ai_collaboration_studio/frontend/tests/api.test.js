@@ -104,6 +104,90 @@ test("manual ChatGPT history and zero-call recovery use bounded encoded routes",
   assert.deepEqual(JSON.parse(requests[1].options.body), recoveryPayload);
 });
 
+test("source inbox API keeps reads and explicit CAS mutations on isolated monitoring routes", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const controller = new AbortController();
+  const content = "```json\n{\"version\":\"source_import_packet_v1\"}\n```";
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    return jsonResponse({ ok: true, source_inbox: { items: [], counts: {} } });
+  };
+  try {
+    await api.listSourceInbox({
+      state: "AWAITING_USER",
+      query: "CI 失败",
+      limit: 12,
+      signal: controller.signal,
+    });
+    await api.sourceInboxItem("event/一", controller.signal);
+    await api.importSourceInbox(content, controller.signal);
+    await api.acknowledgeSourceInboxItem("event/一", 3, controller.signal);
+    await api.attachSourceInboxItem("event/一", "room/二", 4, controller.signal);
+    await api.createSourceInboxRoundDraft(
+      "event/一",
+      "room/二",
+      5,
+      "仅形成待审阅草稿",
+      controller.signal,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(
+    requests[0].path,
+    "/api/monitoring/inbox?limit=12&state=AWAITING_USER&q=CI+%E5%A4%B1%E8%B4%A5",
+  );
+  assert.equal(requests[0].options.signal, controller.signal);
+  assert.equal(requests[1].path, "/api/monitoring/events/event%2F%E4%B8%80");
+  assert.equal(requests[1].options.method, undefined);
+  assert.equal(requests[2].path, "/api/monitoring/imports/chatgpt");
+  assert.deepEqual(JSON.parse(requests[2].options.body), { content });
+  assert.equal(requests[3].path, "/api/monitoring/events/event%2F%E4%B8%80/acknowledge");
+  assert.deepEqual(JSON.parse(requests[3].options.body), {
+    expected_state_version: 3,
+    acknowledgement: true,
+  });
+  assert.equal(requests[4].path, "/api/monitoring/events/event%2F%E4%B8%80/attach");
+  assert.deepEqual(JSON.parse(requests[4].options.body), {
+    room_id: "room/二",
+    expected_state_version: 4,
+  });
+  assert.equal(requests[5].path, "/api/monitoring/events/event%2F%E4%B8%80/round-draft");
+  assert.deepEqual(JSON.parse(requests[5].options.body), {
+    room_id: "room/二",
+    expected_state_version: 5,
+    objective: "仅形成待审阅草稿",
+  });
+  assert.equal(requests.slice(2).every((request) => request.options.method === "POST"), true);
+  assert.equal(requests.every((request) => request.options.signal === controller.signal), true);
+});
+
+test("source import errors retain bounded field issues for repair UI", async () => {
+  const originalFetch = globalThis.fetch;
+  const issues = [{ path: "$.items[0]", code: "SOURCE_IMPORT_FIELD_INVALID" }];
+  globalThis.fetch = async () => jsonResponse({
+    ok: false,
+    error: "来源包字段无效。",
+    code: "SOURCE_IMPORT_FIELD_INVALID",
+    issues,
+  });
+  try {
+    await assert.rejects(
+      () => api.importSourceInbox("{}"),
+      (error) => {
+        assert.equal(error.code, "SOURCE_IMPORT_FIELD_INVALID");
+        assert.deepEqual(error.issues, issues);
+        assert.deepEqual(error.details, issues);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("room plugin registry uses the encoded read-only route", async () => {
   const originalFetch = globalThis.fetch;
   let request;

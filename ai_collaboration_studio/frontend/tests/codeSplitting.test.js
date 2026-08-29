@@ -109,9 +109,12 @@ test("chat, sidebar and composer stay eager while heavy host surfaces use direct
   }
   assert.match(appSource, /function loadRoomInspector\(\)[\s\S]*import\("\.\/components\/RoomInspector\.jsx"\)/);
   assert.match(appSource, /const RoomInspector = lazy\(loadRoomInspector\)/);
+  assert.match(appSource, /function loadSourceInboxPanel\(\)[\s\S]*import\("\.\/components\/SourceInboxPanel\.jsx"\)/);
+  assert.match(appSource, /const SourceInboxPanel = lazy\(loadSourceInboxPanel\)/);
   assert.match(appSource, /onFocus=\{preloadRoomInspector\}[\s\S]*onPointerDown=\{preloadRoomInspector\}[\s\S]*onPointerEnter=\{preloadRoomInspector\}/);
   assert.match(appSource, /onPreloadInspector=\{preloadRoomInspector\}/);
-  assert.equal((iconRailSource.match(/section === "rooms" \? undefined : onPreloadInspector/g) || []).length, 3);
+  assert.match(appSource, /onPreloadSourceInbox=\{preloadSourceInboxPanel\}/);
+  assert.match(iconRailSource, /section === "source-inbox"[\s\S]*onPreloadSourceInbox[\s\S]*section === "rooms"[\s\S]*onPreloadInspector/);
   assert.doesNotMatch(appSource, /import\("\.\/components(?:\/index)?"\)/);
 });
 
@@ -123,10 +126,12 @@ test("deferred surfaces activate on open and remain mounted through a bounded ex
   assert.match(appSource, /return \(\) => globalThis\.clearTimeout\(timer\)/);
   assert.match(appSource, /return Boolean\(active\) \|\| activated/);
   assert.match(appSource, /const inspectorActivated = useDeferredActivation\(inspectorOpen\)/);
+  assert.match(appSource, /const sourceInboxActivated = useDeferredActivation\(sourceInboxOpen\)/);
   assert.match(appSource, /const artifactActivated = useDeferredActivation\(Boolean\(editingArtifact\)\)/);
   assert.match(appSource, /const chatGPTCollaborationActivated = useDeferredActivation\(chatGPTCollaborationOpen\)/);
   assert.match(appSource, /const paperPortfolioActivated = useDeferredActivation\(Boolean\(editingPaperPortfolio\)\)/);
   assert.match(appSource, /\{inspectorActivated \? <Suspense/);
+  assert.match(appSource, /\{sourceInboxActivated \? <Suspense/);
   assert.match(appSource, /\{artifactActivated \? <Suspense/);
   assert.match(appSource, /\{chatGPTCollaborationActivated \? <Suspense/);
   assert.match(appSource, /\{paperPortfolioActivated \? <Suspense/);
@@ -138,8 +143,8 @@ test("every lazy host surface has an explicit Suspense fallback", () => {
   assert.match(deferredFallbackSource, /export function DeferredSurfaceFallback/);
   const lazyCount = (appSource.match(/= lazy\(/g) || []).length;
   const suspenseCount = (appSource.match(/<Suspense fallback=/g) || []).length;
-  assert.equal(lazyCount, 17);
-  assert.equal(suspenseCount, 17);
+  assert.equal(lazyCount, 18);
+  assert.equal(suspenseCount, 18);
 });
 
 test("football and stock panel CSS follows the corresponding lazy module", () => {

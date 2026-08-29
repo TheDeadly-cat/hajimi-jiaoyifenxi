@@ -108,7 +108,7 @@ python scripts\bootstrap_ai_collaboration_studio.py --allow-dependency-downloads
 python scripts\bootstrap_ai_collaboration_studio.py --check-only
 ```
 
-项目当前不是 Git 仓库。以下验收因此使用已有严格备份器生成并离线校验源码 ZIP，再解包到系统临时目录，不能表述为远程 Git clone；依赖下载需要再次显式授权：
+本地权威源码目录有意保持非 Git；公开 GitHub 仓库保存的是经过排除与哈希校验的 source-only 发布投影，两者不是同一个工作树。以下 fresh-source 验收仍使用严格备份器生成并离线校验源码 ZIP，再解包到系统临时目录，不能表述为远程 Git clone；依赖下载需要再次显式授权：
 
 ```powershell
 python scripts\run_fresh_source_smoke.py --allow-dependency-downloads
@@ -120,7 +120,14 @@ listener 表，不会向这些受保护端口发起 `connect` / `connect_ex`；�
 
 smoke 会验证源码排除规则、全新 Python/npm 安装、README 指定的前端安全回归、production build、宿主定向测试和随机回环端口启动，最后删除临时源码、依赖、runtime 与数据库。`requirements.txt` 保留直接依赖兼容范围；实际 bootstrap 使用 `requirements-lock-win-py314.txt` 的精确版本与发行包 SHA，并要求最终 `pip freeze` 完全匹配。该 lock 只覆盖 Windows x64 CPython 3.14，不代表其他平台或字节级构建可复现。
 
-`.github/workflows/isolated-validation.yml` 为未来进入 GitHub 仓库后的 Windows CI 定义：受控前端全量、完整隔离后端层和 clean-source smoke 分别执行。当前目录仍不是 Git 仓库，本地创建该工作流文件不等于 CI 已在 GitHub 实际触发或通过。
+`.github/workflows/isolated-validation.yml` 是 canonical 的仓库根 Windows CI 模板：它固定使用 `pwsh`，所有 `run` 步骤以 `ai_collaboration_studio/` 为工作目录，Node cache 路径则显式从仓库根解析。`scripts/create_github_source_projection.py` 会把完整可发布源码放到投影的 `ai_collaboration_studio/`，并把该模板逐字复制到投影根 `.github/workflows/isolated-validation.yml`；根 README 与 `.cmd.template` 薄启动适配器来自 `delivery/repository-root/`。目标目录必须是源码树外尚不存在的新目录，例如：
+
+```powershell
+$projection = Join-Path ([IO.Path]::GetTempPath()) ("ai-studio-projection-" + [guid]::NewGuid().ToString("N"))
+python scripts\create_github_source_projection.py --destination-root $projection
+```
+
+该命令只生成确定性本地树，不初始化 Git、不提交、不推送，也不证明 CI 已运行。发布后仍须以仓库根 workflow 的真实 Actions run 作为 CI 证据。
 
 CI 中所有第三方 `uses:` 已固定到 2026-08-24 从对应 `actions/*` 官方仓库主版本标签只读解析出的完整提交 SHA；更新 action 必须重新解析、审阅并同步修改契约测试，禁止退回浮动标签。提交固定降低标签漂移风险，但不替代上游代码审阅、依赖告警或实际 CI 运行证据。
 
@@ -138,7 +145,7 @@ python server.py
 
 打开：`http://127.0.0.1:8770/`
 
-桌面快捷方式为 `AI 共创室 - 交易分析.lnk`，入口脚本使用 `scripts/start_ai_collaboration_studio.ps1`：若 8770 上已经是同时通过 readiness、host version 与 `studio_integration_manifest_v2` 契约识别的当前项目服务则直接打开；否则在后台启动服务并等待三项检查通过。若端口被其他程序、旧版服务或未就绪实例占用，入口会失败关闭，不结束或替换现有进程。新源码需要迁移或存在恢复缺口时，launcher 会从自己本次创建的日志中只分类错误类型并提示重新执行精确 `preview → prepare → 授权 → apply`，不会自动迁移、复用旧授权或展示数据库内容。入口本身不调用 Provider、Futu 或任何交易接口。
+桌面快捷方式为 `AI 共创室 - 交易分析.lnk`，直接使用 `scripts/start_ai_collaboration_studio.ps1`；仓库根 `run_ai_collaboration_studio.cmd` 也只转交给同一受控入口，不再自行探测 `/api/health` 或用系统 Python 旁路启动。若 8770 上已经是同时通过 readiness、host version 与 `studio_integration_manifest_v2` 契约识别的当前项目服务则直接打开；否则 launcher 才在后台启动服务并等待三项检查通过。若端口被其他程序、旧版服务或未就绪实例占用，入口会失败关闭，不结束或替换现有进程。新源码需要迁移或存在恢复缺口时，launcher 会从自己本次创建的日志中只分类错误类型并提示重新执行精确 `preview → prepare → 授权 → apply`，不会自动迁移、复用旧授权或展示数据库内容。入口本身不调用 Provider、Futu 或任何交易接口。
 
 宿主交付端点均为只读 JSON，且不探测 Provider、不返回密钥、数据库路径或会话令牌：
 
@@ -146,6 +153,8 @@ python server.py
 - `GET /api/readiness` 使用 `host_readiness_v1`；只有启动所有权/迁移 gate 已完成、当前数据库句柄仍存在且 `frontend/dist/index.html` 可读时才返回 `200` 与 `ready: true`，否则返回 `503`。
 - `GET /api/version` 使用 `host_version_v2`，返回产品 `0.1.0`、宿主 API 契约版本、进程启动时冻结的无路径后端源码 SHA256，以及 production frontend `index.html` 的字节数和 SHA256。launcher 会把冻结指纹与当前磁盘源码比较，拒绝把“旧后端 + 新前端”识别为当前就绪实例。
 - `GET /api/integration/manifest` 使用 `studio_integration_manifest_v2`，只从编译期合同生成自哈希的能力发现清单：列出 kernel/registry、能力包、Manual ChatGPT、只读 MCP、版本化插件目录、PPTX 包合同、项目接入与便携结果的 schema hash，以及固定安全边界；它不读数据库、Provider、市场、环境秘密或本地路径。外部写入只允许使用独立、短时、请求绑定的 project capability 调用 `POST /api/integration/project-invocations`，且仅能原子创建项目专属房间与 intake；`/api/bootstrap` 的前端会话凭据不会被该入口接受。
+- `python -m backend.project_capability_issuer inspect|dry-run|mint` 提供离线可信操作员签发：显式读取 sealed envelope 与无秘密项目 allowlist，复用既有 capability 协议，每枚 token 只含 `project_invocation.intake` 或 `project_invocation.result.read` 一个动作，并输出不含 bearer/签名秘密的审计 receipt。inspect/dry-run 不读取秘密；mint 只从操作员进程环境或显式 stdin 读取秘密，不打开数据库、不启动服务，也不连接 Provider 或市场。完整策略、确认文本和示例见 [`docs/project_invocation_quickstart.md`](docs/project_invocation_quickstart.md)。
+- 全局“来源收件箱”使用领域无关的 `source_import_packet_v1 / project_source_item_v1`：支持 ChatGPT Scheduled Task 结果的人工 JSON 导入、服务端指纹与幂等去重、来源/事实/影响假设的 `external_unverified` 展示、显式“已阅不代表事实确认”、手动挂接房间材料，以及只生成 `source_inbox_round_draft_v1`。它不会自动创建正式轮次、调用 Provider、读取市场或授予执行权限；源码接口与状态机见 [`docs/source_inbox_contract_v1.md`](docs/source_inbox_contract_v1.md)。正式桌面实例仍须先完成当前源码对应的精确数据库迁移授权。
 - 未注册的 `/api` GET 路径返回 JSON `404 / API_NOT_FOUND`，不会落入前端 SPA fallback 形成伪 `200 text/html`。
 
 算命、交易、PPT、足球等项目的正确接入面、结果档案与 scoped capability 路线见 [`docs/cross_project_collaboration_architecture.md`](docs/cross_project_collaboration_architecture.md)；最小调用流程见 [`docs/project_invocation_quickstart.md`](docs/project_invocation_quickstart.md)。现阶段保持 iframe 与跨域写入关闭；发现清单、只读 MCP 和项目接入 capability 是三个不同权限层。

@@ -74,6 +74,12 @@ class CIWorkflowContractTests(unittest.TestCase):
         self.assertIn("runs-on: windows-latest", workflow)
         self.assertIn('python-version: "3.14"', workflow)
         self.assertIn('node-version: "24"', workflow)
+        self.assertIn("defaults:\n      run:\n        shell: pwsh", workflow)
+        self.assertIn("working-directory: ai_collaboration_studio", workflow)
+        self.assertIn(
+            "cache-dependency-path: ai_collaboration_studio/frontend/package-lock.json",
+            workflow,
+        )
         self.assertIn("AI_STUDIO_SKIP_LOCAL_ENV", workflow)
         self.assertIn("scripts/bootstrap_ai_collaboration_studio.py", workflow)
         self.assertIn("scripts/run_static_security_checks.py", workflow)
@@ -92,6 +98,22 @@ class CIWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("python -m unittest", workflow)
         self.assertNotIn("server.py", workflow)
         self.assertNotIn("8770", workflow)
+
+    def test_repository_root_launcher_delegates_to_the_guarded_launcher(self) -> None:
+        root_launcher = (
+            Path(__file__).resolve().parents[1]
+            / "delivery"
+            / "repository-root"
+            / "run_ai_collaboration_studio.cmd.template"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("scripts\\start_ai_collaboration_studio.ps1", root_launcher)
+        self.assertIn("AI_STUDIO_EXIT_CODE=%ERRORLEVEL%", root_launcher)
+        self.assertTrue(root_launcher.isascii())
+        self.assertNotIn("chcp", root_launcher.lower())
+        self.assertNotIn("/api/health", root_launcher)
+        self.assertNotIn("server.py", root_launcher)
+        self.assertNotIn("Stop-Process", root_launcher)
 
     def test_every_action_is_pinned_to_the_reviewed_full_commit(self) -> None:
         workflow = (

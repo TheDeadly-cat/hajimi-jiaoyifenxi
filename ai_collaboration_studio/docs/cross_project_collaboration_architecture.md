@@ -24,6 +24,7 @@ Studio 已把调用方身份、便携请求、结果档案、版本协商和权�
 | 发现与协商 | 查询版本、能力包、端口、schema hash 和安全边界 | `studio_integration_manifest_v2` 与 plugin catalog v3 已提供 | 纯静态只读 |
 | 上下文读取 | 为已授权的冻结轮次读取有界上下文、证据块、状态和导入合同 | 独立只读 MCP 已提供 | room + round + TTL，只读 |
 | 请求与结果 | 幂等创建跨项目房间并读取机器可读结果 | 源码已实现，正式授权运行态未探测 | caller + project + request + room + action + TTL |
+| 外部来源收件箱 | 人工导入 GitHub/CI/ChatGPT/未来领域适配器的结构化来源，确认后挂接房间 | v1 源码、HTTP 与前端已实现；正式数据库尚未迁移 | 本机 UI token + 用户逐项确认；无执行能力 |
 
 前两个面不能被解释为第三个面的授权。发现成功不代表调用已获准，MCP 可读也不代表可以创建房间、导入结果或触发 Provider。
 
@@ -52,6 +53,29 @@ Studio 已把调用方身份、便携请求、结果档案、版本协商和权�
 - 幂等重放返回同一结果，语义漂移必须冲突。
 
 写入口固定为 `POST /api/integration/project-invocations`，结果入口固定为 `GET /api/integration/project-invocations/{client_request_id}/result`。两者只接受独立 Bearer capability，bootstrap UI token 或双凭据均失败；写入范围仅为项目 intake、专属房间和初始房间版本，不触发 Provider、市场读取或执行能力。
+
+可信操作员签发器 `python -m backend.project_capability_issuer inspect|dry-run|mint`
+也已提供：它只从进程环境或显式 stdin 读取签名秘密，每次只签发一个既有动作，
+并输出不含 bearer/secret 的 receipt。当前仍没有网络 mint endpoint；撤销表、密钥轮换和
+宿主强制的 JTI 单次消费仍是后续治理，不应把“可签发”表述为“已完成撤销体系”。
+
+### 已闭合基础：领域无关来源收件箱
+
+`source_import_packet_v1` 把 GitHub/CI、ChatGPT Scheduled Task 和未来领域适配器统一为
+“外部来源”，而不是模型结论或交易观察。服务端负责严格 JSON、大小/深度/数量、时间、
+公开 URL、秘密字段、执行字段、来源引用、规范哈希、幂等键和事件指纹校验；导入内容始终
+标记 `external_unverified`。
+
+全局收件箱只允许以下人工序列：
+
+```text
+导入 → 已阅（不代表事实确认）→ 手动选择房间并附加材料 → 仅生成 round draft
+```
+
+它不调用 `create_round`、Provider 或市场接口。目标房间不预选，draft 继续要求既有正式
+轮次流程中的独立用户确认。UI 使用独立懒加载抽屉与移动端全屏视图，因此交易、算命、
+PPT、足球和 GitHub/CI 可以共享同一收件箱内核，而把领域字段放在有界、版本化 extension
+中；任何领域都不能借 extension 注入代码、工具调用或执行授权。
 
 ### 部分闭合：项目隔离和可恢复性
 
@@ -85,7 +109,7 @@ Studio 已把调用方身份、便携请求、结果档案、版本协商和权�
 ## 仍然容易忽略、且尚未闭合的缺口
 
 1. **原始输入传输**：v1 项目调用只接收内容哈希和字节数，不接收或抓取原始 payload。这保护算命出生资料和金融资料，但意味着调用方仍需通过人工材料导入或未来受控 adapter 提供内容；清单明确标为 `hash_manifest_only`。
-2. **capability 发放与撤销**：签名秘密只应留在可信宿主/代理进程。当前不提供网络 mint endpoint；需要后续的操作员工具、轮换、撤销表和审计，而不是把签名秘密复制给每个业务项目。
+2. **capability 撤销与单次消费**：离线可信操作员签发器已实现，签名秘密仍只应留在可信宿主/代理进程，且不提供网络 mint endpoint；后续仍需密钥轮换、撤销表和宿主强制 JTI 单次消费，不能把秘密复制给业务项目。
 3. **异步任务生命周期**：现在有幂等创建和结果轮询，但还没有通用 queued/running/cancelled/expired 状态机、取消收据、死信队列或回调签名。
 4. **项目级删除/导出**：caller/project 命名空间已有持久化身份，但尚无经过授权的整项目导出、删除、保留期清理和法律留置流程。
 5. **领域确定性内核**：足球/交易已保持只读，PPT 已有结构与渲染收据；算命仍需要真正版本化的历法、时区、节气和排盘引擎 receipt，不能用 LLM 解释代替。

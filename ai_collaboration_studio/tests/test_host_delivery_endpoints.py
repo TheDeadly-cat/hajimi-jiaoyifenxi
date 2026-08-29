@@ -681,7 +681,13 @@ class LauncherDeliveryContractTests(unittest.TestCase):
         self.assertIn('"host_version_v2"', launcher)
         self.assertIn('"studio_integration_manifest_v2"', launcher)
         self.assertIn("Get-BackendSourceSha256", launcher)
+        self.assertIn("Get-FileSha256", launcher)
         self.assertIn("backend_build.source_sha256", launcher)
+        self.assertIn(
+            '$manifest.schema_version -eq "studio_integration_manifest_v2"',
+            launcher,
+        )
+        self.assertNotIn('$manifest.version -eq "studio_integration_manifest_v2"', launcher)
         self.assertIn('"ai_collaboration_studio"', launcher)
         self.assertIn(
             'runtime\\bootstrap\\python\\Scripts\\python.exe',

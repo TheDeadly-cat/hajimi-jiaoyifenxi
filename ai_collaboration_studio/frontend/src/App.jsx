@@ -1,4 +1,4 @@
-import { Menu, PanelLeft, Pause, Settings, Users, X } from "lucide-react";
+import { Inbox, Menu, PanelLeft, Pause, Settings, Users, X } from "lucide-react";
 import {
   Suspense,
   lazy,
@@ -129,6 +129,22 @@ const FootballResearchPanel = lazy(() => import("./components/FootballResearchPa
   .then((module) => ({ default: module.FootballResearchPanel })));
 const StockResearchPanel = lazy(() => import("./components/StockResearchPanel.jsx")
   .then((module) => ({ default: module.StockResearchPanel })));
+let sourceInboxModulePromise = null;
+function loadSourceInboxPanel() {
+  if (!sourceInboxModulePromise) {
+    sourceInboxModulePromise = import("./components/SourceInboxPanel.jsx")
+      .then((module) => ({ default: module.SourceInboxPanel }))
+      .catch((error) => {
+        sourceInboxModulePromise = null;
+        throw error;
+      });
+  }
+  return sourceInboxModulePromise;
+}
+function preloadSourceInboxPanel() {
+  loadSourceInboxPanel().catch(() => {});
+}
+const SourceInboxPanel = lazy(loadSourceInboxPanel);
 let roomInspectorModulePromise = null;
 function loadRoomInspector() {
   if (!roomInspectorModulePromise) {
@@ -321,6 +337,7 @@ export default function App() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [roomDrawerOpen, setRoomDrawerOpen] = useState(false);
   const [actionOverviewOpen, setActionOverviewOpen] = useState(false);
+  const [sourceInboxOpen, setSourceInboxOpen] = useState(false);
   const [chatGPTCollaborationOpen, setChatGPTCollaborationOpen] = useState(false);
   const [railSection, setRailSection] = useState("rooms");
   const [inspectorNavigation, setInspectorNavigation] = useState({
@@ -359,6 +376,7 @@ export default function App() {
     () => emptyDiscussionAuditState(),
   );
   const actionOverviewActivated = useDeferredActivation(actionOverviewOpen);
+  const sourceInboxActivated = useDeferredActivation(sourceInboxOpen);
   const chatGPTCollaborationActivated = useDeferredActivation(chatGPTCollaborationOpen);
   const inspectorActivated = useDeferredActivation(inspectorOpen);
   const roundLaunchActivated = useDeferredActivation(roundLaunch.status !== "idle");
@@ -406,6 +424,7 @@ export default function App() {
   const roomDrawerRestoreFocusRef = useRef(null);
   const roundLaunchRestoreFocusRef = useRef(null);
   const chatGPTCollaborationRestoreFocusRef = useRef(null);
+  const sourceInboxRestoreFocusRef = useRef(null);
   const roundLaunchSuccessFocusRef = useRef(null);
   const observationRestoreFocusRef = useRef(null);
   const reflectionRestoreFocusRef = useRef(null);
@@ -2894,9 +2913,16 @@ export default function App() {
 
   const navigateRail = (section, navigationTrigger = null) => {
     inspectorRestoreFocusRef.current = navigationTrigger || document.activeElement;
+    sourceInboxRestoreFocusRef.current = navigationTrigger || document.activeElement;
     setActionOverviewOpen(false);
     setRailSection(section);
     setRoomDrawerOpen(false);
+    if (section === "source-inbox") {
+      setInspectorOpen(false);
+      setSourceInboxOpen(true);
+      return;
+    }
+    setSourceInboxOpen(false);
     if (section === "rooms") {
       setInspectorOpen(false);
       document.querySelector(".room-search input")?.focus();
@@ -2907,6 +2933,11 @@ export default function App() {
       targetId: `inspector-${section}`,
       requestId: current.requestId + 1,
     }));
+  };
+
+  const closeSourceInbox = () => {
+    setSourceInboxOpen(false);
+    setRailSection("rooms");
   };
 
   const loadRoundExecutionTrace = async ({
@@ -3349,6 +3380,7 @@ export default function App() {
         activeSection={railSection}
         onNavigate={navigateRail}
         onPreloadInspector={preloadRoomInspector}
+        onPreloadSourceInbox={preloadSourceInboxPanel}
       />
       <button
         className={roomDrawerOpen ? "drawer-scrim room-drawer-scrim open" : "drawer-scrim room-drawer-scrim"}
@@ -3379,15 +3411,41 @@ export default function App() {
           />
         </Suspense>
       ) : null}
+      {sourceInboxActivated ? <Suspense fallback={(
+        <DeferredSurfaceFallback
+          label="来源收件箱"
+          dialog
+          open={sourceInboxOpen}
+          onClose={closeSourceInbox}
+          restoreFocusRef={sourceInboxRestoreFocusRef}
+        />
+      )}>
+        <SourceInboxPanel
+          open={sourceInboxOpen}
+          rooms={rooms}
+          activeRoomId={activeRoomId}
+          restoreFocusRef={sourceInboxRestoreFocusRef}
+          onClose={closeSourceInbox}
+          onRoomAttached={async (roomId) => {
+            if (roomId === activeRoomIdRef.current) {
+              await loadRoom(roomId);
+              return;
+            }
+            await refreshRooms(activeRoomIdRef.current);
+          }}
+        />
+      </Suspense> : null}
       <main
         className="conversation-panel"
         aria-hidden={(
           (mobileRoomDrawer && roomDrawerOpen)
           || (compactInspector && inspectorOpen)
+          || sourceInboxOpen
         ) ? "true" : undefined}
         inert={(
           (mobileRoomDrawer && roomDrawerOpen)
           || (compactInspector && inspectorOpen)
+          || sourceInboxOpen
         ) ? "" : undefined}
       >
         <header
@@ -3411,6 +3469,16 @@ export default function App() {
             <span className={roundBusy ? "status live" : "status"}>{roundStatusLabel}</span>
           </div>
           <div className="header-actions">
+            <button
+              className="icon-button source-inbox-mobile-entry"
+              type="button"
+              title="打开来源收件箱"
+              aria-label="打开来源收件箱"
+              onClick={(event) => navigateRail("source-inbox", event.currentTarget)}
+              onFocus={preloadSourceInboxPanel}
+              onPointerDown={preloadSourceInboxPanel}
+              onPointerEnter={preloadSourceInboxPanel}
+            ><Inbox size={18} /></button>
             {roundState.running && (
               <button
                 className="secondary"

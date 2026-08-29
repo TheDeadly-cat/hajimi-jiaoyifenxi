@@ -77,30 +77,58 @@ envelope = seal_project_invocation_envelope({
 })
 ```
 
-## Mint only in a trusted issuer
+## Mint only in the offline operator issuer
 
-Do not distribute `AI_STUDIO_PROJECT_CAPABILITY_SIGNING_SECRET` to ordinary caller processes or put it in URLs, source files, shell history, logs or HTTP responses. A trusted local issuer validates the sealed envelope and mints a short-lived capability for only the required actions:
+Do not distribute `AI_STUDIO_PROJECT_CAPABILITY_SIGNING_SECRET` to ordinary caller processes or put it in URLs, source files, command arguments, shell history, logs or HTTP responses. `backend.project_capability_issuer` is the local operator boundary: it reads one explicit sealed envelope and one secret-free registration policy, then delegates token construction and verification to the existing `ProjectCapabilityAuthorizer`. It does not open SQLite, start a service or contact a Provider, market source or remote endpoint. There is deliberately no anonymous mint HTTP endpoint.
 
-```python
-from backend.project_invocation import (
-    PROJECT_INVOCATION_ACTION_INTAKE,
-    PROJECT_INVOCATION_ACTION_RESULT_READ,
-    ProjectCapabilityAuthorizer,
-)
+The policy is a closed allowlist. Registrations must be sorted by `(caller_id, project_id)`; actions must also be sorted and may only use the two actions already implemented by the host:
 
-token = ProjectCapabilityAuthorizer(signing_secret).mint(
-    caller_id=envelope["caller_id"],
-    project_id=envelope["project_id"],
-    room_id=envelope["room_id"],
-    actions=[
-        PROJECT_INVOCATION_ACTION_INTAKE,
-        PROJECT_INVOCATION_ACTION_RESULT_READ,
-    ],
-    client_request_id=envelope["client_request_id"],
-    request_sha256=envelope["request_sha256"],
-    ttl_seconds=300,
-)
+```json
+{
+  "version": "project_capability_issuer_policy_v1",
+  "projects": [
+    {
+      "caller_id": "bazi_desktop",
+      "project_id": "bazi_case_workspace",
+      "enabled": true,
+      "allowed_actions": [
+        "project_invocation.intake",
+        "project_invocation.result.read"
+      ],
+      "max_ttl_seconds": 300
+    }
+  ]
+}
 ```
+
+Inspect and dry-run validate the envelope, request hash, derived room identity, registration, action and TTL without reading the signing secret or minting a token:
+
+```powershell
+python -m backend.project_capability_issuer inspect `
+  --envelope "<sealed-envelope.json>" `
+  --policy "<reviewed-issuer-policy.json>"
+
+python -m backend.project_capability_issuer dry-run `
+  --envelope "<sealed-envelope.json>" `
+  --policy "<reviewed-issuer-policy.json>" `
+  --action project_invocation.intake `
+  --ttl-seconds 120
+```
+
+After reviewing that output, inject the signing secret into the operator process environment through the approved local secret mechanism, then supply the exact acknowledgement. Do not paste the secret into the command itself:
+
+```powershell
+python -m backend.project_capability_issuer mint `
+  --envelope "<sealed-envelope.json>" `
+  --policy "<reviewed-issuer-policy.json>" `
+  --action project_invocation.intake `
+  --ttl-seconds 120 `
+  --acknowledgement APPROVE_PROJECT_INVOCATION_CAPABILITY
+```
+
+The default stdout JSON contains the bearer token beside a separate audit receipt. The receipt contains only token/JTI hashes, exact request binding, action, TTL, timestamps, policy/plan hashes and zero-I/O safety facts; it contains neither the bearer nor signing secret. `--output <new-file.json>` may be used to create one exclusive, non-overwriting file outside the source tree; its operating-system ACL is still inherited from the chosen parent directory, so the operator must choose a protected directory. `--secret-stdin` is available for an operator-controlled one-line secret input instead of the environment.
+
+Least privilege requires a separate single-action token for `project_invocation.result.read`; do not mint a combined intake/read token. Each mint has a unique `jti`, but the current host does not maintain a token-consumption ledger: intake replay is idempotent and result reads may repeat until expiry. The issuer reports `single_use_consumption_enforced_by_host=false` rather than presenting a unique `jti` as one-time enforcement. Disabling a policy entry stops future issuance; it does not revoke a token that was already minted and has not expired.
 
 ## Call and poll
 

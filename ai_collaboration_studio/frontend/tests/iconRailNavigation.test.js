@@ -19,6 +19,9 @@ test("icon rail binds list identity to sections and keeps activation explicit", 
   assert.match(source, /onClick=\{\(event\) => onNavigate\(section, event\.currentTarget\)\}/);
   assert.match(source, /onKeyDown=\{moveRailFocus\}/);
   assert.match(source, /tabIndex=\{activeSection === section \? 0 : -1\}/);
+  assert.match(source, /label: "来源收件箱", section: "source-inbox"/);
+  assert.match(source, /section === "source-inbox"[\s\S]*onPreloadSourceInbox/);
+  assert.match(source, /onFocus=\{preload\}[\s\S]*onPointerDown=\{preload\}[\s\S]*onPointerEnter=\{preload\}/);
 });
 
 test("rail focus wraps across vertical and compact horizontal orientations", () => {
