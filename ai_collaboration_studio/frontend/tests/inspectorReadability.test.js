@@ -6,10 +6,22 @@ const hostStyles = readFileSync(new URL("../src/styles.css", import.meta.url), "
 const workflowStyles = readFileSync(new URL("../src/styles/workflow-policy.css", import.meta.url), "utf8");
 const reflectionStyles = readFileSync(new URL("../src/styles/reflection-dialog.css", import.meta.url), "utf8");
 
-function rule(selector, source = hostStyles) {
-  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return source.match(new RegExp(`(?:^|})\\s*${escaped}\\s*\\{([^}]*)\\}`))?.[1] || "";
+function normalizeNewlines(value) {
+  return value.replace(/\r\n?/g, "\n");
 }
+
+function rule(selector, source = hostStyles) {
+  const normalizedSelector = normalizeNewlines(selector);
+  const normalizedSource = normalizeNewlines(source);
+  const escaped = normalizedSelector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return normalizedSource.match(new RegExp(`(?:^|})\\s*${escaped}\\s*\\{([^}]*)\\}`))?.[1] || "";
+}
+
+test("CSS rule lookup is stable across Windows checkout line endings", () => {
+  const windowsStyles = ".first,\r\n.second {\r\n  font-size: 10px;\r\n}\r\n";
+
+  assert.match(rule(".first,\n.second", windowsStyles), /font-size:\s*10px/);
+});
 
 test("provider identity and preflight evidence remain readable without ellipsis-only disclosure", () => {
   assert.match(rule(".provider-count-chip > span > small"), /font-size:\s*10px/);
