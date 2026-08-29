@@ -81,6 +81,8 @@ class CIWorkflowContractTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("AI_STUDIO_SKIP_LOCAL_ENV", workflow)
+        self.assertIn('PYTHONUTF8: "1"', workflow)
+        self.assertIn('PYTHONIOENCODING: "utf-8"', workflow)
         self.assertIn("scripts/bootstrap_ai_collaboration_studio.py", workflow)
         self.assertIn("scripts/run_static_security_checks.py", workflow)
         self.assertIn("static-security.json", workflow)

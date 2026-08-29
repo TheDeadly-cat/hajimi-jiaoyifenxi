@@ -18,6 +18,8 @@ jobs:
         working-directory: ai_collaboration_studio
     env:
       AI_STUDIO_SKIP_LOCAL_ENV: "1"
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
       FUTU_HOST: "127.0.0.1"
       FUTU_PORT: "1"
       OPENAI_API_KEY: ""

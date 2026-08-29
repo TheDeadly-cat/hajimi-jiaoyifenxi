@@ -85,6 +85,24 @@ class DependencyInventoryTests(unittest.TestCase):
         rendered = json.dumps(first, ensure_ascii=False)
         self.assertNotIn(str(self.project_root), rendered)
 
+    def test_authoritative_locks_are_checked_out_with_exact_lf_bytes(self) -> None:
+        attributes = (self.project_root / ".gitattributes").read_text(
+            encoding="ascii"
+        ).splitlines()
+        self.assertEqual(attributes, [
+            "/requirements-lock-win-py314.txt text eol=lf",
+            "/frontend/package-lock.json text eol=lf",
+        ])
+        for relative_path in (
+            "requirements-lock-win-py314.txt",
+            "frontend/package-lock.json",
+        ):
+            with self.subTest(relative_path=relative_path):
+                self.assertNotIn(
+                    b"\r",
+                    (self.project_root / relative_path).read_bytes(),
+                )
+
     def test_unhashed_python_and_unhashed_npm_entries_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory(
             prefix="ai-studio-inventory-invalid-python-"
