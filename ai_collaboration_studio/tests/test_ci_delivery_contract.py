@@ -84,6 +84,15 @@ class CIWorkflowContractTests(unittest.TestCase):
         self.assertIn("scripts/bootstrap_ai_collaboration_studio.py", workflow)
         self.assertIn("scripts/run_static_security_checks.py", workflow)
         self.assertIn("static-security.json", workflow)
+        self.assertIn("Resolve guarded bootstrap runtime", workflow)
+        self.assertIn("[System.IO.Path]::GetTempPath()", workflow)
+        self.assertIn("AI_STUDIO_BOOTSTRAP_ROOT=$runtimeRoot", workflow)
+        self.assertIn(
+            '--runtime-root "$env:AI_STUDIO_BOOTSTRAP_ROOT"',
+            workflow,
+        )
+        self.assertEqual(workflow.count("$env:AI_STUDIO_BOOTSTRAP_ROOT"), 5)
+        self.assertNotIn("$env:RUNNER_TEMP\\ai-studio-bootstrap", workflow)
         self.assertIn("npm.cmd --prefix frontend test", workflow)
         self.assertIn("scripts/run_backend_tests_isolated.py", workflow)
         self.assertIn("--layer full", workflow)

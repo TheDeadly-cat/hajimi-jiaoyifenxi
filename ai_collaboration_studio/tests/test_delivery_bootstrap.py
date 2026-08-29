@@ -115,6 +115,22 @@ class DeliveryBootstrapTests(unittest.TestCase):
                 self.project / "frontend" / "bootstrap-cache",
             )
 
+    def test_runtime_root_does_not_trust_runner_temp_environment(self) -> None:
+        project = bootstrap.resolve_project_root(self.project)
+        system_temp = Path(tempfile.gettempdir()).resolve()
+        outside = system_temp.parent / "ai-studio-untrusted-runner-temp" / "runtime"
+
+        with patch.dict(
+            os.environ,
+            {"GITHUB_ACTIONS": "true", "RUNNER_TEMP": str(outside.parent)},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(
+                bootstrap.BootstrapError,
+                "system temp directory",
+            ):
+                bootstrap.resolve_runtime_root(project, outside)
+
     def test_safe_extract_rejects_parent_traversal(self) -> None:
         archive = self.temp_path / "unsafe.zip"
         with ZipFile(archive, "w") as output:

@@ -49,11 +49,18 @@ jobs:
           python scripts/run_static_security_checks.py
           --report "$env:RUNNER_TEMP\static-security.json"
 
+      - name: Resolve guarded bootstrap runtime
+        shell: pwsh
+        run: |
+          $runtimeRoot = Join-Path ([System.IO.Path]::GetTempPath()) "ai-studio-bootstrap"
+          "AI_STUDIO_BOOTSTRAP_ROOT=$runtimeRoot" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Bootstrap locked dependencies and production frontend
         shell: pwsh
         run: >-
           python scripts/bootstrap_ai_collaboration_studio.py
-          --runtime-root "$env:RUNNER_TEMP\ai-studio-bootstrap"
+          --runtime-root "$env:AI_STUDIO_BOOTSTRAP_ROOT"
           --report "$env:RUNNER_TEMP\bootstrap-receipt.json"
           --allow-dependency-downloads
 
@@ -64,7 +71,7 @@ jobs:
       - name: Full isolated backend regression
         shell: pwsh
         run: >-
-          & "$env:RUNNER_TEMP\ai-studio-bootstrap\python\Scripts\python.exe"
+          & "$env:AI_STUDIO_BOOTSTRAP_ROOT\python\Scripts\python.exe"
           scripts/run_backend_tests_isolated.py
           --layer full
           --verbosity 1
@@ -80,17 +87,17 @@ jobs:
       - name: Isolated install, upgrade, and rollback drill
         shell: pwsh
         run: >-
-          & "$env:RUNNER_TEMP\ai-studio-bootstrap\python\Scripts\python.exe"
+          & "$env:AI_STUDIO_BOOTSTRAP_ROOT\python\Scripts\python.exe"
           scripts/run_isolated_release_drill.py
           --report "$env:RUNNER_TEMP\release-drill.json"
 
       - name: Generate offline dependency inventory
         shell: pwsh
         run: |
-          & "$env:RUNNER_TEMP\ai-studio-bootstrap\python\Scripts\python.exe" `
+          & "$env:AI_STUDIO_BOOTSTRAP_ROOT\python\Scripts\python.exe" `
             scripts/generate_dependency_inventory.py `
             --output "$env:RUNNER_TEMP\dependency-inventory.json"
-          & "$env:RUNNER_TEMP\ai-studio-bootstrap\python\Scripts\python.exe" `
+          & "$env:AI_STUDIO_BOOTSTRAP_ROOT\python\Scripts\python.exe" `
             scripts/generate_dependency_inventory.py `
             --verify "$env:RUNNER_TEMP\dependency-inventory.json"
 
