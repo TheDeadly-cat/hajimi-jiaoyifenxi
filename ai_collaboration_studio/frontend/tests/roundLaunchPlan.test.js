@@ -790,7 +790,9 @@ test("resume delegates preflight to the server under the existing ledger", () =>
 
   assert.match(resumeSource, /streamResumeRound\(/);
   assert.doesNotMatch(resumeSource, /preflightProviders|confirmRoundProviders|roundProviderReady/);
-  assert.match(resumeApiSource, /\n    \{},\n    onEvent/);
+  const resumeCallPattern = /\r?\n    \{},\r?\n    onEvent/;
+  assert.match(resumeApiSource, resumeCallPattern);
+  assert.match(resumeApiSource.replace(/\r?\n/g, "\r\n"), resumeCallPattern);
   assert.doesNotMatch(resumeApiSource, /skip_providers/);
 });
 
