@@ -83,6 +83,7 @@ class FakeOfficialAdapter:
     adapter_key = "fixture_official"
     config_version = "fixture_official_config_v1"
     poll_interval_ms = 60_000
+    max_candidates_per_poll = 1
     official_source = True
     execution_capability = "none"
     live_trading_allowed = False
@@ -105,6 +106,47 @@ class FakeOfficialAdapter:
         )
 
 
+class LegacyPollSignatureAdapter(FakeOfficialAdapter):
+    adapter_key = "legacy_poll_signature"
+    config_version = "legacy_poll_signature_config_v1"
+
+    def poll(
+        self,
+        checkpoint: dict[str, object],
+        *,
+        observed_at_ms: int,
+    ) -> AdapterPollResult:
+        return AdapterPollResult.build(
+            self.adapter_key,
+            checkpoint,
+            checkpoint,
+            (),
+            captured_at_ms=observed_at_ms,
+        )
+
+
+class CoerciblePollDefaultAdapter(FakeOfficialAdapter):
+    adapter_key = "coercible_poll_default"
+    config_version = "coercible_poll_default_config_v1"
+
+    def poll(
+        self,
+        checkpoint: dict[str, object],
+        *,
+        observed_at_ms: int,
+        etag: str = "",
+        last_modified: str = "",
+        max_items: float = 50.0,
+    ) -> AdapterPollResult:
+        return AdapterPollResult.build(
+            self.adapter_key,
+            checkpoint,
+            checkpoint,
+            (),
+            captured_at_ms=observed_at_ms,
+        )
+
+
 class SourceAdapterFoundationTests(unittest.TestCase):
     def test_protocol_metadata_and_registry_are_closed(self) -> None:
         adapter = FakeOfficialAdapter()
@@ -113,6 +155,7 @@ class SourceAdapterFoundationTests(unittest.TestCase):
         self.assertEqual(metadata.adapter_key, "fixture_official")
         self.assertEqual(metadata.config_version, "fixture_official_config_v1")
         self.assertEqual(metadata.poll_interval_ms, 60_000)
+        self.assertEqual(metadata.max_candidates_per_poll, 1)
         self.assertEqual(metadata.execution_capability, "none")
         self.assertIs(metadata.live_trading_allowed, False)
 
@@ -146,6 +189,20 @@ class SourceAdapterFoundationTests(unittest.TestCase):
         adapter.official_source = False
         with self.assertRaises(SourceAdapterRegistryError):
             registry.require("fixture_official")
+
+    def test_legacy_poll_signature_is_rejected_before_registration(self) -> None:
+        adapter = LegacyPollSignatureAdapter()
+
+        with self.assertRaisesRegex(
+            SourceAdapterContractError,
+            "etag='', last_modified='', max_items=50",
+        ):
+            validate_source_adapter(adapter)
+        with self.assertRaises(SourceAdapterContractError):
+            SourceAdapterRegistry((adapter,))
+
+        with self.assertRaises(SourceAdapterContractError):
+            validate_source_adapter(CoerciblePollDefaultAdapter())
 
 
 class SourceMonitoringSettingsTests(unittest.TestCase):

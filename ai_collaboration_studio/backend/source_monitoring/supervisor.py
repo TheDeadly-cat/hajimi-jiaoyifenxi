@@ -97,6 +97,17 @@ class SourceMonitoringSupervisor:
                 "SOURCE_MONITORING_IMPORT_HOOK_INVALID",
                 "after_import_hook must be callable",
             )
+        for adapter_key in registry.adapter_keys:
+            metadata = registry.metadata_for(adapter_key)
+            if settings.max_items_per_run < metadata.max_candidates_per_poll:
+                raise SourceMonitoringSupervisorError(
+                    "SOURCE_MONITORING_ITEM_CAPACITY_TOO_LOW",
+                    (
+                        f"max_items_per_run={settings.max_items_per_run} is lower "
+                        f"than adapter {adapter_key} candidate bound "
+                        f"{metadata.max_candidates_per_poll}"
+                    ),
+                )
         self.registry = registry
         self.repository = repository
         self.source_inbox = source_inbox

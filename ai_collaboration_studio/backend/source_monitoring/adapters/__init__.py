@@ -7,6 +7,7 @@ from .base import (
     SourceAdapter,
     SourceAdapterContractError,
     SourceAdapterMetadata,
+    validate_poll_context,
     validate_source_adapter,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "SourceAdapter",
     "SourceAdapterContractError",
     "SourceAdapterMetadata",
+    "validate_poll_context",
     "validate_source_adapter",
 ]

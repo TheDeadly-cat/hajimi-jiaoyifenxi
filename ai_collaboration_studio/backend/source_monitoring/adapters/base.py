@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 import re
 from typing import Any, Protocol, runtime_checkable
 
 from ..contracts import (
+    MAX_ETAG_CHARS,
+    MAX_LAST_MODIFIED_CHARS,
+    MAX_OBSERVED_ITEMS_PER_POLL,
     AdapterPollResult,
     SourceMonitoringContractError,
     normalize_adapter_key,
@@ -24,12 +28,58 @@ class SourceAdapterContractError(SourceMonitoringContractError):
     """Raised when an adapter does not satisfy the closed local protocol."""
 
 
+def _exact_poll_header(value: Any, *, field: str, maximum: int) -> str:
+    if type(value) is not str:
+        raise SourceAdapterContractError(
+            "SOURCE_ADAPTER_POLL_CONTEXT_INVALID",
+            f"{field} must be a native string",
+        )
+    if value != value.strip() or len(value) > maximum or any(
+        ord(character) < 32 or ord(character) == 127 for character in value
+    ):
+        raise SourceAdapterContractError(
+            "SOURCE_ADAPTER_POLL_CONTEXT_INVALID",
+            f"{field} must be canonical bounded single-line text",
+        )
+    return value
+
+
+def validate_poll_context(
+    *,
+    etag: Any,
+    last_modified: Any,
+    max_items: Any,
+) -> tuple[str, str, int]:
+    """Validate one supervisor poll context without coercing identities."""
+
+    clean_etag = _exact_poll_header(
+        etag,
+        field="etag",
+        maximum=MAX_ETAG_CHARS,
+    )
+    clean_last_modified = _exact_poll_header(
+        last_modified,
+        field="last_modified",
+        maximum=MAX_LAST_MODIFIED_CHARS,
+    )
+    if (
+        type(max_items) is not int
+        or not 1 <= max_items <= MAX_OBSERVED_ITEMS_PER_POLL
+    ):
+        raise SourceAdapterContractError(
+            "SOURCE_ADAPTER_POLL_CONTEXT_INVALID",
+            "max_items must be a native integer between 1 and 50",
+        )
+    return clean_etag, clean_last_modified, max_items
+
+
 @dataclass(frozen=True, slots=True)
 class SourceAdapterMetadata:
     contract_version: str
     adapter_key: str
     config_version: str
     poll_interval_ms: int
+    max_candidates_per_poll: int
     official_source: bool
     execution_capability: str
     live_trading_allowed: bool
@@ -67,6 +117,16 @@ class SourceAdapterMetadata:
                 "SOURCE_ADAPTER_POLL_INTERVAL_INVALID",
                 "poll_interval_ms must be a native integer between one minute and seven days",
             )
+        if (
+            type(self.max_candidates_per_poll) is not int
+            or not 1
+            <= self.max_candidates_per_poll
+            <= MAX_OBSERVED_ITEMS_PER_POLL
+        ):
+            raise SourceAdapterContractError(
+                "SOURCE_ADAPTER_CANDIDATE_BOUND_INVALID",
+                "max_candidates_per_poll must be a native integer between 1 and 50",
+            )
         if type(self.official_source) is not bool:
             raise SourceAdapterContractError(
                 "SOURCE_ADAPTER_OFFICIAL_FLAG_INVALID",
@@ -97,6 +157,7 @@ class SourceAdapterMetadata:
             "adapter_key": self.adapter_key,
             "config_version": self.config_version,
             "poll_interval_ms": self.poll_interval_ms,
+            "max_candidates_per_poll": self.max_candidates_per_poll,
             "official_source": self.official_source,
             "execution_capability": self.execution_capability,
             "live_trading_allowed": self.live_trading_allowed,
@@ -111,6 +172,7 @@ class SourceAdapter(Protocol):
     adapter_key: str
     config_version: str
     poll_interval_ms: int
+    max_candidates_per_poll: int
     official_source: bool
     execution_capability: str
     live_trading_allowed: bool
@@ -140,11 +202,58 @@ def validate_source_adapter(adapter: Any) -> SourceAdapterMetadata:
             "SOURCE_ADAPTER_POLL_MISSING",
             "adapter must implement poll(checkpoint, observed_at_ms=...)",
         )
+    try:
+        signature = inspect.signature(poll)
+    except (TypeError, ValueError) as exc:
+        raise SourceAdapterContractError(
+            "SOURCE_ADAPTER_POLL_SIGNATURE_INVALID",
+            "adapter poll signature cannot be inspected",
+        ) from exc
+    parameters = tuple(signature.parameters.values())
+    expected_names = (
+        "checkpoint",
+        "observed_at_ms",
+        "etag",
+        "last_modified",
+        "max_items",
+    )
+    if (
+        tuple(parameter.name for parameter in parameters) != expected_names
+        or parameters[0].kind
+        not in {
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        }
+        or parameters[0].default is not inspect.Parameter.empty
+        or any(
+            parameter.kind is not inspect.Parameter.KEYWORD_ONLY
+            for parameter in parameters[1:]
+        )
+        or parameters[1].default is not inspect.Parameter.empty
+        or type(parameters[2].default) is not str
+        or parameters[2].default != ""
+        or type(parameters[3].default) is not str
+        or parameters[3].default != ""
+        or type(parameters[4].default) is not int
+        or parameters[4].default != 50
+    ):
+        raise SourceAdapterContractError(
+            "SOURCE_ADAPTER_POLL_SIGNATURE_INVALID",
+            (
+                "adapter poll must be poll(checkpoint, *, observed_at_ms, "
+                "etag='', last_modified='', max_items=50)"
+            ),
+        )
     return SourceAdapterMetadata(
         contract_version=getattr(adapter, "contract_version", None),
         adapter_key=getattr(adapter, "adapter_key", None),
         config_version=getattr(adapter, "config_version", None),
         poll_interval_ms=getattr(adapter, "poll_interval_ms", None),
+        max_candidates_per_poll=getattr(
+            adapter,
+            "max_candidates_per_poll",
+            None,
+        ),
         official_source=getattr(adapter, "official_source", None),
         execution_capability=getattr(adapter, "execution_capability", None),
         live_trading_allowed=getattr(adapter, "live_trading_allowed", None),
@@ -158,5 +267,6 @@ __all__ = [
     "SourceAdapter",
     "SourceAdapterContractError",
     "SourceAdapterMetadata",
+    "validate_poll_context",
     "validate_source_adapter",
 ]

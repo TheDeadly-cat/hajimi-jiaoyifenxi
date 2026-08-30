@@ -88,6 +88,7 @@ class FakeAdapter:
     execution_capability = "none"
     live_trading_allowed = False
     poll_interval_ms = 60_000
+    max_candidates_per_poll = 2
 
     def __init__(self, adapter_key: str, *, mode: str = "normal") -> None:
         self.adapter_key = adapter_key
@@ -473,6 +474,35 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
             supervisor.run_once(adapter.adapter_key)
         self.assertEqual(captured.exception.code, "SOURCE_MONITORING_DISABLED")
         self.assertIsNone(self.repository.get_state(adapter.adapter_key))
+
+    def test_low_global_item_capacity_fails_before_any_state_or_run(self) -> None:
+        adapter = FakeAdapter("fake_capacity_guard")
+        low_capacity = SourceMonitoringSettings(
+            enabled=True,
+            auto_start=False,
+            official_only=True,
+            dry_run=False,
+            max_items_per_run=1,
+        )
+
+        with self.assertRaisesRegex(
+            SourceMonitoringSupervisorError,
+            "lower than adapter fake_capacity_guard candidate bound 2",
+        ):
+            SourceMonitoringSupervisor(
+                registry=SourceAdapterRegistry((adapter,)),
+                repository=self.repository,
+                source_inbox=self.inbox,
+                settings=low_capacity,
+                backoff_policy=self.backoff,
+                clock_ms=lambda: self.clock[0],
+            )
+
+        self.assertIsNone(self.repository.get_state(adapter.adapter_key))
+        self.assertEqual(
+            self.repository.list_runs(adapter_key=adapter.adapter_key),
+            [],
+        )
 
 
 class SourceMonitoringBackoffTests(unittest.TestCase):
