@@ -23,6 +23,12 @@ from backend.source_monitoring.adapters.company_ir import (
     MAX_IR_PROJECTIONS,
     CompanyIrSourceAdapter,
 )
+from backend.source_monitoring.adapters.macro_official import (
+    BlsReleaseSourceAdapter,
+    FederalReserveSourceAdapter,
+    OfficialMacroCalendarSourceAdapter,
+    TreasuryReleaseSourceAdapter,
+)
 from backend.source_monitoring.adapters.sec_filings import (
     MAX_SEEN_ACCESSIONS,
     SEC_FILINGS_CHECKPOINT_VERSION,
@@ -917,7 +923,17 @@ class OfficialAdapterSupervisorTests(unittest.TestCase):
 
     def test_production_official_registry_has_no_injection_surface(self) -> None:
         registry = build_official_source_registry()
-        self.assertEqual(registry.adapter_keys, ("company_ir", "sec_filings"))
+        self.assertEqual(
+            registry.adapter_keys,
+            (
+                "bls_releases",
+                "company_ir",
+                "federal_reserve",
+                "official_macro_calendar",
+                "sec_filings",
+                "treasury_releases",
+            ),
+        )
         self.assertIs(
             type(registry.require("sec_filings")),
             SecFilingsSourceAdapter,
@@ -925,6 +941,22 @@ class OfficialAdapterSupervisorTests(unittest.TestCase):
         self.assertIs(
             type(registry.require("company_ir")),
             CompanyIrSourceAdapter,
+        )
+        self.assertIs(
+            type(registry.require("federal_reserve")),
+            FederalReserveSourceAdapter,
+        )
+        self.assertIs(
+            type(registry.require("bls_releases")),
+            BlsReleaseSourceAdapter,
+        )
+        self.assertIs(
+            type(registry.require("treasury_releases")),
+            TreasuryReleaseSourceAdapter,
+        )
+        self.assertIs(
+            type(registry.require("official_macro_calendar")),
+            OfficialMacroCalendarSourceAdapter,
         )
         with self.assertRaises(TypeError):
             build_official_source_registry(sec_filings=object())
@@ -965,6 +997,15 @@ class OfficialAdapterSupervisorTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "transport changed"):
             transport_ir.poll({}, observed_at_ms=FIXED_NOW_MS)
+
+        transport_macro = transport_registry.require("federal_reserve")
+        object.__setattr__(
+            transport_macro._client,
+            "_fetch_bytes",
+            lambda _url: b"<rss />",
+        )
+        with self.assertRaisesRegex(ValueError, "transport changed"):
+            transport_macro.poll({}, observed_at_ms=FIXED_NOW_MS)
 
     def test_sec_fixture_runs_twice_and_creates_one_inbox_event(self) -> None:
         source = SecEdgarAdapter(

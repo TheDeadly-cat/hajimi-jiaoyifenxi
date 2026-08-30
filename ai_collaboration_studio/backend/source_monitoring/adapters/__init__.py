@@ -10,6 +10,12 @@ from .base import (
     validate_poll_context,
     validate_source_adapter,
 )
+from .macro_official import (
+    BlsReleaseSourceAdapter,
+    FederalReserveSourceAdapter,
+    OfficialMacroCalendarSourceAdapter,
+    TreasuryReleaseSourceAdapter,
+)
 
 __all__ = [
     "SOURCE_ADAPTER_CONTRACT_VERSION",
@@ -20,4 +26,8 @@ __all__ = [
     "SourceAdapterMetadata",
     "validate_poll_context",
     "validate_source_adapter",
+    "BlsReleaseSourceAdapter",
+    "FederalReserveSourceAdapter",
+    "OfficialMacroCalendarSourceAdapter",
+    "TreasuryReleaseSourceAdapter",
 ]
