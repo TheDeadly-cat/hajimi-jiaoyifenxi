@@ -230,6 +230,7 @@ class SourceMonitoringStateRepositoryTests(unittest.TestCase):
         dry = self.repository.start_run(
             self.adapter_key,
             config_version=self.config_version,
+            dry_run=True,
         )
         dry_started_state = dry["state"]
         self.clock[0] += 20
@@ -263,6 +264,7 @@ class SourceMonitoringStateRepositoryTests(unittest.TestCase):
         rejected_dry = self.repository.start_run(
             self.adapter_key,
             config_version=self.config_version,
+            dry_run=True,
         )
         with self.assertRaises(SourceMonitoringStateError) as dry_error:
             self.repository.complete_run(
@@ -277,11 +279,17 @@ class SourceMonitoringStateRepositoryTests(unittest.TestCase):
                 receipt_id="forbidden_dry_run_receipt",
             )
         self.assertEqual(dry_error.exception.code, "SOURCE_MONITORING_STATE_INVALID")
-        self.repository.fail_run(
+        self.repository.complete_run(
             rejected_dry["run"]["run_id"],
+            next_checkpoint=rejected_dry["run"]["started_checkpoint"],
+            status=RUN_STATUS_DRY_RUN,
+            observed_count=0,
+            accepted_count=0,
+            duplicate_count=0,
+            rejected_count=0,
+            next_due_at_ms=self.clock[0],
             error_code="DRY_RUN_REJECTED",
             error_message="Rejected invalid dry-run completion.",
-            next_due_at_ms=self.clock[0],
         )
 
     def test_degraded_run_records_partial_import_without_advancing_checkpoint(self) -> None:
@@ -400,6 +408,25 @@ class SourceMonitoringStateRepositoryTests(unittest.TestCase):
             config_version=self.config_version,
         )
         self.assertEqual(next_run["run"]["started_checkpoint"], {})
+
+    def test_dry_run_start_and_restart_recovery_leave_adapter_state_unchanged(self) -> None:
+        self.enable()
+        before = self.repository.get_state(self.adapter_key)
+        started = self.repository.start_run(
+            self.adapter_key,
+            config_version=self.config_version,
+            dry_run=True,
+        )
+        self.assertTrue(started["run"]["dry_run"])
+        self.assertEqual(started["state"], before)
+
+        self.clock[0] += 1_000
+        self.assertEqual(self.repository.recover_incomplete_runs(), 1)
+        recovered = self.repository.get_run(started["run"]["run_id"])
+        after = self.repository.get_state(self.adapter_key)
+        self.assertEqual(recovered["status"], RUN_STATUS_ABANDONED)
+        self.assertTrue(recovered["dry_run"])
+        self.assertEqual(after, before)
 
     def test_config_drift_and_checkpoint_tamper_fail_closed(self) -> None:
         original = self.repository.get_or_create_state(

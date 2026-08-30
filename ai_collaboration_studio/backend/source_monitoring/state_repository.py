@@ -71,8 +71,13 @@ def ensure_source_monitoring_schema(
 ) -> None:
     """Create the monitoring schema inside Studio's controlled initializer."""
 
-    if type(applied_at_ms) is not int or applied_at_ms < 0:
-        raise ValueError("applied_at_ms must be a non-negative native integer")
+    if (
+        type(applied_at_ms) is not int
+        or not 0 <= applied_at_ms <= MAX_NATIVE_INTEGER
+    ):
+        raise ValueError(
+            "applied_at_ms must be a non-negative native signed 64-bit integer"
+        )
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS source_adapter_states (
@@ -319,9 +324,12 @@ class SourceMonitoringStateRepository:
 
     def _now_ms(self) -> int:
         value = self._clock_ms()
-        if type(value) is not int or value < 0:
+        if (
+            type(value) is not int
+            or not 0 <= value <= MAX_NATIVE_INTEGER
+        ):
             raise SourceMonitoringStateError(
-                "monitoring clock must return a non-negative native integer",
+                "monitoring clock must return a non-negative native signed 64-bit integer",
                 code="SOURCE_MONITORING_CLOCK_INVALID",
             )
         return value
@@ -752,7 +760,13 @@ class SourceMonitoringStateRepository:
         adapter_key: Any,
         *,
         config_version: Any,
+        dry_run: Any = False,
     ) -> dict[str, Any]:
+        if type(dry_run) is not bool:
+            raise SourceMonitoringStateError(
+                "dry_run must be a native boolean",
+                code="SOURCE_MONITORING_STATE_INVALID",
+            )
         clean_key = normalize_adapter_key(adapter_key)
         clean_config = _clean_token(config_version, "config_version")
         timestamp = self._now_ms()
@@ -781,15 +795,17 @@ class SourceMonitoringStateRepository:
                     "adapter is disabled",
                     code="SOURCE_MONITORING_ADAPTER_DISABLED",
                 )
-            next_state_version = state["state_version"] + 1
+            next_state_version = (
+                state["state_version"] if dry_run else state["state_version"] + 1
+            )
             checkpoint_json = canonical_json(state["checkpoint"])
             try:
                 connection.execute(
                     """INSERT INTO source_adapter_runs(
                            run_id,record_version,adapter_key,started_state_version,
                            started_checkpoint_json,started_checkpoint_sha256,
-                           next_checkpoint_json,started_at_ms,status
-                       ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                           next_checkpoint_json,started_at_ms,status,dry_run
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
                     (
                         run_id,
                         SOURCE_ADAPTER_RUN_VERSION,
@@ -800,6 +816,7 @@ class SourceMonitoringStateRepository:
                         checkpoint_json,
                         timestamp,
                         RUN_STATUS_RUNNING,
+                        int(dry_run),
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -807,23 +824,24 @@ class SourceMonitoringStateRepository:
                     "adapter already has an active run",
                     code="SOURCE_MONITORING_RUN_ACTIVE",
                 ) from exc
-            cursor = connection.execute(
-                """UPDATE source_adapter_states
-                   SET last_started_at_ms=?,state_version=?,updated_at_ms=?
-                   WHERE adapter_key=? AND state_version=?""",
-                (
-                    timestamp,
-                    next_state_version,
-                    timestamp,
-                    clean_key,
-                    state["state_version"],
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise SourceMonitoringStateError(
-                    "adapter state changed before the run started",
-                    code="SOURCE_MONITORING_STATE_CONFLICT",
+            if not dry_run:
+                cursor = connection.execute(
+                    """UPDATE source_adapter_states
+                       SET last_started_at_ms=?,state_version=?,updated_at_ms=?
+                       WHERE adapter_key=? AND state_version=?""",
+                    (
+                        timestamp,
+                        next_state_version,
+                        timestamp,
+                        clean_key,
+                        state["state_version"],
+                    ),
                 )
+                if cursor.rowcount != 1:
+                    raise SourceMonitoringStateError(
+                        "adapter state changed before the run started",
+                        code="SOURCE_MONITORING_STATE_CONFLICT",
+                    )
             run_row = connection.execute(
                 "SELECT * FROM source_adapter_runs WHERE run_id=?",
                 (run_id,),
@@ -981,6 +999,11 @@ class SourceMonitoringStateRepository:
                     code="SOURCE_MONITORING_RECEIPT_REQUIRED",
                 )
             dry_run = status == RUN_STATUS_DRY_RUN
+            if run["dry_run"] is not dry_run:
+                raise SourceMonitoringStateError(
+                    "run dry-run mode does not match its terminal status",
+                    code="SOURCE_MONITORING_STATE_INVALID",
+                )
             checkpoint_committed = status == RUN_STATUS_SUCCEEDED
             degraded = status == RUN_STATUS_DEGRADED
             consecutive_failures = state["consecutive_failures"] + 1 if degraded else 0
@@ -1088,6 +1111,11 @@ class SourceMonitoringStateRepository:
         with self.store._lock, closing(self.store._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             run, state = self._run_for_update(connection, clean_run_id)
+            if run["dry_run"]:
+                raise SourceMonitoringStateError(
+                    "dry-run failures must be closed with a dry-run receipt",
+                    code="SOURCE_MONITORING_STATE_INVALID",
+                )
             cursor = connection.execute(
                 """UPDATE source_adapter_states
                    SET next_due_at_ms=?,consecutive_failures=consecutive_failures+1,
@@ -1172,20 +1200,21 @@ class SourceMonitoringStateRepository:
                         code="SOURCE_MONITORING_RECORD_CORRUPT",
                     )
                 state = self._state_projection(state_row)
-                connection.execute(
-                    """UPDATE source_adapter_states
-                       SET next_due_at_ms=?,consecutive_failures=consecutive_failures+1,
-                           last_error_code=?,last_error_message='Worker stopped before checkpoint commit.',
-                           state_version=state_version+1,updated_at_ms=?
-                       WHERE adapter_key=? AND state_version=?""",
-                    (
-                        next_due,
-                        clean_error_code,
-                        completed_at,
-                        run["adapter_key"],
-                        state["state_version"],
-                    ),
-                )
+                if not run["dry_run"]:
+                    connection.execute(
+                        """UPDATE source_adapter_states
+                           SET next_due_at_ms=?,consecutive_failures=consecutive_failures+1,
+                               last_error_code=?,last_error_message='Worker stopped before checkpoint commit.',
+                               state_version=state_version+1,updated_at_ms=?
+                           WHERE adapter_key=? AND state_version=?""",
+                        (
+                            next_due,
+                            clean_error_code,
+                            completed_at,
+                            run["adapter_key"],
+                            state["state_version"],
+                        ),
+                    )
                 checkpoint_json = canonical_json(run["started_checkpoint"])
                 connection.execute(
                     """UPDATE source_adapter_runs
