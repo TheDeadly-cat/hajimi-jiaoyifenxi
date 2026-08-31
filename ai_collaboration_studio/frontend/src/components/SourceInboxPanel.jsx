@@ -1,12 +1,17 @@
 import {
+  Activity,
   AlertTriangle,
+  Bell,
+  BellOff,
   Check,
+  ClipboardCopy,
   ExternalLink,
   FileJson2,
   FilePlus2,
   Inbox,
   Link2,
   LoaderCircle,
+  Layers3,
   Paperclip,
   RefreshCw,
   Search,
@@ -21,9 +26,11 @@ import {
   EXTERNAL_UNVERIFIED,
   normalizeSourceInboxItem,
   normalizeSourceInboxResponse,
+  normalizeSourceMonitoringHealth,
   replaceSourceInboxItem,
   SOURCE_INBOX_FILTERS,
   SOURCE_INBOX_STATE_LABELS,
+  SOURCE_MONITORING_HEALTH_LABELS,
   sourceInboxItemPermissions,
 } from "../sourceInbox";
 import "../styles/source-inbox.css";
@@ -33,6 +40,10 @@ const EMPTY_LIST_STATE = Object.freeze({
   status: "idle",
   items: [],
   counts: {},
+  totalCount: 0,
+  unreadCount: 0,
+  matchedCount: 0,
+  sourceFacets: [],
   error: "",
 });
 
@@ -48,6 +59,12 @@ const EMPTY_ACTION_STATE = Object.freeze({
   error: "",
 });
 
+const EMPTY_HEALTH_STATE = Object.freeze({
+  status: "idle",
+  health: null,
+  error: "",
+});
+
 function errorMessage(error, fallback) {
   const message = error instanceof Error ? error.message.trim() : "";
   return (message || fallback).slice(0, 1000);
@@ -56,14 +73,20 @@ function errorMessage(error, fallback) {
 function formatServerTime(value) {
   const timestamp = Number(value);
   if (!Number.isFinite(timestamp) || timestamp <= 0) return "服务端接收时间不可用";
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date(timestamp));
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) return "服务端接收时间不可用";
+  try {
+    return new Intl.DateTimeFormat("zh-CN", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    }).format(date);
+  } catch {
+    return "服务端接收时间不可用";
+  }
 }
 
 function shortHash(value) {
@@ -88,11 +111,60 @@ function SourceInboxListItem({ active, disabled, item, onSelect }) {
       <span className="source-inbox-row-signal" aria-hidden="true" />
       <span>
         <strong>{item.headline}</strong>
-        <small>{item.sourceChannel || "未声明来源通道"}</small>
+        <small>{item.sourceTierCode} · {item.sourceTierLabel} · {item.sourceKey || item.sourceChannel || "未声明来源"}</small>
         <code>{EXTERNAL_UNVERIFIED}</code>
       </span>
-      <em>{item.valid ? (SOURCE_INBOX_STATE_LABELS[item.state] || item.state || "状态未知") : "记录完整性异常"}</em>
+      <em>
+        {item.acknowledged ? "已阅" : "未读"} · {item.valid
+          ? (SOURCE_INBOX_STATE_LABELS[item.state] || item.state || "状态未知")
+          : "记录完整性异常"}
+      </em>
     </button>
+  );
+}
+
+function DeterministicImpactSection({ item }) {
+  const validProjections = item.impactRuleProjections.filter((projection) => projection.valid === true);
+  const invalidProjectionCount = item.impactRuleProjections.length - validProjections.length;
+  const hypotheses = invalidProjectionCount > 0
+    ? []
+    : validProjections.flatMap((projection) => projection.hypotheses);
+  return (
+    <section className="source-inbox-section source-inbox-impact-rules">
+      <h3><Layers3 aria-hidden="true" size={16} />确定性研究影响映射</h3>
+      <p className="source-inbox-impact-boundary">
+        这里只展示固定规则对研究范围的映射；不是方向预测、因果结论、盈利声明或执行授权。
+      </p>
+      {invalidProjectionCount > 0 ? (
+        <p className="source-inbox-integrity-error compact" role="alert">
+          影响映射完整性校验失败，已停止展示该投影内容。
+        </p>
+      ) : null}
+      {item.impactEvaluationState === "not_evaluated" ? (
+        <p className="source-inbox-muted compact">
+          未评估：规则功能可能处于默认关闭状态，或该历史条目按不回填策略保留为空。
+        </p>
+      ) : null}
+      {item.impactEvaluationState === "no_match" ? (
+        <p className="source-inbox-muted compact">已执行固定规则，但没有匹配映射；这不等于“没有影响”。</p>
+      ) : null}
+      {hypotheses.length ? (
+        <ul className="source-inbox-impact-list">
+          {hypotheses.map((hypothesis) => (
+            <li key={hypothesis.id}>
+              <span className="source-inbox-impact-scope">
+                <strong>{hypothesis.areaKind === "sector" ? "行业" : "标的"} · {hypothesis.areaId.toUpperCase()}</strong>
+                {hypothesis.securityIds.length ? <small>{hypothesis.securityIds.join(" · ")}</small> : null}
+              </span>
+              <span>{hypothesis.statement}</span>
+              <small>
+                {hypothesis.timeHorizon || "时间范围未提供"} · 固定规则覆盖度 {Math.round(hypothesis.confidence * 100)}% · 反证未知
+              </small>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
   );
 }
 
@@ -105,6 +177,7 @@ function SourceInboxDetail({
   onAcknowledgementChange,
   onAttach,
   onCreateDraft,
+  onCopyDeepLink,
   onObjectiveChange,
   onRoomChange,
   roomId,
@@ -149,8 +222,12 @@ function SourceInboxDetail({
           <div><dt>服务端接收</dt><dd>{formatServerTime(item.receivedAt)}</dd></div>
           <div><dt>来源指纹</dt><dd><code title={item.serverFingerprint}>{shortHash(item.serverFingerprint)}</code></dd></div>
           <div><dt>来源键</dt><dd>{item.sourceKey || "未提供"}</dd></div>
+          <div><dt>接入层级</dt><dd>{item.sourceTierCode} · {item.sourceTierLabel}（不是事实认证）</dd></div>
           <div><dt>外部运行 ID</dt><dd>{item.externalRunId || "未提供"}</dd></div>
         </dl>
+        <button className="secondary compact source-inbox-copy-link" type="button" onClick={onCopyDeepLink}>
+          <ClipboardCopy aria-hidden="true" size={14} />复制此事件链接
+        </button>
         <DetailList
           empty="未提供可展示的来源链接。"
           items={item.sources}
@@ -169,6 +246,8 @@ function SourceInboxDetail({
           )}
         />
       </section>
+
+      <DeterministicImpactSection item={item} />
 
       <section className="source-inbox-section">
         <h3><Search aria-hidden="true" size={16} />外部声明与影响假设</h3>
@@ -284,11 +363,107 @@ function SourceInboxDetail({
   );
 }
 
+function SourceMonitoringHealth({
+  healthState,
+  notificationState,
+  onNotificationPreferenceChange,
+}) {
+  const health = healthState.health;
+  const notificationSupported = notificationState?.supported === true;
+  const notificationEnabled = notificationState?.enabled === true;
+  const notificationPermission = String(notificationState?.permission || "unsupported");
+  return (
+    <details className="source-inbox-health">
+      <summary>
+        <span><Activity aria-hidden="true" size={15} /><strong>Adapter 健康</strong></span>
+        <small>
+          {healthState.status === "loading"
+            ? "读取中"
+            : health?.valid
+              ? `${health.stateLabel} · ${health.adapters.length} 个`
+              : healthState.status === "error"
+                ? "读取失败"
+                : "尚未读取"}
+        </small>
+      </summary>
+      <div className="source-inbox-health-body">
+        {healthState.status === "error" ? (
+          <p className="source-inbox-notice error" role="alert">{healthState.error}</p>
+        ) : null}
+        {health && !health.valid ? (
+          <p className="source-inbox-notice error" role="alert">
+            Adapter 健康响应未满足零执行与在线性边界，未将其解释为健康状态。
+          </p>
+        ) : null}
+        {health?.valid ? (
+          <>
+            <p className="source-inbox-health-boundary">
+              捕获于 {formatServerTime(health.capturedAt)}。{health.globalEnabled ? "全局监控已启用" : "全局监控默认关闭"}
+              {health.dryRun ? " · dry-run" : ""}。运行时在线性未核验；健康记录不代表来源事实、交易许可或执行权限。
+            </p>
+            <div className="source-inbox-health-adapters" role="list" aria-label="Adapter 健康记录">
+              {health.adapters.map((adapter) => (
+                <article key={adapter.adapterKey} role="listitem">
+                  <header><strong>{adapter.adapterKey}</strong><em>{SOURCE_MONITORING_HEALTH_LABELS[adapter.state] || adapter.state}</em></header>
+                  <small>
+                    {adapter.persistedStatePresent ? "有持久化状态" : "尚无持久化状态"}
+                    {adapter.persistedStatePresent
+                      ? ` · 持久化开关${adapter.persistedEnabled ? "启用" : "关闭"}`
+                      : ""}
+                    {adapter.configStatus ? ` · 配置 ${adapter.configStatus}` : ""}
+                    {adapter.latestRunStatus ? ` · 最近运行 ${adapter.latestRunStatus}` : ""}
+                  </small>
+                  <small>
+                    最近成功 {formatServerTime(adapter.lastSuccessAt)}
+                    {adapter.lastErrorCode ? ` · 错误码 ${adapter.lastErrorCode}` : ""}
+                  </small>
+                </article>
+              ))}
+            </div>
+          </>
+        ) : null}
+        <div className="source-inbox-notifications">
+          <span>
+            {notificationEnabled ? <Bell aria-hidden="true" size={15} /> : <BellOff aria-hidden="true" size={15} />}
+            <span>
+              <strong>浏览器通知</strong>
+              <small>
+                {!notificationSupported
+                  ? "当前浏览器不支持。"
+                  : notificationPermission === "denied"
+                    ? "权限已被浏览器拒绝；请在浏览器设置中调整。"
+                    : notificationEnabled
+                      ? "仅页面打开时提示新未读事件；通知不含外部正文。"
+                      : "只在你明确启用后申请权限；历史事件不会补发。"}
+              </small>
+            </span>
+          </span>
+          <button
+            className="secondary compact"
+            type="button"
+            disabled={!notificationSupported || notificationPermission === "denied"}
+            onClick={() => onNotificationPreferenceChange?.(!notificationEnabled)}
+          >
+            {notificationEnabled ? "停用通知" : "启用通知"}
+          </button>
+        </div>
+      </div>
+    </details>
+  );
+}
+
 export function SourceInboxPanel({
   activeRoomId = "",
+  notificationState = { supported: false, permission: "unsupported", enabled: false },
   onClose,
+  onCopyEventLink,
+  onEventTargetChange,
+  onNotificationPreferenceChange,
   onRoomAttached,
+  onUnreadCountChange,
   open,
+  refreshToken = 0,
+  requestedItemId = "",
   restoreFocusRef,
   rooms = [],
 }) {
@@ -296,12 +471,17 @@ export function SourceInboxPanel({
   const closeButtonRef = useRef(null);
   const openRef = useRef(Boolean(open));
   const listRequestRef = useRef({ sequence: 0, controller: null });
+  const healthRequestRef = useRef({ sequence: 0, controller: null });
   const detailRequestRef = useRef({ sequence: 0, controller: null });
   const actionRequestRef = useRef({ sequence: 0, controller: null });
+  const consumedRefreshTokenRef = useRef(0);
   const [queryInput, setQueryInput] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
   const [stateFilter, setStateFilter] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("");
+  const [unreadOnly, setUnreadOnly] = useState(false);
   const [listState, setListState] = useState(EMPTY_LIST_STATE);
+  const [healthState, setHealthState] = useState(EMPTY_HEALTH_STATE);
   const [selectedItemId, setSelectedItemId] = useState("");
   const [detailState, setDetailState] = useState(EMPTY_DETAIL_STATE);
   const [selectedRoomId, setSelectedRoomId] = useState("");
@@ -354,6 +534,8 @@ export function SourceInboxPanel({
       const payload = await api.listSourceInbox({
         state: stateFilter,
         query: submittedQuery,
+        source: sourceFilter,
+        unread: unreadOnly,
         limit: 100,
         signal: controller.signal,
       });
@@ -363,11 +545,16 @@ export function SourceInboxPanel({
         || !openRef.current
       ) return false;
       const normalized = normalizeSourceInboxResponse(payload);
+      if (!normalized.valid) {
+        throw new Error("来源收件箱列表响应未满足固定契约，已拒绝更新。");
+      }
       setListState({ status: "ready", ...normalized, error: "" });
+      if (typeof onUnreadCountChange === "function") {
+        onUnreadCountChange(normalized.unreadCount);
+      }
       setSelectedItemId((current) => {
-        if (preferredItemId && normalized.items.some((item) => item.id === preferredItemId)) {
-          return preferredItemId;
-        }
+        if (preferredItemId) return preferredItemId;
+        if (requestedItemId) return requestedItemId;
         if (current && normalized.items.some((item) => item.id === current)) return current;
         return normalized.items[0]?.id || "";
       });
@@ -382,24 +569,72 @@ export function SourceInboxPanel({
       }));
       return false;
     }
-  }, [stateFilter, submittedQuery]);
+  }, [onUnreadCountChange, requestedItemId, sourceFilter, stateFilter, submittedQuery, unreadOnly]);
+
+  const loadHealth = useCallback(async () => {
+    const previous = healthRequestRef.current;
+    previous.controller?.abort();
+    const controller = new AbortController();
+    const sequence = previous.sequence + 1;
+    healthRequestRef.current = { sequence, controller };
+    setHealthState((current) => ({ ...current, status: "loading", error: "" }));
+    try {
+      const payload = await api.sourceMonitoringHealth(controller.signal);
+      if (
+        controller.signal.aborted
+        || healthRequestRef.current.sequence !== sequence
+        || !openRef.current
+      ) return false;
+      const health = normalizeSourceMonitoringHealth(payload);
+      setHealthState({ status: "ready", health, error: "" });
+      return true;
+    } catch (error) {
+      if (controller.signal.aborted || error?.name === "AbortError") return false;
+      if (healthRequestRef.current.sequence !== sequence || !openRef.current) return false;
+      setHealthState({
+        status: "error",
+        health: null,
+        error: errorMessage(error, "Adapter 健康记录暂时无法读取。"),
+      });
+      return false;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open && requestedItemId) setSelectedItemId(requestedItemId);
+  }, [open, requestedItemId]);
 
   useEffect(() => {
     if (!open) {
       listRequestRef.current.controller?.abort();
-      detailRequestRef.current.controller?.abort();
-      actionRequestRef.current.controller?.abort();
-      setActionState(EMPTY_ACTION_STATE);
-      setImportError("");
       return undefined;
     }
     void loadList();
-    return () => {
-      listRequestRef.current.controller?.abort();
-      detailRequestRef.current.controller?.abort();
-      actionRequestRef.current.controller?.abort();
-    };
+    return () => listRequestRef.current.controller?.abort();
   }, [loadList, open]);
+
+  useEffect(() => {
+    if (open) return undefined;
+    detailRequestRef.current.controller?.abort();
+    actionRequestRef.current.controller?.abort();
+    setActionState(EMPTY_ACTION_STATE);
+    setImportError("");
+    return undefined;
+  }, [open]);
+
+  useEffect(() => () => {
+    detailRequestRef.current.controller?.abort();
+    actionRequestRef.current.controller?.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!open) {
+      healthRequestRef.current.controller?.abort();
+      return undefined;
+    }
+    void loadHealth();
+    return () => healthRequestRef.current.controller?.abort();
+  }, [loadHealth, open]);
 
   const loadDetail = useCallback(async (itemId) => {
     if (!itemId) {
@@ -420,6 +655,9 @@ export function SourceInboxPanel({
         || !openRef.current
       ) return false;
       const item = normalizeSourceInboxItem(payload.source_item);
+      if (item.id !== itemId) {
+        throw new Error("来源详情与请求事件 ID 不一致，已拒绝展示。");
+      }
       setAcknowledgementChecked(false);
       setDetailState({ status: "ready", item, error: "" });
       setListState((current) => ({
@@ -449,13 +687,45 @@ export function SourceInboxPanel({
 
   const refreshInbox = useCallback(async () => {
     const preferredItemId = selectedItemId;
-    await loadList({ preferredItemId });
+    await Promise.all([
+      loadList({ preferredItemId }),
+      loadHealth(),
+    ]);
     if (preferredItemId) await loadDetail(preferredItemId);
-  }, [loadDetail, loadList, selectedItemId]);
+  }, [loadDetail, loadHealth, loadList, selectedItemId]);
 
-  const adoptItem = useCallback((rawItem) => {
+  useEffect(() => {
+    if (
+      open
+      && refreshToken > consumedRefreshTokenRef.current
+    ) {
+      consumedRefreshTokenRef.current = refreshToken;
+      void refreshInbox();
+    }
+  }, [open, refreshInbox, refreshToken]);
+
+  const selectItem = useCallback((itemId) => {
+    const cleanItemId = String(itemId || "");
+    setSelectedItemId(cleanItemId);
+    if (cleanItemId && typeof onEventTargetChange === "function") {
+      onEventTargetChange(cleanItemId);
+    }
+  }, [onEventTargetChange]);
+
+  const copyDeepLink = useCallback(async () => {
+    if (!detailState.item?.id || typeof onCopyEventLink !== "function") return;
+    setFeedback("");
+    try {
+      await onCopyEventLink(detailState.item.id);
+      setFeedback("已复制该事件的本地深链接；链接只包含服务端事件 ID。");
+    } catch (error) {
+      setFeedback(errorMessage(error, "无法复制事件链接。"));
+    }
+  }, [detailState.item, onCopyEventLink]);
+
+  const adoptItem = useCallback((rawItem, expectedItemId = "") => {
     const item = normalizeSourceInboxItem(rawItem);
-    if (!item.id) return null;
+    if (!item.valid || !item.id || (expectedItemId && item.id !== expectedItemId)) return null;
     setDetailState({ status: "ready", item, error: "" });
     setListState((current) => ({
       ...current,
@@ -482,11 +752,12 @@ export function SourceInboxPanel({
         || actionRequestRef.current.sequence !== sequence
         || !openRef.current
       ) return false;
-      const item = adoptItem(payload.source_item || payload.item);
+      const item = adoptItem(payload.source_item || payload.item, targetItemId);
       if (!item) throw new Error("服务端未返回更新后的来源条目。");
       setAcknowledgementChecked(false);
       setActionState(EMPTY_ACTION_STATE);
       setFeedback(successMessage);
+      await loadList({ preferredItemId: item.id });
       return true;
     } catch (error) {
       if (controller.signal.aborted || error?.name === "AbortError") return false;
@@ -501,7 +772,7 @@ export function SourceInboxPanel({
       });
       return false;
     }
-  }, [actionState.status, adoptItem, detailState.item, loadDetail]);
+  }, [actionState.status, adoptItem, detailState.item, loadDetail, loadList]);
 
   const acknowledgeItem = () => runItemAction(
     "acknowledge",
@@ -565,10 +836,15 @@ export function SourceInboxPanel({
       const importResult = payload.source_import || {};
       const importedItems = Array.isArray(importResult.items) ? importResult.items : [];
       const firstItem = importedItems[0] ? adoptItem(importedItems[0]) : null;
+      if (importedItems.length && !firstItem) {
+        throw new Error("导入响应未返回完整且身份有效的来源条目。");
+      }
       setActionState(EMPTY_ACTION_STATE);
       setImportContent("");
       setImportOpen(false);
       setStateFilter("");
+      setSourceFilter("");
+      setUnreadOnly(false);
       setQueryInput("");
       setSubmittedQuery("");
       setFeedback(importResult.idempotent_replay
@@ -621,7 +897,10 @@ export function SourceInboxPanel({
         <header className="source-inbox-heading">
           <span>
             <Inbox aria-hidden="true" size={20} />
-            <span><strong id={titleId}>来源收件箱</strong><small>人工审阅外部来源</small></span>
+            <span>
+              <strong id={titleId}>来源收件箱</strong>
+              <small>人工审阅外部来源 · {Number(listState.unreadCount || 0)} 条未读</small>
+            </span>
           </span>
           <button
             ref={closeButtonRef}
@@ -695,20 +974,56 @@ export function SourceInboxPanel({
           </section>
         ) : null}
 
-        <div className="source-inbox-filters" aria-label="来源状态筛选">
-          {SOURCE_INBOX_FILTERS.map((filter) => (
+        <SourceMonitoringHealth
+          healthState={healthState}
+          notificationState={notificationState}
+          onNotificationPreferenceChange={onNotificationPreferenceChange}
+        />
+
+        <div className="source-inbox-filter-groups">
+          <fieldset className="source-inbox-filters">
+            <legend>工作状态（全局计数）</legend>
+            <div>
+              {SOURCE_INBOX_FILTERS.map((filter) => (
+                <button
+                  key={filter.id || "all"}
+                  type="button"
+                  aria-pressed={stateFilter === filter.id}
+                  onClick={() => setStateFilter(filter.id)}
+                >
+                  {filter.label}
+                  {filter.id && Number.isFinite(listState.counts[filter.id])
+                    ? <span>{listState.counts[filter.id]}</span>
+                    : null}
+                </button>
+              ))}
+            </div>
+          </fieldset>
+          <fieldset className="source-inbox-provenance-filters">
+            <legend>来源与阅读状态（全局计数）</legend>
+            <label>
+              <span>按接入来源筛选</span>
+              <select
+                aria-label="按接入来源筛选"
+                value={sourceFilter}
+                onChange={(event) => setSourceFilter(event.target.value)}
+              >
+                <option value="">全部来源</option>
+                {listState.sourceFacets?.filter((facet) => facet.valid).map((facet) => (
+                  <option key={facet.id} value={facet.id}>
+                    {facet.sourceTierCode} · {facet.sourceKey}（{facet.count}）
+                  </option>
+                ))}
+              </select>
+            </label>
             <button
-              key={filter.id || "all"}
               type="button"
-              aria-pressed={stateFilter === filter.id}
-              onClick={() => setStateFilter(filter.id)}
+              aria-pressed={unreadOnly}
+              onClick={() => setUnreadOnly((value) => !value)}
             >
-              {filter.label}
-              {filter.id && Number.isFinite(listState.counts[filter.id])
-                ? <span>{listState.counts[filter.id]}</span>
-                : null}
+              仅看未读 <span>{Number(listState.unreadCount || 0)}</span>
             </button>
-          ))}
+          </fieldset>
         </div>
 
         {feedback ? <p className="source-inbox-notice" role="status" aria-live="polite"><Check aria-hidden="true" size={15} />{feedback}</p> : null}
@@ -723,7 +1038,10 @@ export function SourceInboxPanel({
 
         <div className="source-inbox-workspace">
           <aside className="source-inbox-list" aria-label={`来源列表，共 ${visibleCount} 条`}>
-            <header><strong>来源列表</strong><small>{visibleCount} 条当前结果</small></header>
+            <header>
+              <strong>来源列表</strong>
+              <small>{visibleCount} 条已显示 · {Number(listState.matchedCount || visibleCount)} 条匹配</small>
+            </header>
             {listState.status === "loading" && !listState.items.length ? (
               <p className="source-inbox-loading" role="status"><LoaderCircle aria-hidden="true" className="spin" size={16} />正在读取来源…</p>
             ) : null}
@@ -734,17 +1052,18 @@ export function SourceInboxPanel({
                 <small>可调整筛选，或手动导入 ChatGPT 来源包 JSON。</small>
               </div>
             ) : null}
-            <div role="list">
+            <ul className="source-inbox-list-items">
               {listState.items.map((item) => (
-                <SourceInboxListItem
-                  key={item.id}
-                  item={item}
-                  active={selectedItemId === item.id}
-                  disabled={busy}
-                  onSelect={() => setSelectedItemId(item.id)}
-                />
+                <li key={item.id}>
+                  <SourceInboxListItem
+                    item={item}
+                    active={selectedItemId === item.id}
+                    disabled={busy}
+                    onSelect={() => selectItem(item.id)}
+                  />
+                </li>
               ))}
-            </div>
+            </ul>
           </aside>
 
           <div className="source-inbox-detail-wrap">
@@ -770,6 +1089,7 @@ export function SourceInboxPanel({
                 onAcknowledge={() => void acknowledgeItem()}
                 onRoomChange={setSelectedRoomId}
                 onAttach={() => void attachItem()}
+                onCopyDeepLink={() => void copyDeepLink()}
                 onObjectiveChange={setObjective}
                 onCreateDraft={() => void createDraft()}
               />

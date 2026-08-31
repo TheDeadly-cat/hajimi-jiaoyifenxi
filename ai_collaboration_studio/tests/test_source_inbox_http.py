@@ -10,6 +10,7 @@ from contextlib import closing
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 os.environ["AI_STUDIO_SKIP_LOCAL_ENV"] = "1"
@@ -131,10 +132,131 @@ class SourceInboxHttpTests(unittest.TestCase):
         )
         self.assertEqual(list_status, 200)
         self.assertEqual([entry["id"] for entry in listing["source_inbox"]["items"]], [item["id"]])
+        self.assertEqual(listing["source_inbox"]["total_count"], 1)
+        self.assertEqual(listing["source_inbox"]["unread_count"], 1)
+        self.assertEqual(listing["source_inbox"]["matched_count"], 1)
+        self.assertEqual(
+            listing["source_inbox"]["source_facets"],
+            [{
+                "source": "chatgpt_scheduled_task:github_ci_watch",
+                "source_channel": "chatgpt_scheduled_task",
+                "source_key": "github_ci_watch",
+                "source_tier": "external_manual",
+                "count": 1,
+                "unread_count": 1,
+            }],
+        )
+
+        filtered_status, filtered = self.request(
+            "/api/monitoring/inbox?"
+            "source=chatgpt_scheduled_task%3Agithub_ci_watch&unread=true&limit=1"
+        )
+        self.assertEqual(filtered_status, 200)
+        self.assertEqual(filtered["source_inbox"]["matched_count"], 1)
+        self.assertEqual(filtered["source_inbox"]["items"][0]["source_tier"], "external_manual")
 
         detail_status, detail = self.request(f"/api/monitoring/events/{item['id']}")
         self.assertEqual(detail_status, 200)
         self.assertEqual(detail["source_item"]["events"][-1]["to_state"], "AWAITING_USER")
+
+    def test_notification_baseline_cursor_polling_and_acknowledgement(self) -> None:
+        baseline_status, baseline_payload = self.request(
+            "/api/monitoring/notifications?limit=1"
+        )
+        self.assertEqual(baseline_status, 200)
+        baseline = baseline_payload["source_notifications"]
+        self.assertTrue(baseline["baseline"])
+        self.assertEqual(baseline["notifications"], [])
+
+        item = self.import_item()
+        first_status, first_payload = self.request(
+            "/api/monitoring/notifications?after="
+            f"{quote(baseline['cursor'], safe='')}&limit=1"
+        )
+        self.assertEqual(first_status, 200)
+        first = first_payload["source_notifications"]
+        self.assertEqual([row["id"] for row in first["notifications"]], [item["id"]])
+        self.assertEqual(first["unread_count"], 1)
+        self.assertFalse(first["has_more"])
+
+        duplicate_status, duplicate_payload = self.request(
+            "/api/monitoring/notifications?after="
+            f"{quote(first['cursor'], safe='')}&limit=1"
+        )
+        self.assertEqual(duplicate_status, 200)
+        duplicate = duplicate_payload["source_notifications"]
+        self.assertEqual(duplicate["notifications"], [])
+        self.assertEqual(duplicate["cursor"], first["cursor"])
+
+        ack_status, acknowledged = self.request(
+            f"/api/monitoring/events/{item['id']}/acknowledge",
+            method="POST",
+            payload={
+                "expected_state_version": item["state_version"],
+                "acknowledgement": True,
+            },
+        )
+        self.assertEqual(ack_status, 200)
+        self.assertEqual(acknowledged["source_item"]["state"], "AWAITING_USER")
+        after_ack_status, after_ack_payload = self.request(
+            "/api/monitoring/notifications?after="
+            f"{quote(duplicate['cursor'], safe='')}"
+        )
+        self.assertEqual(after_ack_status, 200)
+        self.assertEqual(after_ack_payload["source_notifications"]["unread_count"], 0)
+
+        for path in (
+            "/api/monitoring/notifications?after=not-a-valid-cursor",
+            "/api/monitoring/notifications?after=a&after=b",
+            "/api/monitoring/notifications?unknown=1",
+            "/api/monitoring/inbox?unread=TRUE",
+            "/api/monitoring/inbox?unread=",
+            "/api/monitoring/inbox?source=missing_separator",
+            "/api/monitoring/inbox?source=official_source_monitor%3Asec%20filings",
+            "/api/monitoring/inbox?source=official_source_monitor%3Asec%3Afilings",
+            "/api/monitoring/inbox?source=%20official_source_monitor%3Asec_filings",
+            "/api/monitoring/inbox?source=",
+        ):
+            with self.subTest(path=path):
+                status, payload = self.request(path)
+                self.assertEqual(status, 400)
+                self.assertIn(
+                    payload["code"],
+                    {"SOURCE_INBOX_REQUEST_INVALID", "SOURCE_INBOX_CURSOR_INVALID"},
+                )
+
+    def test_source_monitoring_health_is_read_only_default_off_evidence(self) -> None:
+        status, payload = self.request("/api/monitoring/health")
+        self.assertEqual(status, 200)
+        health = payload["source_monitoring_health"]
+        self.assertEqual(health["version"], "source_monitoring_health_service_v1")
+        self.assertEqual(health["adapter_count"], 7)
+        self.assertFalse(health["runtime_liveness_verified"])
+        self.assertEqual(health["safety"]["database_writes_performed"], 0)
+        self.assertEqual(health["safety"]["provider_calls_performed"], 0)
+        self.assertEqual(health["safety"]["network_requests_performed"], 0)
+        self.assertEqual(health["safety"]["formal_rounds_created"], 0)
+        self.assertTrue(all(
+            adapter["runtime_liveness_verified"] is False
+            and adapter["metadata"]["execution_capability"] == "none"
+            and adapter["metadata"]["live_trading_allowed"] is False
+            for adapter in health["adapters"]
+        ))
+
+        notification_status, _ = self.request(
+            "/api/monitoring/notifications?limit=50"
+        )
+        self.assertEqual(notification_status, 200)
+        repeated_status, repeated_payload = self.request("/api/monitoring/health")
+        self.assertEqual(repeated_status, 200)
+        self.assertEqual(
+            repeated_payload["source_monitoring_health"]["adapter_count"],
+            7,
+        )
+
+        invalid_status, invalid = self.request("/api/monitoring/health?probe=true")
+        self.assertEqual(invalid_status, 400)
+        self.assertEqual(invalid["code"], "SOURCE_MONITORING_HEALTH_QUERY_UNSUPPORTED")
 
     def test_user_sequence_creates_material_and_draft_but_no_formal_round(self) -> None:
         item = self.import_item()
@@ -312,8 +434,13 @@ class SourceInboxHttpTests(unittest.TestCase):
 
     def test_all_source_inbox_responses_are_no_store(self) -> None:
         for path, method, payload, include_token, expected_status in (
+            ("/api/monitoring/health", "GET", None, True, 200),
+            ("/api/monitoring/health", "GET", None, False, 200),
             ("/api/monitoring/inbox", "GET", None, True, 200),
             ("/api/monitoring/inbox?limit=1&limit=2", "GET", None, True, 400),
+            ("/api/monitoring/notifications", "GET", None, True, 200),
+            ("/api/monitoring/notifications", "GET", None, False, 200),
+            ("/api/monitoring/notifications?after=bad", "GET", None, True, 400),
             ("/api/monitoring/events/missing", "GET", None, True, 404),
             (
                 "/api/monitoring/imports/chatgpt",

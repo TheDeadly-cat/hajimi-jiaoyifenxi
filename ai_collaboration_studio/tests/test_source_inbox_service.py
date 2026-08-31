@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ["AI_STUDIO_SKIP_LOCAL_ENV"] = "1"
 
@@ -37,6 +39,25 @@ class SourceInboxServiceTests(unittest.TestCase):
     @staticmethod
     def raw_packet(packet=None) -> str:
         return json.dumps(packet or _packet(), ensure_ascii=False)
+
+    @staticmethod
+    def packet_variant(
+        suffix: str,
+        *,
+        source_channel: str = "chatgpt_scheduled_task",
+        source_key: str = "github_ci_watch",
+    ) -> dict:
+        packet = copy.deepcopy(_packet())
+        packet["source_channel"] = source_channel
+        packet["source_key"] = source_key
+        packet["external_run_id"] = f"source-run-{suffix}"
+        packet["generation"]["channel"] = source_channel
+        packet["generation"]["correlated_output"] = (
+            source_channel == "chatgpt_scheduled_task"
+        )
+        packet["items"][0]["external_item_id"] = f"event-{suffix}"
+        packet["items"][0]["headline"] = f"Source event {suffix}"
+        return packet
 
     def test_import_is_persisted_idempotent_and_drift_conflicts(self) -> None:
         first = self.service.import_packet(self.raw_packet())
@@ -75,6 +96,219 @@ class SourceInboxServiceTests(unittest.TestCase):
                 connection.execute("SELECT COUNT(*) FROM source_inbox_items").fetchone()[0],
                 1,
             )
+
+    def test_list_source_unread_counts_and_tiers_are_additive_and_limit_independent(self) -> None:
+        manual = self.service.import_packet(
+            self.raw_packet(self.packet_variant("manual"))
+        )["items"][0]
+        official_packet = self.packet_variant(
+            "official",
+            source_channel="official_source_monitor",
+            source_key="sec_filings",
+        )
+        official = self.service.import_packet(
+            self.raw_packet(official_packet),
+            actor="source_monitoring_worker",
+        )["items"][0]
+        readonly_packet = self.packet_variant(
+            "readonly-market",
+            source_channel="futu_anomaly_monitor",
+            source_key="futu_anomaly_signals",
+        )
+        self.service.import_packet(
+            self.raw_packet(readonly_packet),
+            actor="source_monitoring_worker",
+        )
+
+        listing = self.service.list_items(limit=1)
+        self.assertEqual(listing["version"], "source_inbox_list_v1")
+        self.assertEqual(len(listing["items"]), 1)
+        self.assertEqual(listing["total_count"], 3)
+        self.assertEqual(listing["unread_count"], 3)
+        self.assertEqual(listing["matched_count"], 3)
+        self.assertEqual(listing["counts"], {"AWAITING_USER": 3})
+        self.assertEqual(
+            {
+                facet["source"]: (
+                    facet["source_tier"],
+                    facet["count"],
+                    facet["unread_count"],
+                )
+                for facet in listing["source_facets"]
+            },
+            {
+                "chatgpt_scheduled_task:github_ci_watch": (
+                    "external_manual",
+                    1,
+                    1,
+                ),
+                "official_source_monitor:sec_filings": (
+                    "official_source",
+                    1,
+                    1,
+                ),
+                "futu_anomaly_monitor:futu_anomaly_signals": (
+                    "readonly_market",
+                    1,
+                    1,
+                ),
+            },
+        )
+
+        official_listing = self.service.list_items(
+            source="official_source_monitor:sec_filings",
+            unread="true",
+        )
+        self.assertEqual(official_listing["matched_count"], 1)
+        self.assertEqual(official_listing["items"][0]["id"], official["id"])
+        self.assertEqual(official_listing["items"][0]["source_tier"], "official_source")
+        self.assertEqual(
+            official_listing["items"][0]["external_claims_verification"],
+            "external_unverified",
+        )
+        no_match = self.service.list_items(
+            state="AWAITING_USER",
+            query="does-not-exist",
+            source="official_source_monitor:sec_filings",
+            unread="true",
+            limit=1,
+        )
+        self.assertEqual(no_match["matched_count"], 0)
+        self.assertEqual(no_match["items"], [])
+        self.assertEqual(no_match["total_count"], 3)
+        self.assertEqual(len(no_match["source_facets"]), 3)
+
+        acknowledged = self.service.acknowledge(
+            manual["id"],
+            expected_state_version=manual["state_version"],
+            acknowledgement=True,
+        )
+        self.assertEqual(acknowledged["state"], "AWAITING_USER")
+        acknowledged_listing = self.service.list_items(unread="false")
+        self.assertEqual(acknowledged_listing["matched_count"], 1)
+        self.assertEqual(acknowledged_listing["items"][0]["id"], manual["id"])
+        self.assertEqual(acknowledged_listing["unread_count"], 2)
+        self.assertEqual(acknowledged_listing["counts"], {"AWAITING_USER": 3})
+
+        for kwargs in (
+            {"source": "official_source_monitor"},
+            {"source": "Official:sec_filings"},
+            {"source": "official_source_monitor:sec filings"},
+            {"source": "official_source_monitor:sec:filings"},
+            {"source": "official_source_monitor:SecFilings"},
+            {"source": " official_source_monitor:sec_filings"},
+            {"source": "official_source_monitor:sec_filings "},
+            {"source": ""},
+            {"unread": "TRUE"},
+            {"unread": ""},
+            {"unread": True},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaises(SourceInboxError):
+                self.service.list_items(**kwargs)
+
+    def test_notification_feed_baselines_pages_without_duplicates_and_tracks_unread(self) -> None:
+        baseline = self.service.list_notifications(limit=1)
+        self.assertTrue(baseline["baseline"])
+        self.assertEqual(baseline["notifications"], [])
+        self.assertEqual(baseline["unread_count"], 0)
+
+        first = self.service.import_packet(
+            self.raw_packet(self.packet_variant("notification-a"))
+        )["items"][0]
+        second = self.service.import_packet(
+            self.raw_packet(self.packet_variant("notification-b"))
+        )["items"][0]
+
+        page_one = self.service.list_notifications(
+            after=baseline["cursor"],
+            limit=1,
+        )
+        self.assertFalse(page_one["baseline"])
+        self.assertTrue(page_one["has_more"])
+        self.assertEqual(len(page_one["notifications"]), 1)
+        page_two = self.service.list_notifications(
+            after=page_one["cursor"],
+            limit=1,
+        )
+        self.assertFalse(page_two["has_more"])
+        self.assertEqual(len(page_two["notifications"]), 1)
+        delivered_ids = {
+            page_one["notifications"][0]["id"],
+            page_two["notifications"][0]["id"],
+        }
+        self.assertEqual(delivered_ids, {first["id"], second["id"]})
+        self.assertTrue(all(
+            notification["external_claims_verification"] == "external_unverified"
+            and notification["safety"]["execution_authorization"] is False
+            for notification in [
+                *page_one["notifications"],
+                *page_two["notifications"],
+            ]
+        ))
+
+        empty = self.service.list_notifications(after=page_two["cursor"], limit=1)
+        self.assertEqual(empty["notifications"], [])
+        self.assertEqual(empty["cursor"], page_two["cursor"])
+        self.assertEqual(empty["unread_count"], 2)
+
+        self.service.acknowledge(
+            first["id"],
+            expected_state_version=first["state_version"],
+            acknowledgement=True,
+        )
+        after_ack = self.service.list_notifications(after=empty["cursor"], limit=1)
+        self.assertEqual(after_ack["notifications"], [])
+        self.assertEqual(after_ack["unread_count"], 1)
+        detail = self.service.get_item(first["id"])
+        assert detail is not None
+        self.assertEqual(detail["state"], "AWAITING_USER")
+
+        tampered_cursor = page_two["cursor"][:-1] + (
+            "A" if page_two["cursor"][-1] != "A" else "B"
+        )
+        with self.assertRaises(SourceInboxError) as cursor_error:
+            self.service.list_notifications(after=tampered_cursor)
+        self.assertEqual(cursor_error.exception.code, "SOURCE_INBOX_CURSOR_INVALID")
+
+    def test_notification_baseline_never_replays_existing_history(self) -> None:
+        self.service.import_packet(
+            self.raw_packet(self.packet_variant("historical-before-baseline"))
+        )
+        baseline = self.service.list_notifications()
+        self.assertTrue(baseline["baseline"])
+        self.assertEqual(baseline["notifications"], [])
+        self.assertEqual(baseline["unread_count"], 1)
+        replay = self.service.list_notifications(after=baseline["cursor"])
+        self.assertEqual(replay["notifications"], [])
+        self.assertEqual(replay["cursor"], baseline["cursor"])
+
+    def test_notification_cursor_uses_insertion_order_for_same_millisecond_ids(self) -> None:
+        uuid_values = [
+            SimpleNamespace(hex=value * 32)
+            for value in ("1", "f", "2", "3", "4", "5", "0", "6", "7", "8")
+        ]
+        with patch(
+            "backend.source_inbox_service.uuid.uuid4",
+            side_effect=uuid_values,
+        ):
+            first = self.service.import_packet(
+                self.raw_packet(self.packet_variant("same-ms-a"))
+            )["items"][0]
+            baseline = self.service.list_notifications()
+            second = self.service.import_packet(
+                self.raw_packet(self.packet_variant("same-ms-b"))
+            )["items"][0]
+
+        self.assertEqual(first["created_at"], second["created_at"])
+        self.assertLess(second["id"], first["id"])
+        delivered = self.service.list_notifications(after=baseline["cursor"])
+        self.assertEqual(
+            [notification["id"] for notification in delivered["notifications"]],
+            [second["id"]],
+        )
+        self.assertFalse(delivered["has_more"])
+        replay = self.service.list_notifications(after=delivered["cursor"])
+        self.assertEqual(replay["notifications"], [])
 
     def test_manual_import_cannot_claim_reserved_monitoring_channels(self) -> None:
         for source_channel, source_key in (

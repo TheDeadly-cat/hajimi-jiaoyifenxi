@@ -67,14 +67,21 @@ function sourceRecord({
   acknowledged = false,
   attachments = [],
   drafts = [],
+  headline = "GitHub / CI 运行结果摘要",
+  id = "source_item_one",
+  impactRuleProjections = [],
+  sourceChannel = "chatgpt_scheduled_task",
+  sourceKey = "github_ci_watch",
+  sourceTier = "external_manual",
   state = "AWAITING_USER",
   stateVersion = 1,
 } = {}) {
   return {
     version: "source_inbox_item_record_v1",
-    id: "source_item_one",
-    source_channel: "chatgpt_scheduled_task",
-    source_key: "github_ci_watch",
+    id,
+    source_channel: sourceChannel,
+    source_key: sourceKey,
+    source_tier: sourceTier,
     external_run_id: "run_one",
     received_at: 1_777_777_777_000,
     server_fingerprint: "a".repeat(64),
@@ -94,7 +101,7 @@ function sourceRecord({
       severity: "high",
       occurred_at: "2026-08-28T12:55:00Z",
       published_at: "2026-08-28T12:56:00Z",
-      headline: "GitHub / CI 运行结果摘要",
+      headline,
       summary: "外部系统声明隔离测试失败。",
       facts: [{ claim: "workflow conclusion is failure", source_indexes: [0] }],
       sources: [{
@@ -117,6 +124,7 @@ function sourceRecord({
     },
     attachments,
     round_drafts: drafts,
+    impact_rule_projections: impactRuleProjections,
     events: [],
     safety: {
       acknowledgement_is_fact_confirmation: false,
@@ -125,6 +133,144 @@ function sourceRecord({
       market_calls_performed: 0,
       execution_capability: "none",
     },
+  };
+}
+
+function sectorImpactProjection() {
+  return {
+    version: "source_inbox_trading_impact_projection_record_v1",
+    id: "impact_deep",
+    source_item_sha256: "b".repeat(64),
+    server_fingerprint: "a".repeat(64),
+    projection_sha256: "e".repeat(64),
+    status: "MATCHED",
+    hypothesis_count: 1,
+    projection: {
+      version: "trading_impact_projection_v1",
+      ruleset_version: "trading_impact_rules_v1",
+      source_binding: {
+        adapter_id: "federal_reserve",
+        source_channel: "official_source_monitor",
+      },
+      source_item_binding: {
+        item_sha256: "b".repeat(64),
+        server_fingerprint: "a".repeat(64),
+      },
+      evaluation: "matched",
+      matched_rule_ids: ["macro_release_review_v1"],
+      hypotheses: [{
+        version: "trading_impact_hypothesis_v1",
+        hypothesis_sha256: "d".repeat(64),
+        rule_id: "macro_release_review_v1",
+        impact_hypothesis: {
+          statement: "The fixed rule maps this release to DRAM research review.",
+          affected_area: "sector:dram",
+          time_horizon: "next_release_window",
+          source_indexes: [0],
+          confidence: 0.5,
+        },
+        affected_area_binding: { kind: "sector", id: "dram", security_ids: ["US.MU"] },
+        time_dimension: { horizon_id: "next_release_window" },
+        confidence_basis: { outcome_probability: false },
+        counterevidence: { status: "unknown" },
+      }],
+      verification_state: "external_unverified",
+      interpretation_boundary: {
+        directional_forecast: false,
+        causal_attribution: "none",
+        profitability_claim: false,
+        execution_authority: "none",
+        user_review_required: true,
+      },
+      accounting: {
+        model_calls_performed: 0,
+        provider_calls_performed: 0,
+        network_requests_performed: 0,
+        market_calls_performed: 0,
+        database_writes_performed: 0,
+      },
+      projection_sha256: "e".repeat(64),
+    },
+    safety: {
+      model_calls_performed: 0,
+      provider_calls_performed: 0,
+      network_requests_performed: 0,
+      market_calls_performed: 0,
+      database_writes_performed: 0,
+      formal_rounds_created: 0,
+      live_trading_allowed: false,
+      execution_capability: "none",
+    },
+  };
+}
+
+function monitoringHealth() {
+  return {
+    ok: true,
+    source_monitoring_health: {
+      version: "source_monitoring_health_service_v1",
+      health_projection_version: "source_monitoring_health_v1",
+      captured_at_ms: 1_777_777_777_000,
+      state: "disabled",
+      adapter_count: 0,
+      counts: { disabled: 0, idle: 0, running: 0, healthy: 0, degraded: 0, backing_off: 0, failed: 0 },
+      adapters: [],
+      settings: {
+        enabled: false,
+        auto_start: false,
+        official_only: true,
+        allow_readonly_market: false,
+        trading_impact_rules_enabled: false,
+        dry_run: true,
+        max_items_per_run: 100,
+      },
+      persistence_available: true,
+      runtime_liveness_verified: false,
+      safety: {
+        database_writes_performed: 0,
+        provider_calls_performed: 0,
+        network_requests_performed: 0,
+        market_calls_performed: 0,
+        formal_rounds_created: 0,
+        execution_capability: "none",
+        live_trading_allowed: false,
+      },
+    },
+  };
+}
+
+function sourceInboxList(items = [], overrides = {}) {
+  const counts = {};
+  const facets = new Map();
+  for (const item of items) {
+    counts[item.state] = (counts[item.state] || 0) + 1;
+    const source = `${item.source_channel}:${item.source_key}`;
+    const current = facets.get(source) || {
+      source,
+      source_channel: item.source_channel,
+      source_key: item.source_key,
+      source_tier: item.source_tier,
+      count: 0,
+      unread_count: 0,
+    };
+    current.count += 1;
+    if (!item.acknowledged) current.unread_count += 1;
+    facets.set(source, current);
+  }
+  return {
+    version: "source_inbox_list_v1",
+    items,
+    counts,
+    total_count: items.length,
+    unread_count: items.filter((item) => !item.acknowledged).length,
+    matched_count: items.length,
+    source_facets: [...facets.values()],
+    query: "",
+    state: "",
+    source: "",
+    unread: "",
+    limit: 100,
+    ...overrides,
   };
 }
 
@@ -213,18 +359,14 @@ test("source actions require explicit read and room choices and stop at a zero-c
   const requests = [];
   let current = sourceRecord();
   let attachedRefreshes = 0;
+  let unreadCount = -1;
   globalThis.fetch = async (path, options = {}) => {
     requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
     if (path.startsWith("/api/monitoring/inbox?")) {
       return response({
         ok: true,
-        source_inbox: {
-          version: "source_inbox_list_v1",
-          items: [current],
-          counts: { [current.state]: 1 },
-          query: "",
-          state: "",
-        },
+        source_inbox: sourceInboxList([current]),
       });
     }
     if (path.endsWith("/acknowledge")) {
@@ -282,6 +424,7 @@ test("source actions require explicit read and room choices and stop at a zero-c
 
   const host = await mountPanel({
     async onRoomAttached() { attachedRefreshes += 1; },
+    onUnreadCountChange(value) { unreadCount = value; },
   });
 
   assert.match(host.textContent, /external_unverified/);
@@ -294,7 +437,8 @@ test("source actions require explicit read and room choices and stop at a zero-c
 
   await click(host.querySelector('.source-inbox-acknowledgement input[type="checkbox"]'));
   await click(buttonWithText(host, "记录已阅"));
-  assert.deepEqual(JSON.parse(requests.at(-1).options.body), {
+  assert.equal(unreadCount, 0, "acknowledgement refreshes the independent unread count");
+  assert.deepEqual(JSON.parse(requests.filter((request) => request.options.method === "POST").at(-1).options.body), {
     expected_state_version: 1,
     acknowledgement: true,
   });
@@ -302,14 +446,14 @@ test("source actions require explicit read and room choices and stop at a zero-c
   await change(roomSelect, "room_current");
   await click(buttonWithText(host, "附加到房间"));
   assert.equal(attachedRefreshes, 1);
-  assert.deepEqual(JSON.parse(requests.at(-1).options.body), {
+  assert.deepEqual(JSON.parse(requests.filter((request) => request.options.method === "POST").at(-1).options.body), {
     room_id: "room_current",
     expected_state_version: 2,
   });
 
   await change(host.querySelector(".source-inbox-draft-actions textarea"), "仅讨论失败断言");
   await click(buttonWithText(host, "仅生成 round draft"));
-  assert.deepEqual(JSON.parse(requests.at(-1).options.body), {
+  assert.deepEqual(JSON.parse(requests.filter((request) => request.options.method === "POST").at(-1).options.body), {
     room_id: "room_current",
     expected_state_version: 3,
     objective: "仅讨论失败断言",
@@ -327,14 +471,194 @@ test("source actions require explicit read and room choices and stop at a zero-c
   assert.equal(requests.some((request) => /providers|market|rounds\/stream/.test(request.path)), false);
 });
 
+test("deep-linked events, source filters, sector mappings, health, and notifications stay read-only", async () => {
+  const requests = [];
+  const copied = [];
+  const notificationChoices = [];
+  const unreadCounts = [];
+  const firstPageItem = sourceRecord();
+  const deepItem = sourceRecord({
+    headline: "官方宏观发布研究映射",
+    id: "source_item_deep",
+    impactRuleProjections: [sectorImpactProjection()],
+    sourceChannel: "official_source_monitor",
+    sourceKey: "federal_reserve",
+    sourceTier: "official_source",
+  });
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({
+        ok: true,
+        source_inbox: sourceInboxList([firstPageItem], {
+          counts: { AWAITING_USER: 2 },
+          total_count: 2,
+          unread_count: 2,
+          matched_count: 1,
+          source_facets: [{
+            source: "official_source_monitor:federal_reserve",
+            source_channel: "official_source_monitor",
+            source_key: "federal_reserve",
+            source_tier: "official_source",
+            count: 1,
+            unread_count: 1,
+          }, {
+            source: "chatgpt_scheduled_task:github_ci_watch",
+            source_channel: "chatgpt_scheduled_task",
+            source_key: "github_ci_watch",
+            source_tier: "external_manual",
+            count: 1,
+            unread_count: 1,
+          }],
+          query: "",
+          state: "",
+          source: "",
+          unread: "",
+        }),
+      });
+    }
+    if (path === "/api/monitoring/events/source_item_deep") {
+      return response({ ok: true, source_item: deepItem });
+    }
+    return response({ ok: true, source_item: firstPageItem });
+  };
+
+  const host = await mountPanel({
+    requestedItemId: "source_item_deep",
+    notificationState: { supported: true, permission: "granted", enabled: false },
+    async onCopyEventLink(itemId) { copied.push(itemId); },
+    onNotificationPreferenceChange(enabled) { notificationChoices.push(enabled); },
+    onUnreadCountChange(value) { unreadCounts.push(value); },
+  });
+
+  assert.match(host.textContent, /官方宏观发布研究映射/);
+  assert.match(host.textContent, /L1 · 官方发布通道/);
+  assert.match(host.textContent, /行业 · DRAM/);
+  assert.match(host.textContent, /不是方向预测、因果结论、盈利声明或执行授权/);
+  assert.ok(requests.some((request) => request.path === "/api/monitoring/events/source_item_deep"));
+  assert.equal(unreadCounts.at(-1), 2);
+
+  await change(
+    host.querySelector('select[aria-label="按接入来源筛选"]'),
+    "official_source_monitor:federal_reserve",
+  );
+  assert.ok(requests.some((request) => (
+    request.path.includes("source=official_source_monitor%3Afederal_reserve")
+  )));
+  await click(buttonWithText(host, "仅看未读"));
+  assert.ok(requests.some((request) => request.path.includes("unread=true")));
+
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "启用通知"));
+  assert.deepEqual(notificationChoices, [true]);
+  await click(buttonWithText(host, "复制此事件链接"));
+  assert.deepEqual(copied, ["source_item_deep"]);
+  assert.equal(requests.some((request) => request.options.method === "POST"), false);
+});
+
+test("requested event details load independently of list availability", async () => {
+  const requested = sourceRecord({
+    headline: "列表失败时仍精确读取的事件",
+    id: "source_item_direct",
+  });
+  globalThis.fetch = async (path) => {
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: false, error: "fixture list unavailable" }, 503);
+    }
+    if (path === "/api/monitoring/events/source_item_direct") {
+      return response({ ok: true, source_item: requested });
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel({ requestedItemId: "source_item_direct" });
+  assert.match(host.textContent, /列表失败时仍精确读取的事件/);
+  assert.match(host.textContent, /fixture list unavailable/);
+});
+
+test("mutation success requires a valid same-identity response", async () => {
+  const current = sourceRecord();
+  globalThis.fetch = async (path, options = {}) => {
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([current]) });
+    }
+    if (path.endsWith("/acknowledge") && options.method === "POST") {
+      const invalidResponse = sourceRecord({
+        acknowledged: true,
+        stateVersion: 2,
+      });
+      invalidResponse.external_claims_verification = "verified";
+      return response({
+        ok: true,
+        source_item: invalidResponse,
+      });
+    }
+    return response({ ok: true, source_item: current });
+  };
+
+  const host = await mountPanel();
+  await click(host.querySelector('.source-inbox-acknowledgement input[type="checkbox"]'));
+  await click(buttonWithText(host, "记录已阅"));
+  assert.match(host.textContent, /服务端未返回更新后的来源条目/);
+  assert.doesNotMatch(host.textContent, /已记录为已阅；这不代表事实确认/);
+});
+
+test("deep-linked details require exact identity and invalid impact projections stay hidden", async () => {
+  const wrongIdentity = sourceRecord({
+    headline: "不应展示的错配详情",
+    id: "source_item_other",
+  });
+  globalThis.fetch = async (path) => {
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({
+        ok: true,
+        source_inbox: sourceInboxList([]),
+      });
+    }
+    return response({ ok: true, source_item: wrongIdentity });
+  };
+
+  const mismatchHost = await mountPanel({ requestedItemId: "source_item_expected" });
+  assert.match(mismatchHost.textContent, /来源详情与请求事件 ID 不一致/);
+  assert.doesNotMatch(mismatchHost.textContent, /不应展示的错配详情/);
+
+  const invalidProjection = sectorImpactProjection();
+  invalidProjection.projection.interpretation_boundary.directional_forecast = true;
+  const invalidItem = sourceRecord({
+    headline: "投影完整性异常",
+    id: "source_item_invalid_impact",
+    impactRuleProjections: [invalidProjection],
+    sourceChannel: "official_source_monitor",
+    sourceKey: "federal_reserve",
+    sourceTier: "official_source",
+  });
+  globalThis.fetch = async (path) => {
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([invalidItem]) });
+    }
+    return response({ ok: true, source_item: invalidItem });
+  };
+
+  const invalidHost = await mountPanel();
+  assert.match(invalidHost.textContent, /影响映射完整性校验失败/);
+  assert.doesNotMatch(invalidHost.textContent, /行业 · DRAM/);
+  assert.equal(buttonWithText(invalidHost, "记录已阅").disabled, true);
+});
+
 test("a CAS conflict rereads the exact item and requires a fresh acknowledgement", async () => {
   let current = sourceRecord();
   let detailReads = 0;
   globalThis.fetch = async (path, options = {}) => {
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
     if (path.startsWith("/api/monitoring/inbox?")) {
       return response({
         ok: true,
-        source_inbox: { items: [current], counts: { AWAITING_USER: 1 } },
+        source_inbox: sourceInboxList([current]),
       });
     }
     if (path.endsWith("/acknowledge") && options.method === "POST") {
@@ -365,6 +689,7 @@ test("fenced ChatGPT source packets reach only the inbox import endpoint", async
   let importedVisible = false;
   globalThis.fetch = async (path, options = {}) => {
     requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
     if (path === "/api/monitoring/imports/chatgpt") {
       importedVisible = true;
       return response({
@@ -378,10 +703,7 @@ test("fenced ChatGPT source packets reach only the inbox import endpoint", async
     if (path.startsWith("/api/monitoring/inbox?")) {
       return response({
         ok: true,
-        source_inbox: {
-          items: importedVisible ? [imported] : [],
-          counts: importedVisible ? { AWAITING_USER: 1 } : {},
-        },
+        source_inbox: sourceInboxList(importedVisible ? [imported] : []),
       });
     }
     return response({ ok: true, source_item: imported });

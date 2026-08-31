@@ -96,6 +96,19 @@ import {
   roundContextAuthorizationEntry,
 } from "./roundContexts.js";
 import { DeferredSurfaceFallback } from "./DeferredSurfaceFallback.js";
+import {
+  buildSourceInboxDeepLink,
+  parseSourceInboxDeepLink,
+  updateSourceInboxDeepLink,
+} from "./sourceInboxDeepLink.js";
+import {
+  createSourceInboxNotification,
+  readSourceInboxNotificationPreference,
+  requestSourceInboxNotificationPermissionFromUserGesture,
+  sourceInboxNotificationCapability,
+  writeSourceInboxNotificationPreference,
+} from "./sourceInboxNotifications.js";
+import { normalizeSourceInboxNotificationFeed } from "./sourceInbox.js";
 
 const ActionOverviewDrawer = lazy(() => import("./components/ActionOverviewDrawer.jsx")
   .then((module) => ({ default: module.ActionOverviewDrawer })));
@@ -257,6 +270,24 @@ function applyArtifactUserDecisionResponse(current, roomId, data) {
 }
 
 const DEFERRED_SURFACE_EXIT_MS = 240;
+const SOURCE_INBOX_NOTIFICATION_POLL_MS = 60_000;
+
+function initialSourceInboxEventId() {
+  try {
+    return parseSourceInboxDeepLink(globalThis.location);
+  } catch {
+    return "";
+  }
+}
+
+function initialSourceInboxNotificationState() {
+  const capability = sourceInboxNotificationCapability();
+  return {
+    ...capability,
+    enabled: capability.permission === "granted"
+      && readSourceInboxNotificationPreference(),
+  };
+}
 
 function useDeferredActivation(active) {
   const [activated, setActivated] = useState(Boolean(active));
@@ -337,9 +368,18 @@ export default function App() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [roomDrawerOpen, setRoomDrawerOpen] = useState(false);
   const [actionOverviewOpen, setActionOverviewOpen] = useState(false);
-  const [sourceInboxOpen, setSourceInboxOpen] = useState(false);
+  const [sourceInboxOpen, setSourceInboxOpen] = useState(() => Boolean(initialSourceInboxEventId()));
+  const [sourceInboxEventId, setSourceInboxEventId] = useState(initialSourceInboxEventId);
+  const [sourceInboxUnreadCount, setSourceInboxUnreadCount] = useState(0);
+  const [sourceInboxAnnouncement, setSourceInboxAnnouncement] = useState("");
+  const [sourceInboxRefreshToken, setSourceInboxRefreshToken] = useState(0);
+  const [sourceInboxNotificationState, setSourceInboxNotificationState] = useState(
+    initialSourceInboxNotificationState,
+  );
   const [chatGPTCollaborationOpen, setChatGPTCollaborationOpen] = useState(false);
-  const [railSection, setRailSection] = useState("rooms");
+  const [railSection, setRailSection] = useState(() => (
+    initialSourceInboxEventId() ? "source-inbox" : "rooms"
+  ));
   const [inspectorNavigation, setInspectorNavigation] = useState({
     targetId: "",
     requestId: 0,
@@ -425,6 +465,18 @@ export default function App() {
   const roundLaunchRestoreFocusRef = useRef(null);
   const chatGPTCollaborationRestoreFocusRef = useRef(null);
   const sourceInboxRestoreFocusRef = useRef(null);
+  const sourceInboxNotificationFeedRef = useRef({
+    baselineReady: false,
+    controller: null,
+    cursor: "",
+    polling: false,
+  });
+  const sourceInboxOpenRef = useRef(sourceInboxOpen);
+  const sourceInboxAnnouncementSequenceRef = useRef(0);
+  const sourceInboxUnreadCountRef = useRef(sourceInboxUnreadCount);
+  const sourceInboxVisibilityEpochRef = useRef(0);
+  sourceInboxOpenRef.current = sourceInboxOpen;
+  sourceInboxUnreadCountRef.current = sourceInboxUnreadCount;
   const roundLaunchSuccessFocusRef = useRef(null);
   const observationRestoreFocusRef = useRef(null);
   const reflectionRestoreFocusRef = useRef(null);
@@ -437,6 +489,162 @@ export default function App() {
   if (!candidateComparisonRequestRef.current) {
     candidateComparisonRequestRef.current = createLatestRequestCoordinator();
   }
+
+  const openSourceInboxEvent = useCallback((eventId, { historyMode = "push" } = {}) => {
+    const target = String(eventId || "");
+    try {
+      updateSourceInboxDeepLink({ eventId: target, mode: historyMode });
+    } catch {
+      return false;
+    }
+    setSourceInboxEventId(target);
+    setActionOverviewOpen(false);
+    setInspectorOpen(false);
+    setRoomDrawerOpen(false);
+    setRailSection("source-inbox");
+    setSourceInboxOpen(true);
+    return true;
+  }, []);
+
+  const copySourceInboxEventLink = useCallback(async (eventId) => {
+    const relative = buildSourceInboxDeepLink(globalThis.location, String(eventId || ""));
+    const absolute = new URL(relative, globalThis.location?.origin || "http://localhost").href;
+    if (typeof globalThis.navigator?.clipboard?.writeText !== "function") {
+      throw new Error("当前浏览器无法写入剪贴板。");
+    }
+    await globalThis.navigator.clipboard.writeText(absolute);
+  }, []);
+
+  const changeSourceInboxNotificationPreference = useCallback(async (enabled) => {
+    if (enabled !== true) {
+      writeSourceInboxNotificationPreference(false);
+      const capability = sourceInboxNotificationCapability();
+      setSourceInboxNotificationState({ ...capability, enabled: false });
+      return;
+    }
+    const permission = await requestSourceInboxNotificationPermissionFromUserGesture();
+    const active = permission === "granted";
+    writeSourceInboxNotificationPreference(active);
+    const capability = sourceInboxNotificationCapability();
+    setSourceInboxNotificationState({
+      ...capability,
+      permission,
+      enabled: active,
+    });
+  }, []);
+
+  useEffect(() => {
+    const syncSourceInboxDeepLink = () => {
+      const eventId = parseSourceInboxDeepLink(globalThis.location);
+      setSourceInboxEventId(eventId);
+      if (eventId) {
+        setActionOverviewOpen(false);
+        setInspectorOpen(false);
+        setRoomDrawerOpen(false);
+        setRailSection("source-inbox");
+        setSourceInboxOpen(true);
+        return;
+      }
+      setSourceInboxOpen(false);
+      setRailSection("rooms");
+    };
+    globalThis.addEventListener?.("popstate", syncSourceInboxDeepLink);
+    return () => globalThis.removeEventListener?.("popstate", syncSourceInboxDeepLink);
+  }, []);
+
+  useEffect(() => {
+    if (sourceInboxOpen && !sourceInboxRestoreFocusRef.current) {
+      sourceInboxRestoreFocusRef.current = document.querySelector('[data-section="source-inbox"]')
+        || document.querySelector(".conversation-header");
+    }
+  }, [sourceInboxOpen]);
+
+  useLayoutEffect(() => {
+    sourceInboxVisibilityEpochRef.current += 1;
+  }, [sourceInboxOpen]);
+
+  useEffect(() => {
+    const feedState = sourceInboxNotificationFeedRef.current;
+    let disposed = false;
+
+    const pollSourceInbox = async () => {
+      if (disposed || feedState.polling) return;
+      feedState.polling = true;
+      const controller = new AbortController();
+      feedState.controller = controller;
+      try {
+        for (let page = 0; page < 4; page += 1) {
+          const requestedCursor = feedState.baselineReady ? feedState.cursor : "";
+          const visibilityEpochAtRequest = sourceInboxVisibilityEpochRef.current;
+          const payload = await api.sourceInboxNotifications({
+            after: requestedCursor,
+            limit: 50,
+            signal: controller.signal,
+          });
+          if (
+            disposed
+            || controller.signal.aborted
+            || sourceInboxVisibilityEpochRef.current !== visibilityEpochAtRequest
+          ) return;
+          const feed = normalizeSourceInboxNotificationFeed(payload, { requestedCursor });
+          if (!feed.valid) return;
+          if (sourceInboxOpenRef.current) {
+            if (
+              feed.unreadCount !== sourceInboxUnreadCountRef.current
+              || feed.notifications.length > 0
+            ) {
+              setSourceInboxRefreshToken((current) => current + 1);
+            }
+          } else {
+            setSourceInboxUnreadCount(feed.unreadCount);
+          }
+
+          if (!feedState.baselineReady || feed.baseline) {
+            feedState.cursor = feed.headCursor || feed.cursor;
+            feedState.baselineReady = true;
+            return;
+          }
+
+          const nextCursor = feed.cursor || requestedCursor;
+          feedState.cursor = nextCursor;
+          if (feed.notifications.length) {
+            sourceInboxAnnouncementSequenceRef.current += 1;
+            setSourceInboxAnnouncement(
+              `来源收件箱更新 ${sourceInboxAnnouncementSequenceRef.current}：${feed.notifications.length} 条新的未读来源已进入收件箱；内容仍为 external_unverified。`,
+            );
+            if (sourceInboxNotificationState.enabled) {
+              for (const notification of feed.notifications) {
+                createSourceInboxNotification({
+                  eventId: notification.eventId,
+                  onOpen: (eventId) => openSourceInboxEvent(eventId, { historyMode: "push" }),
+                });
+              }
+            }
+          }
+          if (!feed.hasMore || nextCursor === requestedCursor) return;
+        }
+      } catch (error) {
+        if (error?.name !== "AbortError") {
+          // Notification polling is supplemental and must never block the host UI.
+        }
+      } finally {
+        if (feedState.controller === controller) {
+          feedState.controller = null;
+          feedState.polling = false;
+        }
+      }
+    };
+
+    void pollSourceInbox();
+    const interval = globalThis.setInterval(pollSourceInbox, SOURCE_INBOX_NOTIFICATION_POLL_MS);
+    return () => {
+      disposed = true;
+      globalThis.clearInterval(interval);
+      feedState.controller?.abort();
+      feedState.controller = null;
+      feedState.polling = false;
+    };
+  }, [openSourceInboxEvent, sourceInboxNotificationState.enabled]);
 
   const room = active?.room || null;
   const activeRoomId = String(room?.id || "");
@@ -2911,6 +3119,16 @@ export default function App() {
     }
   };
 
+  const clearSourceInboxTarget = () => {
+    if (!sourceInboxOpen && !sourceInboxEventId) return;
+    try {
+      updateSourceInboxDeepLink({ eventId: "", mode: "replace" });
+    } catch {
+      // URL state is optional; local navigation must still succeed.
+    }
+    setSourceInboxEventId("");
+  };
+
   const navigateRail = (section, navigationTrigger = null) => {
     inspectorRestoreFocusRef.current = navigationTrigger || document.activeElement;
     sourceInboxRestoreFocusRef.current = navigationTrigger || document.activeElement;
@@ -2922,6 +3140,7 @@ export default function App() {
       setSourceInboxOpen(true);
       return;
     }
+    clearSourceInboxTarget();
     setSourceInboxOpen(false);
     if (section === "rooms") {
       setInspectorOpen(false);
@@ -2936,6 +3155,7 @@ export default function App() {
   };
 
   const closeSourceInbox = () => {
+    clearSourceInboxTarget();
     setSourceInboxOpen(false);
     setRailSection("rooms");
   };
@@ -3376,11 +3596,15 @@ export default function App() {
 
   return (
     <div className={inspectorOpen ? "app-shell inspector-open" : "app-shell"}>
+      <div className="screen-reader-announcer" role="status" aria-live="polite" aria-atomic="true">
+        {sourceInboxAnnouncement}
+      </div>
       <IconRail
         activeSection={railSection}
         onNavigate={navigateRail}
         onPreloadInspector={preloadRoomInspector}
         onPreloadSourceInbox={preloadSourceInboxPanel}
+        sourceInboxUnreadCount={sourceInboxUnreadCount}
       />
       <button
         className={roomDrawerOpen ? "drawer-scrim room-drawer-scrim open" : "drawer-scrim room-drawer-scrim"}
@@ -3424,8 +3648,19 @@ export default function App() {
           open={sourceInboxOpen}
           rooms={rooms}
           activeRoomId={activeRoomId}
+          requestedItemId={sourceInboxEventId}
+          notificationState={sourceInboxNotificationState}
+          refreshToken={sourceInboxRefreshToken}
           restoreFocusRef={sourceInboxRestoreFocusRef}
           onClose={closeSourceInbox}
+          onCopyEventLink={copySourceInboxEventLink}
+          onEventTargetChange={(eventId) => {
+            if (eventId !== sourceInboxEventId) {
+              openSourceInboxEvent(eventId, { historyMode: "push" });
+            }
+          }}
+          onNotificationPreferenceChange={changeSourceInboxNotificationPreference}
+          onUnreadCountChange={setSourceInboxUnreadCount}
           onRoomAttached={async (roomId) => {
             if (roomId === activeRoomIdRef.current) {
               await loadRoom(roomId);
@@ -3473,12 +3708,21 @@ export default function App() {
               className="icon-button source-inbox-mobile-entry"
               type="button"
               title="打开来源收件箱"
-              aria-label="打开来源收件箱"
+              aria-label={sourceInboxUnreadCount > 0
+                ? `打开来源收件箱，${sourceInboxUnreadCount} 条未读`
+                : "打开来源收件箱"}
               onClick={(event) => navigateRail("source-inbox", event.currentTarget)}
               onFocus={preloadSourceInboxPanel}
               onPointerDown={preloadSourceInboxPanel}
               onPointerEnter={preloadSourceInboxPanel}
-            ><Inbox size={18} /></button>
+            >
+              <Inbox size={18} />
+              {sourceInboxUnreadCount > 0 ? (
+                <span className="source-inbox-mobile-unread-badge" aria-hidden="true">
+                  {sourceInboxUnreadCount > 99 ? "99+" : sourceInboxUnreadCount}
+                </span>
+              ) : null}
+            </button>
             {roundState.running && (
               <button
                 className="secondary"

@@ -76,6 +76,11 @@ from .round_contexts import RoundContextError
 from .stock_research_service import StockResearchError, StockResearchService
 from .source_inbox_contracts import SourceInboxContractError
 from .source_inbox_service import SourceInboxError, SourceInboxService
+from .source_monitoring.health_service import (
+    SourceMonitoringHealthService,
+    SourceMonitoringHealthServiceError,
+)
+from .source_monitoring.state_repository import SourceMonitoringStateError
 from .storage_sample_acceptance import StorageSampleAcceptance
 from .structured_logging import (
     classify_request_target,
@@ -113,7 +118,12 @@ HOST_VERSION_SCHEMA_VERSION = "host_version_v2"
 
 def _is_source_inbox_path(path: str) -> bool:
     return bool(
-        path in {"/api/monitoring/inbox", "/api/monitoring/imports/chatgpt"}
+        path in {
+            "/api/monitoring/health",
+            "/api/monitoring/inbox",
+            "/api/monitoring/imports/chatgpt",
+            "/api/monitoring/notifications",
+        }
         or re.fullmatch(r"/api/monitoring/events/[^/]+(?:/(?:acknowledge|attach|round-draft))?", path)
     )
 
@@ -555,16 +565,82 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"ok": True, "action_desk_overview": overview})
             return
+        if parsed.path == "/api/monitoring/health":
+            if parsed.query:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "Source Monitoring health does not accept query parameters.",
+                        "code": "SOURCE_MONITORING_HEALTH_QUERY_UNSUPPORTED",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                health = SourceMonitoringHealthService(STORE).snapshot()
+            except (SourceMonitoringHealthServiceError, SourceMonitoringStateError) as exc:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "code": getattr(
+                            exc,
+                            "code",
+                            "SOURCE_MONITORING_HEALTH_UNAVAILABLE",
+                        ),
+                    },
+                    HTTPStatus(getattr(exc, "status", 409)),
+                )
+                return
+            self._send_json({"ok": True, "source_monitoring_health": health})
+            return
+        if parsed.path == "/api/monitoring/notifications":
+            notification_query = parse_qs(parsed.query, keep_blank_values=True)
+            if (
+                set(notification_query) - {"after", "limit"}
+                or any(len(values) != 1 for values in notification_query.values())
+            ):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "通知流只接受 after 和 limit。",
+                        "code": "SOURCE_INBOX_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                limit = int((notification_query.get("limit") or ["50"])[0])
+                notifications = SourceInboxService(STORE).list_notifications(
+                    after=(
+                        notification_query["after"][0]
+                        if "after" in notification_query
+                        else None
+                    ),
+                    limit=limit,
+                )
+            except (TypeError, ValueError, SourceInboxError) as exc:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "code": getattr(exc, "code", "SOURCE_INBOX_REQUEST_INVALID"),
+                    },
+                    HTTPStatus(getattr(exc, "status", 400)),
+                )
+                return
+            self._send_json({"ok": True, "source_notifications": notifications})
+            return
         if parsed.path == "/api/monitoring/inbox":
             source_query = parse_qs(parsed.query, keep_blank_values=True)
             if (
-                set(source_query) - {"state", "q", "limit"}
+                set(source_query) - {"state", "q", "source", "unread", "limit"}
                 or any(len(values) != 1 for values in source_query.values())
             ):
                 self._send_json(
                     {
                         "ok": False,
-                        "error": "来源收件箱只接受 state、q 和 limit。",
+                        "error": "来源收件箱只接受 state、q、source、unread 和 limit。",
                         "code": "SOURCE_INBOX_REQUEST_INVALID",
                     },
                     HTTPStatus.BAD_REQUEST,
@@ -575,6 +651,16 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 inbox = SourceInboxService(STORE).list_items(
                     state=(source_query.get("state") or [""])[0],
                     query=(source_query.get("q") or [""])[0],
+                    source=(
+                        source_query["source"][0]
+                        if "source" in source_query
+                        else None
+                    ),
+                    unread=(
+                        source_query["unread"][0]
+                        if "unread" in source_query
+                        else None
+                    ),
                     limit=limit,
                 )
             except (TypeError, ValueError, SourceInboxError) as exc:

@@ -8,6 +8,8 @@ Imported packets describe externally discovered source items, remain
 can be attached to a room.  A round draft never creates or starts a round.
 """
 
+import base64
+import binascii
 import hashlib
 import json
 import re
@@ -60,12 +62,19 @@ SOURCE_INBOX_ATTACHMENT_VERSION = "source_inbox_attachment_v1"
 SOURCE_INBOX_ROUND_DRAFT_VERSION = "source_inbox_round_draft_v1"
 SOURCE_INBOX_IMPORT_RESULT_VERSION = "source_inbox_import_result_v1"
 SOURCE_INBOX_LIST_VERSION = "source_inbox_list_v1"
+SOURCE_INBOX_NOTIFICATION_CURSOR_VERSION = "source_inbox_notification_cursor_v1"
+SOURCE_INBOX_NOTIFICATION_FEED_VERSION = "source_inbox_notification_feed_v1"
+SOURCE_INBOX_NOTIFICATION_VERSION = "source_inbox_notification_v1"
 TRADING_IMPACT_IMPORT_ACCOUNTING_VERSION = "trading_impact_import_accounting_v1"
 
 _SOURCE_MONITORING_WORKER_ACTOR = "source_monitoring_worker"
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_SOURCE_CHANNEL_RE = re.compile(r"[a-z][a-z0-9_-]{0,79}\Z")
+_SOURCE_KEY_RE = re.compile(r"[a-z][a-z0-9_-]{0,79}\Z")
+_CURSOR_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{1,512}\Z")
+_MAX_NATIVE_INTEGER = (1 << 63) - 1
 
 
 class SourceInboxError(ValueError):
@@ -333,6 +342,181 @@ def _clean_state_version(value: Any) -> int:
 
 def _row_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return dict(row)
+
+
+def _source_tier(source_channel: Any) -> str:
+    """Project a total provenance tier without changing claim verification."""
+
+    if source_channel == OFFICIAL_SOURCE_CHANNEL:
+        return OFFICIAL_SOURCE_CLASS
+    if source_channel == FUTU_ANOMALY_SOURCE_CHANNEL:
+        return READONLY_MARKET_SOURCE_CLASS
+    return "external_manual"
+
+
+def _clean_source_filter(value: Any) -> tuple[str, str, str]:
+    if value is None:
+        return "", "", ""
+    if type(value) is not str:
+        raise SourceInboxError(
+            "source 必须是 <channel>:<key> 字符串。",
+            code="SOURCE_INBOX_REQUEST_INVALID",
+        )
+    clean = value
+    if not clean:
+        raise SourceInboxError(
+            "source 必须是规范的 <channel>:<key>。",
+            code="SOURCE_INBOX_REQUEST_INVALID",
+        )
+    if len(clean) > 161:
+        raise SourceInboxError(
+            "source 过滤器过长。",
+            code="SOURCE_INBOX_REQUEST_INVALID",
+        )
+    channel, separator, source_key = clean.partition(":")
+    if (
+        separator != ":"
+        or _SOURCE_CHANNEL_RE.fullmatch(channel) is None
+        or _SOURCE_KEY_RE.fullmatch(source_key) is None
+    ):
+        raise SourceInboxError(
+            "source 必须是规范的 <channel>:<key>。",
+            code="SOURCE_INBOX_REQUEST_INVALID",
+        )
+    return f"{channel}:{source_key}", channel, source_key
+
+
+def _clean_unread_filter(value: Any) -> tuple[str, bool | None]:
+    if value is None:
+        return "", None
+    if type(value) is not str:
+        raise SourceInboxError(
+            "unread 必须是 true 或 false。",
+            code="SOURCE_INBOX_REQUEST_INVALID",
+        )
+    if value == "true":
+        return value, True
+    if value == "false":
+        return value, False
+    raise SourceInboxError(
+        "unread 必须是规范的小写 true 或 false。",
+        code="SOURCE_INBOX_REQUEST_INVALID",
+    )
+
+
+def _encode_notification_cursor(
+    sequence: int,
+    created_at: int,
+    item_id: str,
+) -> str:
+    if (
+        type(sequence) is not int
+        or not 0 <= sequence <= _MAX_NATIVE_INTEGER
+        or type(created_at) is not int
+        or not 0 <= created_at <= _MAX_NATIVE_INTEGER
+        or type(item_id) is not str
+        or (
+            item_id != ""
+            and (
+                len(item_id) > 160
+                or _IDENTIFIER_RE.fullmatch(item_id) is None
+            )
+        )
+        or (
+            (sequence == 0 and (created_at != 0 or item_id != ""))
+            or (sequence > 0 and item_id == "")
+        )
+    ):
+        raise SourceInboxError(
+            "通知游标位置无效。",
+            code="SOURCE_INBOX_CURSOR_INVALID",
+        )
+    basis = {
+        "version": SOURCE_INBOX_NOTIFICATION_CURSOR_VERSION,
+        "sequence": sequence,
+        "created_at": created_at,
+        "item_id": item_id,
+    }
+    envelope = {**basis, "sha256": canonical_sha256(basis)}
+    return base64.urlsafe_b64encode(
+        _canonical_json(envelope).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+
+
+def _decode_notification_cursor(value: Any) -> tuple[int, int, str]:
+    if type(value) is not str or _CURSOR_TOKEN_RE.fullmatch(value) is None:
+        raise SourceInboxError(
+            "通知游标无效。",
+            code="SOURCE_INBOX_CURSOR_INVALID",
+        )
+    padding = "=" * ((4 - len(value) % 4) % 4)
+    try:
+        raw = base64.b64decode(
+            (value + padding).encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
+        if len(raw) > 1_024:
+            raise ValueError("cursor payload too large")
+        envelope = json.loads(raw.decode("utf-8", errors="strict"))
+    except (
+        UnicodeError,
+        ValueError,
+        TypeError,
+        binascii.Error,
+        json.JSONDecodeError,
+    ) as exc:
+        raise SourceInboxError(
+            "通知游标无法解析。",
+            code="SOURCE_INBOX_CURSOR_INVALID",
+        ) from exc
+    if type(envelope) is not dict or set(envelope) != {
+        "version",
+        "sequence",
+        "created_at",
+        "item_id",
+        "sha256",
+    }:
+        raise SourceInboxError(
+            "通知游标结构无效。",
+            code="SOURCE_INBOX_CURSOR_INVALID",
+        )
+    sequence = envelope.get("sequence")
+    created_at = envelope.get("created_at")
+    item_id = envelope.get("item_id")
+    basis = {
+        "version": envelope.get("version"),
+        "sequence": sequence,
+        "created_at": created_at,
+        "item_id": item_id,
+    }
+    if (
+        envelope.get("version") != SOURCE_INBOX_NOTIFICATION_CURSOR_VERSION
+        or type(sequence) is not int
+        or not 0 <= sequence <= _MAX_NATIVE_INTEGER
+        or type(created_at) is not int
+        or not 0 <= created_at <= _MAX_NATIVE_INTEGER
+        or type(item_id) is not str
+        or (
+            item_id != ""
+            and (
+                len(item_id) > 160
+                or _IDENTIFIER_RE.fullmatch(item_id) is None
+            )
+        )
+        or (
+            (sequence == 0 and (created_at != 0 or item_id != ""))
+            or (sequence > 0 and item_id == "")
+        )
+        or type(envelope.get("sha256")) is not str
+        or envelope["sha256"] != canonical_sha256(basis)
+        or _encode_notification_cursor(sequence, created_at, item_id) != value
+    ):
+        raise SourceInboxError(
+            "通知游标校验失败。",
+            code="SOURCE_INBOX_CURSOR_INVALID",
+        )
+    return sequence, created_at, item_id
 
 
 def _trading_impact_source_class(source_channel: Any) -> str:
@@ -1088,11 +1272,13 @@ class SourceInboxService:
                 )
             )
         )
+        source_channel = str(import_record["row"].get("source_channel") or "")
         projection = {
             "version": SOURCE_INBOX_ITEM_RECORD_VERSION,
             "id": item_id,
-            "source_channel": str(import_record["row"].get("source_channel") or ""),
+            "source_channel": source_channel,
             "source_key": str(import_record["row"].get("source_key") or ""),
+            "source_tier": _source_tier(source_channel),
             "external_run_id": str(import_record["row"].get("external_run_id") or ""),
             "received_at": _stored_int(import_record["row"], "received_at"),
             "server_fingerprint": str(data.get("server_fingerprint") or ""),
@@ -1481,6 +1667,8 @@ class SourceInboxService:
         *,
         state: str = "",
         query: str = "",
+        source: str | None = None,
+        unread: str | None = None,
         limit: int = 100,
     ) -> dict[str, Any]:
         clean_state = str(state or "").strip().upper()
@@ -1495,6 +1683,8 @@ class SourceInboxService:
                 code="SOURCE_INBOX_REQUEST_INVALID",
             )
         clean_query = str(query or "").strip()[:200]
+        clean_source, source_channel, source_key = _clean_source_filter(source)
+        clean_unread, unread_filter = _clean_unread_filter(unread)
         clauses: list[str] = []
         parameters: list[Any] = []
         if clean_state:
@@ -1504,35 +1694,81 @@ class SourceInboxService:
             clauses.append("(item.headline LIKE ? ESCAPE '\\' OR item.summary LIKE ? ESCAPE '\\')")
             escaped = clean_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             parameters.extend([f"%{escaped}%", f"%{escaped}%"])
+        if clean_source:
+            clauses.extend(("imports.source_channel=?", "imports.source_key=?"))
+            parameters.extend((source_channel, source_key))
+        if unread_filter is True:
+            clauses.append("item.acknowledged_at=0")
+        elif unread_filter is False:
+            clauses.append("item.acknowledged_at>0")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        parameters.append(limit)
         with closing(self.store._connect()) as connection:
             connection.execute("BEGIN")
             rows = connection.execute(
                 f"""SELECT item.*,imports.source_channel,imports.source_key,
                            imports.external_run_id,imports.received_at
-                    FROM source_inbox_items item
-                    JOIN source_inbox_imports imports ON imports.id=item.origin_import_id
-                    {where}
-                    ORDER BY item.updated_at DESC,item.id DESC LIMIT ?""",
-                parameters,
+                     FROM source_inbox_items item
+                     JOIN source_inbox_imports imports ON imports.id=item.origin_import_id
+                     {where}
+                     ORDER BY item.updated_at DESC,item.id DESC LIMIT ?""",
+                [*parameters, limit],
             ).fetchall()
             items = [
                 self._item_projection(connection, row, include_events=False)
                 for row in rows
             ]
+            matched_row = connection.execute(
+                f"""SELECT COUNT(*) AS count
+                     FROM source_inbox_items item
+                     JOIN source_inbox_imports imports ON imports.id=item.origin_import_id
+                     {where}""",
+                parameters,
+            ).fetchone()
+            totals_row = connection.execute(
+                """SELECT COUNT(*) AS total_count,
+                          SUM(CASE WHEN acknowledged_at=0 THEN 1 ELSE 0 END) AS unread_count
+                     FROM source_inbox_items"""
+            ).fetchone()
             counts = {
                 str(row["state"]): int(row["count"])
                 for row in connection.execute(
                     "SELECT state,COUNT(*) AS count FROM source_inbox_items GROUP BY state"
                 ).fetchall()
             }
+            source_facets = []
+            for row in connection.execute(
+                """SELECT imports.source_channel,imports.source_key,
+                          COUNT(*) AS count,
+                          SUM(CASE WHEN item.acknowledged_at=0 THEN 1 ELSE 0 END)
+                              AS unread_count
+                     FROM source_inbox_items item
+                     JOIN source_inbox_imports imports ON imports.id=item.origin_import_id
+                    GROUP BY imports.source_channel,imports.source_key
+                    ORDER BY imports.source_channel,imports.source_key"""
+            ).fetchall():
+                facet_channel = str(row["source_channel"])
+                facet_key = str(row["source_key"])
+                source_facets.append({
+                    "source": f"{facet_channel}:{facet_key}",
+                    "source_channel": facet_channel,
+                    "source_key": facet_key,
+                    "source_tier": _source_tier(facet_channel),
+                    "count": int(row["count"]),
+                    "unread_count": int(row["unread_count"] or 0),
+                })
+            assert matched_row is not None and totals_row is not None
         return {
             "version": SOURCE_INBOX_LIST_VERSION,
             "items": items,
             "counts": counts,
+            "total_count": int(totals_row["total_count"]),
+            "unread_count": int(totals_row["unread_count"] or 0),
+            "matched_count": int(matched_row["count"]),
+            "source_facets": source_facets,
             "query": clean_query,
             "state": clean_state,
+            "source": clean_source,
+            "unread": clean_unread,
             "limit": limit,
         }
 
@@ -1546,6 +1782,161 @@ class SourceInboxService:
                 if row is not None
                 else None
             )
+
+    def list_notifications(
+        self,
+        *,
+        after: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Return a cursor-bounded feed without replaying historical items."""
+
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise SourceInboxError(
+                "limit 必须位于 1 到 100。",
+                code="SOURCE_INBOX_REQUEST_INVALID",
+            )
+        after_position = None if after is None else _decode_notification_cursor(after)
+        with closing(self.store._connect()) as connection:
+            connection.execute("BEGIN")
+            # Source Inbox items are append-only through this service. SQLite rowid
+            # therefore supplies the total insertion order that created_at alone
+            # cannot provide within one millisecond. Every nonzero cursor is bound
+            # back to its row below, so VACUUM/deletion/foreign-database cursors fail
+            # closed instead of silently skipping or replaying events.
+            head_row = connection.execute(
+                """SELECT rowid AS notification_sequence,created_at,id
+                     FROM source_inbox_items
+                    ORDER BY rowid DESC LIMIT 1"""
+            ).fetchone()
+            head_position = (
+                (
+                    int(head_row["notification_sequence"]),
+                    int(head_row["created_at"]),
+                    str(head_row["id"]),
+                )
+                if head_row is not None
+                else (0, 0, "")
+            )
+            head_cursor = _encode_notification_cursor(*head_position)
+            unread_row = connection.execute(
+                """SELECT COUNT(*) AS count FROM source_inbox_items
+                   WHERE acknowledged_at=0"""
+            ).fetchone()
+            assert unread_row is not None
+            unread_count = int(unread_row["count"])
+            if after_position is None:
+                return {
+                    "version": SOURCE_INBOX_NOTIFICATION_FEED_VERSION,
+                    "baseline": True,
+                    "notifications": [],
+                    "cursor": head_cursor,
+                    "head_cursor": head_cursor,
+                    "unread_count": unread_count,
+                    "has_more": False,
+                    "limit": limit,
+                    "safety": {
+                        "external_claims_verification": EXTERNAL_UNVERIFIED,
+                        "execution_capability": "none",
+                        "live_trading_allowed": False,
+                        "provider_calls_performed": 0,
+                        "market_calls_performed": 0,
+                        "formal_rounds_created": 0,
+                    },
+                }
+            if after_position[0] > head_position[0]:
+                raise SourceInboxError(
+                    "通知游标超出当前不可变事件头。",
+                    code="SOURCE_INBOX_CURSOR_INVALID",
+                )
+            if after_position[0] > 0:
+                cursor_row = connection.execute(
+                    """SELECT rowid AS notification_sequence,created_at,id
+                         FROM source_inbox_items WHERE rowid=?""",
+                    (after_position[0],),
+                ).fetchone()
+                if (
+                    cursor_row is None
+                    or (
+                        int(cursor_row["notification_sequence"]),
+                        int(cursor_row["created_at"]),
+                        str(cursor_row["id"]),
+                    )
+                    != after_position
+                ):
+                    raise SourceInboxError(
+                        "通知游标不属于当前不可变事件序列。",
+                        code="SOURCE_INBOX_CURSOR_INVALID",
+                    )
+            rows = connection.execute(
+                """SELECT item.rowid AS notification_sequence,item.*,
+                          imports.source_channel,imports.source_key,
+                          imports.external_run_id,imports.received_at
+                     FROM source_inbox_items item
+                     JOIN source_inbox_imports imports
+                       ON imports.id=item.origin_import_id
+                    WHERE item.acknowledged_at=0
+                      AND item.rowid>?
+                      AND item.rowid<=?
+                    ORDER BY item.rowid LIMIT ?""",
+                (
+                    after_position[0],
+                    head_position[0],
+                    limit + 1,
+                ),
+            ).fetchall()
+            has_more = len(rows) > limit
+            page_rows = rows[:limit]
+            notifications = []
+            for row in page_rows:
+                item = self._item_projection(connection, row, include_events=False)
+                source_item = item["item"]
+                notifications.append({
+                    "version": SOURCE_INBOX_NOTIFICATION_VERSION,
+                    "id": item["id"],
+                    "created_at": item["created_at"],
+                    "source_channel": item["source_channel"],
+                    "source_key": item["source_key"],
+                    "source_tier": item["source_tier"],
+                    "item_type": source_item["item_type"],
+                    "severity": source_item["severity"],
+                    "occurred_at": source_item["occurred_at"],
+                    "headline": source_item["headline"],
+                    "acknowledged": False,
+                    "external_claims_verification": EXTERNAL_UNVERIFIED,
+                    "safety": {
+                        "fact_confirmation": False,
+                        "approval": False,
+                        "execution_authorization": False,
+                    },
+                })
+            next_position = (
+                (
+                    int(page_rows[-1]["notification_sequence"]),
+                    int(page_rows[-1]["created_at"]),
+                    str(page_rows[-1]["id"]),
+                )
+                if has_more and page_rows
+                else head_position
+            )
+        return {
+            "version": SOURCE_INBOX_NOTIFICATION_FEED_VERSION,
+            "baseline": False,
+            "notifications": notifications,
+            "cursor": _encode_notification_cursor(*next_position),
+            "head_cursor": head_cursor,
+            "unread_count": unread_count,
+            "has_more": has_more,
+            "limit": limit,
+            "safety": {
+                "external_claims_verification": EXTERNAL_UNVERIFIED,
+                "execution_capability": "none",
+                "live_trading_allowed": False,
+                "provider_calls_performed": 0,
+                "market_calls_performed": 0,
+                "formal_rounds_created": 0,
+            },
+        }
 
     def acknowledge(
         self,
@@ -2051,6 +2442,9 @@ __all__ = [
     "SOURCE_INBOX_IMPORT_RESULT_VERSION",
     "SOURCE_INBOX_ITEM_RECORD_VERSION",
     "SOURCE_INBOX_LIST_VERSION",
+    "SOURCE_INBOX_NOTIFICATION_CURSOR_VERSION",
+    "SOURCE_INBOX_NOTIFICATION_FEED_VERSION",
+    "SOURCE_INBOX_NOTIFICATION_VERSION",
     "SOURCE_INBOX_ROUND_DRAFT_VERSION",
     "SourceInboxError",
     "SourceInboxService",
