@@ -51,6 +51,7 @@ _API_RESOURCE_CLASSES = frozenset({
     "market",
     "materials",
     "models",
+    "monitoring",
     "observations",
     "plugins",
     "providers",

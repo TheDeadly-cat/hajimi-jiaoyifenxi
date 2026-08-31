@@ -338,6 +338,13 @@ class SourceInboxHttpTests(unittest.TestCase):
         self.assertEqual(health["safety"]["provider_calls_performed"], 0)
         self.assertEqual(health["safety"]["network_requests_performed"], 0)
         self.assertEqual(health["safety"]["formal_rounds_created"], 0)
+        self.assertEqual(health["operations"]["schema_status"], "current")
+        self.assertEqual(
+            health["operations"]["retention_mode"],
+            "retain_all_evidence",
+        )
+        self.assertFalse(health["operations"]["evidence_deletion_allowed"])
+        self.assertFalse(health["operations"]["runtime_liveness_verified"])
         self.assertTrue(all(
             adapter["runtime_liveness_verified"] is False
             and adapter["metadata"]["execution_capability"] == "none"
@@ -359,6 +366,136 @@ class SourceInboxHttpTests(unittest.TestCase):
         invalid_status, invalid = self.request("/api/monitoring/health?probe=true")
         self.assertEqual(invalid_status, 400)
         self.assertEqual(invalid["code"], "SOURCE_MONITORING_HEALTH_QUERY_UNSUPPORTED")
+
+    def test_retention_preview_and_attestation_are_no_store_and_zero_delete(self) -> None:
+        self.import_item()
+        protected_tables = (
+            "source_adapter_runs",
+            "source_adapter_states",
+            "source_inbox_import_items",
+            "source_inbox_imports",
+            "source_inbox_items",
+            "source_inbox_state_events",
+            "source_inbox_attachments",
+            "source_inbox_round_drafts",
+            "source_inbox_trading_impact_projections",
+            "rounds",
+            "provider_call_attempts",
+        )
+
+        def counts() -> tuple[int, ...]:
+            with closing(sqlite3.connect(self.store.path)) as connection:
+                return tuple(
+                    connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    for table in protected_tables
+                )
+
+        before = counts()
+        status, payload, headers = self.request_with_headers(
+            "/api/monitoring/retention/preview"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+        preview = payload["source_monitoring_retention_preview"]
+        self.assertEqual(preview["policy"]["mode"], "retain_all_evidence")
+        self.assertEqual(preview["plan"]["eligible_rows"], 0)
+        self.assertEqual(preview["plan"]["deleted_rows"], 0)
+        self.assertEqual(counts(), before)
+
+        nested_inventory: object = {}
+        for _index in range(80):
+            nested_inventory = {"nested": nested_inventory}
+        deep_preview = json.loads(json.dumps(preview))
+        deep_preview["inventory"] = nested_inventory
+        deep_status, deep_payload, deep_headers = self.request_with_headers(
+            "/api/monitoring/retention/attest",
+            method="POST",
+            payload={
+                "preview": deep_preview,
+                "confirmation": preview["required_confirmation"],
+            },
+        )
+        self.assertEqual(deep_status, 400)
+        self.assertEqual(deep_headers.get("Cache-Control"), "no-store")
+        self.assertEqual(
+            deep_payload["code"],
+            "SOURCE_MONITORING_RETENTION_PREVIEW_INVALID",
+        )
+        self.assertEqual(counts(), before)
+
+        denied_status, denied, denied_headers = self.request_with_headers(
+            "/api/monitoring/retention/attest",
+            method="POST",
+            payload={
+                "preview": preview,
+                "confirmation": preview["required_confirmation"],
+            },
+            include_token=False,
+        )
+        self.assertEqual(denied_status, 403)
+        self.assertEqual(denied_headers.get("Cache-Control"), "no-store")
+        self.assertFalse(denied["ok"])
+
+        wrong_status, wrong = self.request(
+            "/api/monitoring/retention/attest",
+            method="POST",
+            payload={
+                "preview": preview,
+                "confirmation": "DELETE_OLD_EVIDENCE",
+            },
+        )
+        self.assertEqual(wrong_status, 400)
+        self.assertEqual(
+            wrong["code"],
+            "SOURCE_MONITORING_RETENTION_CONFIRMATION_REQUIRED",
+        )
+        self.assertEqual(counts(), before)
+
+        first_status, first, first_headers = self.request_with_headers(
+            "/api/monitoring/retention/attest",
+            method="POST",
+            payload={
+                "preview": preview,
+                "confirmation": preview["required_confirmation"],
+            },
+        )
+        self.assertEqual(first_status, 201)
+        self.assertEqual(first_headers.get("Cache-Control"), "no-store")
+        first_result = first["source_monitoring_retention_attestation"]
+        self.assertFalse(first_result["idempotent_replay"])
+        self.assertEqual(first_result["receipt"]["deleted_rows"], 0)
+        self.assertEqual(first_result["receipt"]["source_rows_updated"], 0)
+        self.assertEqual(counts(), before)
+
+        replay_status, replay = self.request(
+            "/api/monitoring/retention/attest",
+            method="POST",
+            payload={
+                "preview": preview,
+                "confirmation": preview["required_confirmation"],
+            },
+        )
+        self.assertEqual(replay_status, 200)
+        self.assertTrue(
+            replay["source_monitoring_retention_attestation"]["idempotent_replay"]
+        )
+        self.assertEqual(counts(), before)
+        with closing(sqlite3.connect(self.store.path)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM source_monitoring_retention_receipts"
+                ).fetchone()[0],
+                1,
+            )
+
+        query_status, query = self.request(
+            "/api/monitoring/retention/preview?cleanup=true"
+        )
+        self.assertEqual(query_status, 400)
+        self.assertEqual(
+            query["code"],
+            "SOURCE_MONITORING_RETENTION_QUERY_UNSUPPORTED",
+        )
 
     def test_user_sequence_creates_material_and_draft_but_no_formal_round(self) -> None:
         item = self.import_item()

@@ -155,6 +155,7 @@ python server.py
 - `GET /api/integration/manifest` 使用 `studio_integration_manifest_v2`，只从编译期合同生成自哈希的能力发现清单：列出 kernel/registry、能力包、Manual ChatGPT、只读 MCP、版本化插件目录、PPTX 包合同、项目接入与便携结果的 schema hash，以及固定安全边界；它不读数据库、Provider、市场、环境秘密或本地路径。外部写入只允许使用独立、短时、请求绑定的 project capability 调用 `POST /api/integration/project-invocations`，且仅能原子创建项目专属房间与 intake；`/api/bootstrap` 的前端会话凭据不会被该入口接受。
 - `python -m backend.project_capability_issuer inspect|dry-run|mint` 提供离线可信操作员签发：显式读取 sealed envelope 与无秘密项目 allowlist，复用既有 capability 协议，每枚 token 只含 `project_invocation.intake` 或 `project_invocation.result.read` 一个动作，并输出不含 bearer/签名秘密的审计 receipt。inspect/dry-run 不读取秘密；mint 只从操作员进程环境或显式 stdin 读取秘密，不打开数据库、不启动服务，也不连接 Provider 或市场。完整策略、确认文本和示例见 [`docs/project_invocation_quickstart.md`](docs/project_invocation_quickstart.md)。
 - 全局“来源收件箱”使用领域无关的 `source_import_packet_v1 / project_source_item_v1`：支持 ChatGPT 结果的人工 JSON 导入、绑定原始文本的无数据库预览、版本化 GPT 监控提示词模板、服务端指纹与幂等去重、来源/事实/影响假设的 `external_unverified` 展示、显式“已阅不代表事实确认”、手动挂接房间材料，以及只生成 `source_inbox_round_draft_v1`。任何编辑都会令预览失效，正式导入仍在事务内重新校验；模板只供手动复制，不打开、登录、导航或控制 ChatGPT 页面，也不创建 Scheduled Task。它不会自动创建正式轮次、调用 Provider、读取市场或授予执行权限；源码接口与状态机见 [`docs/source_inbox_contract_v1.md`](docs/source_inbox_contract_v1.md)。正式桌面实例仍须先完成当前源码对应的精确数据库迁移授权。
+- 官方来源监控的 Phase 8 运维合同使用有界 `studio_log_event_v1` 生命周期日志、只读 health operations 子投影，以及 `source_monitoring_retention_policy_v1 / retain_all_evidence`。保留预览只封印受保护表计数；精确用户确认只追加不可变零删除 receipt，没有 cleanup/delete route、scheduler hook 或自动启动。数据库只 additive 增加一张证明表、索引、不可变 triggers 与独立 migration key，不回填或改写 Source Inbox、checkpoint、run receipt。日志字段、保留矩阵、正式迁移与回滚矩阵见 [`docs/source_monitoring_operations_runbook.md`](docs/source_monitoring_operations_runbook.md)。
 - 未注册的 `/api` GET 路径返回 JSON `404 / API_NOT_FOUND`，不会落入前端 SPA fallback 形成伪 `200 text/html`。
 
 算命、交易、PPT、足球等项目的正确接入面、结果档案与 scoped capability 路线见 [`docs/cross_project_collaboration_architecture.md`](docs/cross_project_collaboration_architecture.md)；最小调用流程见 [`docs/project_invocation_quickstart.md`](docs/project_invocation_quickstart.md)。现阶段保持 iframe 与跨域写入关闭；发现清单、只读 MCP 和项目接入 capability 是三个不同权限层。
@@ -167,7 +168,7 @@ python server.py
 
 足球与通用股票研究现以 `football_research_readonly`、`stock_research_readonly` 两个版本化只读能力包接入。检查成功不会自动进入正式轮；用户必须显式授权精确合同，服务端才会在 Provider 调用前重新核验并冻结通用 round context。足球 v1 不生成未经真实校准的未来胜率，股票 v1 要求房间显式股票池并逐项核验 Futu、SEC、IR、复权与公司行动；两者都不投注、不接钱包、不下单、不替代用户决定，也不复用存储股票 candidate experiment。合同和边界见 [`docs/readonly_domain_packs.md`](docs/readonly_domain_packs.md)。
 
-后端测试统一入口支持 `migration / core / domains / full` 四层，定义与命令见 [`docs/backend_test_layers.md`](docs/backend_test_layers.md)。不初始化 Git 的版本化源码快照工具见 [`docs/source_backup.md`](docs/source_backup.md)；它显式排除 `runtime`、本地环境文件和凭据，不替代数据库迁移备份。
+后端测试统一入口支持 `migration / core / domains / delivery / full` 五层，定义与命令见 [`docs/backend_test_layers.md`](docs/backend_test_layers.md)。不初始化 Git 的版本化源码快照工具见 [`docs/source_backup.md`](docs/source_backup.md)；它显式排除 `runtime`、本地环境文件和凭据，不替代数据库迁移备份。
 
 ### 已有候选回放的只读对比
 
@@ -522,6 +523,7 @@ $dependencyInventory = Join-Path $env:TEMP ("ai-studio-dependency-inventory-" + 
 python scripts\generate_dependency_inventory.py --output $dependencyInventory
 python scripts\generate_dependency_inventory.py --verify $dependencyInventory
 python scripts\run_backend_tests_isolated.py --layer migration --verbosity 2
+python scripts\run_backend_tests_isolated.py --layer core --verbosity 2
 python scripts\run_backend_tests_isolated.py --layer domains --verbosity 2
 python scripts\run_backend_tests_isolated.py --layer delivery --verbosity 2
 python scripts\run_backend_tests_isolated.py --layer full --verbosity 1
@@ -531,7 +533,7 @@ npm.cmd --prefix frontend run build
 
 `run_static_security_checks.py` 是不联网、无第三方扫描器依赖的发布源基线。它复用版本化源码备份的排除规则，检查 GitHub Actions 是否固定到完整 commit SHA、CI 是否继续使用隔离入口、fresh-source/release drill 是否只被动读取受保护端口、Python 锁文件是否逐项精确哈希、宿主是否只使用结构化日志，以及发布源中是否出现高置信凭证或私钥特征。报告明确保留 `sast_complete=false`、`dependency_cve_audit=false` 和 `penetration_test=false`；通过不代表已完成完整 SAST、在线依赖漏洞审计或渗透测试。
 
-宿主控制的生命周期与 HTTP 元数据写入单行 `studio_log_event_v1` JSONL。HTTP 日志只保留方法、资源类别和状态码，不记录动态 ID、查询参数、请求头、请求体、会话令牌或 Provider 载荷；启动失败只记录阶段和异常类型，不输出数据库路径或原始异常文本。launcher 的 `server-*.stdout.log` 因而可逐行解析；已处理的启动失败不应向 `stderr` 泄漏路径。
+宿主控制的生命周期与 HTTP 元数据写入单行 `studio_log_event_v1` JSONL。HTTP 日志只保留方法、资源类别和状态码，`/api/monitoring/*` 统一归类为 `api:monitoring`；监控 run/恢复/retention 日志也只保留固定状态、计数、error code 与 policy hash。两者都不记录动态路径、URL、headline、checkpoint、原始错误文本、receipt/import/item ID、请求头/体、会话令牌或 Provider/市场载荷。launcher 的 `server-*.stdout.log` 因而可逐行解析；这些外部日志文件的轮转/保留由操作员负责，不属于 SQLite retain-all policy。已处理的启动失败不应向 `stderr` 泄漏路径。
 
 `run_isolated_release_drill.py` 在系统临时目录创建两个 manifest 校验的合成源码版本，验证不可覆盖安装、原子 active pointer、升级、注入 `not_ready` 和显式回滚，并要求外置临时 SQLite 文件族逐字节不变。它不安装依赖、不启动应用、不执行数据库迁移、不访问正式库或外网。该演练只证明当前 release lifecycle 机制失败关闭；`historical_upgrade_compatibility_proven=false`，不能替代真实历史版本升级、正式迁移或生产回滚验收。
 

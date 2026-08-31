@@ -21,6 +21,10 @@ from .default_registry import (
     build_official_source_registry,
 )
 from .health import project_monitoring_health
+from .operations import (
+    SourceMonitoringOperationsError,
+    source_monitoring_operations_health,
+)
 from .settings import SourceMonitoringSettings, load_source_monitoring_settings
 from .state_repository import SourceMonitoringStateRepository
 
@@ -225,7 +229,9 @@ class SourceMonitoringHealthService:
         bool,
         list[dict[str, Any]],
         dict[str, dict[str, Any] | None],
+        dict[str, Any],
     ]:
+        operations = source_monitoring_operations_health(None)
         try:
             path = Path(self.store.path)
         except (AttributeError, TypeError, ValueError) as exc:
@@ -234,7 +240,7 @@ class SourceMonitoringHealthService:
                 code="SOURCE_MONITORING_HEALTH_STORE_INVALID",
             ) from exc
         if not path.is_file():
-            return False, [], {}
+            return False, [], {}, operations
         repository = SourceMonitoringStateRepository(self.store)
         try:
             with self.store._lock:
@@ -244,6 +250,7 @@ class SourceMonitoringHealthService:
                 # joined, created, deleted, or mutated by this health read.
                 with _health_snapshot_connection(path) as connection:
                     connection.execute("BEGIN")
+                    operations = source_monitoring_operations_health(connection)
                     state_rows = connection.execute(
                         "SELECT * FROM source_adapter_states ORDER BY adapter_key"
                     ).fetchall()
@@ -265,7 +272,7 @@ class SourceMonitoringHealthService:
                         )
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).lower():
-                return False, [], {}
+                return False, [], {}, source_monitoring_operations_health(None)
             raise SourceMonitoringHealthServiceError(
                 "Source Monitoring persisted health evidence could not be read.",
                 code="SOURCE_MONITORING_HEALTH_READ_FAILED",
@@ -275,11 +282,22 @@ class SourceMonitoringHealthService:
                 "Source Monitoring persisted health evidence could not be read.",
                 code="SOURCE_MONITORING_HEALTH_READ_FAILED",
             ) from exc
-        return True, states, latest_runs
+        except SourceMonitoringOperationsError as exc:
+            raise SourceMonitoringHealthServiceError(
+                "Source Monitoring operations health evidence is invalid.",
+                code=exc.code,
+                status=exc.status,
+            ) from exc
+        return True, states, latest_runs, operations
 
     def snapshot(self) -> dict[str, Any]:
         captured_at_ms = self._now()
-        persistence_available, states, latest_runs = self._persisted_evidence()
+        (
+            persistence_available,
+            states,
+            latest_runs,
+            operations,
+        ) = self._persisted_evidence()
         state_by_key = {state["adapter_key"]: state for state in states}
         metadata_by_key = {
             str(metadata.get("adapter_key") or ""): metadata
@@ -404,6 +422,7 @@ class SourceMonitoringHealthService:
             "settings": self.settings.to_dict(),
             "persistence_available": persistence_available,
             "runtime_liveness_verified": False,
+            "operations": operations,
             "safety": {
                 "database_writes_performed": 0,
                 "provider_calls_performed": 0,

@@ -17,6 +17,8 @@
 
 所有路径必须显式给出。source、owner lock、manifest、backup、candidate、prepared、receipt 及各自 `-wal` / `-shm` / `-journal` 文件族必须按 Windows 大小写规则两两不相交；任一输出文件族已有主文件、sidecar、目录或链接都会在写入前失败。owner lock 本身也必须是独立的普通文件，不能是符号链接、reparse point 或 hardlink；锁文件打开前后都会重验物理身份。reserved marker/staging/rollback 名及其大小写变体也不能用作输出。所有 SQLite 主文件必须是 link count 为 1 的普通文件，且源库、备份、候选、staging 和恢复镜像的物理 file ID 必须互异；工具没有 hardlink 发布退路。备份和候选应保留到人工复核 receipt 和服务恢复完成之后。JSON 与 marker 都先写同目录临时文件、fsync，再以 fail-if-exists 方式完整发布，因此不会暴露截断的正式 receipt。迁移 shadow 只允许系统临时目录内已存在、非硬链接的副本。
 
+Phase 8 的 `source_monitoring_operations_v1` 也只能走本硬门。它只 additive 增加 retain-all policy receipt 表、一个索引、receipt/marker 不可变 triggers 和 migration key；不加旧表列、不 backfill、不删除或改写 Source Inbox、adapter state/checkpoint/run receipt。专用迁移测试用代表性旧库核对逐表 content hash，并注入 candidate 已替换但 receipt 未发布的故障，证明原 token rollback 恢复迁移前 physical/logical SHA。完整对象与 completed-migration 无自动 down-migration 的边界见 [Source Monitoring operations runbook](./source_monitoring_operations_runbook.md)。
+
 ```powershell
 $db = 'C:\path\to\collaboration_studio.sqlite3'
 $evidence = 'C:\path\to\migration-evidence\2026-08-12'
@@ -60,6 +62,7 @@ python scripts\run_database_migration_gate.py reconcile `
 ```powershell
 python scripts\run_backend_tests_isolated.py --verbosity 1
 python scripts\run_backend_tests_isolated.py tests.test_database_migration tests.test_database_migration_recovery --verbosity 2
+python scripts\run_backend_tests_isolated.py tests.test_source_monitoring_operations_migration --verbosity 2
 ```
 
 迁移工具不启动 HTTP 服务，不访问 8770，不连接 Futu/OpenD，不调用模型 Provider，也不拥有投注、钱包、订单或任何外部执行能力。

@@ -1,4 +1,4 @@
-# 官方来源持续监控边界（阶段 1～3）
+# 官方来源持续监控边界（阶段 1～8）
 
 ## 默认状态与注册范围
 
@@ -43,4 +43,4 @@ Dry-run 只验证候选 packet 并保存终态 run receipt，不写 Source Inbox
 - `execution_capability=none`、`live_trading_allowed=false`；没有订单、账户、资金、支付或钱包能力。
 - 关闭监控不会删除已存监控数据，也不改变原有房间、材料、Manual ChatGPT 或 Source Inbox 状态机。
 
-阶段 3 的宏观源只投递官方计划/发布/修订事实，不计算影响、不生成交易语言。阶段 4 的独立 Futu 异常信号已经实现。阶段 5 以独立默认关闭的不可变 sidecar 提供零 Token 影响规则，详见 [确定性影响规则边界](./trading_impact_rules_phase5.md)。前端通知、GPT 导入增强和自动启动仍属于后续独立阶段。
+阶段 3 的宏观源只投递官方计划/发布/修订事实，不计算影响、不生成交易语言。阶段 4 的独立 Futu 异常信号已经实现。阶段 5 以独立默认关闭的不可变 sidecar 提供零 Token 影响规则，详见 [确定性影响规则边界](./trading_impact_rules_phase5.md)。阶段 6 已提供未读、筛选、健康记录、浏览器通知与深链接；阶段 7 保留人工 JSON 导入并增加绑定原文的预览和只供手动复制的 GPT 模板，不控制 ChatGPT 页面。阶段 8 增加有界生命周期日志、只读 operations health、`retain_all_evidence` 零删除政策证明，以及 additive migration/rollback 合同，详见 [运行手册](./source_monitoring_operations_runbook.md)。自动启动仍未启用，也没有自动清理任务。

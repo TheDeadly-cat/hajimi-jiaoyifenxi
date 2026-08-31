@@ -278,8 +278,12 @@ The implemented store/HTTP integration must:
 4. return `DUPLICATE` on an exact replay and a conflict on reused external run
    identity with different normalized semantics;
 5. persist the normalized packet and sealed receipt under the current schema;
-   a separately versioned retention/cleanup policy remains Phase 8 work and is
-   not implied by this Phase 7 UX;
+   Phase 8 now binds these records to
+   `source_monitoring_retention_policy_v1 / retain_all_evidence`: there is no
+   automatic or scheduled cleanup, and an explicit attestation appends only a
+   zero-delete receipt. Any future destructive policy requires a new version
+   and new user authorization; see
+   [the Source Monitoring operations runbook](./source_monitoring_operations_runbook.md);
 6. expose only sanitized, bounded projections in a separately scoped read-only
    MCP capability;
 7. require an explicit user action before attachment or round drafting.

@@ -68,6 +68,13 @@ class SourceMonitoringHealthServiceTests(unittest.TestCase):
         self.assertFalse(snapshot["settings"]["enabled"])
         self.assertFalse(snapshot["settings"]["auto_start"])
         self.assertTrue(snapshot["settings"]["dry_run"])
+        self.assertEqual(snapshot["operations"]["schema_status"], "current")
+        self.assertEqual(
+            snapshot["operations"]["retention_mode"],
+            "retain_all_evidence",
+        )
+        self.assertFalse(snapshot["operations"]["evidence_deletion_allowed"])
+        self.assertFalse(snapshot["operations"]["runtime_liveness_verified"])
         self.assertTrue(all(
             adapter["state"] == "disabled"
             and adapter["persisted_state"] is False
@@ -96,6 +103,45 @@ class SourceMonitoringHealthServiceTests(unittest.TestCase):
             (before.st_size, before.st_mtime_ns),
         )
         self.assertEqual(sidecars_after, sidecars_before)
+
+    def test_pre_operations_database_reports_migration_required_without_writes(self) -> None:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
+            connection.executescript(
+                """
+                DROP TRIGGER trg_source_monitoring_operations_marker_no_update;
+                DROP TRIGGER trg_source_monitoring_operations_marker_no_delete;
+                DROP TRIGGER trg_source_monitoring_operations_marker_no_replace;
+                DROP TRIGGER trg_source_monitoring_retention_receipts_no_update;
+                DROP TRIGGER trg_source_monitoring_retention_receipts_no_delete;
+                DROP TRIGGER trg_source_monitoring_retention_receipts_no_replace;
+                DROP INDEX idx_source_monitoring_retention_receipts_time;
+                DROP TABLE source_monitoring_retention_receipts;
+                DELETE FROM schema_migrations
+                 WHERE key='source_monitoring_operations_v1';
+                """
+            )
+        before_bytes = self.database_path.read_bytes()
+        before = self.database_path.stat()
+        sidecars_before = sorted(path.name for path in self.database_path.parent.iterdir())
+
+        snapshot = self.service().snapshot()
+
+        after = self.database_path.stat()
+        self.assertTrue(snapshot["persistence_available"])
+        self.assertEqual(
+            snapshot["operations"]["schema_status"],
+            "migration_required",
+        )
+        self.assertEqual(snapshot["operations"]["retention_receipt_count"], 0)
+        self.assertEqual(self.database_path.read_bytes(), before_bytes)
+        self.assertEqual(
+            (after.st_size, after.st_mtime_ns),
+            (before.st_size, before.st_mtime_ns),
+        )
+        self.assertEqual(
+            sorted(path.name for path in self.database_path.parent.iterdir()),
+            sidecars_before,
+        )
 
     def test_persisted_failure_and_latest_run_are_redacted_read_only_evidence(self) -> None:
         initial = self.service().snapshot()
@@ -374,6 +420,7 @@ class SourceMonitoringHealthServiceTests(unittest.TestCase):
             ).fetchall()
 
         self.assertFalse(snapshot["persistence_available"])
+        self.assertEqual(snapshot["operations"]["schema_status"], "unavailable")
         self.assertEqual(snapshot["adapter_count"], 7)
         self.assertTrue(all(not adapter["persisted_state"] for adapter in snapshot["adapters"]))
         self.assertEqual(rows, [("preserve-me",)])

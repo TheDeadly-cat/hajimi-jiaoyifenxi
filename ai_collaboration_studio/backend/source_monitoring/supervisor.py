@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from ..source_inbox_contracts import accept_source_import, canonical_sha256
 from ..source_inbox_service import SourceInboxService
+from ..structured_logging import emit_event
 from .contracts import (
     MAX_NATIVE_INTEGER,
     AdapterPollResult,
@@ -70,6 +71,7 @@ class SourceMonitoringSupervisor:
         clock_ms: Callable[[], Any] | None = None,
         after_import_hook: Callable[[str, dict[str, Any]], Any] | None = None,
         impact_rules: TradingImpactRulesV1 | None = None,
+        event_sink: Callable[..., Any] | None = None,
     ) -> None:
         if type(registry) is not SourceAdapterRegistry:
             raise SourceMonitoringSupervisorError(
@@ -115,6 +117,11 @@ class SourceMonitoringSupervisor:
                 "SOURCE_MONITORING_IMPORT_HOOK_INVALID",
                 "after_import_hook must be callable",
             )
+        if event_sink is not None and not callable(event_sink):
+            raise SourceMonitoringSupervisorError(
+                "SOURCE_MONITORING_EVENT_SINK_INVALID",
+                "event_sink must be callable",
+            )
         if settings.trading_impact_rules_enabled:
             if type(impact_rules) is not TradingImpactRulesV1:
                 raise SourceMonitoringSupervisorError(
@@ -148,6 +155,7 @@ class SourceMonitoringSupervisor:
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
         self._after_import_hook = after_import_hook
         self._impact_rules = impact_rules
+        self._event_sink = event_sink or emit_event
         self._initialization_lock = threading.Lock()
         self._recovery_completed = False
 
@@ -159,6 +167,49 @@ class SourceMonitoringSupervisor:
                 "supervisor clock must return a non-negative native integer",
             )
         return value
+
+    def _emit(
+        self,
+        event: str,
+        *,
+        severity: str = "info",
+        fields: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            self._event_sink(event, severity=severity, fields=fields or {})
+        except Exception:
+            # Logging is deliberately outside the authoritative state/import
+            # transactions and must never affect checkpoint advancement.
+            return
+
+    def _emit_completed_run(
+        self,
+        run: dict[str, Any],
+        *,
+        state_recorded: bool,
+        outcome_status: str | None = None,
+        severity: str = "info",
+    ) -> None:
+        self._emit(
+            "source_monitoring_run_completed",
+            severity=severity,
+            fields={
+                "adapter_key": run.get("adapter_key"),
+                "status": outcome_status or run.get("status"),
+                "dry_run": run.get("dry_run") is True,
+                "observed_count": run.get("observed_count"),
+                "accepted_count": run.get("accepted_count"),
+                "duplicate_count": run.get("duplicate_count"),
+                "rejected_count": run.get("rejected_count"),
+                "duration_ms": run.get("duration_ms"),
+                "error_code": run.get("error_code"),
+                "state_recorded": state_recorded,
+                "execution_capability": "none",
+                "live_trading_allowed": False,
+                "provider_calls_performed": 0,
+                "formal_rounds_created": 0,
+            },
+        )
 
     @staticmethod
     def _impact_safety_accounting() -> dict[str, Any]:
@@ -386,6 +437,10 @@ class SourceMonitoringSupervisor:
                 next_due_at_ms=self._now_ms(),
             )
             self._recovery_completed = True
+            self._emit(
+                "source_monitoring_recovery_completed",
+                fields={"recovered_run_count": recovered},
+            )
             return recovered
 
     def _base_result(
@@ -439,6 +494,13 @@ class SourceMonitoringSupervisor:
             dry_run=self.settings.dry_run,
         )
         run_id = started["run"]["run_id"]
+        self._emit(
+            "source_monitoring_run_started",
+            fields={
+                "adapter_key": metadata.adapter_key,
+                "dry_run": self.settings.dry_run,
+            },
+        )
         poll_result: AdapterPollResult | None = None
         try:
             observed_at_ms = self._now_ms()
@@ -537,6 +599,10 @@ class SourceMonitoringSupervisor:
                 })
                 if impact_accounting is not None:
                     result["trading_impact_rules"] = impact_accounting
+                self._emit_completed_run(
+                    completed["run"],
+                    state_recorded=True,
+                )
                 return result
 
             import_result: dict[str, Any] | None = None
@@ -657,6 +723,11 @@ class SourceMonitoringSupervisor:
             })
             if impact_accounting is not None:
                 result["trading_impact_rules"] = impact_accounting
+            self._emit_completed_run(
+                completed["run"],
+                state_recorded=True,
+                severity=("warning" if terminal_status == RUN_STATUS_DEGRADED else "info"),
+            )
             return result
         except Exception as exc:
             error_code, error_message = _clean_error(exc)
@@ -679,6 +750,7 @@ class SourceMonitoringSupervisor:
             state_recorded = False
             failure: dict[str, Any] | None = None
             recording_error = ""
+            recording_error_code = ""
             try:
                 if self.settings.dry_run:
                     failure = self.repository.complete_run(
@@ -724,7 +796,7 @@ class SourceMonitoringSupervisor:
                     )
                 state_recorded = True
             except Exception as record_exc:
-                _record_code, recording_error = _clean_error(record_exc)
+                recording_error_code, recording_error = _clean_error(record_exc)
                 failure = None
                 self._recovery_completed = False
                 try:
@@ -770,6 +842,51 @@ class SourceMonitoringSupervisor:
                 "import": None,
                 "recording_error": recording_error,
             })
+            if recording_error_code:
+                self._emit(
+                    "source_monitoring_run_recording_failed",
+                    severity="critical",
+                    fields={
+                        "adapter_key": metadata.adapter_key,
+                        "status": (
+                            failure["run"].get("status")
+                            if failure is not None
+                            else result["status"]
+                        ),
+                        "dry_run": self.settings.dry_run,
+                        "error_code": error_code,
+                        "recording_error_code": recording_error_code,
+                        "state_recorded": state_recorded,
+                        "fallback_recovery_succeeded": (
+                            failure is not None and state_recorded
+                        ),
+                        "execution_capability": "none",
+                        "live_trading_allowed": False,
+                        "provider_calls_performed": 0,
+                        "formal_rounds_created": 0,
+                    },
+                )
+            elif failure is not None:
+                self._emit(
+                    "source_monitoring_run_failed",
+                    severity="error",
+                    fields={
+                        "adapter_key": metadata.adapter_key,
+                        "status": result["status"],
+                        "dry_run": self.settings.dry_run,
+                        "observed_count": failure["run"].get("observed_count"),
+                        "accepted_count": failure["run"].get("accepted_count"),
+                        "duplicate_count": failure["run"].get("duplicate_count"),
+                        "rejected_count": failure["run"].get("rejected_count"),
+                        "duration_ms": failure["run"].get("duration_ms"),
+                        "error_code": error_code,
+                        "state_recorded": state_recorded,
+                        "execution_capability": "none",
+                        "live_trading_allowed": False,
+                        "provider_calls_performed": 0,
+                        "formal_rounds_created": 0,
+                    },
+                )
             return result
 
 

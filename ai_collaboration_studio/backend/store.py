@@ -184,6 +184,7 @@ from .round_contexts import (
 )
 from .source_inbox_service import ensure_source_inbox_schema
 from .source_inbox_trading_impact import ensure_source_inbox_trading_impact_schema
+from .source_monitoring.operations import ensure_source_monitoring_operations_schema
 from .source_monitoring.state_repository import ensure_source_monitoring_schema
 from .templates import (
     get_room_template,
@@ -1629,6 +1630,10 @@ class StudioStore:
                 applied_at_ms=schema_applied_at_ms,
             )
             ensure_source_monitoring_schema(
+                connection,
+                applied_at_ms=schema_applied_at_ms,
+            )
+            ensure_source_monitoring_operations_schema(
                 connection,
                 applied_at_ms=schema_applied_at_ms,
             )

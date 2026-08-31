@@ -81,6 +81,10 @@ from .source_monitoring.health_service import (
     SourceMonitoringHealthService,
     SourceMonitoringHealthServiceError,
 )
+from .source_monitoring.operations import (
+    SourceMonitoringOperationsError,
+    SourceMonitoringRetentionService,
+)
 from .source_monitoring.state_repository import SourceMonitoringStateError
 from .storage_sample_acceptance import StorageSampleAcceptance
 from .structured_logging import (
@@ -130,6 +134,8 @@ def _is_source_inbox_path(path: str) -> bool:
             "/api/monitoring/imports/chatgpt/preview",
             "/api/monitoring/imports/chatgpt/prompt-template",
             "/api/monitoring/notifications",
+            "/api/monitoring/retention/attest",
+            "/api/monitoring/retention/preview",
         }
         or re.fullmatch(r"/api/monitoring/events/[^/]+(?:/(?:acknowledge|attach|round-draft))?", path)
     )
@@ -620,6 +626,30 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._send_json({"ok": True, "source_monitoring_health": health})
+            return
+        if parsed.path == "/api/monitoring/retention/preview":
+            if parsed.query:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "Source Monitoring retention preview does not accept query parameters.",
+                        "code": "SOURCE_MONITORING_RETENTION_QUERY_UNSUPPORTED",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                preview = SourceMonitoringRetentionService(STORE).preview()
+            except SourceMonitoringOperationsError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json({
+                "ok": True,
+                "source_monitoring_retention_preview": preview,
+            })
             return
         if parsed.path == "/api/monitoring/notifications":
             notification_query = parse_qs(parsed.query, keep_blank_values=True)
@@ -1585,9 +1615,13 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         is_source_inbox_import_preview = (
             parsed.path == "/api/monitoring/imports/chatgpt/preview"
         )
+        is_monitoring_retention_attest = (
+            parsed.path == "/api/monitoring/retention/attest"
+        )
         is_source_inbox_request = bool(
             is_source_inbox_import
             or is_source_inbox_import_preview
+            or is_monitoring_retention_attest
             or re.fullmatch(
                 r"/api/monitoring/events/[^/]+/(?:acknowledge|attach|round-draft)",
                 parsed.path,
@@ -1661,6 +1695,40 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {"ok": True, "source_import": result},
                 HTTPStatus.OK if result["idempotent_replay"] else HTTPStatus.CREATED,
+            )
+            return
+        if is_monitoring_retention_attest:
+            if parsed.query or set(payload) != {"preview", "confirmation"}:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "Retention attestation requires only preview and confirmation.",
+                        "code": "SOURCE_MONITORING_RETENTION_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                result = SourceMonitoringRetentionService(STORE).attest(
+                    payload.get("preview"),
+                    confirmation=payload.get("confirmation"),
+                )
+            except SourceMonitoringOperationsError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "source_monitoring_retention_attestation": result,
+                },
+                (
+                    HTTPStatus.OK
+                    if result["idempotent_replay"]
+                    else HTTPStatus.CREATED
+                ),
             )
             return
         source_inbox_ack_match = re.fullmatch(

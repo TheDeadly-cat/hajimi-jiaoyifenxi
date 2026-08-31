@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import tempfile
@@ -196,6 +197,7 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
         dry_run: bool = False,
         auto_start: bool = False,
         after_import_hook=None,
+        event_sink=None,
     ) -> SourceMonitoringSupervisor:
         return SourceMonitoringSupervisor(
             registry=SourceAdapterRegistry(adapters),
@@ -205,6 +207,7 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
             backoff_policy=self.backoff,
             clock_ms=lambda: self.clock[0],
             after_import_hook=after_import_hook,
+            event_sink=event_sink,
         )
 
     def enable(self, adapter: FakeAdapter) -> None:
@@ -264,6 +267,75 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
         self.assertEqual(self.provider_counts(), before_provider)
         self.assertEqual(first["safety"]["provider_calls_performed"], 0)
         self.assertEqual(first["safety"]["formal_rounds_created"], 0)
+
+    def test_lifecycle_logs_are_bounded_and_omit_source_material(self) -> None:
+        adapter = FakeAdapter("fake_logging")
+        events: list[dict[str, object]] = []
+
+        def sink(event, *, severity, fields):
+            events.append({"event": event, "severity": severity, "fields": fields})
+
+        supervisor = self.supervisor((adapter,), event_sink=sink)
+        self.enable(adapter)
+        result = supervisor.run_once(adapter.adapter_key)
+
+        self.assertEqual(result["status"], "SUCCEEDED")
+        self.assertEqual(
+            [event["event"] for event in events],
+            [
+                "source_monitoring_recovery_completed",
+                "source_monitoring_run_started",
+                "source_monitoring_run_completed",
+            ],
+        )
+        terminal = events[-1]["fields"]
+        self.assertEqual(
+            set(terminal),
+            {
+                "adapter_key",
+                "status",
+                "dry_run",
+                "observed_count",
+                "accepted_count",
+                "duplicate_count",
+                "rejected_count",
+                "duration_ms",
+                "error_code",
+                "state_recorded",
+                "execution_capability",
+                "live_trading_allowed",
+                "provider_calls_performed",
+                "formal_rounds_created",
+            },
+        )
+        serialized = json.dumps(events, sort_keys=True)
+        for forbidden in (
+            "https://",
+            "Official fixture",
+            "checkpoint",
+            "last_modified",
+            "etag",
+            "error_message",
+            "import_id",
+            "item_id",
+            result["run"]["run_id"],
+            result["import"]["import_id"],
+        ):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_logging_sink_failure_does_not_change_import_or_checkpoint(self) -> None:
+        adapter = FakeAdapter("fake_logging_failure")
+
+        def failing_sink(*_args, **_kwargs):
+            raise RuntimeError("fixture sink must be isolated")
+
+        supervisor = self.supervisor((adapter,), event_sink=failing_sink)
+        self.enable(adapter)
+        result = supervisor.run_once(adapter.adapter_key)
+
+        self.assertEqual(result["status"], "SUCCEEDED")
+        self.assertEqual(result["state"]["checkpoint"], {"cursor": 1})
+        self.assertEqual(self.inbox_counts(), (1, 2))
 
     def test_adapter_exception_and_invalid_packet_preserve_checkpoint(self) -> None:
         for mode in ("raise", "invalid_item"):
@@ -430,6 +502,11 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
 
     def test_failure_recording_fallback_prevents_permanent_running_rows(self) -> None:
         adapter = FakeAdapter("fake_recording_fallback", mode="raise")
+        events: list[dict[str, object]] = []
+
+        def sink(event, *, severity, fields):
+            events.append({"event": event, "severity": severity, "fields": fields})
+
         bad_backoff = BackoffPolicy(
             initial_delay_ms=30_000,
             maximum_delay_ms=120_000,
@@ -443,6 +520,7 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
             settings=self.settings(),
             backoff_policy=bad_backoff,
             clock_ms=lambda: self.clock[0],
+            event_sink=sink,
         )
         self.enable(adapter)
         first = supervisor.run_once(adapter.adapter_key)
@@ -462,6 +540,28 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
         self.assertEqual(second["status"], "FAILED")
         self.assertTrue(second["state_recorded"])
         self.assertEqual(second["run"]["status"], RUN_STATUS_ABANDONED)
+        recording_failure = events[-1]
+        self.assertEqual(
+            recording_failure["event"],
+            "source_monitoring_run_recording_failed",
+        )
+        self.assertEqual(recording_failure["severity"], "critical")
+        self.assertEqual(
+            recording_failure["fields"],
+            {
+                "adapter_key": adapter.adapter_key,
+                "status": RUN_STATUS_ABANDONED,
+                "dry_run": False,
+                "error_code": "SOURCE_MONITORING_RUN_FAILED",
+                "recording_error_code": "SOURCE_MONITORING_RUN_FAILED",
+                "state_recorded": True,
+                "fallback_recovery_succeeded": True,
+                "execution_capability": "none",
+                "live_trading_allowed": False,
+                "provider_calls_performed": 0,
+                "formal_rounds_created": 0,
+            },
+        )
 
         adapter.mode = "normal"
         third = supervisor.run_once(adapter.adapter_key)
