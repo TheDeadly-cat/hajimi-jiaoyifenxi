@@ -80,8 +80,8 @@ Inbox 会返回 duplicate，而不是创建第二条事件。相同时间戳对�
 
 unknowns 明确声明原因未知、没有新闻/因果归因，也没有未来方向或交易含义。阶段 4
 不会检索新闻、不会匹配 SEC/IR/宏观事件、不会调用 Provider、不会创建 round draft 或
-正式 round，也没有账户、持仓、订单、资金、支付、钱包或执行能力。阶段 5 的确定性
-影响规则仍是后续独立提交。
+正式 round，也没有账户、持仓、订单、资金、支付、钱包或执行能力。后续阶段 5 只能使用
+[确定性影响规则 sidecar](./trading_impact_rules_phase5.md)，不得改写该原始信号或增加新闻归因。
 
 ## 默认状态、调用账本与数据库
 
@@ -94,6 +94,7 @@ AI_STUDIO_SOURCE_MONITOR_OFFICIAL_ONLY=1
 AI_STUDIO_SOURCE_MONITOR_ALLOW_READONLY_MARKET=0
 AI_STUDIO_SOURCE_MONITOR_DRY_RUN=1
 AI_STUDIO_SOURCE_MONITOR_MAX_ITEMS_PER_RUN=50
+AI_STUDIO_SOURCE_MONITOR_TRADING_IMPACT_RULES_ENABLED=0
 ```
 
 Futu 模式必须显式使用 `official_only=false` 与 `allow_readonly_market=true`，并在数据库

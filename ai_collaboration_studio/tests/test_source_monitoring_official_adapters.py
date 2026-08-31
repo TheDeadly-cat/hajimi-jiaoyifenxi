@@ -140,6 +140,14 @@ class UnsafeSecPathFetcher(SecFixtureFetcher):
         }
 
 
+class WhitespaceAcceptedAtSecFixtureFetcher(SecFixtureFetcher):
+    def __call__(self, url: str, user_agent: str) -> dict:
+        payload = super().__call__(url, user_agent)
+        if url != SEC_TICKERS_URL:
+            payload["filings"]["recent"]["acceptanceDateTime"][0] = "   "
+        return payload
+
+
 class ManySecFixtureFetcher(SecFixtureFetcher):
     def __init__(self, *, start_index: int = 1, count: int = 7) -> None:
         super().__init__()
@@ -323,7 +331,7 @@ class SecMonitoringAdapterTests(unittest.TestCase):
         self.assertEqual(metadata.execution_capability, "none")
         self.assertFalse(metadata.live_trading_allowed)
         self.assertEqual(metadata.poll_interval_ms, 300_000)
-        self.assertRegex(metadata.config_version, r"\Asec_filings_config_v1_[0-9a-f]{16}\Z")
+        self.assertRegex(metadata.config_version, r"\Asec_filings_config_v2_[0-9a-f]{16}\Z")
 
         first = monitor.poll(
             {},
@@ -342,7 +350,10 @@ class SecMonitoringAdapterTests(unittest.TestCase):
         self.assertEqual(item["extensions"]["sec_v1"]["symbol"], "US.NVDA")
         self.assertEqual(
             item["extensions"]["sec_v1"]["discovered_at_ms"],
-            FIXED_NOW_MS,
+            int(
+                datetime(2026, 8, 30, 20, 0, tzinfo=timezone.utc).timestamp()
+                * 1_000
+            ),
         )
         self.assertNotIn("execution_capability", item)
         self.assertNotIn("live_trading_allowed", item)
@@ -352,6 +363,12 @@ class SecMonitoringAdapterTests(unittest.TestCase):
         )
         self.assertEqual(packet["generation"]["model"], "")
 
+        delayed_crash_replay = monitor.poll(
+            {},
+            observed_at_ms=FIXED_NOW_MS + 60_000,
+        )
+        self.assertEqual(delayed_crash_replay.observed_items, first.observed_items)
+
         second = monitor.poll(
             first.next_checkpoint,
             observed_at_ms=FIXED_NOW_MS,
@@ -359,6 +376,29 @@ class SecMonitoringAdapterTests(unittest.TestCase):
         self.assertEqual(second.observed_items, ())
         self.assertEqual(second.duplicate_count, 1)
         self.assertEqual(second.next_checkpoint, first.next_checkpoint)
+
+    def test_sec_whitespace_acceptance_uses_honest_date_only_anchor(self) -> None:
+        monitor = SecFilingsSourceAdapter(
+            adapter=self.make_sec_adapter(WhitespaceAcceptedAtSecFixtureFetcher()),
+            allowed_symbols=["US.NVDA"],
+            allowed_forms=["8-K"],
+        )
+        result = monitor.poll(
+            {},
+            observed_at_ms=FIXED_NOW_MS,
+            max_items=50,
+        )
+        self.assertEqual(len(result.observed_items), 1)
+        item = result.observed_items[0]
+        self.assertEqual(item["occurred_at"], "2026-08-30T00:00:00Z")
+        self.assertEqual(item["extensions"]["sec_v1"]["accepted_at"], "")
+        self.assertEqual(
+            item["extensions"]["sec_v1"]["discovered_at_ms"],
+            int(
+                datetime(2026, 8, 30, 0, 0, tzinfo=timezone.utc).timestamp()
+                * 1_000
+            ),
+        )
 
     def test_sec_unseen_seventh_filing_drains_after_six_duplicates(self) -> None:
         monitor = SecFilingsSourceAdapter(

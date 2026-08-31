@@ -32,6 +32,8 @@ EDGAR 表单是事件入口，不是事件影响结论。角色必须继续阅�
 
 ## 持续监控投影
 
-`source_monitoring.adapters.sec_filings` 复用本适配器，但不下载附件或正文。旧按需接口仍返回每标的 limit 窗口；监控专用接口会扫描 submissions 响应大小上限内的全部规范化 recent 条目，再让已见 accession 跳过而不占本轮新事件额度。它以严格格式的 accession number 作为外部身份；checkpoint 只保存最多 1,000 个已成功导入的 accession。当前响应超过 1,000 个唯一 accession 时整轮显式 `SEC_CHECKPOINT_CAPACITY_EXCEEDED`、不导入也不推进，不会通过截断 seen 列表静默丢失尾部。`sec_v1` 扩展记录表单、Item 编号、CIK、标的、提交日、接受时间、主文档名和本机发现毫秒时间。官方主文档正文未抓取时，`content_sha256` 必须保持空字符串。
+`source_monitoring.adapters.sec_filings` 复用本适配器，但不下载附件或正文。旧按需接口仍返回每标的 limit 窗口；监控专用接口会扫描 submissions 响应大小上限内的全部规范化 recent 条目，再让已见 accession 跳过而不占本轮新事件额度。它以严格格式的 accession number 作为外部身份；checkpoint 只保存最多 1,000 个已成功导入的 accession。当前响应超过 1,000 个唯一 accession 时整轮显式 `SEC_CHECKPOINT_CAPACITY_EXCEEDED`、不导入也不推进，不会通过截断 seen 列表静默丢失尾部。`sec_v1` 扩展记录表单、Item 编号、CIK、标的、提交日、接受时间和主文档名。为兼容保留的 `discovered_at_ms` 在 v2 config 中是官方事件时间的稳定 epoch 毫秒，本机首次发现时间只存于 Source Inbox `received_at`。该语义变化进入 `sec_filings_config_v2_*`。旧 v1 状态必须先禁用 Adapter、确保没有 `RUNNING`，再通过 `preview_sec_filings_v1_to_v2_migration()` 得到旧 checkpoint 与全部已持久化官方 SEC accession 的唯一并集；可信来源由任一与真实非 dry-run 终态 run 精确绑定的 `CREATED`/`DUPLICATE` import link 证明，不能只看条目的首次 origin 或可伪造标签。成功或降级 run 的精确 receipt 不依赖可能回拨的本机墙钟排序；无 receipt 的失败或遗弃 run 仍须满足运行时间窗口。`migrate_config()` 只接受该精确 replacement checkpoint，且不改写任何旧 Source Inbox 条目或哈希。官方主文档正文未抓取时，`content_sha256` 必须保持空字符串。
+
+影响规则的时间精度也区分来源：存在 `accepted_at` 才标为接受时间的精确 timestamp；只有 `filing_date` 时只允许日期锚点，不能声称精确盘中时刻。
 
 Supervisor 先轮询和校验，再直接调用现有 `SourceInboxService`，只有导入成功后才提交 checkpoint。相同 accession 的后续轮询只增加 duplicate 计数。持久化的 ETag 与 Last-Modified 当前仅作为有界上下文原样透传；本适配器尚未声明已实现条件 GET。

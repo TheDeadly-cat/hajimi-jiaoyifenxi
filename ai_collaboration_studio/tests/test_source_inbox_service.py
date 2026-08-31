@@ -76,6 +76,35 @@ class SourceInboxServiceTests(unittest.TestCase):
                 1,
             )
 
+    def test_manual_import_cannot_claim_reserved_monitoring_channels(self) -> None:
+        for source_channel, source_key in (
+            ("official_source_monitor", "sec_filings"),
+            ("futu_anomaly_monitor", "futu_anomaly_signals"),
+        ):
+            with self.subTest(source_channel=source_channel):
+                packet = copy.deepcopy(_packet())
+                packet["source_channel"] = source_channel
+                packet["source_key"] = source_key
+                packet["external_run_id"] = f"manual-forgery-{source_key}"
+                packet["generation"]["channel"] = source_channel
+                packet["generation"]["correlated_output"] = False
+                with self.assertRaises(SourceInboxError) as captured:
+                    self.service.import_packet(self.raw_packet(packet))
+                self.assertEqual(
+                    captured.exception.code,
+                    "SOURCE_INBOX_MONITORING_CHANNEL_UNAUTHORIZED",
+                )
+                self.assertEqual(captured.exception.status, 403)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM source_inbox_imports").fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM source_inbox_items").fetchone()[0],
+                0,
+            )
+
     def test_import_first_write_is_final_and_fingerprint_collision_rolls_back(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection, connection:
             connection.execute(

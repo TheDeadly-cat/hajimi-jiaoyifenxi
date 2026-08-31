@@ -183,6 +183,7 @@ from .round_contexts import (
     round_context_binding_payload,
 )
 from .source_inbox_service import ensure_source_inbox_schema
+from .source_inbox_trading_impact import ensure_source_inbox_trading_impact_schema
 from .source_monitoring.state_repository import ensure_source_monitoring_schema
 from .templates import (
     get_room_template,
@@ -1621,8 +1622,16 @@ class StudioStore:
                     ON paper_portfolio_walk_forward_runs(room_id, portfolio_id, created_at DESC);
                 """
             )
+            schema_applied_at_ms = now_ms()
             ensure_source_inbox_schema(connection)
-            ensure_source_monitoring_schema(connection, applied_at_ms=now_ms())
+            ensure_source_inbox_trading_impact_schema(
+                connection,
+                applied_at_ms=schema_applied_at_ms,
+            )
+            ensure_source_monitoring_schema(
+                connection,
+                applied_at_ms=schema_applied_at_ms,
+            )
             self._ensure_column(connection, "rooms", "category", "TEXT NOT NULL DEFAULT '通用共创'")
             self._ensure_column(connection, "rooms", "template_id", "TEXT NOT NULL DEFAULT 'open_collaboration'")
             self._ensure_column(connection, "rooms", "capability_packs_json", "TEXT NOT NULL DEFAULT '[]'")

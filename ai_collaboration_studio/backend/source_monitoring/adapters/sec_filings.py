@@ -40,8 +40,9 @@ from .base import (
 
 SEC_FILINGS_ADAPTER_KEY = "sec_filings"
 SEC_FILINGS_CHECKPOINT_VERSION = "sec_filings_checkpoint_v1"
-SEC_FILINGS_CONFIG_BASIS_VERSION = "sec_filings_config_basis_v1"
+SEC_FILINGS_CONFIG_BASIS_VERSION = "sec_filings_config_basis_v2"
 SEC_FILINGS_PROJECTION_VERSION = "sec_v1"
+SEC_FILINGS_DISCOVERY_TIME_SEMANTICS = "official_event_time_epoch_ms_v1"
 SEC_FILINGS_POLL_INTERVAL_MS = 5 * 60 * 1_000
 MAX_SEEN_ACCESSIONS = 1_000
 
@@ -120,6 +121,42 @@ def _event_time(
     if parsed > observed_at:
         return ""
     return _rfc3339_utc(parsed)
+
+
+def _stable_event_time_ms(value: str) -> int:
+    """Project a replay-stable millisecond anchor from the admitted SEC event."""
+
+    if type(value) is not str:
+        raise SourceMonitoringContractError(
+            "SEC_FILINGS_EVENT_TIME_INVALID",
+            "SEC event time must be a native RFC3339 string",
+        )
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SourceMonitoringContractError(
+            "SEC_FILINGS_EVENT_TIME_INVALID",
+            "SEC event time is not valid RFC3339",
+        ) from exc
+    if parsed.tzinfo is None:
+        raise SourceMonitoringContractError(
+            "SEC_FILINGS_EVENT_TIME_INVALID",
+            "SEC event time must include a UTC offset",
+        )
+    utc = parsed.astimezone(timezone.utc)
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    delta = utc - epoch
+    milliseconds = (
+        delta.days * 86_400_000
+        + delta.seconds * 1_000
+        + delta.microseconds // 1_000
+    )
+    if milliseconds < 0:
+        raise SourceMonitoringContractError(
+            "SEC_FILINGS_EVENT_TIME_INVALID",
+            "SEC event time precedes the supported Unix epoch",
+        )
+    return milliseconds
 
 
 def _normalize_checkpoint(value: Any) -> tuple[dict[str, Any], list[str]]:
@@ -207,7 +244,6 @@ def _filing_item(
     filing: dict[str, Any],
     event_time: str,
     official_url: str,
-    discovered_at_ms: int,
 ) -> dict[str, Any]:
     accession = filing["accession_number"]
     form = filing["form"]
@@ -220,6 +256,10 @@ def _filing_item(
     primary_document = filing.get("primary_document")
     primary_document_text = (
         primary_document.strip()[:240] if type(primary_document) is str else ""
+    )
+    raw_accepted_at = filing.get("accepted_at")
+    has_accepted_at = (
+        type(raw_accepted_at) is str and bool(raw_accepted_at.strip())
     )
     headline = f"{symbol} filed SEC {form} ({accession})"
     summary = description_text or f"Official SEC {form} filing metadata for {symbol}."
@@ -256,9 +296,12 @@ def _filing_item(
         "extensions": {
             "sec_v1": {
                 "accession_number": accession,
-                "accepted_at": event_time if filing.get("accepted_at") else "",
+                "accepted_at": event_time if has_accepted_at else "",
                 "cik": cik,
-                "discovered_at_ms": discovered_at_ms,
+                # The legacy field name is retained for schema compatibility,
+                # but the value is the stable official-event anchor.  Local
+                # first discovery remains Source Inbox ``received_at``.
+                "discovered_at_ms": _stable_event_time_ms(event_time),
                 "filing_date": filing.get("filing_date") or "",
                 "form": form,
                 "items": form_items,
@@ -313,6 +356,7 @@ class SecFilingsSourceAdapter:
             "adapter_key": self.adapter_key,
             "checkpoint_version": SEC_FILINGS_CHECKPOINT_VERSION,
             "projection_version": SEC_FILINGS_PROJECTION_VERSION,
+            "discovery_time_semantics": SEC_FILINGS_DISCOVERY_TIME_SEMANTICS,
             "allowed_symbols": list(self.allowed_symbols),
             "allowed_forms": list(self.allowed_forms),
             "per_symbol_limit": self.per_symbol_limit,
@@ -353,7 +397,7 @@ class SecFilingsSourceAdapter:
                 "SEC_FILINGS_SOURCE_PROVENANCE_DRIFT",
                 "SEC filings user agent changed after construction",
             )
-        expected = "sec_filings_config_v1_" + canonical_sha256(
+        expected = "sec_filings_config_v2_" + canonical_sha256(
             self._config_basis()
         )[:16]
         if self.config_version != expected:
@@ -459,7 +503,7 @@ class SecFilingsSourceAdapter:
             else ""
         )
         self._config_version = (
-            "sec_filings_config_v1_" + canonical_sha256(self._config_basis())[:16]
+            "sec_filings_config_v2_" + canonical_sha256(self._config_basis())[:16]
         )
 
     def poll(
@@ -595,7 +639,6 @@ class SecFilingsSourceAdapter:
                     filing=filing,
                     event_time=event_time,
                     official_url=official_url,
-                    discovered_at_ms=captured_at_ms,
                 )
                 if accession not in candidate_groups:
                     candidate_order.append(accession)
@@ -683,6 +726,7 @@ __all__ = [
     "SEC_FILINGS_ADAPTER_KEY",
     "SEC_FILINGS_CHECKPOINT_VERSION",
     "SEC_FILINGS_CONFIG_BASIS_VERSION",
+    "SEC_FILINGS_DISCOVERY_TIME_SEMANTICS",
     "SEC_FILINGS_POLL_INTERVAL_MS",
     "SEC_FILINGS_PROJECTION_VERSION",
     "SecFilingsAdapter",

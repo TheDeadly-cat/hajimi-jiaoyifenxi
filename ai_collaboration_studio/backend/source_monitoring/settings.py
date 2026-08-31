@@ -16,6 +16,9 @@ SOURCE_MONITOR_AUTO_START_ENV = "AI_STUDIO_SOURCE_MONITOR_AUTO_START"
 SOURCE_MONITOR_OFFICIAL_ONLY_ENV = "AI_STUDIO_SOURCE_MONITOR_OFFICIAL_ONLY"
 SOURCE_MONITOR_DRY_RUN_ENV = "AI_STUDIO_SOURCE_MONITOR_DRY_RUN"
 SOURCE_MONITOR_MAX_ITEMS_ENV = "AI_STUDIO_SOURCE_MONITOR_MAX_ITEMS_PER_RUN"
+SOURCE_MONITOR_TRADING_IMPACT_RULES_ENABLED_ENV = (
+    "AI_STUDIO_SOURCE_MONITOR_TRADING_IMPACT_RULES_ENABLED"
+)
 SOURCE_MONITOR_ALLOW_READONLY_MARKET_ENV = (
     "AI_STUDIO_SOURCE_MONITOR_ALLOW_READONLY_MARKET"
 )
@@ -87,6 +90,7 @@ class SourceMonitoringSettings:
     allow_readonly_market: bool = False
     dry_run: bool = True
     max_items_per_run: int = MAX_OBSERVED_ITEMS_PER_POLL
+    trading_impact_rules_enabled: bool = False
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -94,6 +98,7 @@ class SourceMonitoringSettings:
             "auto_start",
             "official_only",
             "allow_readonly_market",
+            "trading_impact_rules_enabled",
             "dry_run",
         ):
             if type(getattr(self, field_name)) is not bool:
@@ -157,6 +162,11 @@ class SourceMonitoringSettings:
                 SOURCE_MONITOR_ALLOW_READONLY_MARKET_ENV,
                 default=False,
             ),
+            trading_impact_rules_enabled=_strict_boolean(
+                source,
+                SOURCE_MONITOR_TRADING_IMPACT_RULES_ENABLED_ENV,
+                default=False,
+            ),
             dry_run=_strict_boolean(
                 source,
                 SOURCE_MONITOR_DRY_RUN_ENV,
@@ -171,6 +181,7 @@ class SourceMonitoringSettings:
             "auto_start": self.auto_start,
             "official_only": self.official_only,
             "allow_readonly_market": self.allow_readonly_market,
+            "trading_impact_rules_enabled": self.trading_impact_rules_enabled,
             "dry_run": self.dry_run,
             "max_items_per_run": self.max_items_per_run,
         }
@@ -189,6 +200,7 @@ __all__ = [
     "SOURCE_MONITOR_ENABLED_ENV",
     "SOURCE_MONITOR_MAX_ITEMS_ENV",
     "SOURCE_MONITOR_OFFICIAL_ONLY_ENV",
+    "SOURCE_MONITOR_TRADING_IMPACT_RULES_ENABLED_ENV",
     "SourceMonitoringSettings",
     "SourceMonitoringSettingsError",
     "load_source_monitoring_settings",

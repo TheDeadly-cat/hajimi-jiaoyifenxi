@@ -42,6 +42,7 @@ from backend.source_monitoring.settings import (
     SOURCE_MONITOR_ENABLED_ENV,
     SOURCE_MONITOR_MAX_ITEMS_ENV,
     SOURCE_MONITOR_OFFICIAL_ONLY_ENV,
+    SOURCE_MONITOR_TRADING_IMPACT_RULES_ENABLED_ENV,
     SourceMonitoringSettings,
     SourceMonitoringSettingsError,
 )
@@ -239,6 +240,7 @@ class SourceMonitoringSettingsTests(unittest.TestCase):
                 "auto_start": False,
                 "official_only": True,
                 "allow_readonly_market": False,
+                "trading_impact_rules_enabled": False,
                 "dry_run": True,
                 "max_items_per_run": 50,
             },
@@ -250,6 +252,7 @@ class SourceMonitoringSettingsTests(unittest.TestCase):
             SOURCE_MONITOR_AUTO_START_ENV: "1",
             SOURCE_MONITOR_OFFICIAL_ONLY_ENV: "1",
             SOURCE_MONITOR_ALLOW_READONLY_MARKET_ENV: "0",
+            SOURCE_MONITOR_TRADING_IMPACT_RULES_ENABLED_ENV: "1",
             SOURCE_MONITOR_DRY_RUN_ENV: "0",
             SOURCE_MONITOR_MAX_ITEMS_ENV: "7",
         })
@@ -257,8 +260,20 @@ class SourceMonitoringSettingsTests(unittest.TestCase):
         self.assertTrue(settings.auto_start)
         self.assertTrue(settings.official_only)
         self.assertFalse(settings.allow_readonly_market)
+        self.assertTrue(settings.trading_impact_rules_enabled)
         self.assertFalse(settings.dry_run)
         self.assertEqual(settings.max_items_per_run, 7)
+        explicitly_disabled = SourceMonitoringSettings.from_environment({
+            SOURCE_MONITOR_TRADING_IMPACT_RULES_ENABLED_ENV: "0",
+        })
+        self.assertFalse(explicitly_disabled.trading_impact_rules_enabled)
+
+    def test_new_flag_does_not_shift_the_existing_positional_layout(self) -> None:
+        settings = SourceMonitoringSettings(False, False, True, False, True, 7)
+
+        self.assertTrue(settings.dry_run)
+        self.assertEqual(settings.max_items_per_run, 7)
+        self.assertFalse(settings.trading_impact_rules_enabled)
 
     def test_malformed_environment_values_are_rejected(self) -> None:
         for value in ("", "true", " false ", "01", "2"):
@@ -267,6 +282,13 @@ class SourceMonitoringSettingsTests(unittest.TestCase):
             ):
                 SourceMonitoringSettings.from_environment({
                     SOURCE_MONITOR_ENABLED_ENV: value
+                })
+        for value in ("", "true", " false ", "01", "2"):
+            with self.subTest(trading_impact_rules=value), self.assertRaises(
+                SourceMonitoringSettingsError
+            ):
+                SourceMonitoringSettings.from_environment({
+                    SOURCE_MONITOR_TRADING_IMPACT_RULES_ENABLED_ENV: value
                 })
         for value in ("0", "01", "51", "1.0", " 2 "):
             with self.subTest(value=value), self.assertRaises(

@@ -9,11 +9,13 @@ databases continue to require the normal preview/prepare/apply migration gate.
 """
 
 import json
+import re
 import sqlite3
 import time
 import uuid
 from contextlib import closing
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from .contracts import (
     MAX_ETAG_CHARS,
@@ -58,6 +60,146 @@ RUN_COMPLETION_STATUSES = frozenset({
     RUN_STATUS_DEGRADED,
     RUN_STATUS_DRY_RUN,
 })
+
+SEC_FILINGS_V1_CONFIG_PREFIX = "sec_filings_config_v1_"
+SEC_FILINGS_V2_CONFIG_PREFIX = "sec_filings_config_v2_"
+SEC_FILINGS_CHECKPOINT_VERSION = "sec_filings_checkpoint_v1"
+SEC_FILINGS_MIGRATION_PREVIEW_VERSION = "sec_filings_v1_to_v2_migration_preview_v1"
+MAX_SEC_FILINGS_SEEN_ACCESSIONS = 1_000
+_SEC_ACCESSION_RE = re.compile(r"[0-9]{10}-[0-9]{2}-[0-9]{6}\Z")
+
+
+def _is_sec_filings_v1_to_v2_migration(
+    adapter_key: str,
+    old_config: str,
+    new_config: str,
+) -> bool:
+    return (
+        adapter_key == "sec_filings"
+        and old_config.startswith(SEC_FILINGS_V1_CONFIG_PREFIX)
+        and new_config.startswith(SEC_FILINGS_V2_CONFIG_PREFIX)
+    )
+
+
+def _strict_sec_checkpoint(value: Any) -> list[str]:
+    checkpoint = normalize_checkpoint(value)
+    if checkpoint == {}:
+        return []
+    if (
+        set(checkpoint) != {"version", "seen_accessions"}
+        or checkpoint.get("version") != SEC_FILINGS_CHECKPOINT_VERSION
+        or type(checkpoint.get("seen_accessions")) is not list
+        or len(checkpoint["seen_accessions"]) > MAX_SEC_FILINGS_SEEN_ACCESSIONS
+    ):
+        raise SourceMonitoringStateError(
+            "SEC checkpoint is invalid for the stable-time migration",
+            code="SOURCE_MONITORING_SEC_MIGRATION_CHECKPOINT_INVALID",
+        )
+    seen: list[str] = []
+    for accession in checkpoint["seen_accessions"]:
+        if (
+            type(accession) is not str
+            or _SEC_ACCESSION_RE.fullmatch(accession) is None
+            or accession in seen
+        ):
+            raise SourceMonitoringStateError(
+                "SEC checkpoint contains an invalid or duplicate accession",
+                code="SOURCE_MONITORING_SEC_MIGRATION_CHECKPOINT_INVALID",
+            )
+        seen.append(accession)
+    return seen
+
+
+def _required_sec_v2_checkpoint(
+    connection: sqlite3.Connection,
+    current_checkpoint: Any,
+) -> tuple[dict[str, Any], int]:
+    seen = _strict_sec_checkpoint(current_checkpoint)
+    rows = connection.execute(
+        """SELECT item.item_json,item.item_sha256,item.server_fingerprint
+             FROM source_inbox_items item
+             JOIN (
+                 SELECT DISTINCT link.item_id
+                   FROM source_inbox_import_items link
+                   JOIN source_inbox_imports observation
+                     ON observation.id=link.import_id
+                   JOIN source_adapter_runs run
+                     ON run.run_id=observation.external_run_id
+                    AND run.adapter_key=observation.source_key
+                  WHERE link.disposition IN ('CREATED','DUPLICATE')
+                    AND observation.source_channel=?
+                    AND observation.source_key=?
+                    AND run.dry_run=0
+                    AND run.status IN (
+                        'SUCCEEDED','DEGRADED','FAILED','ABANDONED'
+                    )
+                    AND (
+                        (
+                            run.status IN ('SUCCEEDED','DEGRADED')
+                            AND run.receipt_id=observation.id
+                        )
+                        OR (
+                            run.status IN ('FAILED','ABANDONED')
+                            AND run.receipt_id=''
+                            AND observation.received_at>=run.started_at_ms
+                            AND observation.received_at<=run.completed_at_ms
+                        )
+                    )
+             ) trusted_observation ON trusted_observation.item_id=item.id
+             ORDER BY item.created_at,item.id""",
+        (OFFICIAL_SOURCE_CHANNEL, "sec_filings"),
+    ).fetchall()
+    persisted: list[str] = []
+    for row in rows:
+        try:
+            item = json.loads(str(row["item_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise SourceMonitoringStateError(
+                "persisted SEC item JSON is invalid",
+                code="SOURCE_MONITORING_SEC_MIGRATION_SOURCE_CORRUPT",
+            ) from exc
+        if type(item) is not dict:
+            raise SourceMonitoringStateError(
+                "persisted SEC item is not an object",
+                code="SOURCE_MONITORING_SEC_MIGRATION_SOURCE_CORRUPT",
+            )
+        extensions = item.get("extensions")
+        sec = extensions.get("sec_v1") if type(extensions) is dict else None
+        accession = item.get("external_item_id")
+        if (
+            type(sec) is not dict
+            or type(accession) is not str
+            or _SEC_ACCESSION_RE.fullmatch(accession) is None
+            or sec.get("accession_number") != accession
+            or item.get("item_type") != "sec_filing"
+            or str(row["item_sha256"]) != canonical_sha256(item)
+            or str(row["server_fingerprint"])
+            != str(item.get("server_fingerprint") or "")
+            or str(row["item_json"]) != canonical_json(item)
+        ):
+            raise SourceMonitoringStateError(
+                "persisted SEC item failed its immutable migration binding",
+                code="SOURCE_MONITORING_SEC_MIGRATION_SOURCE_CORRUPT",
+            )
+        if accession not in persisted:
+            persisted.append(accession)
+    for accession in sorted(persisted):
+        if accession not in seen:
+            seen.append(accession)
+    if len(seen) > MAX_SEC_FILINGS_SEEN_ACCESSIONS:
+        raise SourceMonitoringStateError(
+            "SEC migration checkpoint exceeds the admitted capacity",
+            code="SOURCE_MONITORING_SEC_MIGRATION_CAPACITY_EXCEEDED",
+        )
+    checkpoint = (
+        {
+            "version": SEC_FILINGS_CHECKPOINT_VERSION,
+            "seen_accessions": seen,
+        }
+        if seen
+        else {}
+    )
+    return checkpoint, len(persisted)
 
 
 class SourceMonitoringStateError(RuntimeError):
@@ -323,6 +465,18 @@ class SourceMonitoringStateRepository:
     ) -> None:
         self.store = store
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1000))
+
+    def _connect_read_only(self) -> sqlite3.Connection:
+        uri_path = quote(self.store.path.resolve().as_posix(), safe="/:")
+        connection = sqlite3.connect(
+            f"file:{uri_path}?mode=ro",
+            uri=True,
+            timeout=10,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA foreign_keys=ON")
+        return connection
 
     def _now_ms(self) -> int:
         value = self._clock_ms()
@@ -654,6 +808,91 @@ class SourceMonitoringStateRepository:
             assert updated is not None
             return self._state_projection(updated)
 
+    def preview_sec_filings_v1_to_v2_migration(
+        self,
+        *,
+        expected_config_version: Any,
+        new_config_version: Any,
+        expected_state_version: Any,
+    ) -> dict[str, Any]:
+        """Derive the only safe SEC stable-time replacement checkpoint."""
+
+        expected_config = _clean_token(
+            expected_config_version,
+            "expected_config_version",
+        )
+        new_config = _clean_token(new_config_version, "new_config_version")
+        if not _is_sec_filings_v1_to_v2_migration(
+            "sec_filings",
+            expected_config,
+            new_config,
+        ):
+            raise SourceMonitoringStateError(
+                "preview only supports the SEC v1 to v2 stable-time migration",
+                code="SOURCE_MONITORING_SEC_MIGRATION_UNSUPPORTED",
+            )
+        if type(expected_state_version) is not int or expected_state_version < 1:
+            raise SourceMonitoringStateError(
+                "expected_state_version is invalid",
+                code="SOURCE_MONITORING_STATE_INVALID",
+            )
+        with self.store._lock, closing(self._connect_read_only()) as connection:
+            row = connection.execute(
+                "SELECT * FROM source_adapter_states WHERE adapter_key=?",
+                ("sec_filings",),
+            ).fetchone()
+            if row is None:
+                raise SourceMonitoringStateError(
+                    "adapter state does not exist",
+                    code="SOURCE_MONITORING_STATE_NOT_FOUND",
+                )
+            state = self._state_projection(row)
+            if state["config_version"] != expected_config:
+                raise SourceMonitoringStateError(
+                    "adapter config version differs from the expected version",
+                    code="SOURCE_MONITORING_CONFIG_CONFLICT",
+                )
+            if state["state_version"] != expected_state_version:
+                raise SourceMonitoringStateError(
+                    "adapter state changed before config migration preview",
+                    code="SOURCE_MONITORING_STATE_CONFLICT",
+                )
+            if state["enabled"]:
+                raise SourceMonitoringStateError(
+                    "adapter must be disabled before config migration preview",
+                    code="SOURCE_MONITORING_ADAPTER_ENABLED",
+                )
+            active = connection.execute(
+                "SELECT 1 FROM source_adapter_runs WHERE adapter_key=? AND status='RUNNING'",
+                ("sec_filings",),
+            ).fetchone()
+            if active is not None:
+                raise SourceMonitoringStateError(
+                    "adapter config cannot preview migration during an active run",
+                    code="SOURCE_MONITORING_RUN_ACTIVE",
+                )
+            checkpoint, persisted_count = _required_sec_v2_checkpoint(
+                connection,
+                state["checkpoint"],
+            )
+        return {
+            "version": SEC_FILINGS_MIGRATION_PREVIEW_VERSION,
+            "adapter_key": "sec_filings",
+            "expected_config_version": expected_config,
+            "new_config_version": new_config,
+            "expected_state_version": expected_state_version,
+            "next_checkpoint": checkpoint,
+            "next_checkpoint_sha256": canonical_sha256(checkpoint),
+            "persisted_accession_count": persisted_count,
+            "safety": {
+                "database_writes_performed": 0,
+                "provider_calls_performed": 0,
+                "network_requests_performed": 0,
+                "market_calls_performed": 0,
+                "formal_rounds_created": 0,
+            },
+        }
+
     def migrate_config(
         self,
         adapter_key: Any,
@@ -726,6 +965,20 @@ class SourceMonitoringStateRepository:
                     "adapter config cannot migrate during an active run",
                     code="SOURCE_MONITORING_RUN_ACTIVE",
                 )
+            if _is_sec_filings_v1_to_v2_migration(
+                clean_key,
+                expected_config,
+                new_config,
+            ):
+                required_checkpoint, _persisted_count = _required_sec_v2_checkpoint(
+                    connection,
+                    state["checkpoint"],
+                )
+                if checkpoint != required_checkpoint:
+                    raise SourceMonitoringStateError(
+                        "SEC stable-time migration checkpoint differs from the read-only preview",
+                        code="SOURCE_MONITORING_SEC_MIGRATION_CHECKPOINT_MISMATCH",
+                    )
             cursor = connection.execute(
                 """UPDATE source_adapter_states
                    SET config_version=?,checkpoint_json=?,checkpoint_sha256=?,

@@ -15,6 +15,10 @@ from backend.source_monitoring.contracts import (  # noqa: E402
     FUTU_ANOMALY_SOURCE_CHANNEL,
     OFFICIAL_SOURCE_CHANNEL,
 )
+from backend.market.sec_edgar import SecEdgarAdapter  # noqa: E402
+from backend.source_monitoring.adapters.sec_filings import (  # noqa: E402
+    SecFilingsSourceAdapter,
+)
 
 from backend.source_monitoring.state_repository import (  # noqa: E402
     RUN_STATUS_ABANDONED,
@@ -27,8 +31,15 @@ from backend.source_monitoring.state_repository import (  # noqa: E402
     SourceMonitoringStateRepository,
 )
 from backend.source_inbox_service import SourceInboxService  # noqa: E402
+from backend.source_inbox_contracts import SOURCE_IMPORT_PACKET_VERSION  # noqa: E402
 from backend.store import StudioStore  # noqa: E402
 from tests.test_source_inbox_contracts import _packet  # noqa: E402
+from tests.test_source_monitoring_official_adapters import (  # noqa: E402
+    FIXED_NOW,
+    FIXED_NOW_MS,
+    SecFixtureFetcher,
+)
+from tests.test_trading_impact_rules import _sec  # noqa: E402
 
 
 class SourceMonitoringStateRepositoryTests(unittest.TestCase):
@@ -73,6 +84,52 @@ class SourceMonitoringStateRepositoryTests(unittest.TestCase):
             clock=lambda: self.clock[0] / 1_000,
         )
         return service.import_packet(
+            json.dumps(packet, ensure_ascii=False),
+            actor="source_monitoring_worker",
+        )
+
+    def import_sec_for_run(
+        self,
+        run_id: str,
+        *,
+        accession: str = "0001045810-26-000001",
+    ) -> dict:
+        item, _item_sha256 = _sec("8-K", "US.NVDA")
+        raw_item = copy.deepcopy(item)
+        for derived in (
+            "external_claims_verification",
+            "server_fingerprint",
+            "server_fingerprint_version",
+        ):
+            raw_item.pop(derived)
+        raw_item["external_item_id"] = accession
+        raw_item["headline"] = f"US.NVDA filed SEC 8-K ({accession})"
+        raw_item["extensions"]["sec_v1"]["accession_number"] = accession
+        packet = {
+            "version": SOURCE_IMPORT_PACKET_VERSION,
+            "source_channel": OFFICIAL_SOURCE_CHANNEL,
+            "source_key": "sec_filings",
+            "external_run_id": run_id,
+            "checked_at": "2026-08-31T04:00:00Z",
+            "cutoff_at": "2026-08-31T04:00:00Z",
+            "meaningful_change": True,
+            "items": [raw_item],
+            "generation": {
+                "channel": OFFICIAL_SOURCE_CHANNEL,
+                "model": "",
+                "cost": {
+                    "status": "unavailable",
+                    "amount": None,
+                    "currency": "",
+                    "usage_source": "not_applicable",
+                },
+                "correlated_output": False,
+            },
+        }
+        return SourceInboxService(
+            self.store,
+            clock=lambda: self.clock[0] / 1_000,
+        ).import_packet(
             json.dumps(packet, ensure_ascii=False),
             actor="source_monitoring_worker",
         )
@@ -472,6 +529,291 @@ class SourceMonitoringStateRepositoryTests(unittest.TestCase):
         self.assertEqual(recovered["status"], RUN_STATUS_ABANDONED)
         self.assertTrue(recovered["dry_run"])
         self.assertEqual(after, before)
+
+    def test_sec_v1_to_v2_migration_requires_persisted_accession_union(self) -> None:
+        old_config = "sec_filings_config_v1_fixture"
+        new_config = "sec_filings_config_v2_fixture"
+        self.repository.get_or_create_state(
+            "sec_filings",
+            config_version=old_config,
+        )
+        self.repository.set_enabled(
+            "sec_filings",
+            config_version=old_config,
+            enabled=True,
+        )
+        started = self.repository.start_run(
+            "sec_filings",
+            config_version=old_config,
+        )
+        imported = self.import_sec_for_run(started["run"]["run_id"])
+        self.assertEqual(imported["created_item_count"], 1)
+        self.clock[0] += 1_000
+        self.assertEqual(self.repository.recover_incomplete_runs(), 1)
+        self.repository.set_enabled(
+            "sec_filings",
+            config_version=old_config,
+            enabled=False,
+        )
+        forged = self.import_sec_for_run(
+            "manual-forged-reserved-history",
+            accession="0001045810-26-000099",
+        )
+        self.assertEqual(forged["created_item_count"], 1)
+        state = self.repository.get_state("sec_filings")
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            before = connection.execute(
+                "SELECT item_json,item_sha256 FROM source_inbox_items"
+            ).fetchall()
+        database_before_preview = self.database_path.stat()
+
+        preview = self.repository.preview_sec_filings_v1_to_v2_migration(
+            expected_config_version=old_config,
+            new_config_version=new_config,
+            expected_state_version=state["state_version"],
+        )
+        self.assertEqual(
+            preview["next_checkpoint"],
+            {
+                "version": "sec_filings_checkpoint_v1",
+                "seen_accessions": ["0001045810-26-000001"],
+            },
+        )
+        self.assertEqual(preview["persisted_accession_count"], 1)
+        self.assertEqual(preview["safety"]["database_writes_performed"], 0)
+        database_after_preview = self.database_path.stat()
+        self.assertEqual(
+            (
+                database_after_preview.st_size,
+                database_after_preview.st_mtime_ns,
+            ),
+            (
+                database_before_preview.st_size,
+                database_before_preview.st_mtime_ns,
+            ),
+        )
+        self.assertEqual(
+            self.repository.get_state("sec_filings")["state_version"],
+            state["state_version"],
+        )
+
+        with self.assertRaises(SourceMonitoringStateError) as mismatch:
+            self.repository.migrate_config(
+                "sec_filings",
+                expected_config_version=old_config,
+                new_config_version=new_config,
+                expected_state_version=state["state_version"],
+                next_checkpoint={},
+            )
+        self.assertEqual(
+            mismatch.exception.code,
+            "SOURCE_MONITORING_SEC_MIGRATION_CHECKPOINT_MISMATCH",
+        )
+        self.assertEqual(
+            self.repository.get_state("sec_filings")["config_version"],
+            old_config,
+        )
+
+        migrated = self.repository.migrate_config(
+            "sec_filings",
+            expected_config_version=old_config,
+            new_config_version=new_config,
+            expected_state_version=state["state_version"],
+            next_checkpoint=preview["next_checkpoint"],
+        )
+        self.assertEqual(migrated["config_version"], new_config)
+        self.assertEqual(migrated["checkpoint"], preview["next_checkpoint"])
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            after = connection.execute(
+                "SELECT item_json,item_sha256 FROM source_inbox_items"
+            ).fetchall()
+        self.assertEqual(after, before)
+
+        fetcher = SecFixtureFetcher()
+        monitor = SecFilingsSourceAdapter(
+            adapter=SecEdgarAdapter(
+                user_agent="AI Studio monitor@example.com",
+                fetch_json=fetcher,
+                clock=lambda: FIXED_NOW,
+                allowed_symbols=["US.NVDA"],
+            ),
+            allowed_symbols=["US.NVDA"],
+            allowed_forms=["8-K"],
+        )
+        replay = monitor.poll(
+            migrated["checkpoint"],
+            observed_at_ms=FIXED_NOW_MS,
+            max_items=50,
+        )
+        self.assertEqual(replay.observed_items, ())
+        self.assertEqual(replay.duplicate_count, 1)
+        self.assertEqual(replay.next_checkpoint, migrated["checkpoint"])
+
+    def test_sec_v1_to_v2_migration_accepts_a_verified_duplicate_observation(self) -> None:
+        old_config = "sec_filings_config_v1_fixture"
+        new_config = "sec_filings_config_v2_fixture"
+        accession = "0001045810-26-000001"
+        forged_origin = self.import_sec_for_run(
+            "manual-forged-reserved-origin",
+            accession=accession,
+        )
+        self.assertEqual(forged_origin["created_item_count"], 1)
+
+        self.repository.get_or_create_state(
+            "sec_filings",
+            config_version=old_config,
+        )
+        self.repository.set_enabled(
+            "sec_filings",
+            config_version=old_config,
+            enabled=True,
+        )
+        started = self.repository.start_run(
+            "sec_filings",
+            config_version=old_config,
+        )
+        genuine_observation = self.import_sec_for_run(
+            started["run"]["run_id"],
+            accession=accession,
+        )
+        self.assertEqual(genuine_observation["created_item_count"], 0)
+        self.assertEqual(genuine_observation["duplicate_item_count"], 1)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            item_origin = connection.execute(
+                "SELECT origin_import_id FROM source_inbox_items WHERE external_item_id=?",
+                (accession,),
+            ).fetchone()
+            genuine_link = connection.execute(
+                """SELECT disposition FROM source_inbox_import_items
+                   WHERE import_id=?""",
+                (genuine_observation["import_id"],),
+            ).fetchone()
+        self.assertEqual(item_origin, (forged_origin["import_id"],))
+        self.assertEqual(genuine_link, ("DUPLICATE",))
+
+        self.clock[0] += 1_000
+        self.assertEqual(self.repository.recover_incomplete_runs(), 1)
+        recovered = self.repository.get_run(started["run"]["run_id"])
+        assert recovered is not None
+        self.assertEqual(recovered["status"], RUN_STATUS_ABANDONED)
+        self.repository.set_enabled(
+            "sec_filings",
+            config_version=old_config,
+            enabled=False,
+        )
+        forged_only = self.import_sec_for_run(
+            "manual-forged-reserved-history",
+            accession="0001045810-26-000099",
+        )
+        self.assertEqual(forged_only["created_item_count"], 1)
+
+        state = self.repository.get_state("sec_filings")
+        assert state is not None
+        preview = self.repository.preview_sec_filings_v1_to_v2_migration(
+            expected_config_version=old_config,
+            new_config_version=new_config,
+            expected_state_version=state["state_version"],
+        )
+        self.assertEqual(
+            preview["next_checkpoint"],
+            {
+                "version": "sec_filings_checkpoint_v1",
+                "seen_accessions": [accession],
+            },
+        )
+        self.assertEqual(preview["persisted_accession_count"], 1)
+
+        migrated = self.repository.migrate_config(
+            "sec_filings",
+            expected_config_version=old_config,
+            new_config_version=new_config,
+            expected_state_version=state["state_version"],
+            next_checkpoint=preview["next_checkpoint"],
+        )
+        fetcher = SecFixtureFetcher()
+        monitor = SecFilingsSourceAdapter(
+            adapter=SecEdgarAdapter(
+                user_agent="AI Studio monitor@example.com",
+                fetch_json=fetcher,
+                clock=lambda: FIXED_NOW,
+                allowed_symbols=["US.NVDA"],
+            ),
+            allowed_symbols=["US.NVDA"],
+            allowed_forms=["8-K"],
+        )
+        replay = monitor.poll(
+            migrated["checkpoint"],
+            observed_at_ms=FIXED_NOW_MS,
+            max_items=50,
+        )
+        self.assertEqual(replay.observed_items, ())
+        self.assertEqual(replay.duplicate_count, 1)
+        self.assertEqual(replay.next_checkpoint, migrated["checkpoint"])
+
+    def test_sec_v1_to_v2_migration_prefers_an_exact_receipt_over_wall_clock_order(self) -> None:
+        old_config = "sec_filings_config_v1_fixture"
+        new_config = "sec_filings_config_v2_fixture"
+        accession = "0001045810-26-000001"
+        self.repository.get_or_create_state(
+            "sec_filings",
+            config_version=old_config,
+        )
+        self.repository.set_enabled(
+            "sec_filings",
+            config_version=old_config,
+            enabled=True,
+        )
+        started_at = self.clock[0]
+        started = self.repository.start_run(
+            "sec_filings",
+            config_version=old_config,
+        )
+        self.clock[0] = started_at + 500
+        imported = self.import_sec_for_run(
+            started["run"]["run_id"],
+            accession=accession,
+        )
+        self.assertEqual(imported["created_item_count"], 1)
+
+        self.clock[0] = started_at - 1
+        completed = self.repository.complete_run(
+            started["run"]["run_id"],
+            next_checkpoint={
+                "version": "sec_filings_checkpoint_v1",
+                "seen_accessions": [accession],
+            },
+            status=RUN_STATUS_DEGRADED,
+            observed_count=1,
+            accepted_count=1,
+            duplicate_count=0,
+            rejected_count=0,
+            next_due_at_ms=started_at + 60_000,
+            receipt_id=imported["import_id"],
+        )
+        self.assertLess(
+            completed["run"]["completed_at_ms"],
+            imported["receipt"]["received_at_ms"],
+        )
+        self.assertEqual(completed["state"]["checkpoint"], {})
+        disabled = self.repository.set_enabled(
+            "sec_filings",
+            config_version=old_config,
+            enabled=False,
+        )
+
+        preview = self.repository.preview_sec_filings_v1_to_v2_migration(
+            expected_config_version=old_config,
+            new_config_version=new_config,
+            expected_state_version=disabled["state_version"],
+        )
+        self.assertEqual(
+            preview["next_checkpoint"],
+            {
+                "version": "sec_filings_checkpoint_v1",
+                "seen_accessions": [accession],
+            },
+        )
+        self.assertEqual(preview["persisted_accession_count"], 1)
 
     def test_config_drift_and_checkpoint_tamper_fail_closed(self) -> None:
         original = self.repository.get_or_create_state(

@@ -169,6 +169,19 @@ source URLs, and supplied content hashes. A store should place a uniqueness
 constraint on `(server_fingerprint_version, server_fingerprint)` and classify a
 replay as `DUPLICATE`; it must not silently discard a hash collision.
 
+The continuous-monitoring channels `official_source_monitor` and
+`futu_anomaly_monitor` are reserved for the in-process
+`source_monitoring_worker`. Local-user and ChatGPT/manual imports receive a
+403 before transaction start if they claim either channel. Manual JSON import
+remains available through its non-reserved channels and cannot manufacture
+official-monitor provenance by choosing a `source_key` label.
+
+The worker actor is an in-process routing boundary, not a sandbox against
+arbitrary Python already executing inside the trusted host. Dynamic third-party
+code execution is outside this version; code with host-process or raw-SQL
+authority can already bypass application provenance controls and must not be
+treated as an untrusted Source Inbox client.
+
 ## Receipt
 
 `source_import_receipt_v1` includes:
@@ -233,3 +246,25 @@ A future store/HTTP integration should:
 6. expose only sanitized, bounded projections in a separately scoped read-only
    MCP capability;
 7. require an explicit user action before attachment or round drafting.
+
+## Versioned deterministic impact projections
+
+`trading_impact_rules_v1` does not extend or rewrite the normalized
+`project_source_item_v1`. Its result is an immutable sibling record exposed as
+`impact_rule_projections`; the stored item JSON, full-item SHA-256, server
+fingerprint, import receipt, attachment material, and round-draft hashes remain
+unchanged.
+
+The sidecar binds the exact source item and admitted monitoring source, stores
+both matched and explicit no-match evaluations, and declares
+`external_unverified`, zero model/provider/network/extra-market calls, zero
+formal rounds, and no execution capability. A same-version projection drift is
+a conflict. Exact import-key replay reads existing sidecars without recomputing
+or backfilling them. Its nested `trading_impact_source_semantics_v1` binding
+pins the parent-derived rule, security/form or macro/Futu selectors, actual
+evidence source index, and time anchor semantics. Projection validation binds
+every statement, area, evidence index, and time dimension to that value;
+insert/readback separately reproduce only the parent binding and require exact
+equality, without generating a projection or writing data. See
+`trading_impact_rules_phase5.md` for the closed rules,
+confidence meaning, counterevidence state, migration, and rollback boundary.

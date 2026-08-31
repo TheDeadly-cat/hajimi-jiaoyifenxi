@@ -195,6 +195,23 @@ class SourceInboxHttpTests(unittest.TestCase):
         )
         self.assertEqual(denied_status, 403)
 
+        reserved = _packet()
+        reserved["source_channel"] = "official_source_monitor"
+        reserved["source_key"] = "sec_filings"
+        reserved["external_run_id"] = "manual-reserved-channel-forgery"
+        reserved["generation"]["channel"] = "official_source_monitor"
+        reserved["generation"]["correlated_output"] = False
+        reserved_status, reserved_payload = self.request(
+            "/api/monitoring/imports/chatgpt",
+            method="POST",
+            payload={"content": json.dumps(reserved, ensure_ascii=False)},
+        )
+        self.assertEqual(reserved_status, 403)
+        self.assertEqual(
+            reserved_payload["code"],
+            "SOURCE_INBOX_MONITORING_CHANNEL_UNAUTHORIZED",
+        )
+
         with closing(sqlite3.connect(self.store.path)) as connection:
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM source_inbox_imports").fetchone()[0],
