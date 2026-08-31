@@ -75,6 +75,67 @@ class SourceMonitoringOperationsTests(unittest.TestCase):
                 for table in tables
             }
 
+    def test_schema_initializer_is_atomic_and_never_commits_caller_work(self) -> None:
+        with closing(sqlite3.connect(":memory:")) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.executescript(
+                """
+                CREATE TABLE schema_migrations (
+                    key TEXT PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                );
+                CREATE TABLE phase8_pending_sentinel(value INTEGER NOT NULL);
+                """
+            )
+            connection.execute(
+                "INSERT INTO phase8_pending_sentinel(value) VALUES(1)"
+            )
+            self.assertTrue(connection.in_transaction)
+
+            ensure_source_monitoring_operations_schema(
+                connection,
+                applied_at_ms=self.clock,
+            )
+
+            self.assertTrue(connection.in_transaction)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM source_monitoring_retention_receipts"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE key=?",
+                    (SOURCE_MONITORING_OPERATIONS_MIGRATION_KEY,),
+                ).fetchone()[0],
+                1,
+            )
+
+            connection.rollback()
+
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM phase8_pending_sentinel"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE key=?",
+                    (SOURCE_MONITORING_OPERATIONS_MIGRATION_KEY,),
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    """SELECT COUNT(*) FROM sqlite_master
+                        WHERE name LIKE 'source_monitoring_retention_%'
+                           OR name LIKE 'trg_source_monitoring_%'"""
+                ).fetchone()[0],
+                0,
+            )
+
     def test_preview_is_read_only_sealed_and_retain_all(self) -> None:
         self._import_fixture()
         before_bytes = self.database_path.read_bytes()

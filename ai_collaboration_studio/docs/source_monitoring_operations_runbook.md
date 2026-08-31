@@ -94,7 +94,7 @@ evidence deletion = false
 - receipt UPDATE/DELETE 拒绝 trigger，以及阻止 `INSERT OR REPLACE` 身份/封印碰撞的 INSERT guard；
 - migration marker UPDATE/DELETE 拒绝 trigger，以及阻止 same-key/rowid replace 的 INSERT guard。
 
-receipt 固定 `record_version=source_monitoring_retention_receipt_v1`、`policy_version=source_monitoring_retention_policy_v1`、`decision=RETAIN_ALL`、`eligible_rows=deleted_rows=source_rows_updated=0`，并保存 canonical JSON 与 SHA-256。表不向 run/import/item 建立删除语义的外键，不增加既有表列，不 backfill，也不改写历史数据。initializer 使用迁移 manifest 注入的 `applied_at_ms`；不会在迁移中读取墙钟、启动 worker 或生成 receipt。
+receipt 固定 `record_version=source_monitoring_retention_receipt_v1`、`policy_version=source_monitoring_retention_policy_v1`、`decision=RETAIN_ALL`、`eligible_rows=deleted_rows=source_rows_updated=0`，并保存 canonical JSON 与 SHA-256。表不向 run/import/item 建立删除语义的外键，不增加既有表列，不 backfill，也不改写历史数据。initializer 使用迁移 manifest 注入的 `applied_at_ms`；不会在迁移中读取墙钟、启动 worker 或生成 receipt。八个 schema objects 与 migration marker 在同一 SAVEPOINT 中逐条创建和精确验证，不使用会隐式提交调用方事务的 `executescript()`；调用方 rollback 会同时撤销 pending 业务写入与整个 Phase 8 schema 单元。
 
 同名弱化表、同名空操作 trigger、索引/约束定义漂移、部分 schema objects 或 marker/object 不一致会失败关闭，不能被对象名称或 `CREATE TABLE IF NOT EXISTS` 静默接受。INSERT guards 不依赖 SQLite 的 `recursive_triggers` 设置，`INSERT OR REPLACE` 也不能旁路不可变边界。
 

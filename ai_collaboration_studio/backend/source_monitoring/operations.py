@@ -374,53 +374,33 @@ def ensure_source_monitoring_operations_schema(
     """Add only the append-only policy-attestation schema."""
 
     _native_non_negative(applied_at_ms, "applied_at_ms")
-    existing_names = set(_schema_objects(connection))
-    existing_marker = connection.execute(
-        "SELECT applied_at FROM schema_migrations WHERE key=?",
-        (SOURCE_MONITORING_OPERATIONS_MIGRATION_KEY,),
-    ).fetchone()
-    if existing_marker is not None:
+    if _operations_object_state(connection) == "current":
+        return
+
+    # sqlite3.Connection.executescript() implicitly commits any caller-owned
+    # transaction before running DDL.  A nested savepoint plus one-statement
+    # execute calls keeps all eight objects and the marker in the caller's
+    # transaction while still giving standalone callers one atomic unit.
+    savepoint = "source_monitoring_operations_schema_v1"
+    connection.execute(f"SAVEPOINT {savepoint}")
+    try:
+        for statement in _OPERATIONS_SCHEMA_DDL:
+            connection.execute(statement)
+        connection.execute(
+            """INSERT INTO schema_migrations(key,applied_at)
+               VALUES(?,?)""",
+            (SOURCE_MONITORING_OPERATIONS_MIGRATION_KEY, applied_at_ms),
+        )
         if _operations_object_state(connection) != "current":  # pragma: no cover
             raise SourceMonitoringOperationsError(
-                "Source Monitoring operations schema is invalid.",
+                "Source Monitoring operations migration did not complete.",
                 code="SOURCE_MONITORING_OPERATIONS_SCHEMA_INVALID",
             )
-        return
-    if existing_names:
-        raise SourceMonitoringOperationsError(
-            "Unmarked Source Monitoring operations schema objects already exist.",
-            code="SOURCE_MONITORING_OPERATIONS_SCHEMA_INVALID",
-        )
-    connection.executescript(";\n".join(_OPERATIONS_SCHEMA_DDL) + ";")
-    # Detect a pre-created same-name table with weakened columns before marking
-    # the migration complete.  The surrounding migration candidate transaction
-    # remains authoritative for publication.
-    if set(_schema_objects(connection)) != set(_EXPECTED_SCHEMA_OBJECTS):
-        raise SourceMonitoringOperationsError(
-            "Source Monitoring operations schema objects are invalid.",
-            code="SOURCE_MONITORING_OPERATIONS_SCHEMA_INVALID",
-        )
-    columns = tuple(
-        str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
-        for row in connection.execute(
-            f"PRAGMA table_info({_RETENTION_TABLE})"
-        ).fetchall()
-    )
-    if columns != _RETENTION_COLUMNS:
-        raise SourceMonitoringOperationsError(
-            "Source Monitoring operations schema columns are invalid.",
-            code="SOURCE_MONITORING_OPERATIONS_SCHEMA_INVALID",
-        )
-    connection.execute(
-        """INSERT INTO schema_migrations(key,applied_at)
-           VALUES(?,?)""",
-        (SOURCE_MONITORING_OPERATIONS_MIGRATION_KEY, applied_at_ms),
-    )
-    if _operations_object_state(connection) != "current":  # pragma: no cover
-        raise SourceMonitoringOperationsError(
-            "Source Monitoring operations migration did not complete.",
-            code="SOURCE_MONITORING_OPERATIONS_SCHEMA_INVALID",
-        )
+    except BaseException:
+        connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    connection.execute(f"RELEASE SAVEPOINT {savepoint}")
 
 
 def _read_inventory(connection: sqlite3.Connection) -> dict[str, Any]:
