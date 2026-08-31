@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 os.environ["AI_STUDIO_SKIP_LOCAL_ENV"] = "1"
 
 from backend import http_server  # noqa: E402
+from backend.source_inbox_contracts import MAX_SOURCE_IMPORT_BYTES  # noqa: E402
 from backend.store import StudioStore  # noqa: E402
 from tests.test_source_inbox_contracts import _packet  # noqa: E402
 
@@ -158,6 +159,107 @@ class SourceInboxHttpTests(unittest.TestCase):
         detail_status, detail = self.request(f"/api/monitoring/events/{item['id']}")
         self.assertEqual(detail_status, 200)
         self.assertEqual(detail["source_item"]["events"][-1]["to_state"], "AWAITING_USER")
+
+    def test_manual_preview_and_prompt_template_are_no_store_and_fail_closed(self) -> None:
+        table_names = (
+            "source_inbox_imports",
+            "source_inbox_items",
+            "source_inbox_state_events",
+            "source_inbox_attachments",
+            "source_inbox_round_drafts",
+            "rounds",
+        )
+
+        def counts() -> tuple[int, ...]:
+            with closing(sqlite3.connect(self.store.path)) as connection:
+                return tuple(
+                    connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    for table in table_names
+                )
+
+        before = counts()
+        template_status, template_payload = self.request(
+            "/api/monitoring/imports/chatgpt/prompt-template"
+        )
+        self.assertEqual(template_status, 200)
+        template = template_payload["source_monitoring_prompt_template"]
+        self.assertEqual(template["version"], "source_monitoring_prompt_template_v1")
+        self.assertTrue(template["constraints"]["manual_copy_paste_only"])
+        self.assertFalse(template["safety"]["chatgpt_page_controlled"])
+        self.assertFalse(template["safety"]["external_task_created"])
+
+        raw = json.dumps(_packet(), ensure_ascii=False)
+        preview_status, preview_payload = self.request(
+            "/api/monitoring/imports/chatgpt/preview",
+            method="POST",
+            payload={"content": raw},
+        )
+        self.assertEqual(preview_status, 200)
+        preview = preview_payload["source_import_preview"]
+        self.assertTrue(preview["valid"])
+        self.assertFalse(preview["store_disposition"]["evaluated"])
+        self.assertFalse(preview["safety"]["import_performed"])
+        self.assertEqual(preview["candidate"]["item_count"], 1)
+        self.assertEqual(counts(), before)
+
+        invalid_status, invalid_payload = self.request(
+            "/api/monitoring/imports/chatgpt/preview",
+            method="POST",
+            payload={"content": '{"version":"a","version":"b"}'},
+        )
+        self.assertEqual(invalid_status, 400)
+        self.assertEqual(invalid_payload["code"], "SOURCE_IMPORT_DUPLICATE_KEY")
+        self.assertTrue(invalid_payload["issues"])
+        self.assertEqual(counts(), before)
+
+        query_status, query_payload = self.request(
+            "/api/monitoring/imports/chatgpt/prompt-template?unexpected=1"
+        )
+        self.assertEqual(query_status, 400)
+        self.assertEqual(
+            query_payload["code"],
+            "SOURCE_INBOX_PROMPT_TEMPLATE_QUERY_UNSUPPORTED",
+        )
+        self.assertEqual(counts(), before)
+
+    def test_full_256_kib_packet_survives_outer_json_string_escaping(self) -> None:
+        compact = json.dumps(
+            _packet(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        padding_bytes = MAX_SOURCE_IMPORT_BYTES - len(compact.encode("utf-8"))
+        self.assertGreater(padding_bytes, 0)
+        raw = compact + ("\t" * padding_bytes)
+        self.assertEqual(len(raw.encode("utf-8")), MAX_SOURCE_IMPORT_BYTES)
+        outer = json.dumps({"content": raw}, ensure_ascii=False)
+        self.assertGreater(len(outer.encode("utf-8")), 512_000)
+        self.assertLessEqual(
+            len(outer.encode("utf-8")),
+            http_server._SOURCE_INBOX_HTTP_ENVELOPE_MAX_BYTES,
+        )
+
+        preview_status, preview_payload = self.request(
+            "/api/monitoring/imports/chatgpt/preview",
+            method="POST",
+            payload={"content": raw},
+        )
+        self.assertEqual(preview_status, 200)
+        self.assertEqual(
+            preview_payload["source_import_preview"]["candidate"]["source_payload_bytes"],
+            MAX_SOURCE_IMPORT_BYTES,
+        )
+
+        import_status, import_payload = self.request(
+            "/api/monitoring/imports/chatgpt",
+            method="POST",
+            payload={"content": raw},
+        )
+        self.assertEqual(import_status, 201)
+        self.assertEqual(
+            import_payload["source_import"]["receipt"]["source_payload_bytes"],
+            MAX_SOURCE_IMPORT_BYTES,
+        )
 
     def test_notification_baseline_cursor_polling_and_acknowledgement(self) -> None:
         baseline_status, baseline_payload = self.request(
@@ -441,6 +543,20 @@ class SourceInboxHttpTests(unittest.TestCase):
             ("/api/monitoring/notifications", "GET", None, True, 200),
             ("/api/monitoring/notifications", "GET", None, False, 200),
             ("/api/monitoring/notifications?after=bad", "GET", None, True, 400),
+            (
+                "/api/monitoring/imports/chatgpt/prompt-template",
+                "GET",
+                None,
+                False,
+                200,
+            ),
+            (
+                "/api/monitoring/imports/chatgpt/preview",
+                "POST",
+                {"content": json.dumps(_packet(), ensure_ascii=False)},
+                False,
+                403,
+            ),
             ("/api/monitoring/events/missing", "GET", None, True, 404),
             (
                 "/api/monitoring/imports/chatgpt",

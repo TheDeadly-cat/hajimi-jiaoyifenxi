@@ -11,6 +11,13 @@ import {
   replaceSourceInboxItem,
   sourceInboxItemPermissions,
 } from "../src/sourceInbox.js";
+import {
+  normalizeSourceImportPreview,
+  normalizeSourceImportResult,
+  normalizeSourceMonitoringPromptTemplate,
+  SOURCE_IMPORT_MAX_BYTES,
+  sourceImportUtf8Bytes,
+} from "../src/sourceInboxImport.js";
 
 const panelSource = readFileSync(
   new URL("../src/components/SourceInboxPanel.jsx", import.meta.url),
@@ -79,6 +86,196 @@ function sourceRecord(overrides = {}) {
       execution_capability: "none",
     },
     ...overrides,
+  };
+}
+
+function sourceImportPreview(overrides = {}) {
+  const item = {
+    version: "project_source_item_v1",
+    external_item_id: "github-run-100",
+    item_type: "ci_run_failure",
+    severity: "high",
+    occurred_at: "2026-08-28T12:55:00Z",
+    published_at: "2026-08-28T12:56:00Z",
+    entities: [{ kind: "repository", id: "acme/project", label: "project" }],
+    headline: "CI 运行结果摘要",
+    summary: "外部系统声明测试失败。",
+    facts: [{ claim: "workflow conclusion is failure", source_indexes: [0] }],
+    sources: [{
+      url: "https://github.com/acme/project/actions/runs/100",
+      publisher: "GitHub",
+      source_type: "official_platform",
+      published_at: "2026-08-28T12:56:00Z",
+      content_sha256: "c".repeat(64),
+    }],
+    impact_hypotheses: [{
+      statement: "发布窗口可能受影响。",
+      affected_area: "release readiness",
+      time_horizon: "next publication",
+      source_indexes: [0],
+      confidence: 0.7,
+    }],
+    unknowns: ["失败断言尚未导入。"],
+    confidence: 0.9,
+    recommended_route: "open_round_draft",
+    extensions: {},
+    external_claims_verification: EXTERNAL_UNVERIFIED,
+    server_fingerprint_version: "project_source_item_fingerprint_v1",
+    server_fingerprint: "a".repeat(64),
+  };
+  return {
+    ok: true,
+    source_import_preview: {
+      version: "source_import_preview_v1",
+      valid: true,
+      received_at_ms: 1_777_777_777_000,
+      packet: {
+        version: "source_import_packet_v1",
+        source_channel: "chatgpt_manual",
+        source_key: "github_ci_watch",
+        external_run_id: "run one with spaces",
+        checked_at: "2026-08-28T13:03:00Z",
+        cutoff_at: "2026-08-28T13:00:00Z",
+        meaningful_change: true,
+        items: [item],
+        generation: {
+          channel: "chatgpt_manual",
+          model: "",
+          cost: { status: "unavailable", amount: null, currency: "", usage_source: "subscription_unavailable" },
+          correlated_output: true,
+        },
+        external_claims_verification: {
+          checked_at: EXTERNAL_UNVERIFIED,
+          cutoff_at: EXTERNAL_UNVERIFIED,
+          item_times: EXTERNAL_UNVERIFIED,
+          source_times: EXTERNAL_UNVERIFIED,
+          model: EXTERNAL_UNVERIFIED,
+          cost: EXTERNAL_UNVERIFIED,
+          recommended_routes: EXTERNAL_UNVERIFIED,
+        },
+        safety: {
+          execution_fields_present: false,
+          execution_capability: "none",
+          provider_calls_performed: 0,
+          market_calls_performed: 0,
+          network_requests_performed: 0,
+          user_action_required: true,
+        },
+      },
+      candidate: {
+        source_payload_bytes: 1024,
+        source_payload_sha256: "b".repeat(64),
+        normalized_packet_sha256: "c".repeat(64),
+        import_key_version: "source_import_key_v1",
+        import_key_sha256: "d".repeat(64),
+        item_count: 1,
+        source_count: 1,
+        item_fingerprints: ["a".repeat(64)],
+      },
+      store_disposition: { evaluated: false, reason: "preview_does_not_open_database" },
+      external_claims_verification: EXTERNAL_UNVERIFIED,
+      safety: {
+        database_reads_performed: 0,
+        database_writes_performed: 0,
+        provider_calls_performed: 0,
+        market_calls_performed: 0,
+        network_requests_performed: 0,
+        formal_rounds_created: 0,
+        chatgpt_page_controlled: false,
+        chatgpt_automation_performed: false,
+        external_task_created: false,
+        import_performed: false,
+        execution_capability: "none",
+        revalidation_required: true,
+        user_confirmation_required: true,
+      },
+      preview_sha256: "e".repeat(64),
+      ...overrides,
+    },
+  };
+}
+
+function promptTemplateResponse(overrides = {}) {
+  return {
+    source_monitoring_prompt_template: {
+      version: "source_monitoring_prompt_template_v1",
+      template_id: "manual_chatgpt_source_monitoring",
+      default_source_channel: "chatgpt_manual",
+      packet_version: "source_import_packet_v1",
+      item_version: "project_source_item_v1",
+      prompt: "只读监控 {{monitoring_scope}}\nsource_import_packet_v1\nexternal_unverified",
+      result_template: {},
+      constraints: {
+        one_json_object_only: true,
+        markdown_fence_tolerated: true,
+        manual_copy_paste_only: true,
+        unmodified_template_is_importable: false,
+        public_http_sources_only: true,
+        reserved_source_channels: ["futu_anomaly_monitor", "official_source_monitor"],
+        severities: ["critical", "high", "info", "low", "medium"],
+        recommended_routes: ["attach_to_room", "notify_only", "open_round_draft"],
+        max_payload_bytes: SOURCE_IMPORT_MAX_BYTES,
+        max_items: 50,
+        max_sources_per_item: 12,
+        max_total_sources: 200,
+      },
+      safety: {
+        database_reads_performed: 0,
+        database_writes_performed: 0,
+        provider_calls_performed: 0,
+        market_calls_performed: 0,
+        network_requests_performed: 0,
+        formal_rounds_created: 0,
+        chatgpt_page_controlled: false,
+        chatgpt_automation_performed: false,
+        external_task_created: false,
+        execution_capability: "none",
+        user_review_required: true,
+      },
+      template_sha256: "f".repeat(64),
+      ...overrides,
+    },
+  };
+}
+
+function sourceImportResult(items = [sourceRecord()], overrides = {}) {
+  return {
+    source_import: {
+      version: "source_inbox_import_result_v1",
+      import_id: "source_import_one",
+      status: "AWAITING_USER",
+      receipt: {
+        version: "source_import_receipt_v1",
+        status: "AWAITING_USER",
+        received_at_ms: 1_777_777_777_000,
+        source_payload_bytes: 1024,
+        source_payload_sha256: "1".repeat(64),
+        normalized_packet_sha256: "2".repeat(64),
+        import_key_version: "source_import_key_v1",
+        import_key_sha256: "3".repeat(64),
+        source_channel: "chatgpt_manual",
+        source_key: "github_ci_watch",
+        external_run_id: "run_one",
+        item_count: items.length,
+        source_count: items.length,
+        item_fingerprints: items.map((item) => item.server_fingerprint),
+        external_claims_verification: EXTERNAL_UNVERIFIED,
+        safety: {
+          database_writes_performed: 0,
+          provider_calls_performed: 0,
+          market_calls_performed: 0,
+          network_requests_performed: 0,
+          execution_capability: "none",
+          user_action_required: true,
+        },
+        receipt_sha256: "4".repeat(64),
+      },
+      items,
+      idempotent_replay: false,
+      created_item_count: items.length,
+      duplicate_item_count: 0,
+      ...overrides,
+    },
   };
 }
 
@@ -666,6 +863,64 @@ test("notification feed accepts only cursor-bound unacknowledged zero-authority 
   assert.ok(undercounted.issues.includes("notification_cursor_semantics_invalid"));
 });
 
+test("manual import preview is strict, no-store, and preserves every item summary", () => {
+  const preview = normalizeSourceImportPreview(sourceImportPreview());
+  assert.equal(preview.valid, true, preview.issues.join(","));
+  assert.equal(preview.sourceChannel, "chatgpt_manual");
+  assert.equal(preview.externalRunId, "run one with spaces");
+  assert.equal(preview.itemCount, 1);
+  assert.equal(preview.sourceCount, 1);
+  assert.equal(preview.items[0].headline, "CI 运行结果摘要");
+  assert.equal(preview.items[0].sources[0].url, "https://github.com/acme/project/actions/runs/100");
+
+  const storeClaim = structuredClone(sourceImportPreview());
+  storeClaim.source_import_preview.store_disposition.evaluated = true;
+  assert.equal(normalizeSourceImportPreview(storeClaim).valid, false);
+
+  const reserved = structuredClone(sourceImportPreview());
+  reserved.source_import_preview.packet.source_channel = "official_source_monitor";
+  reserved.source_import_preview.packet.generation.channel = "official_source_monitor";
+  assert.equal(normalizeSourceImportPreview(reserved).valid, false);
+
+  const extra = structuredClone(sourceImportPreview());
+  extra.source_import_preview.unexpected = true;
+  assert.equal(normalizeSourceImportPreview(extra).valid, false);
+});
+
+test("manual import bytes and prompt template fail closed without browser automation", () => {
+  assert.equal(sourceImportUtf8Bytes("猫"), 3);
+  assert.ok(sourceImportUtf8Bytes("猫".repeat(87_382)) > SOURCE_IMPORT_MAX_BYTES);
+
+  const template = normalizeSourceMonitoringPromptTemplate(promptTemplateResponse());
+  assert.equal(template.valid, true);
+  assert.match(template.prompt, /source_import_packet_v1/);
+
+  const automated = promptTemplateResponse({
+    prompt: "{{monitoring_scope}} source_import_packet_v1 external_unverified window.open('https://chatgpt.com')",
+  });
+  assert.equal(normalizeSourceMonitoringPromptTemplate(automated).valid, false);
+});
+
+test("manual import result validates every item, identity, receipt, and accounting", () => {
+  const first = sourceRecord();
+  const second = sourceRecord({
+    id: "source_item_two",
+    server_fingerprint: "5".repeat(64),
+    item_sha256: "6".repeat(64),
+  });
+  const valid = normalizeSourceImportResult(sourceImportResult([first, second]));
+  assert.equal(valid.valid, true);
+  assert.deepEqual(valid.items.map((item) => item.id), ["source_item_one", "source_item_two"]);
+
+  const invalidSecond = structuredClone(sourceImportResult([first, second]));
+  invalidSecond.source_import.items[1].safety.execution_capability = "trade";
+  assert.equal(normalizeSourceImportResult(invalidSecond).valid, false);
+
+  const duplicateIdentity = structuredClone(sourceImportResult([first, second]));
+  duplicateIdentity.source_import.items[1].id = "source_item_one";
+  assert.equal(normalizeSourceImportResult(duplicateIdentity).valid, false);
+});
+
 test("panel source and responsive styles preserve the zero-execution boundary", () => {
   const calledApiMethods = [...panelSource.matchAll(/api\.([A-Za-z0-9_]+)/g)]
     .map((match) => match[1])
@@ -676,8 +931,10 @@ test("panel source and responsive styles preserve the zero-execution boundary", 
     "createSourceInboxRoundDraft",
     "importSourceInbox",
     "listSourceInbox",
+    "previewSourceInboxImport",
     "sourceInboxItem",
     "sourceMonitoringHealth",
+    "sourceMonitoringPromptTemplate",
   ]);
   assert.doesNotMatch(panelSource, /streamRound|streamMessage|preflightProviders|storageSnapshot/);
   assert.match(panelSource, /已阅，不代表事实确认/);
@@ -685,6 +942,10 @@ test("panel source and responsive styles preserve the zero-execution boundary", 
   assert.match(panelSource, /external_unverified/);
   assert.match(panelSource, /不是方向预测、因果结论、盈利声明或执行授权/);
   assert.match(panelSource, /只在你明确启用后申请权限/);
+  assert.match(panelSource, /内容已更改，请重新预览/);
+  assert.match(panelSource, /确认仅导入收件箱/);
+  assert.match(panelSource, /本页不打开、登录或控制 ChatGPT/);
+  assert.doesNotMatch(panelSource, /window\.open|clipboard\.readText|chatgpt\.com/);
   const selectionBlock = panelSource.slice(
     panelSource.indexOf("setSelectedItemId((current) =>"),
     panelSource.indexOf("const loadHealth"),
@@ -698,6 +959,7 @@ test("panel source and responsive styles preserve the zero-execution boundary", 
   assert.match(panelSource, /\{health\?\.valid \? \(/);
   assert.match(panelStyles, /@media \(max-width: 760px\)[\s\S]*\.source-inbox-panel\s*\{\s*width:\s*var\(--visual-viewport-width, 100vw\)/);
   assert.match(panelStyles, /@media \(max-width: 620px\)[\s\S]*\.source-inbox-workspace\s*\{\s*display:\s*block;/);
+  assert.match(panelStyles, /@media \(max-width: 620px\)[\s\S]*\.source-inbox-import > footer button[\s\S]*min-height:\s*44px/);
   assert.match(panelStyles, /@media \(forced-colors: active\)/);
   assert.match(panelStyles, /@media \(prefers-reduced-motion: reduce\)/);
 });

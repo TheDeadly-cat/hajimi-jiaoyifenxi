@@ -192,7 +192,146 @@
   border-color: rgba(168, 110, 0, 0.52);
   box-shadow: 0 0 0 3px rgba(233, 182, 52, 0.13);
 }
-.source-inbox-import footer { display: flex; justify-content: flex-end; gap: 7px; }
+.source-inbox-import > label,
+.source-inbox-prompt-template label {
+  color: #675d4e;
+  font-size: 10px;
+  font-weight: 750;
+}
+.source-inbox-import footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.source-inbox-import-meter {
+  margin: -2px 0 0;
+  color: #746b5f;
+  font-size: 9px;
+  line-height: 1.5;
+}
+.source-inbox-import-meter.invalid { color: #9e2f27; font-weight: 750; }
+
+.source-inbox-prompt-template {
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid rgba(63, 94, 102, 0.18);
+  border-radius: 10px;
+  background: rgba(239, 247, 246, 0.72);
+}
+.source-inbox-prompt-template > button { justify-self: start; }
+.source-inbox-prompt-template > section { display: grid; gap: 8px; min-width: 0; }
+.source-inbox-prompt-template p {
+  margin: 0;
+  color: #59686a;
+  font-size: 9px;
+  line-height: 1.55;
+}
+.source-inbox-prompt-template textarea {
+  min-height: 220px;
+  max-height: 360px;
+  background: rgba(248, 252, 251, 0.96);
+}
+.source-inbox-prompt-template footer { align-items: center; justify-content: space-between; }
+.source-inbox-prompt-template footer > code {
+  min-width: 0;
+  color: #607174;
+  font: 8px/1.4 ui-monospace, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.source-inbox-import-issues {
+  display: grid;
+  gap: 6px;
+  max-height: 180px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.source-inbox-import-issues li {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) minmax(120px, auto) minmax(0, 1fr);
+  gap: 7px;
+  align-items: start;
+  padding: 7px 8px;
+  border: 1px solid rgba(157, 54, 44, 0.2);
+  border-radius: 8px;
+  color: #73403a;
+  background: rgba(255, 246, 244, 0.84);
+  font-size: 9px;
+}
+.source-inbox-import-issues code,
+.source-inbox-import-issues strong,
+.source-inbox-import-issues span { min-width: 0; overflow-wrap: anywhere; }
+.source-inbox-import-issues code { font: 8px/1.45 ui-monospace, Consolas, monospace; }
+
+.source-inbox-import-preview {
+  display: grid;
+  gap: 8px;
+  max-height: 420px;
+  padding: 10px;
+  overflow-y: auto;
+  border: 1px solid rgba(50, 111, 85, 0.22);
+  border-radius: 10px;
+  background: rgba(240, 250, 244, 0.84);
+}
+.source-inbox-import-preview > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  outline: 0;
+}
+.source-inbox-import-preview > header:focus-visible {
+  border-radius: 6px;
+  box-shadow: 0 0 0 3px rgba(44, 118, 86, 0.16);
+}
+.source-inbox-import-preview > header > span { display: inline-flex; align-items: center; gap: 6px; }
+.source-inbox-import-preview > header code { font: 8px/1.4 ui-monospace, Consolas, monospace; }
+.source-inbox-import-preview > p {
+  margin: 0;
+  color: #52645c;
+  font-size: 9px;
+  line-height: 1.55;
+}
+.source-inbox-import-preview dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+}
+.source-inbox-import-preview dl > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid rgba(50, 111, 85, 0.12);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.58);
+}
+.source-inbox-import-preview dt { color: #718078; font-size: 8px; }
+.source-inbox-import-preview dd { min-width: 0; margin: 0; color: #35483f; font-size: 9px; overflow-wrap: anywhere; }
+.source-inbox-import-preview dd code { font: 8px/1.4 ui-monospace, Consolas, monospace; }
+.source-inbox-import-preview-items { display: grid; gap: 6px; }
+.source-inbox-import-preview-items details {
+  border: 1px solid rgba(50, 111, 85, 0.16);
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: rgba(255, 255, 255, 0.62);
+}
+.source-inbox-import-preview-items summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+}
+.source-inbox-import-preview-items summary > span { display: grid; min-width: 0; gap: 2px; }
+.source-inbox-import-preview-items summary strong { color: #385047; font-size: 9px; }
+.source-inbox-import-preview-items summary small,
+.source-inbox-import-preview-items summary em { color: #6b7b74; font-size: 8px; font-style: normal; }
+.source-inbox-import-preview-items details > p,
+.source-inbox-import-preview-items details > small { display: block; margin: 7px 0 0; color: #56665f; font-size: 9px; line-height: 1.5; }
+.source-inbox-import-preview-items ul { display: grid; gap: 5px; margin: 7px 0 0; padding: 0; list-style: none; }
+.source-inbox-import-preview-items li { display: grid; gap: 2px; }
+.source-inbox-import-preview-items li strong { font-size: 8px; }
+.source-inbox-import-preview-items li code { font: 8px/1.45 ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
 
 .source-inbox-filter-groups {
   display: grid;
@@ -688,6 +827,15 @@
   .source-inbox-section { padding: 15px 18px; }
   .source-inbox-health-adapters { grid-template-columns: 1fr; }
   .source-inbox-notifications { align-items: stretch; flex-direction: column; }
+  .source-inbox-import { margin-right: 10px; margin-left: 10px; }
+  .source-inbox-import > footer,
+  .source-inbox-prompt-template footer { align-items: stretch; flex-direction: column; }
+  .source-inbox-import > footer button,
+  .source-inbox-prompt-template footer button,
+  .source-inbox-prompt-template > button { width: 100%; min-height: 44px; justify-content: center; }
+  .source-inbox-import-preview dl { grid-template-columns: 1fr; }
+  .source-inbox-import-issues li { grid-template-columns: 1fr; }
+  .source-inbox-import-preview-items summary { align-items: flex-start; flex-direction: column; }
   .source-inbox-acknowledgement button,
   .source-inbox-room-actions button,
   .source-inbox-draft-actions button,
@@ -707,6 +855,10 @@
     box-shadow: none;
   }
   .source-inbox-health,
+  .source-inbox-import,
+  .source-inbox-prompt-template,
+  .source-inbox-import-preview,
+  .source-inbox-import-issues li,
   .source-inbox-health-adapters article,
   .source-inbox-impact-list > li,
   .source-inbox-mobile-unread-badge {

@@ -239,6 +239,202 @@ function monitoringHealth() {
   };
 }
 
+function sourceImportPreview() {
+  return {
+    ok: true,
+    source_import_preview: {
+      version: "source_import_preview_v1",
+      valid: true,
+      received_at_ms: 1_777_777_777_000,
+      packet: {
+        version: "source_import_packet_v1",
+        source_channel: "chatgpt_manual",
+        source_key: "github_ci_watch",
+        external_run_id: "run one with spaces",
+        checked_at: "2026-08-28T13:03:00Z",
+        cutoff_at: "2026-08-28T13:00:00Z",
+        meaningful_change: true,
+        items: [{
+          version: "project_source_item_v1",
+          external_item_id: "github-run-100",
+          item_type: "ci_run_failure",
+          severity: "high",
+          occurred_at: "2026-08-28T12:55:00Z",
+          published_at: "2026-08-28T12:56:00Z",
+          entities: [{ kind: "repository", id: "acme/project", label: "project" }],
+          headline: "CI 运行结果摘要",
+          summary: "外部系统声明测试失败。",
+          facts: [{ claim: "workflow conclusion is failure", source_indexes: [0] }],
+          sources: [{
+            url: "https://github.com/acme/project/actions/runs/100",
+            publisher: "GitHub",
+            source_type: "official_platform",
+            published_at: "2026-08-28T12:56:00Z",
+            content_sha256: "c".repeat(64),
+          }],
+          impact_hypotheses: [{
+            statement: "发布窗口可能受影响。",
+            affected_area: "release readiness",
+            time_horizon: "next publication",
+            confidence: 0.7,
+            source_indexes: [0],
+          }],
+          unknowns: ["失败断言尚未导入。"],
+          confidence: 0.9,
+          recommended_route: "open_round_draft",
+          extensions: {},
+          external_claims_verification: "external_unverified",
+          server_fingerprint_version: "project_source_item_fingerprint_v1",
+          server_fingerprint: "a".repeat(64),
+        }],
+        generation: {
+          channel: "chatgpt_manual",
+          model: "",
+          cost: {
+            status: "unavailable",
+            amount: null,
+            currency: "",
+            usage_source: "subscription_unavailable",
+          },
+          correlated_output: true,
+        },
+        external_claims_verification: {
+          checked_at: "external_unverified",
+          cost: "external_unverified",
+          cutoff_at: "external_unverified",
+          item_times: "external_unverified",
+          model: "external_unverified",
+          recommended_routes: "external_unverified",
+          source_times: "external_unverified",
+        },
+        safety: {
+          execution_capability: "none",
+          execution_fields_present: false,
+          market_calls_performed: 0,
+          network_requests_performed: 0,
+          provider_calls_performed: 0,
+          user_action_required: true,
+        },
+      },
+      candidate: {
+        source_payload_bytes: 1024,
+        source_payload_sha256: "b".repeat(64),
+        normalized_packet_sha256: "c".repeat(64),
+        import_key_version: "source_import_key_v1",
+        import_key_sha256: "d".repeat(64),
+        item_count: 1,
+        source_count: 1,
+        item_fingerprints: ["a".repeat(64)],
+      },
+      store_disposition: {
+        evaluated: false,
+        reason: "preview_does_not_open_database",
+      },
+      external_claims_verification: "external_unverified",
+      safety: {
+        database_reads_performed: 0,
+        database_writes_performed: 0,
+        provider_calls_performed: 0,
+        market_calls_performed: 0,
+        network_requests_performed: 0,
+        formal_rounds_created: 0,
+        chatgpt_page_controlled: false,
+        chatgpt_automation_performed: false,
+        external_task_created: false,
+        import_performed: false,
+        execution_capability: "none",
+        revalidation_required: true,
+        user_confirmation_required: true,
+      },
+      preview_sha256: "e".repeat(64),
+    },
+  };
+}
+
+function sourceMonitoringPromptTemplate() {
+  return {
+    ok: true,
+    source_monitoring_prompt_template: {
+      version: "source_monitoring_prompt_template_v1",
+      template_id: "manual_chatgpt_source_monitoring",
+      default_source_channel: "chatgpt_manual",
+      packet_version: "source_import_packet_v1",
+      item_version: "project_source_item_v1",
+      prompt: "只读监控 {{monitoring_scope}}\nsource_import_packet_v1\nexternal_unverified",
+      result_template: {},
+      constraints: {
+        one_json_object_only: true,
+        markdown_fence_tolerated: true,
+        manual_copy_paste_only: true,
+        unmodified_template_is_importable: false,
+        public_http_sources_only: true,
+        reserved_source_channels: ["futu_anomaly_monitor", "official_source_monitor"],
+        severities: ["critical", "high", "info", "low", "medium"],
+        recommended_routes: ["attach_to_room", "notify_only", "open_round_draft"],
+        max_payload_bytes: 256 * 1024,
+        max_items: 50,
+        max_sources_per_item: 12,
+        max_total_sources: 200,
+      },
+      safety: {
+        database_reads_performed: 0,
+        database_writes_performed: 0,
+        provider_calls_performed: 0,
+        market_calls_performed: 0,
+        network_requests_performed: 0,
+        formal_rounds_created: 0,
+        chatgpt_page_controlled: false,
+        chatgpt_automation_performed: false,
+        external_task_created: false,
+        execution_capability: "none",
+        user_review_required: true,
+      },
+      template_sha256: "f".repeat(64),
+    },
+  };
+}
+
+function sourceImportResult(items) {
+  return {
+    ok: true,
+    source_import: {
+      version: "source_inbox_import_result_v1",
+      import_id: "source_import_one",
+      status: "AWAITING_USER",
+      receipt: {
+        version: "source_import_receipt_v1",
+        status: "AWAITING_USER",
+        received_at_ms: 1_777_777_777_000,
+        source_payload_bytes: 1024,
+        source_payload_sha256: "1".repeat(64),
+        normalized_packet_sha256: "2".repeat(64),
+        import_key_version: "source_import_key_v1",
+        import_key_sha256: "3".repeat(64),
+        source_channel: "chatgpt_manual",
+        source_key: "github_ci_watch",
+        external_run_id: "run one with spaces",
+        item_count: items.length,
+        source_count: items.length,
+        item_fingerprints: items.map((item) => item.server_fingerprint),
+        external_claims_verification: "external_unverified",
+        safety: {
+          database_writes_performed: 0,
+          execution_capability: "none",
+          market_calls_performed: 0,
+          network_requests_performed: 0,
+          provider_calls_performed: 0,
+          user_action_required: true,
+        },
+        receipt_sha256: "4".repeat(64),
+      },
+      items,
+      idempotent_replay: false,
+      created_item_count: items.length,
+      duplicate_item_count: 0,
+    },
+  };
+}
+
 function sourceInboxList(items = [], overrides = {}) {
   const counts = {};
   const facets = new Map();
@@ -683,22 +879,29 @@ test("a CAS conflict rereads the exact item and requires a fresh acknowledgement
   assert.equal(buttonWithText(host, "记录已阅").disabled, true);
 });
 
-test("fenced ChatGPT source packets reach only the inbox import endpoint", async () => {
+test("fenced ChatGPT source packets require an exact-snapshot preview before inbox import", async () => {
   const requests = [];
-  const imported = sourceRecord();
+  const imported = sourceRecord({
+    sourceChannel: "chatgpt_manual",
+    sourceKey: "github_ci_watch",
+  });
   let importedVisible = false;
+  let importAttempts = 0;
   globalThis.fetch = async (path, options = {}) => {
     requests.push({ path, options });
     if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path === "/api/monitoring/imports/chatgpt/preview") {
+      return response(sourceImportPreview());
+    }
     if (path === "/api/monitoring/imports/chatgpt") {
+      importAttempts += 1;
+      if (importAttempts === 1) {
+        const unsafe = sourceImportResult([imported]);
+        unsafe.source_import.receipt.safety.execution_capability = "trade";
+        return response(unsafe, 201);
+      }
       importedVisible = true;
-      return response({
-        ok: true,
-        source_import: {
-          idempotent_replay: false,
-          items: [imported],
-        },
-      }, 201);
+      return response(sourceImportResult([imported]), 201);
     }
     if (path.startsWith("/api/monitoring/inbox?")) {
       return response({
@@ -712,13 +915,143 @@ test("fenced ChatGPT source packets reach only the inbox import endpoint", async
   const host = await mountPanel();
   await click(buttonWithText(host, "导入 JSON"));
   const fenced = "```json\n{\"version\":\"source_import_packet_v1\"}\n```";
-  await change(host.querySelector('.source-inbox-import textarea'), fenced);
-  await click(buttonWithText(host, "仅导入到收件箱"));
+  const editor = host.querySelector('.source-inbox-import > textarea');
+  const confirmButton = buttonWithText(host, "确认仅导入收件箱");
+  await change(editor, fenced);
 
-  const importRequest = requests.find((request) => request.path === "/api/monitoring/imports/chatgpt");
-  assert.ok(importRequest);
-  assert.deepEqual(JSON.parse(importRequest.options.body), { content: fenced });
-  assert.equal(requests.filter((request) => request.options.method === "POST").length, 1);
+  assert.equal(confirmButton.disabled, true);
+  assert.equal(requests.some((request) => request.path === "/api/monitoring/imports/chatgpt"), false);
+
+  await click(buttonWithText(host, "预览导入内容"));
+  assert.match(host.textContent, /严格合同预览通过/);
+  assert.match(host.textContent, /CI 运行结果摘要/);
+  assert.equal(host.querySelector(".source-inbox-import-preview a"), null);
+  assert.equal(confirmButton.disabled, false);
+
+  await change(editor, `${fenced}\n `);
+  assert.match(host.textContent, /内容已更改，请重新预览/);
+  assert.equal(confirmButton.disabled, true);
+  assert.equal(requests.some((request) => request.path === "/api/monitoring/imports/chatgpt"), false);
+
+  await change(editor, fenced);
+  assert.equal(confirmButton.disabled, true, "restoring text must not silently revive an old preview");
+  await click(buttonWithText(host, "预览导入内容"));
+  assert.equal(confirmButton.disabled, false);
+  await click(confirmButton);
+  assert.match(host.textContent, /导入响应未满足固定回执、身份和零执行合同/);
+  assert.doesNotMatch(host.textContent, /GitHub \/ CI 运行结果摘要/);
+  assert.equal(confirmButton.disabled, false, "a rejected response must not consume the valid preview");
+  await click(confirmButton);
+
+  const previewRequests = requests.filter(
+    (request) => request.path === "/api/monitoring/imports/chatgpt/preview",
+  );
+  assert.equal(previewRequests.length, 2);
+  assert.deepEqual(previewRequests.map((request) => JSON.parse(request.options.body)), [
+    { content: fenced },
+    { content: fenced },
+  ]);
+  const importRequests = requests.filter(
+    (request) => request.path === "/api/monitoring/imports/chatgpt",
+  );
+  assert.equal(importRequests.length, 2);
+  assert.deepEqual(importRequests.map((request) => JSON.parse(request.options.body)), [
+    { content: fenced },
+    { content: fenced },
+  ]);
+  assert.deepEqual(
+    requests.filter((request) => request.options.method === "POST").map((request) => request.path),
+    [
+      "/api/monitoring/imports/chatgpt/preview",
+      "/api/monitoring/imports/chatgpt/preview",
+      "/api/monitoring/imports/chatgpt",
+      "/api/monitoring/imports/chatgpt",
+    ],
+  );
   assert.equal(requests.some((request) => /providers|market|rounds\/stream/.test(request.path)), false);
   assert.match(host.textContent, /GitHub \/ CI 运行结果摘要/);
+});
+
+test("preview validation issues stay visible beside the unchanged import draft", async () => {
+  const issue = {
+    path: "$.items[0].sources[0].url",
+    code: "SOURCE_IMPORT_URL_INVALID",
+    message: "URL 必须是公开的 HTTP(S) 来源。",
+  };
+  globalThis.fetch = async (path) => {
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path === "/api/monitoring/imports/chatgpt/preview") {
+      return response({ ok: false, error: "来源包校验失败。", issues: [issue] }, 400);
+    }
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    return response({ ok: false, error: "unexpected request" }, 404);
+  };
+
+  const host = await mountPanel();
+  await click(buttonWithText(host, "导入 JSON"));
+  const editor = host.querySelector('.source-inbox-import > textarea');
+  const draft = '{"version":"source_import_packet_v1","bad":true}';
+  await change(editor, draft);
+  await click(buttonWithText(host, "预览导入内容"));
+
+  assert.equal(editor.value, draft);
+  assert.match(host.textContent, /SOURCE_IMPORT_URL_INVALID/);
+  assert.match(host.textContent, /\$\.items\[0\]\.sources\[0\]\.url/);
+  assert.match(host.textContent, /公开的 HTTP\(S\) 来源/);
+  assert.equal(buttonWithText(host, "确认仅导入收件箱").disabled, true);
+});
+
+test("GPT monitoring template is fetched and copied without opening or navigating ChatGPT", async (t) => {
+  const requests = [];
+  const copied = [];
+  let openCalls = 0;
+  const originalOpen = window.open;
+  t.after(() => {
+    window.open = originalOpen;
+    delete navigator.clipboard;
+  });
+  window.open = () => {
+    openCalls += 1;
+    return null;
+  };
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: {
+      writeText: async (value) => copied.push(value),
+    },
+  });
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path === "/api/monitoring/imports/chatgpt/prompt-template") {
+      return response(sourceMonitoringPromptTemplate());
+    }
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    return response({ ok: false, error: "unexpected request" }, 404);
+  };
+
+  const initialLocation = window.location.href;
+  const host = await mountPanel();
+  await click(buttonWithText(host, "导入 JSON"));
+  await click(buttonWithText(host, "GPT 监控提示词模板"));
+
+  const prompt = sourceMonitoringPromptTemplate().source_monitoring_prompt_template.prompt;
+  const promptTextarea = host.querySelector('textarea[aria-label="GPT 监控提示词"]');
+  assert.equal(promptTextarea.readOnly, true);
+  assert.equal(promptTextarea.value, prompt);
+  await click(buttonWithText(host, "复制 GPT 监控提示词"));
+
+  assert.deepEqual(copied, [prompt]);
+  assert.equal(openCalls, 0);
+  assert.equal(window.location.href, initialLocation);
+  assert.equal(
+    requests.filter((request) => request.path === "/api/monitoring/imports/chatgpt/prompt-template").length,
+    1,
+  );
+  assert.match(host.textContent, /本页没有打开、登录或控制 ChatGPT/);
+  assert.equal(requests.some((request) => /chatgpt\.com|scheduled|tasks/.test(request.path)), false);
 });

@@ -33,6 +33,13 @@ import {
   SOURCE_MONITORING_HEALTH_LABELS,
   sourceInboxItemPermissions,
 } from "../sourceInbox";
+import {
+  normalizeSourceImportPreview,
+  normalizeSourceImportResult,
+  normalizeSourceMonitoringPromptTemplate,
+  SOURCE_IMPORT_MAX_BYTES,
+  sourceImportUtf8Bytes,
+} from "../sourceInboxImport";
 import "../styles/source-inbox.css";
 import { useModalFocus } from "../useModalFocus";
 
@@ -63,6 +70,27 @@ const EMPTY_HEALTH_STATE = Object.freeze({
   status: "idle",
   health: null,
   error: "",
+});
+
+const EMPTY_IMPORT_PREVIEW_STATE = Object.freeze({
+  status: "idle",
+  preview: null,
+  contentSnapshot: "",
+  issues: [],
+  error: "",
+});
+
+const EMPTY_IMPORT_ACTION_STATE = Object.freeze({
+  status: "idle",
+  issues: [],
+  error: "",
+});
+
+const EMPTY_PROMPT_TEMPLATE_STATE = Object.freeze({
+  status: "idle",
+  template: null,
+  error: "",
+  feedback: "",
 });
 
 function errorMessage(error, fallback) {
@@ -120,6 +148,102 @@ function SourceInboxListItem({ active, disabled, item, onSelect }) {
           : "记录完整性异常"}
       </em>
     </button>
+  );
+}
+
+function normalizedImportIssues(error) {
+  const rawIssues = Array.isArray(error?.issues)
+    ? error.issues
+    : Array.isArray(error?.details)
+      ? error.details
+      : [];
+  return rawIssues.slice(0, 12).map((rawIssue, index) => {
+    const issue = rawIssue && typeof rawIssue === "object" ? rawIssue : {};
+    return {
+      id: `${String(issue.path || "$")}:${String(issue.code || "invalid")}:${index}`,
+      path: String(issue.path || "$ ").trim().slice(0, 240) || "$",
+      code: String(issue.code || "SOURCE_IMPORT_INVALID").slice(0, 120),
+      message: String(issue.message || "导入内容不符合固定合同。").slice(0, 500),
+    };
+  });
+}
+
+function SourceImportIssues({ issues }) {
+  if (!issues.length) return null;
+  return (
+    <ul className="source-inbox-import-issues" aria-label="导入合同问题">
+      {issues.map((issue) => (
+        <li key={issue.id}>
+          <code>{issue.path}</code>
+          <strong>{issue.code}</strong>
+          <span>{issue.message}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function SourceImportPreview({ headingRef, state }) {
+  if (state.status === "idle") {
+    return <p className="source-inbox-muted compact">输入 JSON 后先预览；正式导入仍会在事务内重新校验。</p>;
+  }
+  if (state.status === "loading") {
+    return <p className="source-inbox-loading" role="status"><LoaderCircle aria-hidden="true" className="spin" size={15} />正在执行无写入预览…</p>;
+  }
+  if (state.status === "stale") {
+    return <p className="source-inbox-notice error" role="alert"><AlertTriangle aria-hidden="true" size={15} />内容已更改，请重新预览。</p>;
+  }
+  if (state.status === "error") {
+    return (
+      <div className="source-inbox-import-errors" role="alert">
+        <p className="source-inbox-notice error"><AlertTriangle aria-hidden="true" size={15} />{state.error}</p>
+        <SourceImportIssues issues={state.issues} />
+      </div>
+    );
+  }
+  const preview = state.preview;
+  if (!preview?.valid) {
+    return <p className="source-inbox-notice error" role="alert">预览响应未满足固定安全合同，已停止展示。</p>;
+  }
+  return (
+    <section className="source-inbox-import-preview" aria-label="导入预览">
+      <header ref={headingRef} tabIndex={-1}>
+        <span><Check aria-hidden="true" size={16} /><strong>严格合同预览通过</strong></span>
+        <code>{EXTERNAL_UNVERIFIED}</code>
+      </header>
+      <p>
+        预览未读写数据库，也未判定新增、重复或冲突；点击确认后仍会以原始文本重新校验。
+      </p>
+      <dl>
+        <div><dt>来源</dt><dd>{preview.sourceChannel} / {preview.sourceKey}</dd></div>
+        <div><dt>external run</dt><dd>{preview.externalRunId}</dd></div>
+        <div><dt>时间窗口</dt><dd>{preview.cutoffAt} → {preview.checkedAt}</dd></div>
+        <div><dt>计数</dt><dd>{preview.itemCount} 个 item · {preview.sourceCount} 个 source · {preview.payloadBytes} UTF-8 bytes</dd></div>
+        <div><dt>语义变化</dt><dd>{preview.meaningfulChange ? "是，待人工复核" : "否，items 为空"}</dd></div>
+        <div><dt>规范化哈希</dt><dd><code>{shortHash(preview.normalizedPacketSha256)}</code></dd></div>
+      </dl>
+      <div className="source-inbox-import-preview-items">
+        {preview.items.map((item) => (
+          <details key={item.fingerprint}>
+            <summary>
+              <span><strong>{item.index + 1}. {item.headline}</strong><small>{item.itemType} · {item.severity}</small></span>
+              <em>{item.sourceCount} 个来源</em>
+            </summary>
+            <p>{item.summary}</p>
+            <small>{item.occurredAt} · 路由建议 {item.recommendedRoute}</small>
+            <small>{item.factCount} 个事实 · {item.hypothesisCount} 个假设 · {item.unknownCount} 个未知项</small>
+            <ul>
+              {item.sources.map((source, sourceIndex) => (
+                <li key={`${item.fingerprint}:${sourceIndex}`}>
+                  <strong>{source.publisher}</strong>
+                  <code>{source.url}</code>
+                </li>
+              ))}
+            </ul>
+          </details>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -474,6 +598,10 @@ export function SourceInboxPanel({
   const healthRequestRef = useRef({ sequence: 0, controller: null });
   const detailRequestRef = useRef({ sequence: 0, controller: null });
   const actionRequestRef = useRef({ sequence: 0, controller: null });
+  const importRequestRef = useRef({ sequence: 0, controller: null });
+  const promptTemplateRequestRef = useRef({ sequence: 0, controller: null });
+  const previewHeadingRef = useRef(null);
+  const promptTextareaRef = useRef(null);
   const consumedRefreshTokenRef = useRef(0);
   const [queryInput, setQueryInput] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
@@ -492,9 +620,21 @@ export function SourceInboxPanel({
   const [importOpen, setImportOpen] = useState(false);
   const [importContent, setImportContent] = useState("");
   const [importError, setImportError] = useState("");
+  const [importPreviewState, setImportPreviewState] = useState(EMPTY_IMPORT_PREVIEW_STATE);
+  const [importActionState, setImportActionState] = useState(EMPTY_IMPORT_ACTION_STATE);
+  const [promptTemplateOpen, setPromptTemplateOpen] = useState(false);
+  const [promptTemplateState, setPromptTemplateState] = useState(EMPTY_PROMPT_TEMPLATE_STATE);
   const titleId = useId();
   const descriptionId = useId();
+  const promptTemplateId = useId();
+  const importTextareaId = useId();
+  const importBoundaryId = useId();
   openRef.current = Boolean(open);
+
+  const importContentBytes = useMemo(
+    () => sourceImportUtf8Bytes(importContent),
+    [importContent],
+  );
 
   const roomOptions = useMemo(() => rooms
     .filter((room) => room?.id)
@@ -617,15 +757,31 @@ export function SourceInboxPanel({
     if (open) return undefined;
     detailRequestRef.current.controller?.abort();
     actionRequestRef.current.controller?.abort();
+    importRequestRef.current.controller?.abort();
+    promptTemplateRequestRef.current.controller?.abort();
     setActionState(EMPTY_ACTION_STATE);
+    setImportActionState(EMPTY_IMPORT_ACTION_STATE);
+    setImportPreviewState(EMPTY_IMPORT_PREVIEW_STATE);
+    setPromptTemplateState(EMPTY_PROMPT_TEMPLATE_STATE);
     setImportError("");
+    setImportContent("");
+    setImportOpen(false);
+    setPromptTemplateOpen(false);
     return undefined;
   }, [open]);
 
   useEffect(() => () => {
     detailRequestRef.current.controller?.abort();
     actionRequestRef.current.controller?.abort();
+    importRequestRef.current.controller?.abort();
+    promptTemplateRequestRef.current.controller?.abort();
   }, []);
+
+  useEffect(() => {
+    if (importPreviewState.status === "ready") {
+      previewHeadingRef.current?.focus();
+    }
+  }, [importPreviewState.status]);
 
   useEffect(() => {
     if (!open) {
@@ -723,6 +879,151 @@ export function SourceInboxPanel({
     }
   }, [detailState.item, onCopyEventLink]);
 
+  const loadPromptTemplate = useCallback(async () => {
+    const previous = promptTemplateRequestRef.current;
+    previous.controller?.abort();
+    const controller = new AbortController();
+    const sequence = previous.sequence + 1;
+    promptTemplateRequestRef.current = { sequence, controller };
+    setPromptTemplateState({ ...EMPTY_PROMPT_TEMPLATE_STATE, status: "loading" });
+    try {
+      const payload = await api.sourceMonitoringPromptTemplate(controller.signal);
+      if (
+        controller.signal.aborted
+        || promptTemplateRequestRef.current.sequence !== sequence
+        || !openRef.current
+      ) return false;
+      const template = normalizeSourceMonitoringPromptTemplate(payload);
+      if (!template.valid) {
+        throw new Error("GPT 监控提示词模板未满足固定安全合同。");
+      }
+      setPromptTemplateState({ status: "ready", template, error: "", feedback: "" });
+      return true;
+    } catch (error) {
+      if (controller.signal.aborted || error?.name === "AbortError") return false;
+      if (promptTemplateRequestRef.current.sequence !== sequence || !openRef.current) return false;
+      setPromptTemplateState({
+        status: "error",
+        template: null,
+        error: errorMessage(error, "GPT 监控提示词模板暂时无法读取。"),
+        feedback: "",
+      });
+      return false;
+    }
+  }, []);
+
+  const togglePromptTemplate = useCallback(() => {
+    const nextOpen = !promptTemplateOpen;
+    setPromptTemplateOpen(nextOpen);
+    if (nextOpen && promptTemplateState.status === "idle") {
+      void loadPromptTemplate();
+    }
+  }, [loadPromptTemplate, promptTemplateOpen, promptTemplateState.status]);
+
+  const copyPromptTemplate = useCallback(async () => {
+    const prompt = promptTemplateState.template?.prompt || "";
+    if (!prompt) return;
+    try {
+      if (typeof globalThis.navigator?.clipboard?.writeText !== "function") {
+        throw new Error("当前浏览器无法写入剪贴板。");
+      }
+      await globalThis.navigator.clipboard.writeText(prompt);
+      setPromptTemplateState((current) => ({
+        ...current,
+        error: "",
+        feedback: "已复制 GPT 监控提示词；本页没有打开、登录或控制 ChatGPT。",
+      }));
+    } catch (error) {
+      promptTextareaRef.current?.focus();
+      promptTextareaRef.current?.select();
+      setPromptTemplateState((current) => ({
+        ...current,
+        error: errorMessage(error, "复制失败，已选中模板供手动复制。"),
+        feedback: "",
+      }));
+    }
+  }, [promptTemplateState.template]);
+
+  const clearImportDraft = useCallback(() => {
+    importRequestRef.current.controller?.abort();
+    setImportContent("");
+    setImportError("");
+    setImportPreviewState(EMPTY_IMPORT_PREVIEW_STATE);
+    setImportActionState(EMPTY_IMPORT_ACTION_STATE);
+  }, []);
+
+  const changeImportContent = useCallback((value) => {
+    const nextValue = String(value || "");
+    importRequestRef.current.controller?.abort();
+    setImportContent(nextValue);
+    setImportError("");
+    setImportActionState(EMPTY_IMPORT_ACTION_STATE);
+    setImportPreviewState((current) => (
+      current.status === "idle" && !current.contentSnapshot
+        ? current
+        : {
+          ...EMPTY_IMPORT_PREVIEW_STATE,
+          status: "stale",
+          error: "内容已更改，请重新预览。",
+        }
+    ));
+  }, []);
+
+  const previewImportPacket = useCallback(async () => {
+    const rawSnapshot = importContent;
+    if (!rawSnapshot.trim() || importActionState.status === "loading") return;
+    const payloadBytes = sourceImportUtf8Bytes(rawSnapshot);
+    if (payloadBytes > SOURCE_IMPORT_MAX_BYTES) {
+      setImportPreviewState({
+        ...EMPTY_IMPORT_PREVIEW_STATE,
+        status: "error",
+        error: `导入内容为 ${payloadBytes} UTF-8 bytes，超过 ${SOURCE_IMPORT_MAX_BYTES} 上限。`,
+      });
+      return;
+    }
+    const previous = importRequestRef.current;
+    previous.controller?.abort();
+    const controller = new AbortController();
+    const sequence = previous.sequence + 1;
+    importRequestRef.current = { sequence, controller };
+    setImportError("");
+    setImportActionState(EMPTY_IMPORT_ACTION_STATE);
+    setImportPreviewState({
+      ...EMPTY_IMPORT_PREVIEW_STATE,
+      status: "loading",
+      contentSnapshot: rawSnapshot,
+    });
+    try {
+      const payload = await api.previewSourceInboxImport(rawSnapshot, controller.signal);
+      if (
+        controller.signal.aborted
+        || importRequestRef.current.sequence !== sequence
+        || !openRef.current
+      ) return;
+      const preview = normalizeSourceImportPreview(payload);
+      if (!preview.valid) {
+        throw new Error("预览响应未满足固定安全合同。");
+      }
+      setImportPreviewState({
+        status: "ready",
+        preview,
+        contentSnapshot: rawSnapshot,
+        issues: [],
+        error: "",
+      });
+    } catch (error) {
+      if (controller.signal.aborted || error?.name === "AbortError") return;
+      if (importRequestRef.current.sequence !== sequence || !openRef.current) return;
+      setImportPreviewState({
+        ...EMPTY_IMPORT_PREVIEW_STATE,
+        status: "error",
+        contentSnapshot: rawSnapshot,
+        issues: normalizedImportIssues(error),
+        error: errorMessage(error, "ChatGPT 来源包 JSON 预览失败。"),
+      });
+    }
+  }, [importActionState.status, importContent]);
+
   const adoptItem = useCallback((rawItem, expectedItemId = "") => {
     const item = normalizeSourceInboxItem(rawItem);
     if (!item.valid || !item.id || (expectedItemId && item.id !== expectedItemId)) return null;
@@ -817,29 +1118,47 @@ export function SourceInboxPanel({
   );
 
   const importPacket = async () => {
-    if (!importContent.trim() || actionState.status === "loading") return;
+    if (
+      importActionState.status === "loading"
+      || importPreviewState.status !== "ready"
+      || !importPreviewState.preview?.valid
+      || !importPreviewState.contentSnapshot
+      || importContent !== importPreviewState.contentSnapshot
+    ) return;
+    const rawSnapshot = importPreviewState.contentSnapshot;
     setImportError("");
     setFeedback("");
-    const previous = actionRequestRef.current;
+    const previous = importRequestRef.current;
     previous.controller?.abort();
     const controller = new AbortController();
     const sequence = previous.sequence + 1;
-    actionRequestRef.current = { sequence, controller };
-    setActionState({ status: "loading", type: "import", error: "" });
+    importRequestRef.current = { sequence, controller };
+    setImportActionState({ status: "loading", error: "" });
     try {
-      const payload = await api.importSourceInbox(importContent, controller.signal);
+      const payload = await api.importSourceInbox(rawSnapshot, controller.signal);
       if (
         controller.signal.aborted
-        || actionRequestRef.current.sequence !== sequence
+        || importRequestRef.current.sequence !== sequence
         || !openRef.current
       ) return;
-      const importResult = payload.source_import || {};
-      const importedItems = Array.isArray(importResult.items) ? importResult.items : [];
-      const firstItem = importedItems[0] ? adoptItem(importedItems[0]) : null;
-      if (importedItems.length && !firstItem) {
-        throw new Error("导入响应未返回完整且身份有效的来源条目。");
+      const importResult = normalizeSourceImportResult(payload);
+      if (!importResult.valid) {
+        throw new Error("导入响应未满足固定回执、身份和零执行合同。");
       }
-      setActionState(EMPTY_ACTION_STATE);
+      const firstItem = importResult.items[0] || null;
+      if (firstItem) {
+        setListState((current) => ({
+          ...current,
+          items: importResult.items.reduce(
+            (items, item) => replaceSourceInboxItem(items, item),
+            current.items,
+          ),
+        }));
+        setDetailState({ status: "ready", item: firstItem, error: "" });
+        setSelectedItemId(firstItem.id);
+      }
+      setImportActionState(EMPTY_IMPORT_ACTION_STATE);
+      setImportPreviewState(EMPTY_IMPORT_PREVIEW_STATE);
       setImportContent("");
       setImportOpen(false);
       setStateFilter("");
@@ -847,32 +1166,38 @@ export function SourceInboxPanel({
       setUnreadOnly(false);
       setQueryInput("");
       setSubmittedQuery("");
-      setFeedback(importResult.idempotent_replay
+      setFeedback(importResult.idempotentReplay
         ? "该 external run 已导入过；已返回同一份幂等结果，未重复创建条目。"
-        : importedItems.length
-          ? `已导入 ${importedItems.length} 条 external_unverified 来源；仍需逐条人工审阅。`
+        : importResult.items.length
+          ? `已导入 ${importResult.items.length} 条 external_unverified 来源；仍需逐条人工审阅。`
           : "导入已接收，但没有新增来源条目。");
       void loadList({ preferredItemId: firstItem?.id || "" });
     } catch (error) {
       if (controller.signal.aborted || error?.name === "AbortError") return;
-      if (actionRequestRef.current.sequence !== sequence || !openRef.current) return;
-      const issues = Array.isArray(error?.issues)
-        ? error.issues
-        : Array.isArray(error?.details)
-          ? error.details
-          : [];
-      setActionState({
+      if (importRequestRef.current.sequence !== sequence || !openRef.current) return;
+      const issues = normalizedImportIssues(error);
+      setImportActionState({
         status: "error",
-        type: "import",
+        issues,
         error: errorMessage(error, "ChatGPT 来源包 JSON 导入失败。"),
       });
-      setImportError(issues.length ? `${errorMessage(error, "导入失败。")}（${issues.length} 个问题）` : "");
+      setImportError(issues.length
+        ? `${errorMessage(error, "导入失败。")}（${issues.length} 个问题）`
+        : errorMessage(error, "导入失败。"));
     }
   };
 
   const visibleCount = listState.items.length;
   const selectedItem = detailState.item;
-  const busy = actionState.status === "loading";
+  const importBusy = importPreviewState.status === "loading" || importActionState.status === "loading";
+  const busy = actionState.status === "loading" || importBusy;
+  const canConfirmImport = (
+    importPreviewState.status === "ready"
+    && importPreviewState.preview?.valid === true
+    && importPreviewState.contentSnapshot.length > 0
+    && importContent === importPreviewState.contentSnapshot
+    && !importBusy
+  );
 
   return (
     <>
@@ -951,24 +1276,98 @@ export function SourceInboxPanel({
         </div>
 
         {importOpen ? (
-          <section className="source-inbox-import" aria-label="manual_chatgpt JSON 导入">
-            <header><FileJson2 aria-hidden="true" size={17} /><span><strong>ChatGPT 来源包 JSON（manual import）</strong><small>与 Manual ChatGPT 协作结论流分离；仅导入 source_import_packet_v1，也支持 fenced JSON。</small></span></header>
+          <section
+            className="source-inbox-import"
+            aria-label="manual_chatgpt JSON 导入"
+            aria-busy={importBusy}
+          >
+            <header><FileJson2 aria-hidden="true" size={17} /><span><strong>ChatGPT 来源包 JSON（manual import）</strong><small>与 Manual ChatGPT 协作结论流分离；仅预览和导入 source_import_packet_v1，也支持单个 fenced JSON。</small></span></header>
+            <div className="source-inbox-prompt-template">
+              <button
+                className="secondary compact"
+                type="button"
+                aria-expanded={promptTemplateOpen}
+                aria-controls={promptTemplateId}
+                onClick={togglePromptTemplate}
+              >
+                <ClipboardCopy aria-hidden="true" size={14} />
+                GPT 监控提示词模板
+              </button>
+              {promptTemplateOpen ? (
+                <section id={promptTemplateId} aria-label="GPT 监控提示词模板">
+                  <p>
+                    请先在普通 ChatGPT 对话中测试并手动替换占位符。本页不打开、登录或控制 ChatGPT，也不创建 Scheduled Task。
+                  </p>
+                  {promptTemplateState.status === "loading" ? (
+                    <p className="source-inbox-loading" role="status"><LoaderCircle aria-hidden="true" className="spin" size={14} />正在读取版本化模板…</p>
+                  ) : null}
+                  {promptTemplateState.status === "error" ? (
+                    <p className="source-inbox-notice error" role="alert"><AlertTriangle aria-hidden="true" size={14} />{promptTemplateState.error}</p>
+                  ) : null}
+                  {promptTemplateState.status === "ready" && promptTemplateState.template?.valid ? (
+                    <>
+                      <label htmlFor={`${promptTemplateId}-content`}>GPT 监控提示词（只读）</label>
+                      <textarea
+                        ref={promptTextareaRef}
+                        id={`${promptTemplateId}-content`}
+                        aria-label="GPT 监控提示词"
+                        value={promptTemplateState.template.prompt}
+                        readOnly
+                        spellCheck="false"
+                      />
+                      <footer>
+                        <code>{shortHash(promptTemplateState.template.templateSha256)}</code>
+                        <button className="secondary compact" type="button" onClick={() => void copyPromptTemplate()}>
+                          <ClipboardCopy aria-hidden="true" size={14} />复制 GPT 监控提示词
+                        </button>
+                      </footer>
+                      {promptTemplateState.feedback ? <p className="source-inbox-notice" role="status" aria-live="polite">{promptTemplateState.feedback}</p> : null}
+                      {promptTemplateState.error ? <p className="source-inbox-notice error" role="alert">{promptTemplateState.error}</p> : null}
+                    </>
+                  ) : null}
+                </section>
+              ) : null}
+            </div>
+            <label htmlFor={importTextareaId}>ChatGPT 来源包 JSON</label>
             <textarea
+              id={importTextareaId}
               aria-label="ChatGPT 来源包 JSON"
+              aria-describedby={importBoundaryId}
               value={importContent}
-              maxLength={512000}
+              maxLength={SOURCE_IMPORT_MAX_BYTES}
               placeholder={'粘贴 {"version":"source_import_packet_v1", ...}'}
               spellCheck="false"
-              onChange={(event) => setImportContent(event.target.value)}
+              disabled={importActionState.status === "loading"}
+              onChange={(event) => changeImportContent(event.target.value)}
             />
+            <p
+              id={importBoundaryId}
+              className={importContentBytes > SOURCE_IMPORT_MAX_BYTES ? "source-inbox-import-meter invalid" : "source-inbox-import-meter"}
+            >
+              {importContentBytes} / {SOURCE_IMPORT_MAX_BYTES} UTF-8 bytes · 预览不读写数据库，不调用 Provider/市场，不创建正式 round。
+            </p>
             {importError ? <p className="source-inbox-notice error" role="alert">{importError}</p> : null}
+            <SourceImportIssues issues={importActionState.issues || []} />
+            <SourceImportPreview headingRef={previewHeadingRef} state={importPreviewState} />
             <footer>
-              <button className="secondary compact" type="button" onClick={() => setImportOpen(false)}>取消</button>
-              <button className="primary compact" type="button" disabled={!importContent.trim() || busy} onClick={() => void importPacket()}>
-                {actionState.type === "import" && busy
+              <button className="secondary compact" type="button" disabled={importBusy} onClick={() => setImportOpen(false)}>暂时收起</button>
+              <button className="secondary compact" type="button" disabled={!importContent && importPreviewState.status === "idle"} onClick={clearImportDraft}>清空</button>
+              <button
+                className="secondary compact"
+                type="button"
+                disabled={!importContent.trim() || importBusy || importContentBytes > SOURCE_IMPORT_MAX_BYTES}
+                onClick={() => void previewImportPacket()}
+              >
+                {importPreviewState.status === "loading"
+                  ? <LoaderCircle aria-hidden="true" className="spin" size={14} />
+                  : <FileJson2 aria-hidden="true" size={14} />}
+                预览导入内容
+              </button>
+              <button className="primary compact" type="button" disabled={!canConfirmImport} onClick={() => void importPacket()}>
+                {importActionState.status === "loading"
                   ? <LoaderCircle aria-hidden="true" className="spin" size={14} />
                   : <Upload aria-hidden="true" size={14} />}
-                仅导入到收件箱
+                确认仅导入收件箱
               </button>
             </footer>
           </section>

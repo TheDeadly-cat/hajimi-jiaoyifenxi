@@ -130,6 +130,8 @@ test("source inbox API keeps reads and explicit CAS mutations on isolated monito
       signal: controller.signal,
     });
     await api.sourceInboxItem("event/一", controller.signal);
+    await api.sourceMonitoringPromptTemplate(controller.signal);
+    await api.previewSourceInboxImport(content, controller.signal);
     await api.importSourceInbox(content, controller.signal);
     await api.acknowledgeSourceInboxItem("event/一", 3, controller.signal);
     await api.attachSourceInboxItem("event/一", "room/二", 4, controller.signal);
@@ -157,25 +159,29 @@ test("source inbox API keeps reads and explicit CAS mutations on isolated monito
   );
   assert.equal(requests[4].path, "/api/monitoring/events/event%2F%E4%B8%80");
   assert.equal(requests[4].options.method, undefined);
-  assert.equal(requests[5].path, "/api/monitoring/imports/chatgpt");
-  assert.deepEqual(JSON.parse(requests[5].options.body), { content });
-  assert.equal(requests[6].path, "/api/monitoring/events/event%2F%E4%B8%80/acknowledge");
-  assert.deepEqual(JSON.parse(requests[6].options.body), {
+  assert.equal(requests[5].path, "/api/monitoring/imports/chatgpt/prompt-template");
+  assert.equal(requests[5].options.method, undefined);
+  assert.equal(requests[6].path, "/api/monitoring/imports/chatgpt/preview");
+  assert.deepEqual(JSON.parse(requests[6].options.body), { content });
+  assert.equal(requests[7].path, "/api/monitoring/imports/chatgpt");
+  assert.deepEqual(JSON.parse(requests[7].options.body), { content });
+  assert.equal(requests[8].path, "/api/monitoring/events/event%2F%E4%B8%80/acknowledge");
+  assert.deepEqual(JSON.parse(requests[8].options.body), {
     expected_state_version: 3,
     acknowledgement: true,
   });
-  assert.equal(requests[7].path, "/api/monitoring/events/event%2F%E4%B8%80/attach");
-  assert.deepEqual(JSON.parse(requests[7].options.body), {
+  assert.equal(requests[9].path, "/api/monitoring/events/event%2F%E4%B8%80/attach");
+  assert.deepEqual(JSON.parse(requests[9].options.body), {
     room_id: "room/二",
     expected_state_version: 4,
   });
-  assert.equal(requests[8].path, "/api/monitoring/events/event%2F%E4%B8%80/round-draft");
-  assert.deepEqual(JSON.parse(requests[8].options.body), {
+  assert.equal(requests[10].path, "/api/monitoring/events/event%2F%E4%B8%80/round-draft");
+  assert.deepEqual(JSON.parse(requests[10].options.body), {
     room_id: "room/二",
     expected_state_version: 5,
     objective: "仅形成待审阅草稿",
   });
-  assert.equal(requests.slice(5).every((request) => request.options.method === "POST"), true);
+  assert.equal(requests.filter((request) => request.options.method === "POST").length, 5);
   assert.equal(requests.every((request) => request.options.signal === controller.signal), true);
 });
 

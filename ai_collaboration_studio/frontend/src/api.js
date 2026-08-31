@@ -59,6 +59,14 @@ export const api = {
     "/api/monitoring/imports/chatgpt",
     { method: "POST", body: JSON.stringify({ content }), signal },
   ),
+  previewSourceInboxImport: (content, signal) => jsonRequest(
+    "/api/monitoring/imports/chatgpt/preview",
+    { method: "POST", body: JSON.stringify({ content }), signal },
+  ),
+  sourceMonitoringPromptTemplate: (signal) => jsonRequest(
+    "/api/monitoring/imports/chatgpt/prompt-template",
+    { signal },
+  ),
   acknowledgeSourceInboxItem: (itemId, expectedStateVersion, signal) => jsonRequest(
     `/api/monitoring/events/${encodeURIComponent(itemId)}/acknowledge`,
     {

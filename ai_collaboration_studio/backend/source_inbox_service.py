@@ -35,6 +35,7 @@ from .source_inbox_contracts import (
     canonical_sha256,
     project_source_item_fingerprint,
 )
+from .source_inbox_import_ux import build_source_import_preview
 from .source_inbox_trading_impact import (
     SourceInboxTradingImpactError,
     insert_or_verify_trading_impact_projection,
@@ -329,6 +330,23 @@ def _clean_identifier(value: Any, label: str, *, maximum: int = 160) -> str:
 
 def _clean_actor(value: Any) -> str:
     return _clean_identifier(str(value or "local_user"), "actor", maximum=80)
+
+
+def _require_import_channel_authorized(
+    packet: dict[str, Any],
+    *,
+    actor: str,
+) -> None:
+    if (
+        packet["source_channel"]
+        in {OFFICIAL_SOURCE_CHANNEL, FUTU_ANOMALY_SOURCE_CHANNEL}
+        and actor != _SOURCE_MONITORING_WORKER_ACTOR
+    ):
+        raise SourceInboxError(
+            "保留的持续监控来源通道只能由内部监控 Worker 导入。",
+            code="SOURCE_INBOX_MONITORING_CHANNEL_UNAUTHORIZED",
+            status=403,
+        )
 
 
 def _clean_state_version(value: Any) -> int:
@@ -1322,6 +1340,27 @@ class SourceInboxService:
             (item_id,),
         ).fetchone()
 
+    def preview_packet(
+        self,
+        raw: Any,
+        *,
+        actor: str = "local_user",
+    ) -> dict[str, Any]:
+        """Validate one exact manual packet without opening the store."""
+
+        received_at = self._now_ms()
+        clean_actor = _clean_actor(actor)
+        packet, provisional_receipt = accept_source_import(
+            raw,
+            received_at_ms=received_at,
+        )
+        _require_import_channel_authorized(packet, actor=clean_actor)
+        return build_source_import_preview(
+            packet,
+            provisional_receipt,
+            received_at_ms=received_at,
+        )
+
     def import_packet(
         self,
         raw: Any,
@@ -1348,16 +1387,7 @@ class SourceInboxService:
             raw,
             received_at_ms=received_at,
         )
-        if (
-            packet["source_channel"]
-            in {OFFICIAL_SOURCE_CHANNEL, FUTU_ANOMALY_SOURCE_CHANNEL}
-            and clean_actor != _SOURCE_MONITORING_WORKER_ACTOR
-        ):
-            raise SourceInboxError(
-                "保留的持续监控来源通道只能由内部监控 Worker 导入。",
-                code="SOURCE_INBOX_MONITORING_CHANNEL_UNAUTHORIZED",
-                status=403,
-            )
+        _require_import_channel_authorized(packet, actor=clean_actor)
         impact_source_class = (
             _trading_impact_source_class(packet["source_channel"])
             if impact_rules is not None

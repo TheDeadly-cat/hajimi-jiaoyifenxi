@@ -74,7 +74,8 @@ from .providers.registry import PROVIDERS
 from .round_launch_plan import RoundLaunchPlanService
 from .round_contexts import RoundContextError
 from .stock_research_service import StockResearchError, StockResearchService
-from .source_inbox_contracts import SourceInboxContractError
+from .source_inbox_contracts import MAX_SOURCE_IMPORT_BYTES, SourceInboxContractError
+from .source_inbox_import_ux import build_source_monitoring_prompt_template
 from .source_inbox_service import SourceInboxError, SourceInboxService
 from .source_monitoring.health_service import (
     SourceMonitoringHealthService,
@@ -106,6 +107,10 @@ from .user_decision import (
 from .walk_forward import WalkForwardFeasibilityError
 
 
+# `content` is itself JSON text inside an outer JSON request string.  Allow a
+# bounded 3x escape envelope (including ensure_ascii clients) plus fixed framing;
+# the inner contract remains authoritative at exactly 256 KiB UTF-8.
+_SOURCE_INBOX_HTTP_ENVELOPE_MAX_BYTES = (MAX_SOURCE_IMPORT_BYTES * 3) + 16_384
 LOCAL_SESSION_TOKEN = secrets.token_urlsafe(32)
 LOCAL_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
 SERVICE_ID = "ai_collaboration_studio"
@@ -122,6 +127,8 @@ def _is_source_inbox_path(path: str) -> bool:
             "/api/monitoring/health",
             "/api/monitoring/inbox",
             "/api/monitoring/imports/chatgpt",
+            "/api/monitoring/imports/chatgpt/preview",
+            "/api/monitoring/imports/chatgpt/prompt-template",
             "/api/monitoring/notifications",
         }
         or re.fullmatch(r"/api/monitoring/events/[^/]+(?:/(?:acknowledge|attach|round-draft))?", path)
@@ -564,6 +571,26 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._send_json({"ok": True, "action_desk_overview": overview})
+            return
+        if parsed.path == "/api/monitoring/imports/chatgpt/prompt-template":
+            if parsed.query:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "GPT 监控提示词模板不接受查询参数。",
+                        "code": "SOURCE_INBOX_PROMPT_TEMPLATE_QUERY_UNSUPPORTED",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "source_monitoring_prompt_template": (
+                        build_source_monitoring_prompt_template()
+                    ),
+                }
+            )
             return
         if parsed.path == "/api/monitoring/health":
             if parsed.query:
@@ -1555,8 +1582,12 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             parsed.path,
         ))
         is_source_inbox_import = parsed.path == "/api/monitoring/imports/chatgpt"
+        is_source_inbox_import_preview = (
+            parsed.path == "/api/monitoring/imports/chatgpt/preview"
+        )
         is_source_inbox_request = bool(
             is_source_inbox_import
+            or is_source_inbox_import_preview
             or re.fullmatch(
                 r"/api/monitoring/events/[^/]+/(?:acknowledge|attach|round-draft)",
                 parsed.path,
@@ -1574,27 +1605,36 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 if readonly_research_match is not None or carries_round_context
                 else 256_000
                 if is_manual_chatgpt_import
-                else 512_000
-                if is_source_inbox_import
+                else _SOURCE_INBOX_HTTP_ENVELOPE_MAX_BYTES
+                if is_source_inbox_import or is_source_inbox_import_preview
                 else 128_000
             ),
             strict=is_source_inbox_request,
         )
         if payload is None:
             return
-        if is_source_inbox_import:
+        if is_source_inbox_import or is_source_inbox_import_preview:
             if set(payload) != {"content"} or type(payload.get("content")) is not str:
                 self._send_json(
                     {
                         "ok": False,
-                        "error": "来源导入请求必须只包含字符串 content。",
+                        "error": (
+                            "来源预览请求必须只包含字符串 content。"
+                            if is_source_inbox_import_preview
+                            else "来源导入请求必须只包含字符串 content。"
+                        ),
                         "code": "SOURCE_INBOX_REQUEST_INVALID",
                     },
                     HTTPStatus.BAD_REQUEST,
                 )
                 return
             try:
-                result = SourceInboxService(STORE).import_packet(payload["content"])
+                source_inbox_service = SourceInboxService(STORE)
+                result = (
+                    source_inbox_service.preview_packet(payload["content"])
+                    if is_source_inbox_import_preview
+                    else source_inbox_service.import_packet(payload["content"])
+                )
             except SourceInboxContractError as exc:
                 self._send_json(
                     {
@@ -1610,6 +1650,12 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     {"ok": False, "error": str(exc), "code": exc.code},
                     HTTPStatus(exc.status),
+                )
+                return
+            if is_source_inbox_import_preview:
+                self._send_json(
+                    {"ok": True, "source_import_preview": result},
+                    HTTPStatus.OK,
                 )
                 return
             self._send_json(
