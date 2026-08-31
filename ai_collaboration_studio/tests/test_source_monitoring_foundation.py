@@ -18,9 +18,14 @@ from backend.source_monitoring.adapters.base import (
     SourceAdapterContractError,
     validate_source_adapter,
 )
-from backend.source_monitoring.contracts import AdapterPollResult
-from backend.source_monitoring.packet_builder import (
+from backend.source_monitoring.contracts import (
+    FUTU_ANOMALY_SOURCE_CHANNEL,
     OFFICIAL_SOURCE_CHANNEL,
+    OFFICIAL_SOURCE_CLASS,
+    READONLY_MARKET_SOURCE_CLASS,
+    AdapterPollResult,
+)
+from backend.source_monitoring.packet_builder import (
     SourcePacketBuildError,
     build_source_import_payload,
     build_packet_from_poll_result,
@@ -32,6 +37,7 @@ from backend.source_monitoring.registry import (
 )
 from backend.source_monitoring.settings import (
     SOURCE_MONITOR_AUTO_START_ENV,
+    SOURCE_MONITOR_ALLOW_READONLY_MARKET_ENV,
     SOURCE_MONITOR_DRY_RUN_ENV,
     SOURCE_MONITOR_ENABLED_ENV,
     SOURCE_MONITOR_MAX_ITEMS_ENV,
@@ -106,6 +112,15 @@ class FakeOfficialAdapter:
         )
 
 
+class FakeReadonlyMarketAdapter(FakeOfficialAdapter):
+    adapter_key = "fixture_readonly_market"
+    config_version = "fixture_readonly_market_config_v1"
+    official_source = False
+    source_class = READONLY_MARKET_SOURCE_CLASS
+    source_channel = FUTU_ANOMALY_SOURCE_CHANNEL
+    max_market_calls_per_poll = 1
+
+
 class LegacyPollSignatureAdapter(FakeOfficialAdapter):
     adapter_key = "legacy_poll_signature"
     config_version = "legacy_poll_signature_config_v1"
@@ -156,6 +171,9 @@ class SourceAdapterFoundationTests(unittest.TestCase):
         self.assertEqual(metadata.config_version, "fixture_official_config_v1")
         self.assertEqual(metadata.poll_interval_ms, 60_000)
         self.assertEqual(metadata.max_candidates_per_poll, 1)
+        self.assertEqual(metadata.source_class, OFFICIAL_SOURCE_CLASS)
+        self.assertEqual(metadata.source_channel, OFFICIAL_SOURCE_CHANNEL)
+        self.assertEqual(metadata.max_market_calls_per_poll, 0)
         self.assertEqual(metadata.execution_capability, "none")
         self.assertIs(metadata.live_trading_allowed, False)
 
@@ -170,8 +188,14 @@ class SourceAdapterFoundationTests(unittest.TestCase):
     def test_non_official_and_unsafe_metadata_fail_closed(self) -> None:
         adapter = FakeOfficialAdapter()
         adapter.official_source = False
-        with self.assertRaises(SourceAdapterRegistryError):
+        with self.assertRaises(SourceAdapterContractError):
             SourceAdapterRegistry((adapter,))
+
+        readonly = FakeReadonlyMarketAdapter()
+        with self.assertRaises(SourceAdapterRegistryError):
+            SourceAdapterRegistry((readonly,))
+        readonly_registry = SourceAdapterRegistry((readonly,), official_only=False)
+        self.assertIs(readonly_registry.require(readonly.adapter_key), readonly)
 
         adapter.official_source = True
         adapter.execution_capability = "write"
@@ -187,7 +211,7 @@ class SourceAdapterFoundationTests(unittest.TestCase):
         adapter = FakeOfficialAdapter()
         registry = SourceAdapterRegistry((adapter,))
         adapter.official_source = False
-        with self.assertRaises(SourceAdapterRegistryError):
+        with self.assertRaises(SourceAdapterContractError):
             registry.require("fixture_official")
 
     def test_legacy_poll_signature_is_rejected_before_registration(self) -> None:
@@ -214,6 +238,7 @@ class SourceMonitoringSettingsTests(unittest.TestCase):
                 "enabled": False,
                 "auto_start": False,
                 "official_only": True,
+                "allow_readonly_market": False,
                 "dry_run": True,
                 "max_items_per_run": 50,
             },
@@ -224,12 +249,14 @@ class SourceMonitoringSettingsTests(unittest.TestCase):
             SOURCE_MONITOR_ENABLED_ENV: "1",
             SOURCE_MONITOR_AUTO_START_ENV: "1",
             SOURCE_MONITOR_OFFICIAL_ONLY_ENV: "1",
+            SOURCE_MONITOR_ALLOW_READONLY_MARKET_ENV: "0",
             SOURCE_MONITOR_DRY_RUN_ENV: "0",
             SOURCE_MONITOR_MAX_ITEMS_ENV: "7",
         })
         self.assertTrue(settings.enabled)
         self.assertTrue(settings.auto_start)
         self.assertTrue(settings.official_only)
+        self.assertFalse(settings.allow_readonly_market)
         self.assertFalse(settings.dry_run)
         self.assertEqual(settings.max_items_per_run, 7)
 
@@ -251,6 +278,17 @@ class SourceMonitoringSettingsTests(unittest.TestCase):
         with self.assertRaises(SourceMonitoringSettingsError):
             SourceMonitoringSettings.from_environment({
                 SOURCE_MONITOR_OFFICIAL_ONLY_ENV: "0",
+            })
+        readonly = SourceMonitoringSettings.from_environment({
+            SOURCE_MONITOR_OFFICIAL_ONLY_ENV: "0",
+            SOURCE_MONITOR_ALLOW_READONLY_MARKET_ENV: "1",
+        })
+        self.assertFalse(readonly.official_only)
+        self.assertTrue(readonly.allow_readonly_market)
+        with self.assertRaises(SourceMonitoringSettingsError):
+            SourceMonitoringSettings.from_environment({
+                SOURCE_MONITOR_OFFICIAL_ONLY_ENV: "1",
+                SOURCE_MONITOR_ALLOW_READONLY_MARKET_ENV: "1",
             })
         with self.assertRaises(SourceMonitoringSettingsError):
             SourceMonitoringSettings.from_environment({
@@ -306,6 +344,28 @@ class SourceMonitoringPacketBuilderTests(unittest.TestCase):
         )
         self.assertEqual(normalized["safety"]["provider_calls_performed"], 0)
         self.assertEqual(normalized["safety"]["execution_capability"], "none")
+
+    def test_readonly_market_channel_is_explicit_and_closed(self) -> None:
+        packet = build_source_import_packet(
+            adapter_key="fixture_readonly_market",
+            external_run_id="run-market-1",
+            captured_at_ms=CAPTURED_AT_MS,
+            observed_items=[_item()],
+            source_channel=FUTU_ANOMALY_SOURCE_CHANNEL,
+        )
+        self.assertEqual(packet["source_channel"], FUTU_ANOMALY_SOURCE_CHANNEL)
+        self.assertEqual(
+            packet["generation"]["channel"],
+            FUTU_ANOMALY_SOURCE_CHANNEL,
+        )
+        with self.assertRaises(SourcePacketBuildError):
+            build_source_import_packet(
+                adapter_key="fixture_readonly_market",
+                external_run_id="run-market-2",
+                captured_at_ms=CAPTURED_AT_MS,
+                observed_items=[_item()],
+                source_channel="arbitrary_market_channel",
+            )
 
     def test_empty_poll_and_poll_result_projection_remain_deterministic(self) -> None:
         empty = build_source_import_packet(

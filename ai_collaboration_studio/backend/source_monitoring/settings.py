@@ -16,6 +16,9 @@ SOURCE_MONITOR_AUTO_START_ENV = "AI_STUDIO_SOURCE_MONITOR_AUTO_START"
 SOURCE_MONITOR_OFFICIAL_ONLY_ENV = "AI_STUDIO_SOURCE_MONITOR_OFFICIAL_ONLY"
 SOURCE_MONITOR_DRY_RUN_ENV = "AI_STUDIO_SOURCE_MONITOR_DRY_RUN"
 SOURCE_MONITOR_MAX_ITEMS_ENV = "AI_STUDIO_SOURCE_MONITOR_MAX_ITEMS_PER_RUN"
+SOURCE_MONITOR_ALLOW_READONLY_MARKET_ENV = (
+    "AI_STUDIO_SOURCE_MONITOR_ALLOW_READONLY_MARKET"
+)
 
 _INTEGER_RE = re.compile(r"[1-9][0-9]*\Z")
 
@@ -81,6 +84,7 @@ class SourceMonitoringSettings:
     enabled: bool = False
     auto_start: bool = False
     official_only: bool = True
+    allow_readonly_market: bool = False
     dry_run: bool = True
     max_items_per_run: int = MAX_OBSERVED_ITEMS_PER_POLL
 
@@ -89,6 +93,7 @@ class SourceMonitoringSettings:
             "enabled",
             "auto_start",
             "official_only",
+            "allow_readonly_market",
             "dry_run",
         ):
             if type(getattr(self, field_name)) is not bool:
@@ -106,10 +111,13 @@ class SourceMonitoringSettings:
                 "SOURCE_MONITORING_MAX_ITEMS_INVALID",
                 "max_items_per_run must be a native integer between 1 and 50",
             )
-        if self.official_only is not True:
+        if self.official_only is self.allow_readonly_market:
             raise SourceMonitoringSettingsError(
-                "SOURCE_MONITORING_OFFICIAL_ONLY_REQUIRED",
-                "official_only must remain true for the official source monitor",
+                "SOURCE_MONITORING_SOURCE_MODE_INVALID",
+                (
+                    "exactly one of official_only or allow_readonly_market "
+                    "must be true"
+                ),
             )
         if self.auto_start and not self.enabled:
             raise SourceMonitoringSettingsError(
@@ -144,6 +152,11 @@ class SourceMonitoringSettings:
                 SOURCE_MONITOR_OFFICIAL_ONLY_ENV,
                 default=True,
             ),
+            allow_readonly_market=_strict_boolean(
+                source,
+                SOURCE_MONITOR_ALLOW_READONLY_MARKET_ENV,
+                default=False,
+            ),
             dry_run=_strict_boolean(
                 source,
                 SOURCE_MONITOR_DRY_RUN_ENV,
@@ -157,6 +170,7 @@ class SourceMonitoringSettings:
             "enabled": self.enabled,
             "auto_start": self.auto_start,
             "official_only": self.official_only,
+            "allow_readonly_market": self.allow_readonly_market,
             "dry_run": self.dry_run,
             "max_items_per_run": self.max_items_per_run,
         }
@@ -170,6 +184,7 @@ def load_source_monitoring_settings(
 
 __all__ = [
     "SOURCE_MONITOR_AUTO_START_ENV",
+    "SOURCE_MONITOR_ALLOW_READONLY_MARKET_ENV",
     "SOURCE_MONITOR_DRY_RUN_ENV",
     "SOURCE_MONITOR_ENABLED_ENV",
     "SOURCE_MONITOR_MAX_ITEMS_ENV",

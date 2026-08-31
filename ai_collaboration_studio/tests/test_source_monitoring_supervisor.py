@@ -16,6 +16,8 @@ from backend.source_monitoring.adapters.base import (  # noqa: E402
     SOURCE_ADAPTER_CONTRACT_VERSION,
 )
 from backend.source_monitoring.contracts import (  # noqa: E402
+    FUTU_ANOMALY_SOURCE_CHANNEL,
+    READONLY_MARKET_SOURCE_CLASS,
     AdapterPollResult,
     SourcePollError,
 )
@@ -141,7 +143,16 @@ class FakeAdapter:
             etag=self.response_etag,
             last_modified=self.response_last_modified,
             rejected_count=1 if self.mode == "rejected" else 0,
+            market_calls_performed=getattr(self, "market_call_count", 0),
         )
+
+
+class FakeReadonlyMarketAdapter(FakeAdapter):
+    official_source = False
+    source_class = READONLY_MARKET_SOURCE_CLASS
+    source_channel = FUTU_ANOMALY_SOURCE_CHANNEL
+    max_market_calls_per_poll = 1
+    market_call_count = 1
 
 
 class SourceMonitoringSupervisorTests(unittest.TestCase):
@@ -473,6 +484,63 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
         with self.assertRaises(SourceMonitoringSupervisorError) as captured:
             supervisor.run_once(adapter.adapter_key)
         self.assertEqual(captured.exception.code, "SOURCE_MONITORING_DISABLED")
+        self.assertIsNone(self.repository.get_state(adapter.adapter_key))
+
+    def test_readonly_market_mode_uses_its_channel_and_truthful_call_receipt(self) -> None:
+        adapter = FakeReadonlyMarketAdapter("fixture_readonly_market")
+        settings = SourceMonitoringSettings(
+            enabled=True,
+            auto_start=False,
+            official_only=False,
+            allow_readonly_market=True,
+            dry_run=False,
+            max_items_per_run=50,
+        )
+        supervisor = SourceMonitoringSupervisor(
+            registry=SourceAdapterRegistry((adapter,), official_only=False),
+            repository=self.repository,
+            source_inbox=self.inbox,
+            settings=settings,
+            backoff_policy=self.backoff,
+            clock_ms=lambda: self.clock[0],
+        )
+        self.enable(adapter)
+        provider_before = self.provider_counts()
+
+        result = supervisor.run_once(adapter.adapter_key)
+
+        self.assertEqual(result["status"], "SUCCEEDED")
+        self.assertEqual(result["safety"]["market_calls_performed"], 1)
+        self.assertEqual(result["safety"]["market_calls_accounting"], "exact")
+        self.assertEqual(result["safety"]["market_calls_possible_max"], 1)
+        self.assertEqual(self.provider_counts(), provider_before)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            channel = connection.execute(
+                "SELECT source_channel FROM source_inbox_imports"
+            ).fetchone()[0]
+        self.assertEqual(channel, FUTU_ANOMALY_SOURCE_CHANNEL)
+
+    def test_readonly_market_global_disable_prevents_poll_and_state_creation(self) -> None:
+        adapter = FakeReadonlyMarketAdapter("fixture_readonly_disabled")
+        supervisor = SourceMonitoringSupervisor(
+            registry=SourceAdapterRegistry((adapter,), official_only=False),
+            repository=self.repository,
+            source_inbox=self.inbox,
+            settings=SourceMonitoringSettings(
+                enabled=False,
+                auto_start=False,
+                official_only=False,
+                allow_readonly_market=True,
+                dry_run=True,
+            ),
+            backoff_policy=self.backoff,
+            clock_ms=lambda: self.clock[0],
+        )
+
+        with self.assertRaises(SourceMonitoringSupervisorError):
+            supervisor.run_once(adapter.adapter_key)
+
+        self.assertEqual(adapter.poll_count, 0)
         self.assertIsNone(self.repository.get_state(adapter.adapter_key))
 
     def test_low_global_item_capacity_fails_before_any_state_or_run(self) -> None:

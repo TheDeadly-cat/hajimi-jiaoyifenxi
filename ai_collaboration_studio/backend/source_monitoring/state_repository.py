@@ -20,6 +20,8 @@ from .contracts import (
     MAX_LAST_MODIFIED_CHARS,
     MAX_NATIVE_INTEGER,
     MAX_SOURCE_ERRORS_PER_POLL,
+    OFFICIAL_SOURCE_CHANNEL,
+    SOURCE_MONITORING_SOURCE_CHANNELS,
     SourceMonitoringContractError,
     SourcePollError,
     canonical_json,
@@ -906,6 +908,7 @@ class SourceMonitoringStateRepository:
         next_due_at_ms: int,
         source_errors: Any = (),
         receipt_id: str = "",
+        source_channel: str = OFFICIAL_SOURCE_CHANNEL,
         etag: str = "",
         last_modified: str = "",
         error_code: str = "",
@@ -940,6 +943,15 @@ class SourceMonitoringStateRepository:
         normalized_errors = _normalize_source_error_records(source_errors)
         source_errors_json = canonical_json(normalized_errors)
         clean_receipt = _clean_optional_text(receipt_id, "receipt_id", maximum=200)
+        if (
+            type(source_channel) is not str
+            or source_channel not in SOURCE_MONITORING_SOURCE_CHANNELS
+        ):
+            raise SourceMonitoringStateError(
+                "source channel is not in the closed monitoring channel set",
+                code="SOURCE_MONITORING_SOURCE_CHANNEL_INVALID",
+            )
+        clean_source_channel = source_channel
         clean_etag = _clean_optional_text(etag, "etag", maximum=MAX_ETAG_CHARS)
         clean_last_modified = _clean_optional_text(
             last_modified,
@@ -971,7 +983,7 @@ class SourceMonitoringStateRepository:
                 ).fetchone()
                 if (
                     receipt_row is None
-                    or str(receipt_row["source_channel"]) != "official_source_monitor"
+                    or str(receipt_row["source_channel"]) != clean_source_channel
                     or str(receipt_row["source_key"]) != run["adapter_key"]
                     or str(receipt_row["external_run_id"]) != run["run_id"]
                 ):

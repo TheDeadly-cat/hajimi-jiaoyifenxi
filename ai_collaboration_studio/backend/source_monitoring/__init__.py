@@ -1,4 +1,4 @@
-"""Deterministic contracts for official source monitoring."""
+"""Deterministic contracts for official and sealed read-only source monitoring."""
 
 from .contracts import (
     MAX_ADAPTER_KEY_CHARS,
@@ -9,9 +9,14 @@ from .contracts import (
     MAX_ETAG_CHARS,
     MAX_JSON_DEPTH,
     MAX_LAST_MODIFIED_CHARS,
+    MAX_MARKET_CALLS_PER_POLL,
     MAX_NATIVE_INTEGER,
     MAX_OBSERVED_ITEMS_PER_POLL,
     MAX_SOURCE_ERRORS_PER_POLL,
+    FUTU_ANOMALY_SOURCE_CHANNEL,
+    OFFICIAL_SOURCE_CHANNEL,
+    OFFICIAL_SOURCE_CLASS,
+    READONLY_MARKET_SOURCE_CLASS,
     AdapterPollResult,
     SourceMonitoringContractError,
     SourcePollError,
@@ -30,9 +35,14 @@ __all__ = [
     "MAX_ETAG_CHARS",
     "MAX_JSON_DEPTH",
     "MAX_LAST_MODIFIED_CHARS",
+    "MAX_MARKET_CALLS_PER_POLL",
     "MAX_NATIVE_INTEGER",
     "MAX_OBSERVED_ITEMS_PER_POLL",
     "MAX_SOURCE_ERRORS_PER_POLL",
+    "FUTU_ANOMALY_SOURCE_CHANNEL",
+    "OFFICIAL_SOURCE_CHANNEL",
+    "OFFICIAL_SOURCE_CLASS",
+    "READONLY_MARKET_SOURCE_CLASS",
     "AdapterPollResult",
     "SourceMonitoringContractError",
     "SourcePollError",

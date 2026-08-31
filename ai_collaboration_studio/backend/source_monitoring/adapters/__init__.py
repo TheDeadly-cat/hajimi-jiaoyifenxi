@@ -16,6 +16,10 @@ from .macro_official import (
     OfficialMacroCalendarSourceAdapter,
     TreasuryReleaseSourceAdapter,
 )
+from .futu_anomaly import (
+    FUTU_ANOMALY_ADAPTER_KEY,
+    FutuAnomalySourceAdapter,
+)
 
 __all__ = [
     "SOURCE_ADAPTER_CONTRACT_VERSION",
@@ -30,4 +34,6 @@ __all__ = [
     "FederalReserveSourceAdapter",
     "OfficialMacroCalendarSourceAdapter",
     "TreasuryReleaseSourceAdapter",
+    "FUTU_ANOMALY_ADAPTER_KEY",
+    "FutuAnomalySourceAdapter",
 ]

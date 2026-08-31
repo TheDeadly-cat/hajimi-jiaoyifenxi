@@ -11,6 +11,11 @@ from pathlib import Path
 
 os.environ["AI_STUDIO_SKIP_LOCAL_ENV"] = "1"
 
+from backend.source_monitoring.contracts import (  # noqa: E402
+    FUTU_ANOMALY_SOURCE_CHANNEL,
+    OFFICIAL_SOURCE_CHANNEL,
+)
+
 from backend.source_monitoring.state_repository import (  # noqa: E402
     RUN_STATUS_ABANDONED,
     RUN_STATUS_DEGRADED,
@@ -49,12 +54,17 @@ class SourceMonitoringStateRepositoryTests(unittest.TestCase):
             enabled=True,
         )
 
-    def import_for_run(self, run_id: str) -> dict:
+    def import_for_run(
+        self,
+        run_id: str,
+        *,
+        source_channel: str = OFFICIAL_SOURCE_CHANNEL,
+    ) -> dict:
         packet = copy.deepcopy(_packet())
-        packet["source_channel"] = "official_source_monitor"
+        packet["source_channel"] = source_channel
         packet["source_key"] = self.adapter_key
         packet["external_run_id"] = run_id
-        packet["generation"]["channel"] = "official_source_monitor"
+        packet["generation"]["channel"] = source_channel
         packet["generation"]["correlated_output"] = False
         packet["items"][0]["external_item_id"] = run_id
         packet["items"][0]["headline"] = f"Official source event for {run_id}"
@@ -385,6 +395,41 @@ class SourceMonitoringStateRepositoryTests(unittest.TestCase):
             error_message="Close the intentionally rejected run.",
             next_due_at_ms=self.clock[0],
         )
+
+    def test_receipt_binding_rejects_cross_channel_and_accepts_exact_channel(self) -> None:
+        self.enable()
+        started = self.repository.start_run(
+            self.adapter_key,
+            config_version=self.config_version,
+        )
+        imported = self.import_for_run(
+            started["run"]["run_id"],
+            source_channel=FUTU_ANOMALY_SOURCE_CHANNEL,
+        )
+        common = {
+            "next_checkpoint": {"cursor": 1},
+            "status": RUN_STATUS_SUCCEEDED,
+            "observed_count": 1,
+            "accepted_count": 1,
+            "duplicate_count": 0,
+            "rejected_count": 0,
+            "next_due_at_ms": self.clock[0],
+            "receipt_id": imported["import_id"],
+        }
+
+        with self.assertRaises(SourceMonitoringStateError) as mismatch:
+            self.repository.complete_run(started["run"]["run_id"], **common)
+        self.assertEqual(
+            mismatch.exception.code,
+            "SOURCE_MONITORING_RECEIPT_INVALID",
+        )
+
+        completed = self.repository.complete_run(
+            started["run"]["run_id"],
+            **common,
+            source_channel=FUTU_ANOMALY_SOURCE_CHANNEL,
+        )
+        self.assertEqual(completed["run"]["status"], RUN_STATUS_SUCCEEDED)
 
     def test_restart_recovery_abandons_run_without_advancing_checkpoint(self) -> None:
         self.enable()

@@ -27,6 +27,20 @@ MAX_ETAG_CHARS = 1_024
 MAX_LAST_MODIFIED_CHARS = 256
 MAX_JSON_DEPTH = 32
 MAX_NATIVE_INTEGER = (1 << 63) - 1
+MAX_MARKET_CALLS_PER_POLL = 50
+
+OFFICIAL_SOURCE_CLASS = "official_source"
+READONLY_MARKET_SOURCE_CLASS = "readonly_market"
+OFFICIAL_SOURCE_CHANNEL = "official_source_monitor"
+FUTU_ANOMALY_SOURCE_CHANNEL = "futu_anomaly_monitor"
+SOURCE_MONITORING_SOURCE_CLASSES = frozenset({
+    OFFICIAL_SOURCE_CLASS,
+    READONLY_MARKET_SOURCE_CLASS,
+})
+SOURCE_MONITORING_SOURCE_CHANNELS = frozenset({
+    OFFICIAL_SOURCE_CHANNEL,
+    FUTU_ANOMALY_SOURCE_CHANNEL,
+})
 
 _ADAPTER_KEY_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _ERROR_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,79}\Z")
@@ -380,6 +394,7 @@ class AdapterPollResult:
     last_modified: str
     duplicate_count: int
     rejected_count: int
+    market_calls_performed: int
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -412,6 +427,7 @@ class AdapterPollResult:
             "captured_at_ms",
             "duplicate_count",
             "rejected_count",
+            "market_calls_performed",
         ):
             object.__setattr__(
                 self,
@@ -457,6 +473,7 @@ class AdapterPollResult:
         last_modified: Any = "",
         duplicate_count: Any = 0,
         rejected_count: Any = 0,
+        market_calls_performed: Any = 0,
     ) -> "AdapterPollResult":
         return cls(
             adapter_key=adapter_key,
@@ -470,6 +487,7 @@ class AdapterPollResult:
             last_modified=last_modified,
             duplicate_count=duplicate_count,
             rejected_count=rejected_count,
+            market_calls_performed=market_calls_performed,
         )
 
     @property
@@ -490,6 +508,7 @@ class AdapterPollResult:
             "last_modified": self.last_modified,
             "duplicate_count": self.duplicate_count,
             "rejected_count": self.rejected_count,
+            "market_calls_performed": self.market_calls_performed,
         }
 
 
@@ -502,9 +521,16 @@ __all__ = [
     "MAX_ETAG_CHARS",
     "MAX_JSON_DEPTH",
     "MAX_LAST_MODIFIED_CHARS",
+    "MAX_MARKET_CALLS_PER_POLL",
     "MAX_NATIVE_INTEGER",
     "MAX_OBSERVED_ITEMS_PER_POLL",
     "MAX_SOURCE_ERRORS_PER_POLL",
+    "OFFICIAL_SOURCE_CHANNEL",
+    "OFFICIAL_SOURCE_CLASS",
+    "FUTU_ANOMALY_SOURCE_CHANNEL",
+    "READONLY_MARKET_SOURCE_CLASS",
+    "SOURCE_MONITORING_SOURCE_CHANNELS",
+    "SOURCE_MONITORING_SOURCE_CLASSES",
     "AdapterPollResult",
     "SourceMonitoringContractError",
     "SourcePollError",

@@ -204,6 +204,7 @@ class SourceMonitoringScheduler:
                 result = self.supervisor.run_once(adapter_key)
             except Exception as exc:  # isolate one worker boundary from its peers
                 boundary_failed = True
+                metadata = self.registry.metadata_for(adapter_key)
                 result = {
                     "version": "source_monitoring_run_result_v1",
                     "adapter_key": adapter_key,
@@ -215,7 +216,18 @@ class SourceMonitoringScheduler:
                         "execution_capability": "none",
                         "live_trading_allowed": False,
                         "provider_calls_performed": 0,
-                        "market_calls_performed": 0,
+                        "market_calls_performed": (
+                            0 if metadata.max_market_calls_per_poll == 0 else None
+                        ),
+                        "market_calls_accounting": (
+                            "exact"
+                            if metadata.max_market_calls_per_poll == 0
+                            else "unknown"
+                        ),
+                        "market_calls_possible_max": (
+                            metadata.max_market_calls_per_poll
+                        ),
+                        "formal_rounds_created": 0,
                     },
                 }
             results.append(result)
@@ -235,6 +247,15 @@ class SourceMonitoringScheduler:
                 )
             else:
                 self._ephemeral_due_at_ms.pop(adapter_key, None)
+        market_call_values = [
+            result.get("safety", {}).get("market_calls_performed")
+            for result in results
+        ]
+        market_calls_exact = all(type(value) is int for value in market_call_values)
+        market_calls_possible_max = sum(
+            int(result.get("safety", {}).get("market_calls_possible_max") or 0)
+            for result in results
+        )
         return {
             "version": "source_monitoring_schedule_cycle_v1",
             "started_at_ms": started_at,
@@ -245,7 +266,13 @@ class SourceMonitoringScheduler:
                 "execution_capability": "none",
                 "live_trading_allowed": False,
                 "provider_calls_performed": 0,
-                "market_calls_performed": 0,
+                "market_calls_performed": (
+                    sum(market_call_values) if market_calls_exact else None
+                ),
+                "market_calls_accounting": (
+                    "exact" if market_calls_exact else "unknown"
+                ),
+                "market_calls_possible_max": market_calls_possible_max,
             },
         }
 

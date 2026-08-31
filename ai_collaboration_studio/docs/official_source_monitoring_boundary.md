@@ -8,6 +8,7 @@
 AI_STUDIO_SOURCE_MONITOR_ENABLED=0
 AI_STUDIO_SOURCE_MONITOR_AUTO_START=0
 AI_STUDIO_SOURCE_MONITOR_OFFICIAL_ONLY=1
+AI_STUDIO_SOURCE_MONITOR_ALLOW_READONLY_MARKET=0
 AI_STUDIO_SOURCE_MONITOR_DRY_RUN=1
 AI_STUDIO_SOURCE_MONITOR_MAX_ITEMS_PER_RUN=50
 ```
@@ -37,8 +38,8 @@ Dry-run 只验证候选 packet 并保存终态 run receipt，不写 Source Inbox
 - 每个适配器声明并封印本轮可输出的 `max_candidates_per_poll`（当前默认 SEC 42、IR 32、Fed 50、BLS 12、Treasury 10、宏观日历 50）。该上限是每个 adapter 的界限，不是一次 scheduler cycle 的总额。全局 `AI_STUDIO_SOURCE_MONITOR_MAX_ITEMS_PER_RUN` 小于任一输出上界时，Supervisor 在写 state/run 前拒绝构造；适配器被直接调用时也在抓取前拒绝。监控专用解析路径会完整验证固定窗口，超过候选或 checkpoint 容量时整轮零候选、显式报错并保持起始 checkpoint，禁止静默截断。
 - Checkpoint 必须能完整表示当前官方窗口：SEC 最多 1,000 个唯一 accession，IR 最多 250 个唯一身份。当前有效窗口一旦超过容量，整轮返回显式 capacity source error、零候选、零导入并保持 started checkpoint；Supervisor 记录 `DEGRADED`。容量内更新会先丢弃已离开当前窗口的 stale 身份，再加入新身份，禁止通过尾部截断造成循环重放或尾部饥饿。更大的官方窗口需要后续版本化水位/回填游标，不能在本版本静默降级。
 - 所有候选保持 `external_unverified`，已阅不代表事实确认。
-- Worker 不调用 Provider、Futu/市场读取或模型，不创建房间、材料、round draft 或正式 round。
+- 阶段 1～3 的官方 Worker 不调用 Provider、Futu/市场读取或模型，不创建房间、材料、round draft 或正式 round。阶段 4 的 Futu 异常监控使用独立 registry、`readonly_market` 来源类别和 `futu_anomaly_monitor` channel，详见 `futu_anomaly_monitoring_phase4.md`；它不会进入本官方 registry。
 - `execution_capability=none`、`live_trading_allowed=false`；没有订单、账户、资金、支付或钱包能力。
 - 关闭监控不会删除已存监控数据，也不改变原有房间、材料、Manual ChatGPT 或 Source Inbox 状态机。
 
-阶段 3 的宏观源只投递官方计划/发布/修订事实，不计算影响、不生成交易语言。Futu 异动、零 Token 影响规则、前端通知、GPT 导入增强和自动启动仍属于后续阶段，不在本次实现中。
+阶段 3 的宏观源只投递官方计划/发布/修订事实，不计算影响、不生成交易语言。阶段 4 的独立 Futu 异常信号已经实现，但零 Token 影响规则、前端通知、GPT 导入增强和自动启动仍属于后续阶段，不在阶段 1～4 实现中。

@@ -87,11 +87,25 @@ class SourceMonitoringSupervisor:
                 "SOURCE_MONITORING_SETTINGS_INVALID",
                 "settings must be SourceMonitoringSettings",
             )
-        if settings.official_only is not True or registry.official_only is not True:
+        if settings.official_only is not registry.official_only:
             raise SourceMonitoringSupervisorError(
-                "SOURCE_MONITORING_OFFICIAL_ONLY_REQUIRED",
-                "the phase-one worker requires official-only mode",
+                "SOURCE_MONITORING_SOURCE_MODE_MISMATCH",
+                "settings and registry must use the same closed source mode",
             )
+        if registry.official_only is not True:
+            if settings.allow_readonly_market is not True:
+                raise SourceMonitoringSupervisorError(
+                    "SOURCE_MONITORING_READONLY_MARKET_NOT_ALLOWED",
+                    "read-only market adapters require explicit opt-in",
+                )
+            if not any(
+                registry.metadata_for(adapter_key).official_source is False
+                for adapter_key in registry.adapter_keys
+            ):
+                raise SourceMonitoringSupervisorError(
+                    "SOURCE_MONITORING_READONLY_MARKET_ADAPTER_REQUIRED",
+                    "read-only market mode requires a non-official market adapter",
+                )
         if after_import_hook is not None and not callable(after_import_hook):
             raise SourceMonitoringSupervisorError(
                 "SOURCE_MONITORING_IMPORT_HOOK_INVALID",
@@ -140,7 +154,15 @@ class SourceMonitoringSupervisor:
             self._recovery_completed = True
             return recovered
 
-    def _base_result(self, *, adapter_key: str, run_id: str, status: str) -> dict[str, Any]:
+    def _base_result(
+        self,
+        *,
+        adapter_key: str,
+        run_id: str,
+        status: str,
+        market_calls_performed: int | None = 0,
+        market_calls_possible_max: int = 0,
+    ) -> dict[str, Any]:
         return {
             "version": SOURCE_MONITORING_RUN_RESULT_VERSION,
             "adapter_key": adapter_key,
@@ -150,7 +172,11 @@ class SourceMonitoringSupervisor:
                 "execution_capability": "none",
                 "live_trading_allowed": False,
                 "provider_calls_performed": 0,
-                "market_calls_performed": 0,
+                "market_calls_performed": market_calls_performed,
+                "market_calls_accounting": (
+                    "exact" if type(market_calls_performed) is int else "unknown"
+                ),
+                "market_calls_possible_max": market_calls_possible_max,
                 "formal_rounds_created": 0,
             },
         }
@@ -200,6 +226,15 @@ class SourceMonitoringSupervisor:
                     "SOURCE_MONITORING_ADAPTER_RESULT_MISMATCH",
                     "poll result adapter_key does not match the active adapter",
                 )
+            if candidate.market_calls_performed > metadata.max_market_calls_per_poll:
+                raise SourceMonitoringSupervisorError(
+                    "SOURCE_MONITORING_MARKET_CALL_BOUND_EXCEEDED",
+                    (
+                        f"adapter {metadata.adapter_key} reported "
+                        f"{candidate.market_calls_performed} market calls above its "
+                        f"sealed bound of {metadata.max_market_calls_per_poll}"
+                    ),
+                )
             if canonical_json(candidate.started_checkpoint) != canonical_json(
                 started["run"]["started_checkpoint"]
             ):
@@ -211,6 +246,7 @@ class SourceMonitoringSupervisor:
                 candidate,
                 external_run_id=run_id,
                 max_items=self.settings.max_items_per_run,
+                source_channel=metadata.source_channel,
             )
             validation_time_ms = max(self._now_ms(), candidate.captured_at_ms)
             payload = canonical_source_import_payload(
@@ -234,6 +270,7 @@ class SourceMonitoringSupervisor:
                     rejected_count=candidate.rejected_count,
                     next_due_at_ms=projected_due,
                     source_errors=list(candidate.source_errors),
+                    source_channel=metadata.source_channel,
                     etag=candidate.etag,
                     last_modified=candidate.last_modified,
                 )
@@ -241,6 +278,8 @@ class SourceMonitoringSupervisor:
                     adapter_key=metadata.adapter_key,
                     run_id=run_id,
                     status=RUN_STATUS_DRY_RUN,
+                    market_calls_performed=candidate.market_calls_performed,
+                    market_calls_possible_max=metadata.max_market_calls_per_poll,
                 )
                 result.update({
                     "candidate_count": len(candidate.observed_items),
@@ -315,6 +354,7 @@ class SourceMonitoringSupervisor:
                 next_due_at_ms=next_due_at_ms,
                 source_errors=list(candidate.source_errors),
                 receipt_id=receipt_id,
+                source_channel=metadata.source_channel,
                 etag=candidate.etag,
                 last_modified=candidate.last_modified,
                 error_code=error_code,
@@ -324,6 +364,8 @@ class SourceMonitoringSupervisor:
                 adapter_key=metadata.adapter_key,
                 run_id=run_id,
                 status=terminal_status,
+                market_calls_performed=candidate.market_calls_performed,
+                market_calls_possible_max=metadata.max_market_calls_per_poll,
             )
             result.update({
                 "run": completed["run"],
@@ -388,6 +430,7 @@ class SourceMonitoringSupervisor:
                             if poll_result is not None
                             else []
                         ),
+                        source_channel=metadata.source_channel,
                         error_code=error_code,
                         error_message=error_message,
                     )
@@ -433,6 +476,14 @@ class SourceMonitoringSupervisor:
                     if self.settings.dry_run
                     else RUN_STATUS_FAILED
                 ),
+                market_calls_performed=(
+                    poll_result.market_calls_performed
+                    if poll_result is not None
+                    else 0
+                    if metadata.max_market_calls_per_poll == 0
+                    else None
+                ),
+                market_calls_possible_max=metadata.max_market_calls_per_poll,
             )
             result.update({
                 "error_code": error_code,

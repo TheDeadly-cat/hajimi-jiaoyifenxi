@@ -46,6 +46,7 @@ def _result(**overrides) -> AdapterPollResult:
         "last_modified": "Sun, 30 Aug 2026 17:00:00 GMT",
         "duplicate_count": 0,
         "rejected_count": 0,
+        "market_calls_performed": 0,
     }
     values.update(overrides)
     return AdapterPollResult.build(**values)
@@ -171,6 +172,7 @@ class AdapterPollResultContractTests(unittest.TestCase):
             source_errors=[source_error],
             duplicate_count=3,
             rejected_count=2,
+            market_calls_performed=1,
             etag="  etag-value  ",
         )
 
@@ -185,11 +187,13 @@ class AdapterPollResultContractTests(unittest.TestCase):
         self.assertIsNot(result.source_errors[0], source_error)
         self.assertEqual(result.etag, "etag-value")
         self.assertEqual(result.observed_count, 6)
+        self.assertEqual(result.market_calls_performed, 1)
 
         projection = result.to_dict()
         self.assertEqual(projection["observed_count"], 6)
         self.assertEqual(projection["duplicate_count"], 3)
         self.assertEqual(projection["rejected_count"], 2)
+        self.assertEqual(projection["market_calls_performed"], 1)
         projection["started_checkpoint"]["cursor"]["page"] = 101
         projection["next_checkpoint"]["cursor"]["page"] = 102
         projection["observed_items"][0]["facts"][0]["value"] = 103
@@ -207,6 +211,7 @@ class AdapterPollResultContractTests(unittest.TestCase):
             "captured_at_ms",
             "duplicate_count",
             "rejected_count",
+            "market_calls_performed",
         ):
             for invalid in (True, NativeIntSubclass(1), -1):
                 with self.subTest(field=field, invalid=invalid):

@@ -8,9 +8,16 @@ import re
 from typing import Any, Protocol, runtime_checkable
 
 from ..contracts import (
+    FUTU_ANOMALY_SOURCE_CHANNEL,
     MAX_ETAG_CHARS,
     MAX_LAST_MODIFIED_CHARS,
+    MAX_MARKET_CALLS_PER_POLL,
     MAX_OBSERVED_ITEMS_PER_POLL,
+    OFFICIAL_SOURCE_CHANNEL,
+    OFFICIAL_SOURCE_CLASS,
+    READONLY_MARKET_SOURCE_CLASS,
+    SOURCE_MONITORING_SOURCE_CHANNELS,
+    SOURCE_MONITORING_SOURCE_CLASSES,
     AdapterPollResult,
     SourceMonitoringContractError,
     normalize_adapter_key,
@@ -81,6 +88,9 @@ class SourceAdapterMetadata:
     poll_interval_ms: int
     max_candidates_per_poll: int
     official_source: bool
+    source_class: str
+    source_channel: str
+    max_market_calls_per_poll: int
     execution_capability: str
     live_trading_allowed: bool
 
@@ -133,6 +143,57 @@ class SourceAdapterMetadata:
                 "official_source must be a native boolean",
             )
         if (
+            type(self.source_class) is not str
+            or self.source_class not in SOURCE_MONITORING_SOURCE_CLASSES
+        ):
+            raise SourceAdapterContractError(
+                "SOURCE_ADAPTER_SOURCE_CLASS_INVALID",
+                "source_class is not in the closed monitoring source-class set",
+            )
+        if (
+            type(self.source_channel) is not str
+            or self.source_channel not in SOURCE_MONITORING_SOURCE_CHANNELS
+        ):
+            raise SourceAdapterContractError(
+                "SOURCE_ADAPTER_SOURCE_CHANNEL_INVALID",
+                "source_channel is not in the closed monitoring channel set",
+            )
+        if (
+            type(self.max_market_calls_per_poll) is not int
+            or not 0
+            <= self.max_market_calls_per_poll
+            <= MAX_MARKET_CALLS_PER_POLL
+        ):
+            raise SourceAdapterContractError(
+                "SOURCE_ADAPTER_MARKET_CALL_BOUND_INVALID",
+                (
+                    "max_market_calls_per_poll must be a native integer "
+                    f"between 0 and {MAX_MARKET_CALLS_PER_POLL}"
+                ),
+            )
+        expected_source = (
+            (OFFICIAL_SOURCE_CLASS, OFFICIAL_SOURCE_CHANNEL, 0)
+            if self.official_source
+            else (
+                READONLY_MARKET_SOURCE_CLASS,
+                FUTU_ANOMALY_SOURCE_CHANNEL,
+                1,
+            )
+        )
+        if (
+            self.source_class != expected_source[0]
+            or self.source_channel != expected_source[1]
+            or (
+                self.max_market_calls_per_poll != 0
+                if self.official_source
+                else self.max_market_calls_per_poll < expected_source[2]
+            )
+        ):
+            raise SourceAdapterContractError(
+                "SOURCE_ADAPTER_SOURCE_BINDING_INVALID",
+                "official and read-only market source metadata must use their exact channel binding",
+            )
+        if (
             type(self.execution_capability) is not str
             or self.execution_capability != "none"
         ):
@@ -159,6 +220,9 @@ class SourceAdapterMetadata:
             "poll_interval_ms": self.poll_interval_ms,
             "max_candidates_per_poll": self.max_candidates_per_poll,
             "official_source": self.official_source,
+            "source_class": self.source_class,
+            "source_channel": self.source_channel,
+            "max_market_calls_per_poll": self.max_market_calls_per_poll,
             "execution_capability": self.execution_capability,
             "live_trading_allowed": self.live_trading_allowed,
         }
@@ -244,6 +308,7 @@ def validate_source_adapter(adapter: Any) -> SourceAdapterMetadata:
                 "etag='', last_modified='', max_items=50)"
             ),
         )
+    official_source = getattr(adapter, "official_source", None)
     return SourceAdapterMetadata(
         contract_version=getattr(adapter, "contract_version", None),
         adapter_key=getattr(adapter, "adapter_key", None),
@@ -254,7 +319,22 @@ def validate_source_adapter(adapter: Any) -> SourceAdapterMetadata:
             "max_candidates_per_poll",
             None,
         ),
-        official_source=getattr(adapter, "official_source", None),
+        official_source=official_source,
+        source_class=getattr(
+            adapter,
+            "source_class",
+            OFFICIAL_SOURCE_CLASS if official_source is True else None,
+        ),
+        source_channel=getattr(
+            adapter,
+            "source_channel",
+            OFFICIAL_SOURCE_CHANNEL if official_source is True else None,
+        ),
+        max_market_calls_per_poll=getattr(
+            adapter,
+            "max_market_calls_per_poll",
+            0 if official_source is True else None,
+        ),
         execution_capability=getattr(adapter, "execution_capability", None),
         live_trading_allowed=getattr(adapter, "live_trading_allowed", None),
     )

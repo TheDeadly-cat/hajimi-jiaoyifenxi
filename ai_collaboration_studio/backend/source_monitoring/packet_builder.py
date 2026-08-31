@@ -1,4 +1,4 @@
-"""Build fixed-channel packets for the existing Source Inbox contract."""
+"""Build closed-channel packets for the existing Source Inbox contract."""
 
 from __future__ import annotations
 
@@ -16,6 +16,9 @@ from ..source_inbox_contracts import (
     accept_source_import,
 )
 from .contracts import (
+    FUTU_ANOMALY_SOURCE_CHANNEL,
+    OFFICIAL_SOURCE_CHANNEL,
+    SOURCE_MONITORING_SOURCE_CHANNELS,
     AdapterPollResult,
     SourceMonitoringContractError,
     canonical_json,
@@ -23,7 +26,6 @@ from .contracts import (
 )
 
 
-OFFICIAL_SOURCE_CHANNEL = "official_source_monitor"
 MAX_PACKET_TIMESTAMP_MS = 253_402_300_799_999
 
 
@@ -86,6 +88,15 @@ def _max_items(value: Any) -> int:
     return value
 
 
+def normalize_source_channel(value: Any) -> str:
+    if type(value) is not str or value not in SOURCE_MONITORING_SOURCE_CHANNELS:
+        raise SourcePacketBuildError(
+            "SOURCE_MONITORING_PACKET_CHANNEL_INVALID",
+            "source_channel is not in the closed monitoring channel set",
+        )
+    return value
+
+
 def _observed_items(value: Any, *, maximum: int) -> list[dict[str, Any]]:
     if type(value) not in {list, tuple}:
         raise SourcePacketBuildError(
@@ -119,12 +130,14 @@ def build_source_import_packet(
     external_run_id: Any,
     captured_at_ms: Any,
     observed_items: Any,
+    source_channel: Any = OFFICIAL_SOURCE_CHANNEL,
     cutoff_at_ms: Any | None = None,
     max_items: Any = MAX_SOURCE_ITEMS,
 ) -> dict[str, Any]:
-    """Build and fully validate one raw, fixed-channel import packet."""
+    """Build and fully validate one raw import packet on a closed channel."""
 
     clean_adapter_key = normalize_adapter_key(adapter_key)
+    clean_source_channel = normalize_source_channel(source_channel)
     clean_run_id = _bounded_text(
         external_run_id,
         field="external_run_id",
@@ -145,7 +158,7 @@ def build_source_import_packet(
     items = _observed_items(observed_items, maximum=item_limit)
     packet: dict[str, Any] = {
         "version": SOURCE_IMPORT_PACKET_VERSION,
-        "source_channel": OFFICIAL_SOURCE_CHANNEL,
+        "source_channel": clean_source_channel,
         "source_key": clean_adapter_key,
         "external_run_id": clean_run_id,
         "checked_at": _rfc3339_from_ms(checked_ms),
@@ -153,7 +166,7 @@ def build_source_import_packet(
         "meaningful_change": bool(items),
         "items": items,
         "generation": {
-            "channel": OFFICIAL_SOURCE_CHANNEL,
+            "channel": clean_source_channel,
             "model": "",
             "cost": {
                 "status": "unavailable",
@@ -212,6 +225,7 @@ def build_source_import_payload(
     external_run_id: Any,
     captured_at_ms: Any,
     observed_items: Any,
+    source_channel: Any = OFFICIAL_SOURCE_CHANNEL,
     cutoff_at_ms: Any | None = None,
     max_items: Any = MAX_SOURCE_ITEMS,
     received_at_ms: Any | None = None,
@@ -221,6 +235,7 @@ def build_source_import_payload(
         external_run_id=external_run_id,
         captured_at_ms=captured_at_ms,
         observed_items=observed_items,
+        source_channel=source_channel,
         cutoff_at_ms=cutoff_at_ms,
         max_items=max_items,
     )
@@ -238,6 +253,7 @@ def build_packet_from_poll_result(
     external_run_id: Any,
     cutoff_at_ms: Any | None = None,
     max_items: Any = MAX_SOURCE_ITEMS,
+    source_channel: Any = OFFICIAL_SOURCE_CHANNEL,
 ) -> dict[str, Any]:
     if type(result) is not AdapterPollResult:
         raise SourcePacketBuildError(
@@ -249,6 +265,7 @@ def build_packet_from_poll_result(
         external_run_id=external_run_id,
         captured_at_ms=result.captured_at_ms,
         observed_items=result.observed_items,
+        source_channel=source_channel,
         cutoff_at_ms=cutoff_at_ms,
         max_items=max_items,
     )
@@ -261,12 +278,14 @@ def build_payload_from_poll_result(
     cutoff_at_ms: Any | None = None,
     max_items: Any = MAX_SOURCE_ITEMS,
     received_at_ms: Any | None = None,
+    source_channel: Any = OFFICIAL_SOURCE_CHANNEL,
 ) -> str:
     packet = build_packet_from_poll_result(
         result,
         external_run_id=external_run_id,
         cutoff_at_ms=cutoff_at_ms,
         max_items=max_items,
+        source_channel=source_channel,
     )
     return canonical_source_import_payload(
         packet,
@@ -278,6 +297,7 @@ def build_payload_from_poll_result(
 
 __all__ = [
     "MAX_PACKET_TIMESTAMP_MS",
+    "FUTU_ANOMALY_SOURCE_CHANNEL",
     "OFFICIAL_SOURCE_CHANNEL",
     "SourcePacketBuildError",
     "build_payload_from_poll_result",
@@ -285,4 +305,5 @@ __all__ = [
     "build_source_import_payload",
     "build_source_import_packet",
     "canonical_source_import_payload",
+    "normalize_source_channel",
 ]
