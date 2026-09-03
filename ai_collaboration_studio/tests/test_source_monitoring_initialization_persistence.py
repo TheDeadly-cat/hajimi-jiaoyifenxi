@@ -15,9 +15,11 @@ from backend.source_monitoring.state_repository import (  # noqa: E402
     RUN_STATUS_SUCCEEDED,
     SOURCE_MONITORING_INITIALIZATION_MIGRATION_KEY,
     SOURCE_MONITORING_INITIALIZATION_VERSION,
+    SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY,
     SourceMonitoringStateError,
     SourceMonitoringStateRepository,
     ensure_source_monitoring_schema,
+    source_monitoring_pending_authorization_schema_state,
 )
 from backend.store import StudioStore  # noqa: E402
 
@@ -37,6 +39,15 @@ INITIALIZATION_OBJECTS = {
     "trg_source_monitoring_initialization_marker_no_update",
     "trg_source_monitoring_initialization_marker_no_delete",
     "trg_source_monitoring_initialization_marker_no_replace",
+}
+PENDING_AUTHORIZATION_COLUMNS = {
+    "pending_initialization_authorization_json",
+    "pending_initialization_authorization_sha256",
+}
+PENDING_AUTHORIZATION_OBJECTS = {
+    "trg_source_monitoring_pending_authorization_marker_no_update",
+    "trg_source_monitoring_pending_authorization_marker_no_delete",
+    "trg_source_monitoring_pending_authorization_marker_no_replace",
 }
 
 
@@ -202,6 +213,32 @@ class SourceMonitoringInitializationPersistenceTests(unittest.TestCase):
         self.assertTrue(INITIALIZATION_OBJECTS.issubset(objects))
         self.assertIsNotNone(marker)
 
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            state_columns = {
+                row[1]: row for row in connection.execute(
+                    "PRAGMA table_info(source_adapter_states)"
+                )
+            }
+            pending_objects = {
+                row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE name LIKE '%pending_authorization%'"
+                )
+            }
+            pending_marker = connection.execute(
+                "SELECT applied_at FROM schema_migrations WHERE key=?",
+                (SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY,),
+            ).fetchone()
+            self.assertEqual(
+                source_monitoring_pending_authorization_schema_state(connection),
+                "current",
+            )
+        self.assertEqual(
+            set(state_columns).intersection(PENDING_AUTHORIZATION_COLUMNS),
+            PENDING_AUTHORIZATION_COLUMNS,
+        )
+        self.assertTrue(PENDING_AUTHORIZATION_OBJECTS.issubset(pending_objects))
+        self.assertIsNotNone(pending_marker)
+
         run = self._start()
         with closing(sqlite3.connect(self.database_path)) as connection:
             with self.assertRaises(sqlite3.IntegrityError):
@@ -260,10 +297,54 @@ class SourceMonitoringInitializationPersistenceTests(unittest.TestCase):
                 "SELECT applied_at FROM schema_migrations WHERE key=?",
                 (SOURCE_MONITORING_INITIALIZATION_MIGRATION_KEY,),
             ).fetchone()
+            state_columns = {
+                item[1] for item in connection.execute(
+                    "PRAGMA table_info(source_adapter_states)"
+                )
+            }
+            pending_marker = connection.execute(
+                "SELECT applied_at FROM schema_migrations WHERE key=?",
+                (SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY,),
+            ).fetchone()
 
         self.assertIsNotNone(row)
         self.assertTrue(INITIALIZATION_COLUMNS.issubset(run_columns))
         self.assertEqual(marker[0], 2)
+        self.assertTrue(PENDING_AUTHORIZATION_COLUMNS.issubset(state_columns))
+        self.assertEqual(pending_marker[0], 2)
+
+    def test_pending_authorization_migration_rolls_back_its_partial_unit(self) -> None:
+        legacy_path = Path(self.temp_dir.name) / "pending-atomic.sqlite3"
+        with closing(_legacy_connection(legacy_path)) as connection:
+            def deny_pending_trigger(action, arg1, _arg2, _database, _source):
+                if (
+                    action == sqlite3.SQLITE_CREATE_TRIGGER
+                    and "pending_authorization" in str(arg1 or "")
+                ):
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            connection.set_authorizer(deny_pending_trigger)
+            with self.assertRaises(sqlite3.DatabaseError):
+                ensure_source_monitoring_schema(connection, applied_at_ms=2)
+            connection.set_authorizer(None)
+            state_columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(source_adapter_states)"
+                )
+            }
+            marker = connection.execute(
+                "SELECT 1 FROM schema_migrations WHERE key=?",
+                (SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY,),
+            ).fetchone()
+            objects = {
+                row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE name LIKE '%pending_authorization%'"
+                )
+            }
+        self.assertFalse(PENDING_AUTHORIZATION_COLUMNS.intersection(state_columns))
+        self.assertFalse(PENDING_AUTHORIZATION_OBJECTS.intersection(objects))
+        self.assertIsNone(marker)
 
     def test_incremental_migration_rolls_back_all_objects_on_failure(self) -> None:
         legacy_path = Path(self.temp_dir.name) / "atomic.sqlite3"

@@ -40,6 +40,12 @@ import {
   SOURCE_IMPORT_MAX_BYTES,
   sourceImportUtf8Bytes,
 } from "../sourceInboxImport";
+import {
+  normalizeSourceMonitoringEnablementResult,
+  normalizeSourceMonitoringOperatorControl,
+  normalizeSourceMonitoringOperatorPreview,
+  sourceMonitoringConfirmationText,
+} from "../sourceMonitoringControl";
 import "../styles/source-inbox.css";
 import { useModalFocus } from "../useModalFocus";
 
@@ -70,6 +76,29 @@ const EMPTY_HEALTH_STATE = Object.freeze({
   status: "idle",
   health: null,
   error: "",
+});
+
+const EMPTY_OPERATOR_CONTROL_STATE = Object.freeze({
+  status: "idle",
+  control: null,
+  error: "",
+});
+
+const EMPTY_OPERATOR_ACTION_STATE = Object.freeze({
+  status: "idle",
+  adapterKey: "",
+  intent: "",
+  preview: null,
+  confirmed: false,
+  error: "",
+  feedback: "",
+});
+
+const INITIALIZATION_STATUS_LABELS = Object.freeze({
+  required: "首次初始化待预览",
+  authorized: "首次初始化已授权、待 Runtime 消费",
+  complete: "首次初始化收据已记录",
+  legacy: "历史状态（模式未知）",
 });
 
 const EMPTY_IMPORT_PREVIEW_STATE = Object.freeze({
@@ -487,10 +516,219 @@ function SourceInboxDetail({
   );
 }
 
+function SourceMonitoringOperatorControls({
+  actionState,
+  controlState,
+  onCancel,
+  onConfirmationChange,
+  onLoad,
+  onPrepareEnable,
+  onPrepareDisable,
+  onPreview,
+  onSubmit,
+  previewHeadingRef,
+}) {
+  if (controlState.status === "idle") {
+    return (
+      <section className="source-monitoring-controls" aria-label="Adapter 接入设置">
+        <p>接入设置仅在你明确读取后显示；打开来源收件箱不会轮询任何外部来源。</p>
+        <button className="secondary compact" type="button" onClick={onLoad}>查看 Adapter 接入设置</button>
+      </section>
+    );
+  }
+  if (controlState.status === "loading") {
+    return <p className="source-inbox-loading" role="status"><LoaderCircle aria-hidden="true" className="spin" size={14} />正在读取 Adapter 接入设置…</p>;
+  }
+  if (controlState.status === "error" || !controlState.control?.valid) {
+    return (
+      <section className="source-monitoring-controls" aria-label="Adapter 接入设置">
+        <p className="source-inbox-notice error" role="alert">
+          {controlState.error || "Adapter 接入设置未满足固定安全合同。"}
+        </p>
+        <button className="secondary compact" type="button" onClick={onLoad}>重新读取接入设置</button>
+      </section>
+    );
+  }
+
+  const { control } = controlState;
+  const selected = control.adapters.find(
+    (adapter) => adapter.adapterKey === actionState.adapterKey,
+  ) || null;
+  const preview = actionState.preview;
+  const previewUsable = preview?.valid === true
+    && !preview.initializationBlocked
+    && preview.adapterKey === selected?.adapterKey
+    && preview.configVersion === selected?.configVersion
+    && preview.stateVersion === selected?.stateVersion
+    && preview.initialRequired === (selected?.initializationStatus === "required")
+    && preview.mode === control.settings.initialMode
+    && preview.catchUpMaxItems === control.settings.catchUpMaxItems
+    && preview.fromTime === control.settings.fromTime;
+  const enableWithoutPreview = actionState.intent === "enable"
+    && selected
+    && selected.initializationStatus !== "required";
+  const canSubmit = actionState.confirmed
+    && actionState.status !== "loading"
+    && selected
+    && (actionState.intent === "disable" || previewUsable || enableWithoutPreview);
+  const confirmationText = actionState.intent === "disable"
+    ? "我确认只停止该 Adapter 的后续轮询；不会删除 checkpoint、初始化收据或 Source Inbox 记录。"
+    : previewUsable
+      ? sourceMonitoringConfirmationText(preview)
+      : enableWithoutPreview
+        ? "我确认保存该 Adapter 的启用状态；这不会证明 Runtime 已启动或来源可用。"
+        : "";
+
+  return (
+    <section
+      className="source-monitoring-controls"
+      aria-label="Adapter 接入设置"
+      aria-busy={actionState.status === "loading"}
+    >
+      <header>
+        <span>
+          <strong>Adapter 接入设置</strong>
+          <small>
+            全局{control.settings.globalEnabled ? "已启用" : "关闭"}
+            {control.settings.autoStart ? " · auto-start 已启用" : " · auto-start 关闭"}
+            {control.settings.dryRun ? " · dry-run" : ""}
+          </small>
+        </span>
+        <button className="secondary compact" type="button" onClick={onLoad}>重读设置</button>
+      </header>
+      <p>
+        保存 Adapter 启用状态不证明 Runtime 在线；预览只读取固定来源，不写 checkpoint 或 Source Inbox，
+        不调用 Provider，也不授予交易权限。
+      </p>
+      <p role="note">确认首次启用时，服务端会重读同一固定来源并核对预览哈希；来源证据漂移时不会保存启用状态。</p>
+      {control.adapters.some((adapter) => adapter.sourceClass === "readonly_market") ? (
+        <p role="note">readonly_market 首次预览会执行有界只读行情调用；确认启用时会再次读取，实际次数显示在预览中。</p>
+      ) : null}
+      {!control.settings.autoStart ? (
+        <p role="note">auto-start 当前关闭；保存启用状态后不会自动轮询。</p>
+      ) : null}
+      {control.settings.dryRun ? (
+        <p role="note">dry-run 当前启用；轮询只生成预览证据，不提交首次 checkpoint，也不写 Source Inbox。</p>
+      ) : null}
+      <div className="source-monitoring-control-list" role="list">
+        {control.adapters.map((adapter) => (
+          <article key={adapter.adapterKey} role="listitem">
+            <header>
+              <span><strong>{adapter.adapterKey}</strong><small>{adapter.sourceClass}</small></span>
+              <em>{adapter.persistedEnabled ? "持久化启用" : "持久化关闭"}</em>
+            </header>
+            <small>
+              {INITIALIZATION_STATUS_LABELS[adapter.initializationStatus] || "初始化状态异常"}
+              {adapter.initializationMode ? ` · ${adapter.initializationMode}` : ""}
+              {adapter.activeRun ? " · 当前有运行记录" : ""}
+            </small>
+            {adapter.blockedReasonCodes.length ? (
+              <small className="source-monitoring-blockers" role="note">
+                阻断：{adapter.blockedReasonCodes.join(" · ")}
+              </small>
+            ) : null}
+            <footer>
+              {adapter.canPreview ? (
+                <button
+                  className="secondary compact"
+                  type="button"
+                  disabled={actionState.status === "loading"}
+                  onClick={() => onPreview(adapter)}
+                >预览首次读取范围</button>
+              ) : null}
+              {adapter.canEnable && !adapter.canPreview ? (
+                <button
+                  className="secondary compact"
+                  type="button"
+                  disabled={actionState.status === "loading"}
+                  onClick={() => onPrepareEnable(adapter)}
+                >准备启用</button>
+              ) : null}
+              {adapter.canDisable ? (
+                <button
+                  className="secondary compact"
+                  type="button"
+                  disabled={actionState.status === "loading"}
+                  onClick={() => onPrepareDisable(adapter)}
+                >准备停用</button>
+              ) : null}
+            </footer>
+          </article>
+        ))}
+      </div>
+      {actionState.status === "loading" ? (
+        <p className="source-inbox-loading" role="status"><LoaderCircle aria-hidden="true" className="spin" size={14} />正在处理显式请求…</p>
+      ) : null}
+      {actionState.error ? <p className="source-inbox-notice error" role="alert">{actionState.error}</p> : null}
+      {actionState.feedback ? <p className="source-inbox-notice" role="status" aria-live="polite">{actionState.feedback}</p> : null}
+      {preview?.valid ? (
+        <section className="source-monitoring-preview" aria-label="首次初始化预览">
+          <header ref={previewHeadingRef} tabIndex={-1}>
+            <strong>首次读取范围预览</strong>
+            <code>{shortHash(preview.previewSha256)}</code>
+          </header>
+          <dl>
+            <div><dt>模式</dt><dd>{preview.mode}</dd></div>
+            <div><dt>候选</dt><dd>{preview.candidateCount}</dd></div>
+            <div><dt>将处理</dt><dd>{preview.selectedCount}</dd></div>
+            <div><dt>将跳过</dt><dd>{preview.skippedCount}</dd></div>
+            <div><dt>重复候选</dt><dd>{preview.adapterDuplicateCount}</dd></div>
+            <div><dt>来源异常 / 拒绝</dt><dd>{preview.sourceErrorCount} / {preview.rejectedCount}</dd></div>
+            <div><dt>只读市场调用</dt><dd>{preview.marketCallsPerformed}</dd></div>
+            <div><dt>模式参数</dt><dd>{preview.mode === "catch_up"
+              ? `最多 ${preview.catchUpMaxItems} 条`
+              : preview.mode === "from_time"
+                ? preview.fromTime
+                : "只建立基线"}</dd></div>
+            <div><dt>捕获时间</dt><dd>{formatServerTime(preview.capturedAt)}</dd></div>
+            <div><dt>最早时间</dt><dd>{preview.earliestOccurredAt || "无候选"}</dd></div>
+            <div><dt>最晚时间</dt><dd>{preview.latestOccurredAt || "无候选"}</dd></div>
+            <div><dt>起始 checkpoint</dt><dd><code>{shortHash(preview.startingCheckpointSha256)}</code></dd></div>
+            <div><dt>下一 checkpoint</dt><dd><code>{shortHash(preview.nextCheckpointSha256)}</code></dd></div>
+          </dl>
+          {preview.initializationBlocked ? (
+            <p className="source-inbox-notice error" role="alert">
+              预览包含 {preview.sourceErrorCount} 个来源错误和 {preview.rejectedCount} 个拒绝项，不能确认。
+            </p>
+          ) : null}
+        </section>
+      ) : null}
+      {confirmationText ? (
+        <fieldset className="source-monitoring-confirmation" disabled={actionState.status === "loading"}>
+          <label>
+            <input
+              type="checkbox"
+              checked={actionState.confirmed}
+              onChange={(event) => onConfirmationChange(event.target.checked)}
+            />
+            <span>{confirmationText}</span>
+          </label>
+          <footer>
+            <button className="secondary compact" type="button" onClick={onCancel}>取消</button>
+            <button className="primary compact" type="button" disabled={!canSubmit} onClick={onSubmit}>
+              {actionState.intent === "disable" ? "确认停止后续轮询" : "确认保存 Adapter 启用状态"}
+            </button>
+          </footer>
+        </fieldset>
+      ) : null}
+    </section>
+  );
+}
+
 function SourceMonitoringHealth({
   healthState,
+  operatorActionState,
+  operatorControlState,
+  operatorPreviewHeadingRef,
   notificationState,
+  onCancelOperatorAction,
+  onLoadOperatorControl,
   onNotificationPreferenceChange,
+  onOperatorConfirmationChange,
+  onPrepareAdapterDisable,
+  onPrepareAdapterEnable,
+  onPreviewAdapterInitialization,
+  onSubmitAdapterEnablement,
 }) {
   const health = healthState.health;
   const notificationSupported = notificationState?.supported === true;
@@ -570,6 +808,18 @@ function SourceMonitoringHealth({
                 </article>
               ))}
             </div>
+            <SourceMonitoringOperatorControls
+              actionState={operatorActionState}
+              controlState={operatorControlState}
+              onCancel={onCancelOperatorAction}
+              onConfirmationChange={onOperatorConfirmationChange}
+              onLoad={onLoadOperatorControl}
+              onPrepareDisable={onPrepareAdapterDisable}
+              onPrepareEnable={onPrepareAdapterEnable}
+              onPreview={onPreviewAdapterInitialization}
+              onSubmit={onSubmitAdapterEnablement}
+              previewHeadingRef={operatorPreviewHeadingRef}
+            />
           </>
         ) : null}
         <div className="source-inbox-notifications">
@@ -622,11 +872,13 @@ export function SourceInboxPanel({
   const openRef = useRef(Boolean(open));
   const listRequestRef = useRef({ sequence: 0, controller: null });
   const healthRequestRef = useRef({ sequence: 0, controller: null });
+  const operatorRequestRef = useRef({ sequence: 0, controller: null });
   const detailRequestRef = useRef({ sequence: 0, controller: null });
   const actionRequestRef = useRef({ sequence: 0, controller: null });
   const importRequestRef = useRef({ sequence: 0, controller: null });
   const promptTemplateRequestRef = useRef({ sequence: 0, controller: null });
   const previewHeadingRef = useRef(null);
+  const operatorPreviewHeadingRef = useRef(null);
   const promptTextareaRef = useRef(null);
   const consumedRefreshTokenRef = useRef(0);
   const [queryInput, setQueryInput] = useState("");
@@ -636,6 +888,8 @@ export function SourceInboxPanel({
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [listState, setListState] = useState(EMPTY_LIST_STATE);
   const [healthState, setHealthState] = useState(EMPTY_HEALTH_STATE);
+  const [operatorControlState, setOperatorControlState] = useState(EMPTY_OPERATOR_CONTROL_STATE);
+  const [operatorActionState, setOperatorActionState] = useState(EMPTY_OPERATOR_ACTION_STATE);
   const [selectedItemId, setSelectedItemId] = useState("");
   const [detailState, setDetailState] = useState(EMPTY_DETAIL_STATE);
   const [selectedRoomId, setSelectedRoomId] = useState("");
@@ -766,6 +1020,220 @@ export function SourceInboxPanel({
     }
   }, []);
 
+  const loadOperatorControl = useCallback(async () => {
+    const previous = operatorRequestRef.current;
+    previous.controller?.abort();
+    const controller = new AbortController();
+    const sequence = previous.sequence + 1;
+    operatorRequestRef.current = { sequence, controller };
+    setOperatorActionState(EMPTY_OPERATOR_ACTION_STATE);
+    setOperatorControlState((current) => ({ ...current, status: "loading", error: "" }));
+    try {
+      const payload = await api.sourceMonitoringOperatorControl(controller.signal);
+      if (
+        controller.signal.aborted
+        || operatorRequestRef.current.sequence !== sequence
+        || !openRef.current
+      ) return false;
+      const control = normalizeSourceMonitoringOperatorControl(payload);
+      if (!control.valid) {
+        throw new Error("Adapter 接入设置未满足固定零执行合同。");
+      }
+      setOperatorControlState({ status: "ready", control, error: "" });
+      return control;
+    } catch (error) {
+      if (controller.signal.aborted || error?.name === "AbortError") return false;
+      if (operatorRequestRef.current.sequence !== sequence || !openRef.current) return false;
+      setOperatorControlState({
+        status: "error",
+        control: null,
+        error: errorMessage(error, "Adapter 接入设置暂时无法读取。"),
+      });
+      return null;
+    }
+  }, []);
+
+  const previewAdapterInitialization = useCallback(async (adapter) => {
+    if (!adapter?.canPreview || operatorActionState.status === "loading") return;
+    const previous = operatorRequestRef.current;
+    previous.controller?.abort();
+    const controller = new AbortController();
+    const sequence = previous.sequence + 1;
+    operatorRequestRef.current = { sequence, controller };
+    const binding = {
+      adapterKey: adapter.adapterKey,
+      configVersion: adapter.configVersion,
+      stateVersion: adapter.stateVersion,
+      initialMode: operatorControlState.control?.settings.initialMode,
+      catchUpMaxItems: operatorControlState.control?.settings.catchUpMaxItems,
+      fromTime: operatorControlState.control?.settings.fromTime,
+    };
+    setOperatorActionState({
+      ...EMPTY_OPERATOR_ACTION_STATE,
+      status: "loading",
+      intent: "enable",
+      adapterKey: adapter.adapterKey,
+    });
+    try {
+      const payload = await api.previewSourceMonitoringAdapterInitialization(
+        adapter.adapterKey,
+        {
+          expected_state_version: adapter.stateVersion,
+          expected_config_version: adapter.configVersion,
+        },
+        controller.signal,
+      );
+      if (
+        controller.signal.aborted
+        || operatorRequestRef.current.sequence !== sequence
+        || !openRef.current
+      ) return;
+      const preview = normalizeSourceMonitoringOperatorPreview(payload);
+      if (
+        !preview.valid
+        || preview.adapterKey !== binding.adapterKey
+        || preview.configVersion !== binding.configVersion
+        || preview.stateVersion !== binding.stateVersion
+        || preview.mode !== binding.initialMode
+        || preview.catchUpMaxItems !== binding.catchUpMaxItems
+        || preview.fromTime !== binding.fromTime
+      ) {
+        throw new Error("首次初始化预览未绑定当前 Adapter 精确状态。");
+      }
+      setOperatorActionState({
+        ...EMPTY_OPERATOR_ACTION_STATE,
+        status: "ready",
+        intent: "enable",
+        adapterKey: adapter.adapterKey,
+        preview,
+      });
+    } catch (error) {
+      if (controller.signal.aborted || error?.name === "AbortError") return;
+      if (operatorRequestRef.current.sequence !== sequence || !openRef.current) return;
+      setOperatorActionState({
+        ...EMPTY_OPERATOR_ACTION_STATE,
+        status: "error",
+        intent: "enable",
+        adapterKey: adapter.adapterKey,
+        error: errorMessage(error, "首次初始化预览失败。"),
+      });
+    }
+  }, [operatorActionState.status, operatorControlState.control]);
+
+  const prepareAdapterEnable = useCallback((adapter) => {
+    operatorRequestRef.current.controller?.abort();
+    setOperatorActionState({
+      ...EMPTY_OPERATOR_ACTION_STATE,
+      status: "ready",
+      intent: "enable",
+      adapterKey: adapter.adapterKey,
+    });
+  }, []);
+
+  const prepareAdapterDisable = useCallback((adapter) => {
+    operatorRequestRef.current.controller?.abort();
+    setOperatorActionState({
+      ...EMPTY_OPERATOR_ACTION_STATE,
+      status: "ready",
+      intent: "disable",
+      adapterKey: adapter.adapterKey,
+    });
+  }, []);
+
+  const submitAdapterEnablement = useCallback(async () => {
+    const control = operatorControlState.control;
+    const adapter = control?.adapters.find(
+      (candidate) => candidate.adapterKey === operatorActionState.adapterKey,
+    );
+    if (!adapter || !operatorActionState.confirmed || operatorActionState.status === "loading") return;
+    const enabled = operatorActionState.intent === "enable";
+    const preview = operatorActionState.preview;
+    const previewSha256 = (
+      enabled && adapter.initializationStatus === "required"
+        ? preview?.previewSha256 || ""
+        : ""
+    );
+    if (enabled && adapter.initializationStatus === "required" && !preview?.valid) return;
+
+    const previous = operatorRequestRef.current;
+    previous.controller?.abort();
+    const controller = new AbortController();
+    const sequence = previous.sequence + 1;
+    operatorRequestRef.current = { sequence, controller };
+    setOperatorActionState((current) => ({ ...current, status: "loading", error: "", feedback: "" }));
+    try {
+      const payload = await api.setSourceMonitoringAdapterEnablement(
+        adapter.adapterKey,
+        {
+          expected_state_version: adapter.stateVersion,
+          expected_config_version: adapter.configVersion,
+          enabled,
+          preview_sha256: previewSha256,
+          confirmation: enabled
+            ? "ENABLE_SOURCE_MONITORING_ADAPTER"
+            : "DISABLE_SOURCE_MONITORING_ADAPTER",
+        },
+        controller.signal,
+      );
+      if (
+        controller.signal.aborted
+        || operatorRequestRef.current.sequence !== sequence
+        || !openRef.current
+      ) return;
+      const result = normalizeSourceMonitoringEnablementResult(payload);
+      const initializationAuthorized = enabled
+        && adapter.initializationStatus === "required";
+      if (
+        !result.valid
+        || result.adapterKey !== adapter.adapterKey
+        || result.configVersion !== adapter.configVersion
+        || result.persistedEnabled !== enabled
+        || result.initializationAuthorized !== initializationAuthorized
+        || result.previewSha256 !== (
+          initializationAuthorized ? previewSha256 : ""
+        )
+      ) {
+        throw new Error("Adapter 启停回执未绑定本次精确请求。");
+      }
+      const [authoritativeControl, healthLoaded] = await Promise.all([
+        loadOperatorControl(),
+        loadHealth(),
+      ]);
+      if (!openRef.current) return;
+      const authoritativeAdapter = authoritativeControl?.adapters.find(
+        (candidate) => candidate.adapterKey === adapter.adapterKey,
+      );
+      const controlConfirmed = authoritativeAdapter?.configVersion
+        === adapter.configVersion
+        && authoritativeAdapter?.persistedEnabled === enabled
+        && authoritativeAdapter?.stateVersion >= result.stateVersion;
+      setOperatorActionState({
+        ...EMPTY_OPERATOR_ACTION_STATE,
+        feedback: controlConfirmed && healthLoaded
+          ? enabled
+            ? "启用状态变更已提交并完成权威重读；Runtime 在线状态请以上方健康记录为准。"
+            : "后续轮询停用请求已提交并完成权威重读；历史 checkpoint 与收件箱记录未被删除。"
+          : "变更请求已返回有效回执，但权威重读未确认目标状态；请重新读取接入设置与健康记录。",
+      });
+    } catch (error) {
+      if (controller.signal.aborted || error?.name === "AbortError") return;
+      if (operatorRequestRef.current.sequence !== sequence || !openRef.current) return;
+      if (error?.status === 409) {
+        await Promise.all([loadOperatorControl(), loadHealth()]);
+      }
+      if (!openRef.current) return;
+      setOperatorActionState({
+        ...EMPTY_OPERATOR_ACTION_STATE,
+        status: "error",
+        adapterKey: adapter.adapterKey,
+        intent: enabled ? "enable" : "disable",
+        error: error?.status === 409
+          ? `${errorMessage(error, "Adapter 状态已变化。")} 已权威重读，请重新预览和确认。`
+          : errorMessage(error, "Adapter 启停请求未完成。"),
+      });
+    }
+  }, [loadHealth, loadOperatorControl, operatorActionState, operatorControlState.control]);
+
   useEffect(() => {
     if (open && requestedItemId) setSelectedItemId(requestedItemId);
   }, [open, requestedItemId]);
@@ -773,22 +1241,34 @@ export function SourceInboxPanel({
   useEffect(() => {
     if (!open) {
       listRequestRef.current.controller?.abort();
+      healthRequestRef.current.controller?.abort();
       return undefined;
     }
-    void loadList();
-    return () => listRequestRef.current.controller?.abort();
-  }, [loadList, open]);
+    let cancelled = false;
+    void (async () => {
+      await loadList();
+      if (!cancelled && openRef.current) await loadHealth();
+    })();
+    return () => {
+      cancelled = true;
+      listRequestRef.current.controller?.abort();
+      healthRequestRef.current.controller?.abort();
+    };
+  }, [loadHealth, loadList, open]);
 
   useEffect(() => {
     if (open) return undefined;
     detailRequestRef.current.controller?.abort();
     actionRequestRef.current.controller?.abort();
+    operatorRequestRef.current.controller?.abort();
     importRequestRef.current.controller?.abort();
     promptTemplateRequestRef.current.controller?.abort();
     setActionState(EMPTY_ACTION_STATE);
     setImportActionState(EMPTY_IMPORT_ACTION_STATE);
     setImportPreviewState(EMPTY_IMPORT_PREVIEW_STATE);
     setPromptTemplateState(EMPTY_PROMPT_TEMPLATE_STATE);
+    setOperatorControlState(EMPTY_OPERATOR_CONTROL_STATE);
+    setOperatorActionState(EMPTY_OPERATOR_ACTION_STATE);
     setImportError("");
     setImportContent("");
     setImportOpen(false);
@@ -799,6 +1279,7 @@ export function SourceInboxPanel({
   useEffect(() => () => {
     detailRequestRef.current.controller?.abort();
     actionRequestRef.current.controller?.abort();
+    operatorRequestRef.current.controller?.abort();
     importRequestRef.current.controller?.abort();
     promptTemplateRequestRef.current.controller?.abort();
   }, []);
@@ -810,13 +1291,10 @@ export function SourceInboxPanel({
   }, [importPreviewState.status]);
 
   useEffect(() => {
-    if (!open) {
-      healthRequestRef.current.controller?.abort();
-      return undefined;
+    if (operatorActionState.status === "ready" && operatorActionState.preview?.valid) {
+      operatorPreviewHeadingRef.current?.focus();
     }
-    void loadHealth();
-    return () => healthRequestRef.current.controller?.abort();
-  }, [loadHealth, open]);
+  }, [operatorActionState.preview, operatorActionState.status]);
 
   const loadDetail = useCallback(async (itemId) => {
     if (!itemId) {
@@ -869,10 +1347,8 @@ export function SourceInboxPanel({
 
   const refreshInbox = useCallback(async () => {
     const preferredItemId = selectedItemId;
-    await Promise.all([
-      loadList({ preferredItemId }),
-      loadHealth(),
-    ]);
+    await loadList({ preferredItemId });
+    await loadHealth();
     if (preferredItemId) await loadDetail(preferredItemId);
   }, [loadDetail, loadHealth, loadList, selectedItemId]);
 
@@ -1266,7 +1742,7 @@ export function SourceInboxPanel({
           <ShieldAlert aria-hidden="true" size={17} />
           <span>
             <strong>外部信息默认不可信</strong>
-            <small>这里只接收、展示、人工确认、附加材料和生成草稿；不触发 Provider、正式 round、市场调用或执行。</small>
+            <small>打开本页及收件箱审阅、附加、草稿操作不触发 Provider、正式 round、市场读取或执行；只有你明确执行 Adapter 首次预览时，readonly_market 来源才可进行界面列明的有界只读行情调用。</small>
           </span>
         </div>
 
@@ -1401,8 +1877,20 @@ export function SourceInboxPanel({
 
         <SourceMonitoringHealth
           healthState={healthState}
+          operatorActionState={operatorActionState}
+          operatorControlState={operatorControlState}
+          operatorPreviewHeadingRef={operatorPreviewHeadingRef}
           notificationState={notificationState}
+          onCancelOperatorAction={() => setOperatorActionState(EMPTY_OPERATOR_ACTION_STATE)}
+          onLoadOperatorControl={() => void loadOperatorControl()}
           onNotificationPreferenceChange={onNotificationPreferenceChange}
+          onOperatorConfirmationChange={(confirmed) => setOperatorActionState(
+            (current) => ({ ...current, confirmed }),
+          )}
+          onPrepareAdapterDisable={prepareAdapterDisable}
+          onPrepareAdapterEnable={prepareAdapterEnable}
+          onPreviewAdapterInitialization={(adapter) => void previewAdapterInitialization(adapter)}
+          onSubmitAdapterEnablement={() => void submitAdapterEnablement()}
         />
 
         <div className="source-inbox-filter-groups">

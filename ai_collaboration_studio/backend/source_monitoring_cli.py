@@ -66,6 +66,7 @@ class SourceMonitoringCliDependencies:
     repository_builder: Callable[[Any], Any] | None = None
     health_builder: Callable[[Any, Any], Any] | None = None
     supervisor_builder: Callable[[Any, Any, Any, Any], Any] | None = None
+    operator_builder: Callable[[Any, Any, Any, Any], Any] | None = None
     clock_ms: Callable[[], Any] | None = None
 
 
@@ -75,9 +76,22 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("status", help="read the bounded monitoring health snapshot")
     preview = commands.add_parser("preview", help="preview one enabled adapter poll")
     preview.add_argument("adapter_key")
+    preview.add_argument("--expected-config-version", default="")
+    preview.add_argument("--expected-state-version", default="")
     run_once = commands.add_parser("run-once", help="run one enabled adapter immediately")
     run_once.add_argument("adapter_key")
     run_once.add_argument("--confirm", default="")
+    for command_name in ("enable", "disable"):
+        command = commands.add_parser(
+            command_name,
+            help=f"{command_name} one code-registered adapter",
+        )
+        command.add_argument("adapter_key")
+        command.add_argument("--expected-config-version", required=True)
+        command.add_argument("--expected-state-version", required=True)
+        command.add_argument("--confirm", default="")
+        if command_name == "enable":
+            command.add_argument("--preview-sha256", default="")
     return parser
 
 
@@ -252,6 +266,35 @@ def _supervisor(
         settings=settings,
         impact_rules=(TradingImpactRulesV1() if settings.trading_impact_rules_enabled else None),
     )
+
+
+def _operator(
+    store: Any,
+    settings: Any,
+    registry: Any,
+    repository: Any,
+    dependencies: SourceMonitoringCliDependencies,
+) -> Any:
+    if dependencies.operator_builder is not None:
+        return dependencies.operator_builder(store, settings, registry, repository)
+    from .source_monitoring.operator_service import SourceMonitoringOperatorService
+
+    return SourceMonitoringOperatorService(
+        store=store,
+        settings=settings,
+        registry=registry,
+        repository=repository,
+        clock_ms=dependencies.clock_ms,
+    )
+
+
+def _expected_state_version(value: Any) -> int:
+    if type(value) is not str or re.fullmatch(r"0|[1-9][0-9]*", value) is None:
+        raise _CliContractError("SOURCE_MONITORING_STATE_VERSION_INVALID")
+    parsed = int(value)
+    if parsed > (1 << 63) - 1:
+        raise _CliContractError("SOURCE_MONITORING_STATE_VERSION_INVALID")
+    return parsed
 
 
 def _now_ms(dependencies: SourceMonitoringCliDependencies) -> int:
@@ -580,6 +623,59 @@ def _run_once(
     return (0 if payload["ok"] else 2), payload
 
 
+def _operator_preview(
+    store: Any,
+    adapter_key: str,
+    expected_config_version: str,
+    expected_state_version: str,
+    dependencies: SourceMonitoringCliDependencies,
+) -> tuple[int, dict[str, Any]]:
+    settings = _settings(dependencies)
+    registry = _registry(settings, dependencies)
+    repository = _repository(store, dependencies)
+    preview = _operator(
+        store,
+        settings,
+        registry,
+        repository,
+        dependencies,
+    ).preview(
+        adapter_key,
+        expected_config_version=expected_config_version,
+        expected_state_version=_expected_state_version(expected_state_version),
+    )
+    return (2 if preview["initialization_blocked"] else 0), preview
+
+
+def _set_enablement(
+    store: Any,
+    arguments: argparse.Namespace,
+    dependencies: SourceMonitoringCliDependencies,
+) -> tuple[int, dict[str, Any]]:
+    settings = _settings(dependencies)
+    registry = _registry(settings, dependencies)
+    repository = _repository(store, dependencies)
+    result = _operator(
+        store,
+        settings,
+        registry,
+        repository,
+        dependencies,
+    ).set_enablement(
+        arguments.adapter_key,
+        enabled=arguments.command == "enable",
+        expected_config_version=arguments.expected_config_version,
+        expected_state_version=_expected_state_version(
+            arguments.expected_state_version
+        ),
+        confirmation=arguments.confirm,
+        preview_sha256=(
+            arguments.preview_sha256 if arguments.command == "enable" else ""
+        ),
+    )
+    return 0, result
+
+
 def _dispatch(
     arguments: argparse.Namespace,
     database_path: str | Path,
@@ -590,11 +686,39 @@ def _dispatch(
             "run-once",
             "SOURCE_MONITORING_CONFIRMATION_REQUIRED",
         )
+    if arguments.command in {"enable", "disable"}:
+        expected_confirmation = (
+            "ENABLE_SOURCE_MONITORING_ADAPTER"
+            if arguments.command == "enable"
+            else "DISABLE_SOURCE_MONITORING_ADAPTER"
+        )
+        if arguments.confirm != expected_confirmation:
+            return 2, _error_payload(
+                arguments.command,
+                "SOURCE_MONITORING_CONFIRMATION_REQUIRED",
+            )
     store = _open_verified_store(database_path, dependencies)
     if arguments.command == "status":
         return _status(store, dependencies)
     if arguments.command == "preview":
+        if bool(arguments.expected_config_version) is not bool(
+            arguments.expected_state_version
+        ):
+            return 2, _error_payload(
+                "preview",
+                "SOURCE_MONITORING_PREVIEW_EXPECTATION_INCOMPLETE",
+            )
+        if arguments.expected_config_version:
+            return _operator_preview(
+                store,
+                arguments.adapter_key,
+                arguments.expected_config_version,
+                arguments.expected_state_version,
+                dependencies,
+            )
         return _preview(store, arguments.adapter_key, dependencies)
+    if arguments.command in {"enable", "disable"}:
+        return _set_enablement(store, arguments, dependencies)
     return _run_once(
         store,
         arguments.adapter_key,

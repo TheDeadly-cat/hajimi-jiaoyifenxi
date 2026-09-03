@@ -21,6 +21,7 @@ from backend.source_monitoring.contracts import (  # noqa: E402
     READONLY_MARKET_SOURCE_CLASS,
     AdapterPollResult,
     SourcePollError,
+    canonical_sha256,
 )
 from backend.source_monitoring.registry import SourceAdapterRegistry  # noqa: E402
 from backend.source_monitoring.scheduler import (  # noqa: E402
@@ -31,6 +32,7 @@ from backend.source_monitoring.settings import SourceMonitoringSettings  # noqa:
 from backend.source_monitoring.state_repository import (  # noqa: E402
     RUN_STATUS_ABANDONED,
     RUN_STATUS_FAILED,
+    SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION,
     SourceMonitoringStateRepository,
 )
 from backend.source_monitoring.supervisor import (  # noqa: E402
@@ -674,6 +676,78 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
                 "SELECT source_channel FROM source_inbox_imports"
             ).fetchone()[0]
         self.assertEqual(channel, FUTU_ANOMALY_SOURCE_CHANNEL)
+
+    def test_pending_and_environment_catch_up_authorities_conflict_before_poll(self) -> None:
+        adapter = FakeAdapter("fake_authority_conflict")
+        authorization = {
+            "version": SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION,
+            "adapter_key": adapter.adapter_key,
+            "config_version": adapter.config_version,
+            "mode": "catch_up",
+            "catch_up_max_items": 2,
+            "from_time_ms": 0,
+            "starting_checkpoint_sha256": canonical_sha256({}),
+            "preview_sha256": "a" * 64,
+            "confirmed_at_ms": self.clock[0],
+        }
+        self.repository.authorize_initialization_and_enable(
+            adapter.adapter_key,
+            config_version=adapter.config_version,
+            expected_state_version=0,
+            authorization=authorization,
+        )
+        supervisor = SourceMonitoringSupervisor(
+            registry=SourceAdapterRegistry((adapter,)),
+            repository=self.repository,
+            source_inbox=self.inbox,
+            settings=SourceMonitoringSettings(
+                enabled=True,
+                official_only=True,
+                dry_run=False,
+                max_items_per_run=50,
+                initial_mode="catch_up",
+                catch_up_max_items=2,
+                initial_preview_sha256="b" * 64,
+            ),
+            backoff_policy=self.backoff,
+            clock_ms=lambda: self.clock[0],
+        )
+        with self.assertRaises(SourceMonitoringSupervisorError) as caught:
+            supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(
+            caught.exception.code,
+            "SOURCE_MONITORING_INITIAL_AUTHORITY_CONFLICT",
+        )
+        self.assertEqual(adapter.poll_count, 0)
+        self.assertEqual(self.repository.list_runs(), [])
+
+    def test_failed_initial_run_preserves_pending_authorization_for_retry(self) -> None:
+        adapter = FakeAdapter("fake_authorized_failure", mode="raise")
+        authorization = {
+            "version": SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION,
+            "adapter_key": adapter.adapter_key,
+            "config_version": adapter.config_version,
+            "mode": "from_time",
+            "catch_up_max_items": 0,
+            "from_time_ms": 0,
+            "starting_checkpoint_sha256": canonical_sha256({}),
+            "preview_sha256": "c" * 64,
+            "confirmed_at_ms": self.clock[0],
+        }
+        self.repository.authorize_initialization_and_enable(
+            adapter.adapter_key,
+            config_version=adapter.config_version,
+            expected_state_version=0,
+            authorization=authorization,
+        )
+        result = self.supervisor((adapter,)).run_once(adapter.adapter_key)
+        self.assertEqual(result["status"], "FAILED")
+        state = self.repository.get_state(adapter.adapter_key)
+        self.assertEqual(
+            state["pending_initialization_authorization"],
+            authorization,
+        )
+        self.assertEqual(state["checkpoint"], {})
 
     def test_readonly_market_global_disable_prevents_poll_and_state_creation(self) -> None:
         adapter = FakeReadonlyMarketAdapter("fixture_readonly_disabled")

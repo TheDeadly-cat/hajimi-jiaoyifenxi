@@ -9,6 +9,8 @@ import unittest
 from contextlib import closing
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -113,6 +115,18 @@ class SourceInboxHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 201)
         return payload["source_import"]["items"][0]
+
+    def attach_operator_runtime(self) -> Mock:
+        owner = Mock(spec=http_server.DatabaseInstanceOwner)
+        self.server.ai_studio_instance_owner = owner
+        self.server.ai_studio_source_monitoring_runtime = SimpleNamespace(
+            settings=object(),
+            scheduler=SimpleNamespace(
+                registry=object(),
+                repository=object(),
+            ),
+        )
+        return owner
 
     def test_import_list_detail_and_replay_routes(self) -> None:
         empty_status, empty = self.request("/api/monitoring/inbox")
@@ -369,6 +383,149 @@ class SourceInboxHttpTests(unittest.TestCase):
         invalid_status, invalid = self.request("/api/monitoring/health?probe=true")
         self.assertEqual(invalid_status, 400)
         self.assertEqual(invalid["code"], "SOURCE_MONITORING_HEALTH_QUERY_UNSUPPORTED")
+
+    def test_operator_control_preview_and_enablement_use_live_owner_runtime(self) -> None:
+        owner = self.attach_operator_runtime()
+        service = Mock()
+        service.control_snapshot.return_value = {
+            "version": "source_monitoring_operator_control_v1"
+        }
+        service.preview.return_value = {
+            "version": "source_monitoring_operator_preview_v1"
+        }
+        service.set_enablement.return_value = {
+            "version": "source_monitoring_enablement_result_v1"
+        }
+        with patch.object(
+            http_server,
+            "SourceMonitoringOperatorService",
+            return_value=service,
+        ) as factory:
+            status, payload, headers = self.request_with_headers(
+                "/api/monitoring/adapters/control"
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(headers.get("Cache-Control"), "no-store")
+            self.assertEqual(
+                payload["source_monitoring_operator_control"]["version"],
+                "source_monitoring_operator_control_v1",
+            )
+
+            preview_status, preview_payload, preview_headers = (
+                self.request_with_headers(
+                    "/api/monitoring/adapters/sec_filings/initialization-preview",
+                    method="POST",
+                    payload={
+                        "expected_config_version": "sec_config_v1",
+                        "expected_state_version": 0,
+                    },
+                )
+            )
+            self.assertEqual(preview_status, 200)
+            self.assertEqual(preview_headers.get("Cache-Control"), "no-store")
+            self.assertEqual(
+                preview_payload["source_monitoring_operator_preview"]["version"],
+                "source_monitoring_operator_preview_v1",
+            )
+            service.preview.assert_called_once_with(
+                "sec_filings",
+                expected_config_version="sec_config_v1",
+                expected_state_version=0,
+            )
+
+            enable_status, enable_payload, enable_headers = self.request_with_headers(
+                "/api/monitoring/adapters/sec_filings/enablement",
+                method="POST",
+                payload={
+                    "expected_config_version": "sec_config_v1",
+                    "expected_state_version": 0,
+                    "enabled": True,
+                    "preview_sha256": "a" * 64,
+                    "confirmation": "ENABLE_SOURCE_MONITORING_ADAPTER",
+                },
+            )
+            self.assertEqual(enable_status, 200)
+            self.assertEqual(enable_headers.get("Cache-Control"), "no-store")
+            self.assertEqual(
+                enable_payload["source_monitoring_enablement_result"]["version"],
+                "source_monitoring_enablement_result_v1",
+            )
+            service.set_enablement.assert_called_once_with(
+                "sec_filings",
+                enabled=True,
+                expected_config_version="sec_config_v1",
+                expected_state_version=0,
+                confirmation="ENABLE_SOURCE_MONITORING_ADAPTER",
+                preview_sha256="a" * 64,
+            )
+            owner.assert_held_for.assert_called_with(self.store.path)
+            self.assertEqual(factory.call_count, 3)
+
+    def test_operator_routes_fail_closed_before_service_or_on_contract_error(self) -> None:
+        status, payload = self.request("/api/monitoring/adapters/control")
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["code"], "SOURCE_MONITORING_OPERATOR_UNAVAILABLE")
+
+        query_status, query_payload = self.request(
+            "/api/monitoring/adapters/control?refresh=1"
+        )
+        self.assertEqual(query_status, 400)
+        self.assertEqual(
+            query_payload["code"],
+            "SOURCE_MONITORING_OPERATOR_QUERY_UNSUPPORTED",
+        )
+
+        invalid_status, invalid = self.request(
+            "/api/monitoring/adapters/sec_filings/initialization-preview",
+            method="POST",
+            payload={
+                "expected_config_version": "sec_config_v1",
+                "expected_state_version": 0,
+                "unexpected": True,
+            },
+        )
+        self.assertEqual(invalid_status, 400)
+        self.assertEqual(
+            invalid["code"],
+            "SOURCE_MONITORING_OPERATOR_REQUEST_INVALID",
+        )
+
+        forbidden_status, _forbidden = self.request(
+            "/api/monitoring/adapters/sec_filings/enablement",
+            method="POST",
+            payload={
+                "expected_config_version": "sec_config_v1",
+                "expected_state_version": 0,
+                "enabled": True,
+                "preview_sha256": "a" * 64,
+                "confirmation": "ENABLE_SOURCE_MONITORING_ADAPTER",
+            },
+            include_token=False,
+        )
+        self.assertEqual(forbidden_status, 403)
+
+        self.attach_operator_runtime()
+        service = Mock()
+        service.preview.side_effect = http_server.SourceMonitoringOperatorError(
+            "SOURCE_MONITORING_STATE_CONFLICT",
+            "adapter state changed before the operator action",
+            status=409,
+        )
+        with patch.object(
+            http_server,
+            "SourceMonitoringOperatorService",
+            return_value=service,
+        ):
+            conflict_status, conflict = self.request(
+                "/api/monitoring/adapters/sec_filings/initialization-preview",
+                method="POST",
+                payload={
+                    "expected_config_version": "sec_config_v1",
+                    "expected_state_version": 0,
+                },
+            )
+        self.assertEqual(conflict_status, 409)
+        self.assertEqual(conflict["code"], "SOURCE_MONITORING_STATE_CONFLICT")
 
     def test_retention_preview_and_attestation_are_no_store_and_zero_delete(self) -> None:
         self.import_item()
@@ -678,6 +835,30 @@ class SourceInboxHttpTests(unittest.TestCase):
         for path, method, payload, include_token, expected_status in (
             ("/api/monitoring/health", "GET", None, True, 200),
             ("/api/monitoring/health", "GET", None, False, 200),
+            ("/api/monitoring/adapters/control", "GET", None, True, 503),
+            (
+                "/api/monitoring/adapters/sec_filings/initialization-preview",
+                "POST",
+                {
+                    "expected_config_version": "sec_config_v1",
+                    "expected_state_version": 0,
+                },
+                False,
+                403,
+            ),
+            (
+                "/api/monitoring/adapters/sec_filings/enablement",
+                "POST",
+                {
+                    "expected_config_version": "sec_config_v1",
+                    "expected_state_version": 0,
+                    "enabled": True,
+                    "preview_sha256": "a" * 64,
+                    "confirmation": "ENABLE_SOURCE_MONITORING_ADAPTER",
+                },
+                False,
+                403,
+            ),
             ("/api/monitoring/inbox", "GET", None, True, 200),
             ("/api/monitoring/inbox?limit=1&limit=2", "GET", None, True, 400),
             ("/api/monitoring/notifications", "GET", None, True, 200),

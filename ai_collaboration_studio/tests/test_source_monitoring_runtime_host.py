@@ -103,10 +103,12 @@ class SourceMonitoringRuntimeHostTests(unittest.TestCase):
 
             def __init__(self) -> None:
                 self.ai_studio_startup_ready = None
+                self.ai_studio_instance_owner = None
                 self.ai_studio_source_monitoring_runtime = None
 
             def serve_forever(self) -> None:
                 case.assertTrue(self.ai_studio_startup_ready)
+                case.assertIs(self.ai_studio_instance_owner, owner)
                 case.assertIs(self.daemon_threads, False)
                 case.assertIs(self.block_on_close, True)
                 events.append("serve")

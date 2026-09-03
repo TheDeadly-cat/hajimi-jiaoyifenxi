@@ -35,6 +35,7 @@ from .settings import SourceMonitoringSettings, load_source_monitoring_settings
 from .state_repository import (
     SourceMonitoringStateRepository,
     source_monitoring_initialization_schema_state,
+    source_monitoring_pending_authorization_schema_state,
 )
 
 
@@ -464,6 +465,7 @@ class SourceMonitoringHealthService:
         bool,
         list[dict[str, Any]],
         dict[str, dict[str, Any] | None],
+        dict[str, dict[str, Any] | None],
         dict[str, Any],
     ]:
         operations = source_monitoring_operations_health(None)
@@ -475,7 +477,7 @@ class SourceMonitoringHealthService:
                 code="SOURCE_MONITORING_HEALTH_STORE_INVALID",
             ) from exc
         if not path.is_file():
-            return False, [], {}, operations
+            return False, [], {}, {}, operations
         repository = SourceMonitoringStateRepository(self.store)
         try:
             with self.store._lock:
@@ -488,8 +490,16 @@ class SourceMonitoringHealthService:
                     initialization_schema_status = (
                         source_monitoring_initialization_schema_state(connection)
                     )
+                    pending_authorization_schema_status = (
+                        source_monitoring_pending_authorization_schema_state(
+                            connection
+                        )
+                    )
                     operations = source_monitoring_operations_health(connection)
-                    if initialization_schema_status != "current":
+                    if (
+                        initialization_schema_status != "current"
+                        or pending_authorization_schema_status != "current"
+                    ):
                         operations = {
                             **operations,
                             "schema_status": "migration_required",
@@ -501,6 +511,7 @@ class SourceMonitoringHealthService:
                         repository._state_projection(row) for row in state_rows
                     ]
                     latest_runs = {}
+                    initializations = {}
                     for state in states:
                         if initialization_schema_status == "current":
                             run_row = connection.execute(
@@ -514,14 +525,22 @@ class SourceMonitoringHealthService:
                                 if run_row is not None
                                 else None
                             )
+                            initializations[state["adapter_key"]] = (
+                                repository.read_latest_successful_initialization_from_connection(
+                                    connection,
+                                    state["adapter_key"],
+                                    config_version=state["config_version"],
+                                )
+                            )
                         else:
                             # Legacy run rows predate the initialization columns.
                             # Do not deserialize them as corrupt receipts while the
                             # additive migration is still pending.
                             latest_runs[state["adapter_key"]] = None
+                            initializations[state["adapter_key"]] = None
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).lower():
-                return False, [], {}, source_monitoring_operations_health(None)
+                return False, [], {}, {}, source_monitoring_operations_health(None)
             raise SourceMonitoringHealthServiceError(
                 "Source Monitoring persisted health evidence could not be read.",
                 code="SOURCE_MONITORING_HEALTH_READ_FAILED",
@@ -537,7 +556,7 @@ class SourceMonitoringHealthService:
                 code=exc.code,
                 status=exc.status,
             ) from exc
-        return True, states, latest_runs, operations
+        return True, states, latest_runs, initializations, operations
 
     def snapshot(self) -> dict[str, Any]:
         captured_at_ms = self._now()
@@ -562,6 +581,7 @@ class SourceMonitoringHealthService:
             persistence_available,
             states,
             latest_runs,
+            initializations,
             operations,
         ) = self._persisted_evidence()
         state_by_key = {state["adapter_key"]: state for state in states}
@@ -590,6 +610,32 @@ class SourceMonitoringHealthService:
                 source_class == READONLY_MARKET_SOURCE_CLASS
                 and self.settings.allow_readonly_market
             )
+            initialization = initializations.get(adapter_key)
+            pending_authorization = (
+                state.get("pending_initialization_authorization")
+                if state is not None
+                else None
+            )
+            initialization_policy_current = bool(
+                initialization is None
+                or (
+                    initialization["mode"] == self.settings.initial_mode
+                    and initialization["catch_up_max_items"]
+                    == self.settings.catch_up_max_items
+                    and initialization["from_time_ms"]
+                    == self.settings.from_time_ms
+                )
+            )
+            pending_authorization_policy_current = bool(
+                pending_authorization is None
+                or (
+                    pending_authorization["mode"] == self.settings.initial_mode
+                    and pending_authorization["catch_up_max_items"]
+                    == self.settings.catch_up_max_items
+                    and pending_authorization["from_time_ms"]
+                    == self.settings.from_time_ms
+                )
+            )
             effective_enabled = bool(
                 self.settings.enabled
                 and metadata is not None
@@ -597,6 +643,8 @@ class SourceMonitoringHealthService:
                 and state.get("enabled") is True
                 and state.get("config_version") == metadata.get("config_version")
                 and source_mode_enabled
+                and initialization_policy_current
+                and pending_authorization_policy_current
             )
             effective_enabled_by_key[adapter_key] = effective_enabled
             projection_states.append(

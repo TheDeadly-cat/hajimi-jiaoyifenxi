@@ -473,6 +473,68 @@
 .source-inbox-health-adapters strong { overflow-wrap: anywhere; font-size: 10px; }
 .source-inbox-health-adapters em { color: #5f7072; font-size: 9px; font-style: normal; text-align: right; }
 .source-inbox-health-adapters small { color: #66777a; font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+.source-monitoring-controls {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid rgba(78, 103, 109, 0.16);
+  border-radius: 9px;
+  background: rgba(248, 251, 250, 0.7);
+}
+.source-monitoring-controls > header,
+.source-monitoring-control-list article > header,
+.source-monitoring-control-list article > footer,
+.source-monitoring-confirmation > footer,
+.source-monitoring-preview > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.source-monitoring-controls > header > span,
+.source-monitoring-control-list article > header > span { display: grid; min-width: 0; gap: 2px; }
+.source-monitoring-controls p { margin: 0; color: #53686b; font-size: 9px; line-height: 1.55; }
+.source-monitoring-controls > header strong { font-size: 10px; }
+.source-monitoring-controls > header small { color: #66777a; font-size: 9px; }
+.source-monitoring-controls > .source-inbox-notice { margin: 0; }
+.source-monitoring-control-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.source-monitoring-control-list article {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 8px;
+  border: 1px solid rgba(78, 103, 109, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.62);
+}
+.source-monitoring-control-list article strong { overflow-wrap: anywhere; font-size: 10px; }
+.source-monitoring-control-list article small,
+.source-monitoring-control-list article em { color: #657679; font-size: 9px; font-style: normal; line-height: 1.45; overflow-wrap: anywhere; }
+.source-monitoring-control-list article > footer { justify-content: flex-end; flex-wrap: wrap; }
+.source-monitoring-control-list .source-monitoring-blockers { color: #8a4039; }
+.source-monitoring-preview {
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid rgba(78, 103, 109, 0.16);
+  border-radius: 8px;
+  background: rgba(243, 248, 247, 0.76);
+}
+.source-monitoring-preview > header { outline: 0; }
+.source-monitoring-preview > header:focus-visible {
+  box-shadow: 0 0 0 3px rgba(63, 94, 102, 0.14);
+}
+.source-monitoring-preview > header strong { font-size: 10px; }
+.source-monitoring-preview > header code,
+.source-monitoring-preview dd code { font: 8px/1.4 ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
+.source-monitoring-preview dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; margin: 0; }
+.source-monitoring-preview dl > div { display: grid; min-width: 0; gap: 2px; padding: 6px; border: 1px solid rgba(78, 103, 109, 0.1); border-radius: 7px; }
+.source-monitoring-preview dt { color: #718083; font-size: 8px; }
+.source-monitoring-preview dd { min-width: 0; margin: 0; color: #405356; font-size: 9px; overflow-wrap: anywhere; }
+.source-monitoring-confirmation { display: grid; gap: 8px; margin: 0; border: 0; padding: 0; }
+.source-monitoring-confirmation label { display: flex; align-items: flex-start; gap: 7px; color: #4d6266; font-size: 9px; line-height: 1.5; }
+.source-monitoring-confirmation input { flex: 0 0 auto; margin-top: 2px; }
+.source-monitoring-confirmation > footer { justify-content: flex-end; flex-wrap: wrap; }
 .source-inbox-notifications {
   display: flex;
   align-items: center;
@@ -826,6 +888,12 @@
   .source-inbox-detail-heading em { grid-column: 2; justify-self: start; }
   .source-inbox-section { padding: 15px 18px; }
   .source-inbox-health-adapters { grid-template-columns: 1fr; }
+  .source-monitoring-control-list,
+  .source-monitoring-preview dl { grid-template-columns: 1fr; }
+  .source-monitoring-control-list button,
+  .source-monitoring-confirmation button,
+  .source-monitoring-controls > button,
+  .source-monitoring-controls > header > button { min-height: 44px; }
   .source-inbox-notifications { align-items: stretch; flex-direction: column; }
   .source-inbox-import { margin-right: 10px; margin-left: 10px; }
   .source-inbox-import > footer,

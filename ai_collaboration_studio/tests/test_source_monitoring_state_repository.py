@@ -15,6 +15,7 @@ os.environ["AI_STUDIO_SKIP_LOCAL_ENV"] = "1"
 from backend.source_monitoring.contracts import (  # noqa: E402
     FUTU_ANOMALY_SOURCE_CHANNEL,
     OFFICIAL_SOURCE_CHANNEL,
+    canonical_sha256,
 )
 from backend.market.sec_edgar import SecEdgarAdapter  # noqa: E402
 from backend.source_monitoring.adapters.sec_filings import (  # noqa: E402
@@ -28,6 +29,7 @@ from backend.source_monitoring.state_repository import (  # noqa: E402
     RUN_STATUS_FAILED,
     RUN_STATUS_SUCCEEDED,
     SOURCE_MONITORING_MIGRATION_KEY,
+    SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION,
     SourceMonitoringStateError,
     SourceMonitoringStateRepository,
 )
@@ -881,6 +883,97 @@ class SourceMonitoringStateRepositoryTests(unittest.TestCase):
         with self.assertRaises(SourceMonitoringStateError) as tamper_error:
             self.repository.get_state(self.adapter_key)
         self.assertEqual(tamper_error.exception.code, "SOURCE_MONITORING_RECORD_CORRUPT")
+
+    def test_pending_authorization_absence_cas_and_disable_clear(self) -> None:
+        authorization = {
+            "version": SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION,
+            "adapter_key": self.adapter_key,
+            "config_version": self.config_version,
+            "mode": "catch_up",
+            "catch_up_max_items": 2,
+            "from_time_ms": 0,
+            "starting_checkpoint_sha256": canonical_sha256({}),
+            "preview_sha256": "a" * 64,
+            "confirmed_at_ms": self.clock[0],
+        }
+        with self.assertRaises(SourceMonitoringStateError) as stale:
+            self.repository.authorize_initialization_and_enable(
+                self.adapter_key,
+                config_version=self.config_version,
+                expected_state_version=1,
+                authorization=authorization,
+            )
+        self.assertEqual(stale.exception.code, "SOURCE_MONITORING_STATE_CONFLICT")
+        self.assertIsNone(self.repository.get_state(self.adapter_key))
+
+        enabled = self.repository.authorize_initialization_and_enable(
+            self.adapter_key,
+            config_version=self.config_version,
+            expected_state_version=0,
+            authorization=authorization,
+        )
+        self.assertTrue(enabled["enabled"])
+        self.assertEqual(
+            enabled["pending_initialization_authorization"],
+            authorization,
+        )
+        self.assertEqual(
+            enabled["pending_initialization_authorization_sha256"],
+            canonical_sha256(authorization),
+        )
+        with self.assertRaises(SourceMonitoringStateError) as replay:
+            self.repository.authorize_initialization_and_enable(
+                self.adapter_key,
+                config_version=self.config_version,
+                expected_state_version=0,
+                authorization=authorization,
+            )
+        self.assertEqual(replay.exception.code, "SOURCE_MONITORING_STATE_CONFLICT")
+
+        disabled = self.repository.set_enabled(
+            self.adapter_key,
+            config_version=self.config_version,
+            enabled=False,
+            expected_state_version=enabled["state_version"],
+        )
+        self.assertFalse(disabled["enabled"])
+        self.assertIsNone(disabled["pending_initialization_authorization"])
+        self.assertEqual(
+            disabled["pending_initialization_authorization_sha256"],
+            "",
+        )
+
+    def test_pending_authorization_tamper_fails_closed(self) -> None:
+        authorization = {
+            "version": SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION,
+            "adapter_key": self.adapter_key,
+            "config_version": self.config_version,
+            "mode": "seed_only",
+            "catch_up_max_items": 0,
+            "from_time_ms": 0,
+            "starting_checkpoint_sha256": canonical_sha256({}),
+            "preview_sha256": "b" * 64,
+            "confirmed_at_ms": self.clock[0],
+        }
+        self.repository.authorize_initialization_and_enable(
+            self.adapter_key,
+            config_version=self.config_version,
+            expected_state_version=0,
+            authorization=authorization,
+        )
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
+            connection.execute(
+                """UPDATE source_adapter_states
+                      SET pending_initialization_authorization_sha256=?
+                    WHERE adapter_key=?""",
+                ("c" * 64, self.adapter_key),
+            )
+        with self.assertRaises(SourceMonitoringStateError) as corrupt:
+            self.repository.get_state(self.adapter_key)
+        self.assertEqual(
+            corrupt.exception.code,
+            "SOURCE_MONITORING_PENDING_AUTHORIZATION_CORRUPT",
+        )
 
 
 if __name__ == "__main__":

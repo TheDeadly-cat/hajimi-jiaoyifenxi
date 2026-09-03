@@ -85,6 +85,10 @@ from .source_monitoring.operations import (
     SourceMonitoringOperationsError,
     SourceMonitoringRetentionService,
 )
+from .source_monitoring.operator_service import (
+    SourceMonitoringOperatorError,
+    SourceMonitoringOperatorService,
+)
 from .source_monitoring.state_repository import SourceMonitoringStateError
 from .storage_sample_acceptance import StorageSampleAcceptance
 from .structured_logging import (
@@ -134,9 +138,14 @@ def _is_source_inbox_path(path: str) -> bool:
             "/api/monitoring/imports/chatgpt/preview",
             "/api/monitoring/imports/chatgpt/prompt-template",
             "/api/monitoring/notifications",
+            "/api/monitoring/adapters/control",
             "/api/monitoring/retention/attest",
             "/api/monitoring/retention/preview",
         }
+        or re.fullmatch(
+            r"/api/monitoring/adapters/[^/]+/(?:initialization-preview|enablement)",
+            path,
+        )
         or re.fullmatch(r"/api/monitoring/events/[^/]+(?:/(?:acknowledge|attach|round-draft))?", path)
     )
 
@@ -637,6 +646,36 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._send_json({"ok": True, "source_monitoring_health": health})
+            return
+        if parsed.path == "/api/monitoring/adapters/control":
+            if parsed.query:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "Source Monitoring controls do not accept query parameters.",
+                        "code": "SOURCE_MONITORING_OPERATOR_QUERY_UNSUPPORTED",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            service = self._source_monitoring_operator_service()
+            if service is None:
+                return
+            try:
+                control = service.control_snapshot()
+            except SourceMonitoringOperatorError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "source_monitoring_operator_control": control,
+                },
+                cache_control="no-store",
+            )
             return
         if parsed.path == "/api/monitoring/retention/preview":
             if parsed.query:
@@ -1629,10 +1668,20 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         is_monitoring_retention_attest = (
             parsed.path == "/api/monitoring/retention/attest"
         )
+        monitoring_initial_preview_match = re.fullmatch(
+            r"/api/monitoring/adapters/([a-z][a-z0-9_]{0,63})/initialization-preview",
+            parsed.path,
+        )
+        monitoring_enablement_match = re.fullmatch(
+            r"/api/monitoring/adapters/([a-z][a-z0-9_]{0,63})/enablement",
+            parsed.path,
+        )
         is_source_inbox_request = bool(
             is_source_inbox_import
             or is_source_inbox_import_preview
             or is_monitoring_retention_attest
+            or monitoring_initial_preview_match
+            or monitoring_enablement_match
             or re.fullmatch(
                 r"/api/monitoring/events/[^/]+/(?:acknowledge|attach|round-draft)",
                 parsed.path,
@@ -1657,6 +1706,101 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             strict=is_source_inbox_request,
         )
         if payload is None:
+            return
+        if monitoring_initial_preview_match:
+            if (
+                parsed.query
+                or set(payload)
+                != {"expected_config_version", "expected_state_version"}
+            ):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": (
+                            "Initialization preview requires only expected config "
+                            "and state versions."
+                        ),
+                        "code": "SOURCE_MONITORING_OPERATOR_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            service = self._source_monitoring_operator_service()
+            if service is None:
+                return
+            try:
+                preview = service.preview(
+                    monitoring_initial_preview_match.group(1),
+                    expected_config_version=payload.get(
+                        "expected_config_version"
+                    ),
+                    expected_state_version=payload.get("expected_state_version"),
+                )
+            except SourceMonitoringOperatorError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "source_monitoring_operator_preview": preview,
+                },
+                cache_control="no-store",
+            )
+            return
+        if monitoring_enablement_match:
+            if (
+                parsed.query
+                or set(payload)
+                != {
+                    "expected_config_version",
+                    "expected_state_version",
+                    "enabled",
+                    "preview_sha256",
+                    "confirmation",
+                }
+            ):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": (
+                            "Adapter enablement requires the exact version, state, "
+                            "preview, and confirmation fields."
+                        ),
+                        "code": "SOURCE_MONITORING_OPERATOR_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            service = self._source_monitoring_operator_service()
+            if service is None:
+                return
+            try:
+                result = service.set_enablement(
+                    monitoring_enablement_match.group(1),
+                    enabled=payload.get("enabled"),
+                    expected_config_version=payload.get(
+                        "expected_config_version"
+                    ),
+                    expected_state_version=payload.get("expected_state_version"),
+                    confirmation=payload.get("confirmation"),
+                    preview_sha256=payload.get("preview_sha256"),
+                )
+            except SourceMonitoringOperatorError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "source_monitoring_enablement_result": result,
+                },
+                cache_control="no-store",
+            )
             return
         if is_source_inbox_import or is_source_inbox_import_preview:
             if set(payload) != {"content"} or type(payload.get("content")) is not str:
@@ -5445,6 +5589,55 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             )
         return True
 
+    def _source_monitoring_operator_service(
+        self,
+    ) -> SourceMonitoringOperatorService | None:
+        """Bind operator actions to the live host owner/runtime graph."""
+
+        phase = "owner"
+        try:
+            owner = getattr(self.server, "ai_studio_instance_owner", None)
+            if owner is None:
+                raise RuntimeError("operator owner is unavailable")
+            owner.assert_held_for(STORE.path)
+            phase = "runtime"
+            runtime = getattr(
+                self.server,
+                "ai_studio_source_monitoring_runtime",
+                None,
+            )
+            scheduler = getattr(runtime, "scheduler", None)
+            if runtime is None or scheduler is None:
+                raise RuntimeError("operator runtime is unavailable")
+            phase = "service"
+            return SourceMonitoringOperatorService(
+                store=STORE,
+                settings=runtime.settings,
+                registry=scheduler.registry,
+                repository=scheduler.repository,
+            )
+        except Exception as exc:
+            emit_event(
+                "source_monitoring_operator_unavailable",
+                severity="error",
+                fields={
+                    "phase": phase,
+                    "exception_type": type(exc).__name__,
+                    "execution_capability": "none",
+                    "live_trading_allowed": False,
+                },
+            )
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": "Source Monitoring operator control is unavailable.",
+                    "code": "SOURCE_MONITORING_OPERATOR_UNAVAILABLE",
+                },
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                cache_control="no-store",
+            )
+            return None
+
     def _send_json(
         self,
         payload: dict[str, Any],
@@ -5523,6 +5716,10 @@ def run_server(
     server.daemon_threads = False
     server.block_on_close = True
     server.ai_studio_startup_ready = False
+    # Operator-control handlers must re-check the same owner immediately
+    # before any source preview or enablement write.  Keep the already
+    # verified owner attached for the full handler-drain/runtime lifetime.
+    server.ai_studio_instance_owner = instance_owner
     server.ai_studio_source_monitoring_runtime = None
     runtime = None
     started = False

@@ -19,6 +19,8 @@
 
 Phase 8 的 `source_monitoring_operations_v1` 也只能走本硬门。它只 additive 增加 retain-all policy receipt 表、一个索引、receipt/marker 不可变 triggers 和 migration key；不加旧表列、不 backfill、不删除或改写 Source Inbox、adapter state/checkpoint/run receipt。专用迁移测试用代表性旧库核对逐表 content hash，并注入 candidate 已替换但 receipt 未发布的故障，证明原 token rollback 恢复迁移前 physical/logical SHA。完整对象与 completed-migration 无自动 down-migration 的边界见 [Source Monitoring operations runbook](./source_monitoring_operations_runbook.md)。
 
+Adapter 操作员控制面的 `source_monitoring_pending_initialization_authorization_v1` 同样只能走本硬门：它只向 `source_adapter_states` additive 增加 pending authorization JSON/SHA-256 两列、三个 marker guards 和 migration key；不启用 adapter、不生成授权、不轮询来源，也不回填或改写既有 state/checkpoint/run/Source Inbox。部分对象或 seal 异常失败关闭，正式 apply 后没有自动 down-migration。
+
 ```powershell
 $db = 'C:\path\to\collaboration_studio.sqlite3'
 $evidence = 'C:\path\to\migration-evidence\2026-08-12'
