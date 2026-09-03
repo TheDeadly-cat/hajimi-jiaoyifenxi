@@ -265,6 +265,26 @@ class SourceMonitoringCliTests(unittest.TestCase):
             ["status"],
             ["preview", self.adapter.adapter_key],
             ["run-once", self.adapter.adapter_key, "--confirm", "RUN_ONCE"],
+            [
+                "enable",
+                self.adapter.adapter_key,
+                "--expected-config-version",
+                self.adapter.config_version,
+                "--expected-state-version",
+                "1",
+                "--confirm",
+                "ENABLE_SOURCE_MONITORING_ADAPTER",
+            ],
+            [
+                "disable",
+                self.adapter.adapter_key,
+                "--expected-config-version",
+                self.adapter.config_version,
+                "--expected-state-version",
+                "1",
+                "--confirm",
+                "DISABLE_SOURCE_MONITORING_ADAPTER",
+            ],
         ):
             calls: list[str] = []
 
@@ -294,6 +314,88 @@ class SourceMonitoringCliTests(unittest.TestCase):
                 self.assertNotIn("SECRET", text)
                 self.assertEqual(calls, [])
                 self.assertEqual(self.adapter.poll_count, 0)
+
+    def test_operator_preview_enable_disable_flow_uses_exact_contracts(self) -> None:
+        disabled = self.repository.set_enabled(
+            self.adapter.adapter_key,
+            config_version=self.adapter.config_version,
+            enabled=False,
+        )
+        state_version = disabled["state_version"]
+        exit_code, _text, preview = self.invoke(
+            [
+                "preview",
+                self.adapter.adapter_key,
+                "--expected-config-version",
+                self.adapter.config_version,
+                "--expected-state-version",
+                str(state_version),
+            ]
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            set(preview),
+            {
+                "version",
+                "adapter_key",
+                "config_version",
+                "state_version",
+                "mode",
+                "initial_required",
+                "initialization_blocked",
+                "catch_up_max_items",
+                "from_time",
+                "candidate_count",
+                "selected_count",
+                "skipped_count",
+                "adapter_duplicate_count",
+                "source_error_count",
+                "rejected_count",
+                "earliest_occurred_at",
+                "latest_occurred_at",
+                "preview_sha256",
+                "starting_checkpoint_sha256",
+                "next_checkpoint_sha256",
+                "captured_at_ms",
+                "safety",
+            },
+        )
+        exit_code, _text, enabled = self.invoke(
+            [
+                "enable",
+                self.adapter.adapter_key,
+                "--expected-config-version",
+                self.adapter.config_version,
+                "--expected-state-version",
+                str(state_version),
+                "--preview-sha256",
+                preview["preview_sha256"],
+                "--confirm",
+                "ENABLE_SOURCE_MONITORING_ADAPTER",
+            ]
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(enabled["version"], "source_monitoring_enablement_result_v1")
+        self.assertTrue(enabled["persisted_enabled"])
+        self.assertTrue(enabled["initialization_authorized"])
+
+        exit_code, _text, disabled_result = self.invoke(
+            [
+                "disable",
+                self.adapter.adapter_key,
+                "--expected-config-version",
+                self.adapter.config_version,
+                "--expected-state-version",
+                str(enabled["state_version"]),
+                "--confirm",
+                "DISABLE_SOURCE_MONITORING_ADAPTER",
+            ]
+        )
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(disabled_result["persisted_enabled"])
+        self.assertFalse(disabled_result["initialization_authorized"])
+        state = self.repository.get_state(self.adapter.adapter_key)
+        self.assertIsNone(state["pending_initialization_authorization"])
 
     def test_status_is_read_only_network_free_and_does_not_build_registry(self) -> None:
         before = _logical_fingerprint(self.database_path)
@@ -587,6 +689,44 @@ class SourceMonitoringCliTests(unittest.TestCase):
                 self.assertEqual(store_calls, [0])
         self.assertEqual(supervisor.call_count, 0)
         self.assertEqual(self.adapter.poll_count, 0)
+
+    def test_enable_and_disable_confirmation_precede_preflight_and_store(self) -> None:
+        for command in ("enable", "disable"):
+            preflight_calls = [0]
+            store_calls = [0]
+
+            def forbidden_preflight(_path: str | Path) -> None:
+                preflight_calls[0] += 1
+                raise AssertionError("confirmation must precede preflight")
+
+            def forbidden_store(_path: Path) -> object:
+                store_calls[0] += 1
+                raise AssertionError("confirmation must precede store open")
+
+            with self.subTest(command=command):
+                exit_code, _text, payload = self.invoke(
+                    [
+                        command,
+                        self.adapter.adapter_key,
+                        "--expected-config-version",
+                        self.adapter.config_version,
+                        "--expected-state-version",
+                        "0",
+                        "--confirm",
+                        "WRONG_CONFIRMATION",
+                    ],
+                    dependencies=self.dependencies(
+                        preflight=forbidden_preflight,
+                        store_opener=forbidden_store,
+                    ),
+                )
+                self.assertEqual(exit_code, 2)
+                self.assertEqual(
+                    payload["error_code"],
+                    "SOURCE_MONITORING_CONFIRMATION_REQUIRED",
+                )
+                self.assertEqual(preflight_calls, [0])
+                self.assertEqual(store_calls, [0])
 
     def test_run_once_exit_codes_cover_dry_live_and_degraded_results(self) -> None:
         cases = (

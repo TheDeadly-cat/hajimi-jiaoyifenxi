@@ -22,6 +22,7 @@ from .contracts import (
     MAX_ETAG_CHARS,
     MAX_LAST_MODIFIED_CHARS,
     MAX_NATIVE_INTEGER,
+    MAX_OBSERVED_ITEMS_PER_POLL,
     MAX_SOURCE_ERRORS_PER_POLL,
     OFFICIAL_SOURCE_CHANNEL,
     SOURCE_MONITORING_SOURCE_CHANNELS,
@@ -47,6 +48,12 @@ SOURCE_MONITORING_INITIALIZATION_RECEIPT_VERSION = (
     "source_monitoring_initialization_receipt_v1"
 )
 SOURCE_MONITORING_INITIALIZATION_VERSION = "source_monitoring_initialization_v1"
+SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY = (
+    "source_monitoring_pending_initialization_authorization_v1"
+)
+SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION = (
+    "source_monitoring_pending_initialization_authorization_v1"
+)
 
 INITIALIZATION_MODES = frozenset({"seed_only", "catch_up", "from_time"})
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -177,6 +184,77 @@ _INITIALIZATION_SCHEMA_OBJECTS = {
     _INITIALIZATION_MIGRATION_INSERT_TRIGGER: (
         "trigger",
         _INITIALIZATION_MIGRATION_INSERT_TRIGGER_DDL,
+    ),
+}
+
+_PENDING_AUTHORIZATION_COLUMNS = (
+    "pending_initialization_authorization_json",
+    "pending_initialization_authorization_sha256",
+)
+_PENDING_AUTHORIZATION_COLUMN_DEFINITIONS = {
+    "pending_initialization_authorization_json": (
+        "TEXT NOT NULL DEFAULT '' "
+        "CHECK(length(pending_initialization_authorization_json)<=4096)"
+    ),
+    "pending_initialization_authorization_sha256": (
+        "TEXT NOT NULL DEFAULT '' CHECK("
+        "(pending_initialization_authorization_sha256='' AND "
+        "pending_initialization_authorization_json='') OR "
+        "(length(pending_initialization_authorization_sha256)=64 AND "
+        "pending_initialization_authorization_sha256 NOT GLOB '*[^0-9a-f]*' AND "
+        "pending_initialization_authorization_json<>''))"
+    ),
+}
+_PENDING_AUTHORIZATION_MIGRATION_UPDATE_TRIGGER = (
+    "trg_source_monitoring_pending_authorization_marker_no_update"
+)
+_PENDING_AUTHORIZATION_MIGRATION_DELETE_TRIGGER = (
+    "trg_source_monitoring_pending_authorization_marker_no_delete"
+)
+_PENDING_AUTHORIZATION_MIGRATION_INSERT_TRIGGER = (
+    "trg_source_monitoring_pending_authorization_marker_no_replace"
+)
+_PENDING_AUTHORIZATION_MIGRATION_UPDATE_TRIGGER_DDL = f"""CREATE TRIGGER {_PENDING_AUTHORIZATION_MIGRATION_UPDATE_TRIGGER}
+BEFORE UPDATE ON schema_migrations
+WHEN OLD.key='{SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY}'
+  OR NEW.key='{SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY}'
+BEGIN
+    SELECT RAISE(ABORT,'source monitoring pending authorization marker is immutable');
+END"""
+_PENDING_AUTHORIZATION_MIGRATION_DELETE_TRIGGER_DDL = f"""CREATE TRIGGER {_PENDING_AUTHORIZATION_MIGRATION_DELETE_TRIGGER}
+BEFORE DELETE ON schema_migrations
+WHEN OLD.key='{SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY}'
+BEGIN
+    SELECT RAISE(ABORT,'source monitoring pending authorization marker is immutable');
+END"""
+_PENDING_AUTHORIZATION_MIGRATION_INSERT_TRIGGER_DDL = f"""CREATE TRIGGER {_PENDING_AUTHORIZATION_MIGRATION_INSERT_TRIGGER}
+BEFORE INSERT ON schema_migrations
+WHEN EXISTS (
+    SELECT 1 FROM schema_migrations existing
+     WHERE existing.key='{SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY}'
+       AND (existing.rowid=NEW.rowid
+            OR NEW.key='{SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY}')
+)
+BEGIN
+    SELECT RAISE(ABORT,'source monitoring pending authorization marker is immutable');
+END"""
+_PENDING_AUTHORIZATION_SCHEMA_DDL = (
+    _PENDING_AUTHORIZATION_MIGRATION_UPDATE_TRIGGER_DDL,
+    _PENDING_AUTHORIZATION_MIGRATION_DELETE_TRIGGER_DDL,
+    _PENDING_AUTHORIZATION_MIGRATION_INSERT_TRIGGER_DDL,
+)
+_PENDING_AUTHORIZATION_SCHEMA_OBJECTS = {
+    _PENDING_AUTHORIZATION_MIGRATION_UPDATE_TRIGGER: (
+        "trigger",
+        _PENDING_AUTHORIZATION_MIGRATION_UPDATE_TRIGGER_DDL,
+    ),
+    _PENDING_AUTHORIZATION_MIGRATION_DELETE_TRIGGER: (
+        "trigger",
+        _PENDING_AUTHORIZATION_MIGRATION_DELETE_TRIGGER_DDL,
+    ),
+    _PENDING_AUTHORIZATION_MIGRATION_INSERT_TRIGGER: (
+        "trigger",
+        _PENDING_AUTHORIZATION_MIGRATION_INSERT_TRIGGER_DDL,
     ),
 }
 
@@ -508,6 +586,148 @@ def _ensure_source_monitoring_initialization_schema(
     connection.execute(f"RELEASE SAVEPOINT {savepoint}")
 
 
+def _source_monitoring_pending_authorization_schema_state(
+    connection: sqlite3.Connection,
+) -> str:
+    table_row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='source_adapter_states'"
+    ).fetchone()
+    if table_row is None:
+        raise SourceMonitoringStateError(
+            "source adapter state table is missing",
+            code="SOURCE_MONITORING_PENDING_AUTHORIZATION_SCHEMA_INVALID",
+        )
+    table_sql = str(
+        table_row["sql"] if isinstance(table_row, sqlite3.Row) else table_row[0]
+    )
+    column_rows = connection.execute(
+        "PRAGMA table_info(source_adapter_states)"
+    ).fetchall()
+    column_info = {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1]): {
+            "type": str(row["type"] if isinstance(row, sqlite3.Row) else row[2]),
+            "notnull": row["notnull"] if isinstance(row, sqlite3.Row) else row[3],
+            "default": row["dflt_value"] if isinstance(row, sqlite3.Row) else row[4],
+            "pk": row["pk"] if isinstance(row, sqlite3.Row) else row[5],
+        }
+        for row in column_rows
+    }
+    present_columns = set(_PENDING_AUTHORIZATION_COLUMNS).intersection(column_info)
+    object_names = tuple(_PENDING_AUTHORIZATION_SCHEMA_OBJECTS)
+    placeholders = ",".join("?" for _name in object_names)
+    object_rows = connection.execute(
+        f"SELECT type,name,sql FROM sqlite_master WHERE name IN ({placeholders})",
+        object_names,
+    ).fetchall()
+    objects = {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1]): {
+            "type": str(row["type"] if isinstance(row, sqlite3.Row) else row[0]),
+            "sql": str(row["sql"] if isinstance(row, sqlite3.Row) else row[2]),
+        }
+        for row in object_rows
+    }
+    marker = connection.execute(
+        "SELECT applied_at FROM schema_migrations WHERE key=?",
+        (SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY,),
+    ).fetchone()
+    if not objects and marker is None and (
+        not present_columns
+        or present_columns == set(_PENDING_AUTHORIZATION_COLUMNS)
+    ):
+        return "migration_required"
+    if (
+        present_columns != set(_PENDING_AUTHORIZATION_COLUMNS)
+        or set(objects) != set(_PENDING_AUTHORIZATION_SCHEMA_OBJECTS)
+        or marker is None
+    ):
+        raise SourceMonitoringStateError(
+            "source monitoring pending authorization schema is incomplete",
+            code="SOURCE_MONITORING_PENDING_AUTHORIZATION_SCHEMA_INVALID",
+        )
+    compact_table_sql = _compact_sql(table_sql)
+    for name, definition in _PENDING_AUTHORIZATION_COLUMN_DEFINITIONS.items():
+        if (
+            column_info[name]
+            != {"type": "TEXT", "notnull": 1, "default": "''", "pk": 0}
+            or _compact_sql(f"{name} {definition}") not in compact_table_sql
+        ):
+            raise SourceMonitoringStateError(
+                f"source monitoring pending authorization column {name} is invalid",
+                code="SOURCE_MONITORING_PENDING_AUTHORIZATION_SCHEMA_INVALID",
+            )
+    for name, (expected_type, expected_sql) in (
+        _PENDING_AUTHORIZATION_SCHEMA_OBJECTS.items()
+    ):
+        if objects[name] != {"type": expected_type, "sql": expected_sql}:
+            raise SourceMonitoringStateError(
+                f"source monitoring pending authorization object {name} is invalid",
+                code="SOURCE_MONITORING_PENDING_AUTHORIZATION_SCHEMA_INVALID",
+            )
+    applied_at = marker["applied_at"] if isinstance(marker, sqlite3.Row) else marker[0]
+    if type(applied_at) is not int or not 0 <= applied_at <= MAX_NATIVE_INTEGER:
+        raise SourceMonitoringStateError(
+            "source monitoring pending authorization marker is invalid",
+            code="SOURCE_MONITORING_PENDING_AUTHORIZATION_SCHEMA_INVALID",
+        )
+    return "current"
+
+
+def source_monitoring_pending_authorization_schema_state(
+    connection: sqlite3.Connection,
+) -> str:
+    if not isinstance(connection, sqlite3.Connection):
+        raise SourceMonitoringStateError(
+            "source monitoring pending authorization connection is invalid",
+            code="SOURCE_MONITORING_PENDING_AUTHORIZATION_SCHEMA_INVALID",
+        )
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_adapter_states'"
+    ).fetchone()
+    if table is None:
+        return "unavailable"
+    return _source_monitoring_pending_authorization_schema_state(connection)
+
+
+def _ensure_source_monitoring_pending_authorization_schema(
+    connection: sqlite3.Connection,
+    *,
+    applied_at_ms: int,
+) -> None:
+    if _source_monitoring_pending_authorization_schema_state(connection) == "current":
+        return
+    savepoint = "source_monitoring_pending_initialization_authorization_v1"
+    connection.execute(f"SAVEPOINT {savepoint}")
+    try:
+        existing_columns = {
+            str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(source_adapter_states)"
+            ).fetchall()
+        }
+        for name in _PENDING_AUTHORIZATION_COLUMNS:
+            if name not in existing_columns:
+                connection.execute(
+                    f"ALTER TABLE source_adapter_states ADD COLUMN "
+                    f"{name} {_PENDING_AUTHORIZATION_COLUMN_DEFINITIONS[name]}"
+                )
+        for statement in _PENDING_AUTHORIZATION_SCHEMA_DDL:
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_migrations(key,applied_at) VALUES(?,?)",
+            (SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY, applied_at_ms),
+        )
+        if _source_monitoring_pending_authorization_schema_state(connection) != "current":
+            raise SourceMonitoringStateError(
+                "source monitoring pending authorization migration did not complete",
+                code="SOURCE_MONITORING_PENDING_AUTHORIZATION_SCHEMA_INVALID",
+            )
+    except BaseException:
+        connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+
 def ensure_source_monitoring_schema(
     connection: sqlite3.Connection,
     *,
@@ -546,6 +766,20 @@ def ensure_source_monitoring_schema(
                 CHECK(consecutive_failures>=0),
             last_error_code TEXT NOT NULL DEFAULT '',
             last_error_message TEXT NOT NULL DEFAULT '',
+            pending_initialization_authorization_json TEXT NOT NULL DEFAULT ''
+                CHECK(length(pending_initialization_authorization_json)<=4096),
+            pending_initialization_authorization_sha256 TEXT NOT NULL DEFAULT ''
+                CHECK(
+                    (
+                        pending_initialization_authorization_sha256=''
+                        AND pending_initialization_authorization_json=''
+                    ) OR (
+                        length(pending_initialization_authorization_sha256)=64
+                        AND pending_initialization_authorization_sha256
+                            NOT GLOB '*[^0-9a-f]*'
+                        AND pending_initialization_authorization_json<>''
+                    )
+                ),
             state_version INTEGER NOT NULL DEFAULT 1 CHECK(state_version>0),
             updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms>=0)
         );
@@ -624,6 +858,10 @@ def ensure_source_monitoring_schema(
         (SOURCE_MONITORING_MIGRATION_KEY, applied_at_ms),
     )
     _ensure_source_monitoring_initialization_schema(
+        connection,
+        applied_at_ms=applied_at_ms,
+    )
+    _ensure_source_monitoring_pending_authorization_schema(
         connection,
         applied_at_ms=applied_at_ms,
     )
@@ -794,6 +1032,135 @@ def _sha256_digest(value: Any, label: str) -> str:
             code="SOURCE_MONITORING_STATE_INVALID",
         )
     return value
+
+
+def normalize_pending_initialization_authorization(value: Any) -> dict[str, Any]:
+    """Validate the exact persisted authorization projection."""
+
+    expected_fields = {
+        "version",
+        "adapter_key",
+        "config_version",
+        "mode",
+        "catch_up_max_items",
+        "from_time_ms",
+        "starting_checkpoint_sha256",
+        "preview_sha256",
+        "confirmed_at_ms",
+    }
+    if type(value) is not dict or set(value) != expected_fields:
+        raise SourceMonitoringStateError(
+            "pending initialization authorization is not the closed v1 projection",
+            code="SOURCE_MONITORING_PENDING_AUTHORIZATION_INVALID",
+        )
+    if value.get("version") != SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION:
+        raise SourceMonitoringStateError(
+            "pending initialization authorization version is invalid",
+            code="SOURCE_MONITORING_PENDING_AUTHORIZATION_INVALID",
+        )
+    mode = _clean_token(
+        value.get("mode"),
+        "pending_authorization.mode",
+        maximum=32,
+    )
+    if mode not in INITIALIZATION_MODES:
+        raise SourceMonitoringStateError(
+            "pending initialization authorization mode is invalid",
+            code="SOURCE_MONITORING_PENDING_AUTHORIZATION_INVALID",
+        )
+    catch_up_max_items = _native_non_negative(
+        value.get("catch_up_max_items"),
+        "pending_authorization.catch_up_max_items",
+    )
+    from_time_ms = _native_non_negative(
+        value.get("from_time_ms"),
+        "pending_authorization.from_time_ms",
+    )
+    if (
+        (mode == "seed_only" and (catch_up_max_items != 0 or from_time_ms != 0))
+        or (
+            mode == "catch_up"
+            and (
+                not 1 <= catch_up_max_items <= MAX_OBSERVED_ITEMS_PER_POLL
+                or from_time_ms != 0
+            )
+        )
+        or (mode == "from_time" and catch_up_max_items != 0)
+    ):
+        raise SourceMonitoringStateError(
+            "pending initialization authorization policy is inconsistent",
+            code="SOURCE_MONITORING_PENDING_AUTHORIZATION_INVALID",
+        )
+    return {
+        "version": SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION,
+        "adapter_key": normalize_adapter_key(value.get("adapter_key")),
+        "config_version": _clean_token(
+            value.get("config_version"),
+            "pending_authorization.config_version",
+        ),
+        "mode": mode,
+        "catch_up_max_items": catch_up_max_items,
+        "from_time_ms": from_time_ms,
+        "starting_checkpoint_sha256": _sha256_digest(
+            value.get("starting_checkpoint_sha256"),
+            "pending_authorization.starting_checkpoint_sha256",
+        ),
+        "preview_sha256": _sha256_digest(
+            value.get("preview_sha256"),
+            "pending_authorization.preview_sha256",
+        ),
+        "confirmed_at_ms": _native_non_negative(
+            value.get("confirmed_at_ms"),
+            "pending_authorization.confirmed_at_ms",
+        ),
+    }
+
+
+def _pending_authorization_projection(
+    data: dict[str, Any],
+    *,
+    adapter_key: str,
+    config_version: str,
+    checkpoint_sha256: str,
+    enabled: bool,
+) -> tuple[dict[str, Any] | None, str]:
+    raw_json = data.get("pending_initialization_authorization_json")
+    raw_sha = data.get("pending_initialization_authorization_sha256")
+    if raw_json is None and raw_sha is None:
+        # Health may project an intact pre-migration state after independently
+        # classifying the additive schema as migration_required.
+        return None, ""
+    if raw_json == "" and raw_sha == "":
+        return None, ""
+    if type(raw_json) is not str or type(raw_sha) is not str or not raw_json or not raw_sha:
+        raise SourceMonitoringStateError(
+            "pending initialization authorization storage is incomplete",
+            code="SOURCE_MONITORING_PENDING_AUTHORIZATION_CORRUPT",
+        )
+    decoded = _decode_json_object(
+        raw_json,
+        "pending_initialization_authorization_json",
+    )
+    try:
+        authorization = normalize_pending_initialization_authorization(decoded)
+    except SourceMonitoringStateError as exc:
+        raise SourceMonitoringStateError(
+            "pending initialization authorization is invalid",
+            code="SOURCE_MONITORING_PENDING_AUTHORIZATION_CORRUPT",
+        ) from exc
+    if (
+        _SHA256_RE.fullmatch(raw_sha) is None
+        or canonical_sha256(authorization) != raw_sha
+        or authorization["adapter_key"] != adapter_key
+        or authorization["config_version"] != config_version
+        or authorization["starting_checkpoint_sha256"] != checkpoint_sha256
+        or enabled is not True
+    ):
+        raise SourceMonitoringStateError(
+            "pending initialization authorization seal is invalid",
+            code="SOURCE_MONITORING_PENDING_AUTHORIZATION_CORRUPT",
+        )
+    return authorization, raw_sha
 
 
 def _canonical_initialization_time(value: Any, label: str) -> str:
@@ -1212,6 +1579,17 @@ class SourceMonitoringStateRepository:
                 "source adapter state version is invalid",
                 code="SOURCE_MONITORING_RECORD_CORRUPT",
             )
+        authorization, authorization_sha256 = _pending_authorization_projection(
+            data,
+            adapter_key=projection["adapter_key"],
+            config_version=projection["config_version"],
+            checkpoint_sha256=projection["checkpoint_sha256"],
+            enabled=projection["enabled"],
+        )
+        projection["pending_initialization_authorization"] = authorization
+        projection["pending_initialization_authorization_sha256"] = (
+            authorization_sha256
+        )
         return projection
 
     @staticmethod
@@ -1438,12 +1816,21 @@ class SourceMonitoringStateRepository:
                 next_due = timestamp if enabled else state["next_due_at_ms"]
                 cursor = connection.execute(
                     """UPDATE source_adapter_states
-                       SET enabled=?,next_due_at_ms=?,state_version=state_version+1,
+                       SET enabled=?,next_due_at_ms=?,
+                           pending_initialization_authorization_json=
+                               CASE WHEN ?=0 THEN ''
+                                    ELSE pending_initialization_authorization_json END,
+                           pending_initialization_authorization_sha256=
+                               CASE WHEN ?=0 THEN ''
+                                    ELSE pending_initialization_authorization_sha256 END,
+                           state_version=state_version+1,
                            updated_at_ms=?
                        WHERE adapter_key=? AND state_version=?""",
                     (
                         int(enabled),
                         next_due,
+                        int(enabled),
+                        int(enabled),
                         timestamp,
                         clean_key,
                         state["state_version"],
@@ -1454,6 +1841,159 @@ class SourceMonitoringStateRepository:
                         "adapter state changed before enablement update",
                         code="SOURCE_MONITORING_STATE_CONFLICT",
                     )
+            updated = connection.execute(
+                "SELECT * FROM source_adapter_states WHERE adapter_key=?",
+                (clean_key,),
+            ).fetchone()
+            assert updated is not None
+            return self._state_projection(updated)
+
+    def authorize_initialization_and_enable(
+        self,
+        adapter_key: Any,
+        *,
+        config_version: Any,
+        expected_state_version: Any,
+        authorization: Any,
+    ) -> dict[str, Any]:
+        """Atomically persist one sealed initial authorization and enable state."""
+
+        clean_key = normalize_adapter_key(adapter_key)
+        clean_config = _clean_token(config_version, "config_version")
+        if (
+            type(expected_state_version) is not int
+            or not 0 <= expected_state_version <= MAX_NATIVE_INTEGER
+        ):
+            raise SourceMonitoringStateError(
+                "expected_state_version is invalid",
+                code="SOURCE_MONITORING_STATE_INVALID",
+            )
+        clean_authorization = normalize_pending_initialization_authorization(
+            authorization
+        )
+        if (
+            clean_authorization["adapter_key"] != clean_key
+            or clean_authorization["config_version"] != clean_config
+        ):
+            raise SourceMonitoringStateError(
+                "pending authorization identity does not match the adapter",
+                code="SOURCE_MONITORING_PENDING_AUTHORIZATION_INVALID",
+            )
+        timestamp = self._now_ms()
+        if clean_authorization["confirmed_at_ms"] > timestamp:
+            raise SourceMonitoringStateError(
+                "pending authorization confirmation time is in the future",
+                code="SOURCE_MONITORING_PENDING_AUTHORIZATION_INVALID",
+            )
+        authorization_json = canonical_json(clean_authorization)
+        if len(authorization_json) > 4096:
+            raise SourceMonitoringStateError(
+                "pending authorization exceeds the persisted bound",
+                code="SOURCE_MONITORING_PENDING_AUTHORIZATION_INVALID",
+            )
+        authorization_sha256 = canonical_sha256(clean_authorization)
+        with self.store._lock, closing(self.store._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM source_adapter_states WHERE adapter_key=?",
+                (clean_key,),
+            ).fetchone()
+            if row is None:
+                if expected_state_version != 0:
+                    raise SourceMonitoringStateError(
+                        "adapter state changed before initialization authorization",
+                        code="SOURCE_MONITORING_STATE_CONFLICT",
+                    )
+                self._insert_state(
+                    connection,
+                    adapter_key=clean_key,
+                    config_version=clean_config,
+                    now_ms=timestamp,
+                )
+                row = connection.execute(
+                    "SELECT * FROM source_adapter_states WHERE adapter_key=?",
+                    (clean_key,),
+                ).fetchone()
+                assert row is not None
+            elif expected_state_version == 0:
+                raise SourceMonitoringStateError(
+                    "adapter state changed before initialization authorization",
+                    code="SOURCE_MONITORING_STATE_CONFLICT",
+                )
+            state = self._state_projection(row)
+            if (
+                expected_state_version != 0
+                and state["state_version"] != expected_state_version
+            ):
+                raise SourceMonitoringStateError(
+                    "adapter state changed before initialization authorization",
+                    code="SOURCE_MONITORING_STATE_CONFLICT",
+                )
+            if state["config_version"] != clean_config:
+                raise SourceMonitoringStateError(
+                    "adapter config version differs from persisted state",
+                    code="SOURCE_MONITORING_CONFIG_CONFLICT",
+                )
+            if state["enabled"]:
+                raise SourceMonitoringStateError(
+                    "adapter is already enabled",
+                    code="SOURCE_MONITORING_ADAPTER_ENABLED",
+                )
+            if state["checkpoint"] != {} or state["last_success_at_ms"] > 0:
+                raise SourceMonitoringStateError(
+                    "adapter initialization is already complete",
+                    code="SOURCE_MONITORING_INITIALIZATION_ALREADY_COMPLETE",
+                )
+            if self.read_latest_successful_initialization_from_connection(
+                connection,
+                clean_key,
+                config_version=clean_config,
+            ) is not None:
+                raise SourceMonitoringStateError(
+                    "adapter initialization is already complete",
+                    code="SOURCE_MONITORING_INITIALIZATION_ALREADY_COMPLETE",
+                )
+            if (
+                clean_authorization["starting_checkpoint_sha256"]
+                != state["checkpoint_sha256"]
+            ):
+                raise SourceMonitoringStateError(
+                    "adapter checkpoint changed after initialization preview",
+                    code="SOURCE_MONITORING_CHECKPOINT_START_MISMATCH",
+                )
+            active = connection.execute(
+                "SELECT 1 FROM source_adapter_runs WHERE adapter_key=? AND status='RUNNING'",
+                (clean_key,),
+            ).fetchone()
+            if active is not None:
+                raise SourceMonitoringStateError(
+                    "adapter enablement cannot change during an active run",
+                    code="SOURCE_MONITORING_RUN_ACTIVE",
+                )
+            cursor = connection.execute(
+                """UPDATE source_adapter_states
+                   SET enabled=1,next_due_at_ms=?,
+                       pending_initialization_authorization_json=?,
+                       pending_initialization_authorization_sha256=?,
+                       state_version=state_version+1,updated_at_ms=?
+                   WHERE adapter_key=? AND enabled=0 AND state_version=?
+                         AND config_version=? AND checkpoint_sha256=?""",
+                (
+                    timestamp,
+                    authorization_json,
+                    authorization_sha256,
+                    timestamp,
+                    clean_key,
+                    state["state_version"],
+                    clean_config,
+                    state["checkpoint_sha256"],
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise SourceMonitoringStateError(
+                    "adapter state changed before initialization authorization",
+                    code="SOURCE_MONITORING_STATE_CONFLICT",
+                )
             updated = connection.execute(
                 "SELECT * FROM source_adapter_states WHERE adapter_key=?",
                 (clean_key,),
@@ -1638,6 +2178,8 @@ class SourceMonitoringStateRepository:
                        etag='',last_modified='',last_started_at_ms=0,
                        last_success_at_ms=0,last_event_at_ms=0,next_due_at_ms=0,
                        consecutive_failures=0,last_error_code='',last_error_message='',
+                       pending_initialization_authorization_json='',
+                       pending_initialization_authorization_sha256='',
                        state_version=state_version+1,updated_at_ms=?
                    WHERE adapter_key=? AND enabled=0 AND state_version=?
                          AND config_version=?""",
@@ -1886,6 +2428,9 @@ class SourceMonitoringStateRepository:
             initialization_receipt_json = ""
             initialization_receipt_sha256 = ""
             if clean_initialization is not None:
+                pending_authorization = state[
+                    "pending_initialization_authorization"
+                ]
                 if (
                     status != RUN_STATUS_SUCCEEDED
                     or run["dry_run"]
@@ -1919,6 +2464,30 @@ class SourceMonitoringStateRepository:
                         and (
                             clean_initialization["selected_count"] != 0
                             or bool(clean_receipt)
+                        )
+                    )
+                    or (
+                        pending_authorization is not None
+                        and (
+                            pending_authorization["mode"]
+                            != clean_initialization["mode"]
+                            or pending_authorization["config_version"]
+                            != clean_initialization["config_version"]
+                            or pending_authorization["catch_up_max_items"]
+                            != clean_initialization["catch_up_max_items"]
+                            or pending_authorization["from_time_ms"]
+                            != clean_initialization["from_time_ms"]
+                            or pending_authorization[
+                                "starting_checkpoint_sha256"
+                            ]
+                            != clean_initialization[
+                                "starting_checkpoint_sha256"
+                            ]
+                            or (
+                                clean_initialization["mode"] == "catch_up"
+                                and pending_authorization["preview_sha256"]
+                                != clean_initialization["preview_sha256"]
+                            )
                         )
                     )
                 ):
@@ -1997,6 +2566,12 @@ class SourceMonitoringStateRepository:
                        SET checkpoint_json=?,checkpoint_sha256=?,etag=?,last_modified=?,
                            last_success_at_ms=?,last_event_at_ms=?,next_due_at_ms=?,
                            consecutive_failures=?,last_error_code=?,last_error_message=?,
+                           pending_initialization_authorization_json=
+                               CASE WHEN ?=1 THEN ''
+                                    ELSE pending_initialization_authorization_json END,
+                           pending_initialization_authorization_sha256=
+                               CASE WHEN ?=1 THEN ''
+                                    ELSE pending_initialization_authorization_sha256 END,
                            state_version=state_version+1,updated_at_ms=?
                        WHERE adapter_key=? AND state_version=?""",
                     (
@@ -2010,6 +2585,8 @@ class SourceMonitoringStateRepository:
                         consecutive_failures,
                         state_error_code,
                         state_error_message,
+                        int(clean_initialization is not None),
+                        int(clean_initialization is not None),
                         completed_at,
                         run["adapter_key"],
                         state["state_version"],
@@ -2325,8 +2902,12 @@ __all__ = [
     "SOURCE_MONITORING_INITIALIZATION_RECEIPT_VERSION",
     "SOURCE_MONITORING_INITIALIZATION_VERSION",
     "SOURCE_MONITORING_MIGRATION_KEY",
+    "SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY",
+    "SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION",
     "SourceMonitoringStateError",
     "SourceMonitoringStateRepository",
+    "normalize_pending_initialization_authorization",
     "source_monitoring_initialization_schema_state",
+    "source_monitoring_pending_authorization_schema_state",
     "ensure_source_monitoring_schema",
 ]

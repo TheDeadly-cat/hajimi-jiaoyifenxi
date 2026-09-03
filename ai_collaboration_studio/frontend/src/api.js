@@ -46,6 +46,18 @@ export const api = {
     "/api/monitoring/health",
     { signal },
   ),
+  sourceMonitoringOperatorControl: (signal) => jsonRequest(
+    "/api/monitoring/adapters/control",
+    { signal },
+  ),
+  previewSourceMonitoringAdapterInitialization: (adapterKey, payload, signal) => jsonRequest(
+    `/api/monitoring/adapters/${encodeURIComponent(adapterKey)}/initialization-preview`,
+    { method: "POST", body: JSON.stringify(payload), signal },
+  ),
+  setSourceMonitoringAdapterEnablement: (adapterKey, payload, signal) => jsonRequest(
+    `/api/monitoring/adapters/${encodeURIComponent(adapterKey)}/enablement`,
+    { method: "POST", body: JSON.stringify(payload), signal },
+  ),
   sourceInboxNotifications: ({ after = "", limit = 50, signal } = {}) => {
     const parameters = new URLSearchParams({ limit: String(limit) });
     if (after) parameters.set("after", after);

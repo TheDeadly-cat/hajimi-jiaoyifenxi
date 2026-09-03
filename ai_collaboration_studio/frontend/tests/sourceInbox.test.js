@@ -1095,8 +1095,11 @@ test("panel source and responsive styles preserve the zero-execution boundary", 
     "importSourceInbox",
     "listSourceInbox",
     "previewSourceInboxImport",
+    "previewSourceMonitoringAdapterInitialization",
+    "setSourceMonitoringAdapterEnablement",
     "sourceInboxItem",
     "sourceMonitoringHealth",
+    "sourceMonitoringOperatorControl",
     "sourceMonitoringPromptTemplate",
   ]);
   assert.doesNotMatch(panelSource, /streamRound|streamMessage|preflightProviders|storageSnapshot/);
@@ -1108,6 +1111,10 @@ test("panel source and responsive styles preserve the zero-execution boundary", 
   assert.match(panelSource, /内容已更改，请重新预览/);
   assert.match(panelSource, /确认仅导入收件箱/);
   assert.match(panelSource, /本页不打开、登录或控制 ChatGPT/);
+  assert.match(panelSource, /保存 Adapter 启用状态不证明 Runtime 在线/);
+  assert.match(panelSource, /不会删除 checkpoint、初始化收据或 Source Inbox 记录/);
+  assert.match(panelSource, /ENABLE_SOURCE_MONITORING_ADAPTER/);
+  assert.match(panelSource, /DISABLE_SOURCE_MONITORING_ADAPTER/);
   assert.doesNotMatch(panelSource, /window\.open|clipboard\.readText|chatgpt\.com/);
   const selectionBlock = panelSource.slice(
     panelSource.indexOf("setSelectedItemId((current) =>"),

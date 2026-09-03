@@ -4,7 +4,7 @@
 
 本文件是 `source_monitoring_operations_v1` 与 `SourceMonitoringRuntime v1` 的运行、首次初始化、保留、迁移和回滚合同。它不扩大来源监控的权限：监控仍默认关闭、默认不自动启动、默认 dry-run；`execution_capability=none`、`live_trading_allowed=false`。本阶段没有新增信息源、Telegram/TDLib、ChatGPT 页面控制、任意 URL 抓取、Provider 基础监控、自动正式 round 或交易能力。
 
-Runtime 构造本身零 I/O，并且不会创建或启用 adapter state。只有全局 `enabled=1`、`auto_start=1`，且某个代码注册 adapter 已在持久化状态中被显式启用、config version 仍 current 时，worker 才可能轮询该 adapter。Runtime v1 CLI 故意不实现 enable/disable；缺少既有显式启用状态时会失败关闭或保持空闲。
+Runtime 构造本身零 I/O，并且不会创建或启用 adapter state。只有全局 `enabled=1`、`auto_start=1`，且某个代码注册 adapter 已通过本地操作员入口显式启用、config version 与初始化策略仍 current 时，worker 才可能轮询该 adapter。Adapter 开关可从 Source Inbox 的懒加载控制面或 owner-exclusive CLI 修改；打开面板、展开健康区或只读取 control 都不会轮询来源。
 
 这些监控变量只从启动进程的真实环境读取，当前 `.env.local` 白名单不会导入 `AI_STUDIO_SOURCE_MONITOR_*`。PowerShell 操作员必须在启动同一进程前设置 `$env:...`；不要把凭据或监控开关提交进仓库。
 
@@ -51,7 +51,9 @@ serve_forever 退出
 | `catch_up` | 还必须设置 `AI_STUDIO_SOURCE_MONITOR_CATCH_UP_MAX_ITEMS=1..50`，先 preview，再把 `AI_STUDIO_SOURCE_MONITOR_INITIAL_PREVIEW_SHA256` 设为精确预览哈希；只导入确定性排序后的最新 N 项，但提交完整 next checkpoint | 正常处理新项 |
 | `from_time` | 还必须设置带时区 RFC3339 的 `AI_STUDIO_SOURCE_MONITOR_FROM_TIME`；时间标准化到 UTC 毫秒，只导入 `occurred_at >= cutoff` 的项 | 同一 cutoff 持续过滤，防止旧项延迟出现 |
 
-`catch_up` 按 `occurred_at` UTC 降序、服务端 fingerprint 升序确定性选择；预览封印 adapter key、config version、起止 checkpoint hash、模式/上限、完整候选与选择后的 fingerprint 集。缺少确认哈希会在网络和 run receipt 之前失败；确认后来源证据漂移会在 Source Inbox 写入和 checkpoint 前失败。只读市场 adapter 首次只允许 `seed_only`。
+`catch_up` 按 `occurred_at` UTC 降序、服务端 fingerprint 升序确定性选择；预览封印 adapter key、config version、起止 checkpoint hash、模式/上限、完整候选与选择后的 fingerprint 集。缺少确认哈希会在 worker 网络读取和 run receipt 之前失败；确认后来源证据漂移会在 Source Inbox 写入和 checkpoint 前失败。UI 授权会把精确 preview hash 与策略、起始 checkpoint 封印为 pending authorization；成功初始化在同一事务消费它，失败/degraded/dry-run 保留，disable 或 config migration 清除。环境与 UI 同时提供 catch-up hash 且不一致时失败关闭。
+
+`seed_only` 与 `from_time` 的 UI 确认绑定模式、参数和起始 checkpoint，而不是延迟启动时的候选全集；首次成功运行分别以当时完整候选建立基线，或严格按已确认 cutoff 过滤。界面会明确提示 seed 候选数可能变化。只读市场 adapter 首次只允许 `seed_only`；其 preview 会执行有界行情读取，确认启用时服务端会再读一次并核对状态，界面展示实际 market-call 计数，但这两次读取都不创建交易上下文或订单。
 
 三种模式都先用完整 Source Inbox 合同验证全部候选。首次轮询只要包含 source error 或 rejected item，就不导入、不提交 checkpoint、也不写 initialization receipt。dry-run 优先于所有模式：只返回 `would_seed/would_import`，不会建立基线。成功 initialization receipt 会把模式、catch-up 上限/from-time cutoff、计数、时间界限、checkpoint hashes 和 preview hash 封印到 `source_adapter_runs`；重启时策略漂移会在 poll 前失败关闭。
 
@@ -60,13 +62,27 @@ serve_forever 退出
 ```powershell
 python -m backend.source_monitoring_cli status
 python -m backend.source_monitoring_cli preview sec_filings
+python -m backend.source_monitoring_cli preview sec_filings `
+  --expected-config-version '<control 中的 config_version>' `
+  --expected-state-version '<control 中的 state_version>'
+python -m backend.source_monitoring_cli enable sec_filings `
+  --expected-config-version '<control 中的 config_version>' `
+  --expected-state-version '<control 中的 state_version>' `
+  --preview-sha256 '<首次预览 SHA-256>' `
+  --confirm ENABLE_SOURCE_MONITORING_ADAPTER
+python -m backend.source_monitoring_cli disable sec_filings `
+  --expected-config-version '<control 中的 config_version>' `
+  --expected-state-version '<control 中的 state_version>' `
+  --confirm DISABLE_SOURCE_MONITORING_ADAPTER
 python -m backend.source_monitoring_cli run-once sec_filings --confirm RUN_ONCE
 ```
 
-三个命令都先竞争与正式宿主相同的 OS owner lock；宿主或另一个 CLI 正在使用数据库时返回 `SOURCE_MONITORING_INSTANCE_ACTIVE`，且不解析 Store、不迁移、不轮询、不输出数据库路径。CLI 不接受 `--database`，也不启动 HTTP listener。
+这些命令都先竞争与正式宿主相同的 OS owner lock；宿主或另一个 CLI 正在使用数据库时返回 `SOURCE_MONITORING_INSTANCE_ACTIVE`，且不解析 Store、不迁移、不轮询、不输出数据库路径。CLI 不接受 `--database`，也不启动 HTTP listener。
 
 - `status`：只读迁移门和 health snapshot；不恢复、不轮询、不写库。
-- `preview`：要求全局 enabled、adapter 已显式 enabled 且 config current；允许访问该固定来源，但不创建 run、import 或 checkpoint，只输出有界计数、时间和 hashes。当前 HTTP 请求计数未被 adapter 合同精确计量，所以会诚实显示 `null/not_instrumented`，不会伪报为零。
+- `preview`（不带 expected 参数）：要求全局 enabled、adapter 已显式 enabled 且 config current；允许访问该固定来源，但不创建 run、import 或 checkpoint，只输出有界计数、时间和 hashes。
+- `preview --expected-*`：只用于尚未初始化且已关闭的 adapter，按 control 中的 config/state 做 CAS 绑定；同样零数据库写入。当前 HTTP 请求计数未被 adapter 合同精确计量，所以会诚实显示 `null/not_instrumented`，不会伪报为零。
+- `enable/disable`：要求精确 config/state 和确认字符串。首次 enable 还要求本次 preview hash，服务端会重读固定来源；普通 re-enable 与 disable 必须传空 preview。disable 即使遇到代码 config bump 也能用当前 control 身份关闭旧持久状态，但不能借此重新启用或迁移 config。
 - `run-once`：精确确认字符串是写门；忽略 auto-start 与 due-time，但不绕过全局/adapter/config/首次模式门。它只调用 monitoring supervisor 的遗留 RUNNING 恢复，不调用宿主通用恢复。
 
 CLI 输出不包含外部 item、URL、headline、summary、checkpoint/ETag、数据库路径、异常文本或 secret；始终声明 Provider 调用为 0、执行能力为 none、真实交易为 false。退出码：0 为成功/dry-run/seed，2 为配置/合同/非成功结果，3 为 owner 冲突，1 为已脱敏的意外内部错误。
@@ -99,6 +115,7 @@ evidence deletion = false
 | `source_monitoring_runtime_stop_timeout` | `database_owner_retained=true` 与固定零执行安全字段；线程真正退出前宿主不返回 |
 | `source_monitoring_retention_previewed` | policy version/hash、`eligible_rows=0`, `deleted_rows=0` |
 | `source_monitoring_retention_attested` | policy version/hash、`decision=RETAIN_ALL`、零删除/更新计数、幂等标记 |
+| `source_monitoring_operator_unavailable` | 固定 `phase`、异常类型名与零执行安全字段；不含 adapter、路径或异常文本 |
 
 `run_started` 只在 `source_adapter_runs` 的 RUNNING 事务成功后发出；terminal 和 attestation 日志只在权威数据库事务完成后发出。日志 sink 抛错会被隔离，不能改变导入、checkpoint、run status 或 receipt。
 
@@ -106,10 +123,10 @@ evidence deletion = false
 
 ## 健康语义
 
-`GET /api/monitoring/health` 仍是 `no-store`、只读、无探测接口。它使用稳定的 main/WAL 临时快照，不初始化 schema、不写 retention receipt、不轮询来源、不调用 Provider/市场。顶层合同升级为 `source_monitoring_health_service_v2`，保留 `operations` 子对象并新增进程内 `source_monitoring_runtime_health_v1`：
+`GET /api/monitoring/health` 仍是 `no-store`、只读、无探测接口。它使用稳定的 main/WAL 临时快照，不初始化 schema、不写 retention receipt、不轮询来源、不调用 Provider/市场。顶层合同升级为 `source_monitoring_health_service_v2`，保留 `operations` 子对象并新增进程内 `source_monitoring_runtime_health_v1`。初始化 receipt 或 pending authorization 与当前策略漂移时，持久化开关仍如实展示，但不会投影为 effective enabled：
 
 - `schema_status=current`：表、索引、六个不可变/防 replace trigger 与 migration key 的精确 `sqlite_master` 定义全部匹配，且最新 receipt 可验证；
-- `schema_status=migration_required`：监控 state schema 可读，但 operations 或 Runtime initialization additive schema 尚未授权迁移；
+- `schema_status=migration_required`：监控 state schema 可读，但 operations、Runtime initialization receipt 或 pending authorization additive schema 尚未授权迁移；
 - `schema_status=unavailable`：数据库或基础 schema 不可用；
 - 部分对象、弱化列或损坏 receipt 不会被自动修复，而是失败关闭。
 
@@ -154,6 +171,16 @@ Runtime 状态闭集为 `disabled/stopped/starting/running/degraded/stalled/fail
 
 不存在 cleanup/apply/delete route，也没有 scheduler、startup 或 background attestation hook。
 
+## Adapter 本地控制面
+
+控制面仅绑定当前 loopback 宿主、同一数据库 owner 与当前 Runtime registry：
+
+- `GET /api/monitoring/adapters/control`：懒加载、`no-store`，只读稳定数据库快照且零数据库写入、零外部来源/Provider/市场调用；返回代码 config、持久化开关、effective 状态、初始化状态与阻断码。
+- `POST /api/monitoring/adapters/{adapter_key}/initialization-preview`：需要同源本机会话 token、严格 JSON 和精确 config/state；只允许未初始化且关闭的注册 adapter。它可读取固定官方源或有界 readonly-market 来源，但不写 state/checkpoint/Inbox。
+- `POST /api/monitoring/adapters/{adapter_key}/enablement`：同样需要 token、严格 CAS 与精确确认。首次 enable 会重新 preview 后原子写入 pending authorization + enabled；disable 保留 checkpoint、run、initialization receipt 与 Source Inbox，仅清除未消费的 pending authorization。
+
+没有 run-now/run-once HTTP route。control/preview/enablement 回执都固定声明 Provider/model/formal round 为零、`execution_capability=none`、`live_trading_allowed=false`；前端拒绝额外字段、非零禁区证据、与请求不绑定的回执，并在 mutation 后重新读取 control 与 health。`auto_start=true` 时，成功 enable 会令 adapter 到期，随后由独立 scheduler 正常执行；这不是 enablement handler 内部导入。
+
 ## Additive schema
 
 受控 initializer 在既有 monitoring schema 后增加 operations 证明对象，并为 Runtime v1 initialization receipt 增加：
@@ -161,6 +188,14 @@ Runtime 状态闭集为 `disabled/stopped/starting/running/degraded/stalled/fail
 - migration key：`source_monitoring_initialization_receipt_v1`；
 - `source_adapter_runs` 的五个 additive 字段：`initialization_mode`、`initialization_config_version`、`initialization_preview_sha256`、`initialization_receipt_json`、`initialization_receipt_sha256`；
 - initialization time/unique seal indexes、receipt 不可变 triggers 与 migration marker guards。
+
+显式首次授权再增加一个独立 additive schema 单元：
+
+- migration key：`source_monitoring_pending_initialization_authorization_v1`；
+- `source_adapter_states` 的两个 additive 字段：`pending_initialization_authorization_json`、`pending_initialization_authorization_sha256`；
+- 三个 migration marker UPDATE/DELETE/replace guard triggers。
+
+pending JSON 是严格闭集，只含 adapter/config、初始化模式及参数、起始 checkpoint hash、preview hash 与确认时间；读取时必须重新核对 canonical SHA-256、adapter/config/checkpoint 身份及 enabled invariant。部分列、部分 trigger、marker/object 不一致或 seal 损坏全部失败关闭。
 
 随后保留 Phase 8 operations 对象：
 
@@ -178,13 +213,13 @@ retention receipt 固定 `record_version=source_monitoring_retention_receipt_v1`
 
 正式数据库继续使用 [数据库迁移硬门](./database_migration_gate.md)：
 
-1. 只读 `preview`，核对只新增上述 columns/table/index/triggers/keys；
+1. 只读 `preview`，核对只新增上述 initialization/pending columns、retention table、indexes、triggers 与 migration keys；
 2. `prepare` 生成逐字节 backup、授权 candidate 与 sealed prepared 文件；
 3. 用户核对精确 authorization token；
 4. `apply` 原子替换；
 5. 核对 receipt、integrity、foreign keys、WAL/sidecar、physical/logical/table hashes。
 
-系统临时迁移测试会保存代表性的 Source Inbox 与 adapter run/state，并验证 legacy run 行只获得空 initialization 默认值；除 additive columns、空 retention receipt table、schema objects 和 `schema_migrations` markers 外，不允许既有业务内容漂移。`run_isolated_release_drill.py` 明确不执行正式数据库迁移，不能替代这里的证据。
+系统临时迁移测试会保存代表性的 Source Inbox 与 adapter run/state，并验证 legacy run 行只获得空 initialization/pending authorization 默认值；除 additive columns、空 retention receipt table、schema objects 和 `schema_migrations` markers 外，不允许既有业务内容漂移。`run_isolated_release_drill.py` 明确不执行正式数据库迁移，不能替代这里的证据。
 
 ## 回滚矩阵
 

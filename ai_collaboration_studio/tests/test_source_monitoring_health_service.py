@@ -15,8 +15,10 @@ from backend.source_monitoring.health_service import (  # noqa: E402
     SourceMonitoringHealthService,
     SourceMonitoringHealthServiceError,
 )
+from backend.source_monitoring.contracts import canonical_sha256  # noqa: E402
 from backend.source_monitoring.settings import SourceMonitoringSettings  # noqa: E402
 from backend.source_monitoring.state_repository import (  # noqa: E402
+    SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION,
     SourceMonitoringStateError,
     SourceMonitoringStateRepository,
 )
@@ -240,6 +242,47 @@ class SourceMonitoringHealthServiceTests(unittest.TestCase):
         )
         self.assertTrue(sec_health["persisted_state"])
         self.assertIsNone(sec_health["latest_run"])
+        self.assertEqual(after, before)
+
+    def test_pre_pending_authorization_schema_reports_migration_required_without_writes(self) -> None:
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
+            connection.executescript(
+                """
+                DROP TRIGGER trg_source_monitoring_pending_authorization_marker_no_update;
+                DROP TRIGGER trg_source_monitoring_pending_authorization_marker_no_delete;
+                DROP TRIGGER trg_source_monitoring_pending_authorization_marker_no_replace;
+                DELETE FROM schema_migrations
+                 WHERE key='source_monitoring_pending_initialization_authorization_v1';
+                """
+            )
+
+        family_paths = (
+            self.database_path,
+            Path(f"{self.database_path}-wal"),
+            Path(f"{self.database_path}-shm"),
+            Path(f"{self.database_path}-journal"),
+        )
+
+        def file_family_signature() -> dict[str, tuple[bytes, int, int]]:
+            return {
+                path.name: (
+                    path.read_bytes(),
+                    path.stat().st_size,
+                    path.stat().st_mtime_ns,
+                )
+                for path in family_paths
+                if path.exists()
+            }
+
+        before = file_family_signature()
+        snapshot = self.service().snapshot()
+        after = file_family_signature()
+
+        self.assertTrue(snapshot["persistence_available"])
+        self.assertEqual(
+            snapshot["operations"]["schema_status"],
+            "migration_required",
+        )
         self.assertEqual(after, before)
 
     def test_persisted_failure_and_latest_run_are_redacted_read_only_evidence(self) -> None:
@@ -468,6 +511,63 @@ class SourceMonitoringHealthServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(sec_health["config_status"], "migration_required")
+        self.assertTrue(sec_health["persisted_enabled"])
+        self.assertFalse(sec_health["enabled"])
+        self.assertEqual(sec_health["state"], "disabled")
+
+    def test_pending_authorization_policy_drift_is_not_effectively_enabled(self) -> None:
+        authorized_settings = SourceMonitoringSettings(
+            enabled=True,
+            dry_run=False,
+            initial_mode="catch_up",
+            catch_up_max_items=1,
+        )
+        baseline = SourceMonitoringHealthService(
+            self.store,
+            clock_ms=lambda: self.clock,
+            settings=authorized_settings,
+        ).snapshot()
+        sec = next(
+            adapter
+            for adapter in baseline["adapters"]
+            if adapter["adapter_key"] == "sec_filings"
+        )
+        repository = SourceMonitoringStateRepository(
+            self.store,
+            clock_ms=lambda: self.clock,
+        )
+        repository.authorize_initialization_and_enable(
+            "sec_filings",
+            config_version=sec["metadata"]["config_version"],
+            expected_state_version=0,
+            authorization={
+                "version": SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION,
+                "adapter_key": "sec_filings",
+                "config_version": sec["metadata"]["config_version"],
+                "mode": "catch_up",
+                "catch_up_max_items": 1,
+                "from_time_ms": 0,
+                "starting_checkpoint_sha256": canonical_sha256({}),
+                "preview_sha256": "a" * 64,
+                "confirmed_at_ms": self.clock,
+            },
+        )
+
+        snapshot = SourceMonitoringHealthService(
+            self.store,
+            clock_ms=lambda: self.clock,
+            settings=SourceMonitoringSettings(
+                enabled=True,
+                dry_run=False,
+                initial_mode="seed_only",
+            ),
+        ).snapshot()
+        sec_health = next(
+            adapter
+            for adapter in snapshot["adapters"]
+            if adapter["adapter_key"] == "sec_filings"
+        )
+
         self.assertTrue(sec_health["persisted_enabled"])
         self.assertFalse(sec_health["enabled"])
         self.assertEqual(sec_health["state"], "disabled")

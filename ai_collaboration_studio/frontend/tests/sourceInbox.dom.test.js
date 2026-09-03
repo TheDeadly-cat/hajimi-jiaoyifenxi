@@ -333,6 +333,141 @@ function activeMonitoringHealth({ failed = false, stalled = false } = {}) {
   return payload;
 }
 
+function operatorHealth() {
+  const payload = monitoringHealth();
+  payload.source_monitoring_health.state = "idle";
+  Object.assign(payload.source_monitoring_health.settings, {
+    enabled: true,
+    auto_start: false,
+  });
+  Object.assign(payload.source_monitoring_health.runtime, {
+    status: "stopped",
+    enabled: true,
+  });
+  return payload;
+}
+
+function operatorSafety({ network = 0, preview = false, writeFlags = false, writes = 0 } = {}) {
+  return {
+    database_writes_performed: writeFlags ? Boolean(writes) : writes,
+    checkpoint_writes_performed: writeFlags ? false : 0,
+    source_inbox_writes_performed: writeFlags ? false : 0,
+    provider_calls_performed: 0,
+    model_calls_performed: 0,
+    formal_rounds_created: 0,
+    market_calls_performed: 0,
+    network_requests_performed: network,
+    execution_capability: "none",
+    live_trading_allowed: false,
+    ...(preview ? {
+      network_requests_accounting: network === null ? "not_instrumented" : "exact",
+    } : {}),
+  };
+}
+
+function operatorAdapter(overrides = {}) {
+  return {
+    version: "source_monitoring_adapter_control_v1",
+    adapter_key: "sec_filings",
+    config_version: "sec_filings_config_v2",
+    state_version: 0,
+    persisted_state: false,
+    persisted_enabled: false,
+    effective_enabled: false,
+    active_run: false,
+    source_class: "official_source",
+    source_channel: "official_source_monitor",
+    official_source: true,
+    initialization_status: "required",
+    initialization_mode: "seed_only",
+    initialization_preview_sha256: "",
+    initialization_completed_at_ms: 0,
+    pending_authorization: false,
+    can_preview: true,
+    can_enable: false,
+    can_disable: false,
+    blocked_reason_codes: [],
+    ...overrides,
+  };
+}
+
+function operatorControl(adapterOverrides = {}) {
+  return {
+    ok: true,
+    source_monitoring_operator_control: {
+      version: "source_monitoring_operator_control_v1",
+      captured_at_ms: 1_777_777_777_000,
+      settings: {
+        global_enabled: true,
+        auto_start: false,
+        dry_run: true,
+        initial_mode: "seed_only",
+        catch_up_max_items: 0,
+        from_time: "",
+      },
+      adapters: [operatorAdapter(adapterOverrides)],
+      safety: operatorSafety(),
+    },
+  };
+}
+
+function operatorPreview(overrides = {}) {
+  return {
+    ok: true,
+    source_monitoring_operator_preview: {
+      version: "source_monitoring_operator_preview_v1",
+      adapter_key: "sec_filings",
+      config_version: "sec_filings_config_v2",
+      state_version: 0,
+      mode: "seed_only",
+      initial_required: true,
+      initialization_blocked: false,
+      catch_up_max_items: 0,
+      from_time: "",
+      candidate_count: 3,
+      selected_count: 0,
+      skipped_count: 3,
+      adapter_duplicate_count: 0,
+      source_error_count: 0,
+      rejected_count: 0,
+      earliest_occurred_at: "2026-09-01T00:00:00Z",
+      latest_occurred_at: "2026-09-02T00:00:00Z",
+      preview_sha256: "a".repeat(64),
+      starting_checkpoint_sha256: "b".repeat(64),
+      next_checkpoint_sha256: "c".repeat(64),
+      captured_at_ms: 1_777_777_777_000,
+      safety: operatorSafety({ network: null, preview: true }),
+      ...overrides,
+    },
+  };
+}
+
+function enablementResult({
+  enabled,
+  stateVersion,
+  initializationAuthorized = enabled,
+  previewSha256 = enabled ? "a".repeat(64) : "",
+}) {
+  return {
+    ok: true,
+    source_monitoring_enablement_result: {
+      version: "source_monitoring_enablement_result_v1",
+      adapter_key: "sec_filings",
+      config_version: "sec_filings_config_v2",
+      state_version: stateVersion,
+      persisted_enabled: enabled,
+      initialization_authorized: initializationAuthorized,
+      preview_sha256: previewSha256,
+      safety: operatorSafety({
+        network: initializationAuthorized ? null : 0,
+        preview: true,
+        writeFlags: true,
+        writes: 1,
+      }),
+    },
+  };
+}
+
 function sourceImportPreview() {
   return {
     ok: true,
@@ -891,6 +1026,329 @@ test("runtime health renders fresh progress neutrally and stalled state accessib
   const forgedWarning = forgedHost.querySelector('.source-inbox-health [role="alert"]');
   assert.ok(forgedWarning);
   assert.match(forgedWarning.textContent, /未满足零执行与 Runtime 在线性边界/);
+});
+
+test("initial health read waits for the inbox database read to finish", async () => {
+  let listReadActive = false;
+  let healthOverlappedList = false;
+  globalThis.fetch = async (path) => {
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      listReadActive = true;
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      listReadActive = false;
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/health") {
+      healthOverlappedList = listReadActive;
+      return response(operatorHealth());
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 30)));
+  await settle();
+  assert.equal(healthOverlappedList, false);
+  assert.match(host.querySelector(".source-inbox-health summary").textContent, /等待首次检查/);
+});
+
+test("adapter enablement stays lazy and requires a sealed preview plus explicit confirmation", async () => {
+  const requests = [];
+  let enabled = false;
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") {
+      return response(enabled
+        ? operatorControl({
+          state_version: 1,
+          persisted_state: true,
+          persisted_enabled: true,
+          effective_enabled: true,
+          initialization_status: "authorized",
+          initialization_preview_sha256: "a".repeat(64),
+          pending_authorization: true,
+          can_preview: false,
+          can_disable: true,
+        })
+        : operatorControl());
+    }
+    if (path.endsWith("/initialization-preview")) return response(operatorPreview());
+    if (path.endsWith("/enablement")) {
+      enabled = true;
+      return response(enablementResult({ enabled: true, stateVersion: 1 }));
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  assert.equal(requests.some((request) => request.path.includes("/adapters/")), false);
+  await click(host.querySelector(".source-inbox-health summary"));
+  assert.equal(requests.some((request) => request.path.includes("/adapters/")), false);
+
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  assert.equal(requests.filter((request) => request.path === "/api/monitoring/adapters/control").length, 1);
+  assert.equal(requests.some((request) => request.path.endsWith("/initialization-preview")), false);
+  assert.match(host.textContent, /auto-start 关闭/);
+  assert.match(host.textContent, /保存 Adapter 启用状态不证明 Runtime 在线/);
+  assert.match(host.textContent, /服务端会重读同一固定来源并核对预览哈希/);
+
+  await click(buttonWithText(host, "预览首次读取范围"));
+  const previewRequest = requests.find((request) => request.path.endsWith("/initialization-preview"));
+  assert.deepEqual(JSON.parse(previewRequest.options.body), {
+    expected_state_version: 0,
+    expected_config_version: "sec_filings_config_v2",
+  });
+  assert.match(host.textContent, /将跳过3/);
+  assert.match(host.textContent, /本次预览当前有 3 条，来源变化可能改变数量/);
+  assert.equal(host.querySelector(".source-monitoring-preview a"), null);
+  await click(buttonWithText(host, "重读设置"));
+  assert.equal(host.querySelector(".source-monitoring-confirmation"), null);
+  await click(buttonWithText(host, "预览首次读取范围"));
+  const enableButton = buttonWithText(host, "确认保存 Adapter 启用状态");
+  assert.equal(enableButton.disabled, true);
+
+  await click(host.querySelector('.source-monitoring-confirmation input[type="checkbox"]'));
+  assert.equal(enableButton.disabled, false);
+  await click(enableButton);
+  const enableRequest = requests.find((request) => request.path.endsWith("/enablement"));
+  assert.deepEqual(JSON.parse(enableRequest.options.body), {
+    expected_state_version: 0,
+    expected_config_version: "sec_filings_config_v2",
+    enabled: true,
+    preview_sha256: "a".repeat(64),
+    confirmation: "ENABLE_SOURCE_MONITORING_ADAPTER",
+  });
+  assert.ok(requests.filter((request) => request.path === "/api/monitoring/adapters/control").length >= 2);
+  assert.match(host.textContent, /Runtime 在线状态请以上方健康记录为准/);
+  assert.match(host.textContent, /Runtime已停止/);
+  assert.equal(requests.some((request) => /providers|market|rounds\/stream/.test(request.path)), false);
+});
+
+test("readonly market initialization preview discloses its bounded market read", async () => {
+  const requests = [];
+  const marketPreview = operatorPreview();
+  marketPreview.source_monitoring_operator_preview.safety.market_calls_performed = 1;
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") {
+      return response(operatorControl({
+        source_class: "readonly_market",
+        source_channel: "futu_anomaly_monitor",
+        official_source: false,
+      }));
+    }
+    if (path.endsWith("/initialization-preview")) return response(marketPreview);
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  assert.match(host.textContent, /readonly_market 首次预览会执行有界只读行情调用/);
+  await click(buttonWithText(host, "预览首次读取范围"));
+  assert.match(host.textContent, /只读市场调用1/);
+  assert.equal(requests.filter((request) => request.path.endsWith("/initialization-preview")).length, 1);
+  assert.equal(requests.some((request) => /providers|rounds\/stream/.test(request.path)), false);
+});
+
+test("first enable rejects a valid-looking receipt not bound to its preview", async () => {
+  const requests = [];
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") return response(operatorControl());
+    if (path.endsWith("/initialization-preview")) return response(operatorPreview());
+    if (path.endsWith("/enablement")) {
+      return response(enablementResult({
+        enabled: true,
+        stateVersion: 1,
+        initializationAuthorized: false,
+        previewSha256: "",
+      }));
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  await click(buttonWithText(host, "预览首次读取范围"));
+  await click(host.querySelector('.source-monitoring-confirmation input[type="checkbox"]'));
+  await click(buttonWithText(host, "确认保存 Adapter 启用状态"));
+
+  assert.match(host.textContent, /Adapter 启停回执未绑定本次精确请求/);
+  assert.equal(requests.filter((request) => request.path === "/api/monitoring/adapters/control").length, 1);
+  assert.doesNotMatch(host.textContent, /Runtime 在线状态请以上方健康记录为准/);
+});
+
+test("adapter disablement requires a second confirmation and never previews or deletes evidence", async () => {
+  const requests = [];
+  let enabled = true;
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") {
+      return response(operatorControl(enabled ? {
+        state_version: 5,
+        persisted_state: true,
+        persisted_enabled: true,
+        effective_enabled: true,
+        initialization_status: "complete",
+        initialization_preview_sha256: "d".repeat(64),
+        initialization_completed_at_ms: 1_777_777_777_000,
+        can_preview: false,
+        can_disable: true,
+      } : {
+        state_version: 6,
+        persisted_state: true,
+        initialization_status: "complete",
+        initialization_preview_sha256: "d".repeat(64),
+        initialization_completed_at_ms: 1_777_777_777_000,
+        can_preview: false,
+        can_enable: true,
+      }));
+    }
+    if (path.endsWith("/enablement")) {
+      enabled = JSON.parse(options.body).enabled;
+      return response(enablementResult({
+        enabled,
+        stateVersion: enabled ? 7 : 6,
+        initializationAuthorized: false,
+        previewSha256: "",
+      }));
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  await click(buttonWithText(host, "准备停用"));
+  assert.match(host.textContent, /不会删除 checkpoint、初始化收据或 Source Inbox 记录/);
+  const disableButton = buttonWithText(host, "确认停止后续轮询");
+  assert.equal(disableButton.disabled, true);
+  await click(host.querySelector('.source-monitoring-confirmation input[type="checkbox"]'));
+  await click(disableButton);
+
+  const disableRequest = requests.find((request) => request.path.endsWith("/enablement"));
+  assert.deepEqual(JSON.parse(disableRequest.options.body), {
+    expected_state_version: 5,
+    expected_config_version: "sec_filings_config_v2",
+    enabled: false,
+    preview_sha256: "",
+    confirmation: "DISABLE_SOURCE_MONITORING_ADAPTER",
+  });
+  assert.equal(requests.some((request) => request.path.endsWith("/initialization-preview")), false);
+  assert.match(host.textContent, /历史 checkpoint 与收件箱记录未被删除/);
+
+  await click(buttonWithText(host, "准备启用"));
+  await click(host.querySelector('.source-monitoring-confirmation input[type="checkbox"]'));
+  await click(buttonWithText(host, "确认保存 Adapter 启用状态"));
+  const enableRequest = requests.filter(
+    (request) => request.path.endsWith("/enablement"),
+  )[1];
+  assert.deepEqual(JSON.parse(enableRequest.options.body), {
+    expected_state_version: 6,
+    expected_config_version: "sec_filings_config_v2",
+    enabled: true,
+    preview_sha256: "",
+    confirmation: "ENABLE_SOURCE_MONITORING_ADAPTER",
+  });
+  assert.equal(requests.some((request) => request.path.endsWith("/initialization-preview")), false);
+});
+
+test("config-mismatched persisted adapter remains explicitly disableable", async () => {
+  const requests = [];
+  let enabled = true;
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") {
+      return response(operatorControl({
+        config_version: "sec_filings_config_v3",
+        state_version: enabled ? 8 : 9,
+        persisted_state: true,
+        persisted_enabled: enabled,
+        initialization_status: "legacy",
+        initialization_mode: "",
+        can_preview: false,
+        can_disable: enabled,
+        blocked_reason_codes: [
+          ...(enabled ? ["SOURCE_MONITORING_ADAPTER_ENABLED"] : []),
+          "SOURCE_MONITORING_CONFIG_MIGRATION_REQUIRED",
+        ],
+      }));
+    }
+    if (path.endsWith("/enablement")) {
+      enabled = false;
+      return response({
+        ...enablementResult({ enabled: false, stateVersion: 9 }),
+      });
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  assert.match(host.textContent, /SOURCE_MONITORING_CONFIG_MIGRATION_REQUIRED/);
+  await click(buttonWithText(host, "准备停用"));
+  await click(host.querySelector('.source-monitoring-confirmation input[type="checkbox"]'));
+  await click(buttonWithText(host, "确认停止后续轮询"));
+
+  const request = requests.find((candidate) => candidate.path.endsWith("/enablement"));
+  assert.equal(JSON.parse(request.options.body).expected_config_version, "sec_filings_config_v3");
+  assert.equal(JSON.parse(request.options.body).enabled, false);
+});
+
+test("adapter enablement conflict rereads authority and never retries the mutation", async () => {
+  const requests = [];
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") return response(operatorControl());
+    if (path.endsWith("/initialization-preview")) return response(operatorPreview());
+    if (path.endsWith("/enablement")) {
+      return response({
+        ok: false,
+        error: "adapter state changed",
+        code: "SOURCE_MONITORING_STATE_CONFLICT",
+      }, 409);
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  await click(buttonWithText(host, "预览首次读取范围"));
+  await click(host.querySelector('.source-monitoring-confirmation input[type="checkbox"]'));
+  await click(buttonWithText(host, "确认保存 Adapter 启用状态"));
+
+  assert.equal(requests.filter((request) => request.path.endsWith("/enablement")).length, 1);
+  assert.ok(requests.filter((request) => request.path === "/api/monitoring/adapters/control").length >= 2);
+  assert.match(host.textContent, /已权威重读，请重新预览和确认/);
+  assert.equal(host.querySelector(".source-monitoring-confirmation"), null);
 });
 
 test("requested event details load independently of list availability", async () => {

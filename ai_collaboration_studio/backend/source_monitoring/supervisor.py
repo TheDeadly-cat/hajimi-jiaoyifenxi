@@ -535,6 +535,9 @@ class SourceMonitoringSupervisor:
             metadata.adapter_key,
             config_version=metadata.config_version,
         )
+        pending_authorization = state.get(
+            "pending_initialization_authorization"
+        )
         if initialization_evidence is not None and (
             initialization_evidence["mode"] != self.settings.initial_mode
             or initialization_evidence["catch_up_max_items"]
@@ -549,12 +552,46 @@ class SourceMonitoringSupervisor:
         legacy_initialized = bool(
             state["checkpoint"] != {} or state["last_success_at_ms"] > 0
         )
-        initial_required = initialization_evidence is None and not legacy_initialized
-        if not self.settings.dry_run:
-            require_catch_up_confirmation_before_poll(
-                self.settings,
-                initial_required=initial_required,
+        if (initialization_evidence is not None or legacy_initialized) and (
+            pending_authorization is not None
+        ):
+            raise SourceMonitoringSupervisorError(
+                "SOURCE_MONITORING_PENDING_AUTHORIZATION_STALE",
+                "initialized adapter retains a pending initial authorization",
             )
+        initial_required = initialization_evidence is None and not legacy_initialized
+        if pending_authorization is not None and (
+            pending_authorization["adapter_key"] != metadata.adapter_key
+            or pending_authorization["config_version"] != metadata.config_version
+            or pending_authorization["mode"] != self.settings.initial_mode
+            or pending_authorization["catch_up_max_items"]
+            != self.settings.catch_up_max_items
+            or pending_authorization["from_time_ms"] != self.settings.from_time_ms
+            or pending_authorization["starting_checkpoint_sha256"]
+            != state["checkpoint_sha256"]
+        ):
+            raise SourceMonitoringSupervisorError(
+                "SOURCE_MONITORING_PENDING_AUTHORIZATION_MISMATCH",
+                "pending initial authorization differs from runtime policy or state",
+            )
+        if not self.settings.dry_run:
+            if (
+                initial_required
+                and self.settings.initial_mode == "catch_up"
+                and pending_authorization is not None
+                and self.settings.initial_preview_sha256
+                and pending_authorization["preview_sha256"]
+                != self.settings.initial_preview_sha256
+            ):
+                raise SourceMonitoringSupervisorError(
+                    "SOURCE_MONITORING_INITIAL_AUTHORITY_CONFLICT",
+                    "persisted and environment catch-up authorities conflict",
+                )
+            if pending_authorization is None:
+                require_catch_up_confirmation_before_poll(
+                    self.settings,
+                    initial_required=initial_required,
+                )
         started = self.repository.start_run(
             metadata.adapter_key,
             config_version=metadata.config_version,
@@ -617,7 +654,21 @@ class SourceMonitoringSupervisor:
                 received_at_ms=validation_time_ms,
             )
             if not self.settings.dry_run:
-                require_initial_preview_match(initial_plan, self.settings)
+                if (
+                    initial_required
+                    and self.settings.initial_mode == "catch_up"
+                    and pending_authorization is not None
+                ):
+                    if (
+                        initial_plan.preview["preview_sha256"]
+                        != pending_authorization["preview_sha256"]
+                    ):
+                        raise SourceMonitoringSupervisorError(
+                            "SOURCE_MONITORING_CATCH_UP_PREVIEW_MISMATCH",
+                            "catch-up source evidence changed after UI confirmation",
+                        )
+                else:
+                    require_initial_preview_match(initial_plan, self.settings)
             packet = initial_plan.selected_packet(
                 candidate,
                 external_run_id=run_id,
