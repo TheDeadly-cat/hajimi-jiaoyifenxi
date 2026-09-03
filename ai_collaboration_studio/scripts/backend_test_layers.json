@@ -72,6 +72,7 @@
         "tests.test_football_research_service",
         "tests.test_football_round_context_e2e",
         "tests.test_round_contexts",
+        "tests.test_source_monitoring_futu_live_preflight",
         "tests.test_stock_research",
         "tests.test_stock_research_http",
         "tests.test_stock_research_service",

@@ -114,3 +114,47 @@ Futu 模式必须显式使用 `official_only=false` 与 `allow_readonly_market=t
 的 monotonic/random source；没有连接 OpenD、Provider、正式端口或正式数据库。通过
 这些测试不等同于真实 Futu 在线验收、行情事实确认、浏览器验收、交易许可或公开发布
 授权。
+
+## 一次性生产路径观察
+
+在启用 Futu adapter 或安排独立 soak 前，可先运行不接触 Studio 数据库的一次性观察：
+
+```powershell
+python -I -B scripts\run_futu_live_preflight.py --help
+python -I -B scripts\run_futu_live_preflight.py `
+  --confirm RUN_FUTU_LIVE_PREFLIGHT_ONCE
+```
+
+公共入口只接受代码固定的 `127.0.0.1:11111` 和上述四个标的，不接受 host、port、
+symbols、数据库路径或凭据参数。确认通过后，它在一个由父进程 15 秒 watchdog 约束的
+隔离子进程中运行；子进程使用最小环境白名单、跳过 `.env.local`，并把配置导入所需的
+runtime/数据库路径绑定到既有项目目录和一个必须不存在的哨兵文件。它不会启动或登录
+OpenD，也不会导入 Store、Provider、Source Inbox 或监控 runtime。
+
+锁定版 Futu SDK 在 Windows 导入时会强制创建日志。父进程因此在自己的单次临时目录内
+创建专用 `APPDATA/LOCALAPPDATA` profile；worker 只接受与当前临时 cwd 精确绑定的该
+profile，不继承真实用户目录。SDK 退出后父进程才回收整个临时目录；清理失败会成为
+indeterminate 生命周期错误。SDK 导入期的普通异常或 `SystemExit` 只映射为固定
+`FUTU_SDK_IMPORT_FAILED`，不泄露异常正文，也不能降级成可提升的浅层回执。第三方 SDK
+实际写入、同用户路径竞态与进程后代仍不被冒充为已完整观测。SDK 导入和调用期间的
+Python `stdout/stderr` 被定向到空设备，最终 JSON 在恢复后的独立协议时段输出；父进程
+仍严格解析完整 stdout，不会用“最后一行”绕过额外输出。
+
+worker 即使被直接调用，也会再次重建自己的最小环境，而且只能输出
+`watchdog_worker_observation` 中间回执，其中 `watchdog_enforced=false`。只有公共父进程
+确认 worker 在限时、限流边界内退出并严格重验中间回执后，才会升级并重封为
+`production_path_observation`；公开的 worker token 只是父子关联标记，不被当作安全凭据。
+
+预检复用 `FutuUsMarketAdapter.quote_batch(..., force=true)`，但给 SDK 只暴露
+`OpenQuoteContext`、一次 `get_market_snapshot`、最多一次 `get_market_state` 和一次
+`close`。这些高层调用有精确计数且每项上限为 1；SDK 内部 socket、线程、keepalive
+或重连没有独立观测，所以 `network_requests_performed` 必须保持
+`null/sdk_transport_not_instrumented`。该入口只接受精确锁文件当前固定的
+`futu-api==10.10.7008`；`close` 未确认成功、依赖漂移、超时、SDK 版本不符、
+OpenD 离线、四股不完整或任一快照质量门失败都不能产出 passed。
+
+输出是闭集、最多 16 KiB 的单行 JSON，只含固定错误码、覆盖/质量计数、调用账本和密封
+哈希；不含行情价格、OpenD 用户、异常原文、路径或凭据。`passed` 仅表示当时本机固定
+回环路径返回了通过既有只读快照门的四股截面；它不是行情真值的独立见证，也不证明
+24 小时连续性、Provider、正式迁移、交易许可、PR 合并或发布验收。系统始终保持
+`execution_capability=none` 与 `live_trading_allowed=false`。

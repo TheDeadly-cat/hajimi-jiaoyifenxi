@@ -251,7 +251,7 @@ python server.py
 
 ### 富途只读行情
 
-富途是可选数据源。桌面“富途牛牛”客户端不等于 Futu OpenD；只安装牛牛客户端不会自动开放 `11111`。请从[富途官方可视化 OpenD 页面](https://openapi.futunn.com/futu-api-doc/quick/opend-base.html)下载安装并登录 OpenD，在图形界面保持监听 `127.0.0.1`、端口 `11111`。Windows 可视化版默认安装在 `%APPDATA%`；本项目只需要行情登录，不需要解锁交易。Python 环境需要 `futu-api`。也可以在 `.env.local` 中设置非敏感连接参数：
+富途是可选数据源。桌面“富途牛牛”客户端不等于 Futu OpenD；只安装牛牛客户端不会自动开放 `11111`。请从[富途官方可视化 OpenD 页面](https://openapi.futunn.com/futu-api-doc/quick/opend-base.html)下载安装并登录 OpenD，在图形界面保持监听 `127.0.0.1`、端口 `11111`。Windows 可视化版默认安装在 `%APPDATA%`；本项目只需要行情登录，不需要解锁交易。Python 环境需要 `futu-api`；一次性生产路径预检只接受 `requirements-lock-win-py314.txt` 当前固定的 `futu-api==10.10.7008`，使用兼容范围 `requirements.txt` 安装到其他版本时会在网络 I/O 前失败关闭。也可以在 `.env.local` 中设置非敏感连接参数：
 
 ```dotenv
 FUTU_HOST=127.0.0.1
@@ -287,6 +287,21 @@ SEC_CACHE_TTL_SECONDS=300
 适配层只创建 `OpenQuoteContext`。它没有交易上下文、解锁交易或下单能力；权限不足、OpenD 离线和标的缺失都会作为数据质量事件返回。
 
 当前依赖状态以运行时接口为准，不在文档中宣称持续在线：只有 Futu SDK 可用、OpenD 已启动并登录、行情权限满足且 MU、SNDK、WDC、STX 四行快照完整时，行情证据才可标记为研究 `ready`；`ready` 不等于实时，逐行 `quote_is_live` 与 `freshness_basis` 才说明它是 20 分钟实时窗还是 96 小时内的最近闭市截面。OpenD 离线、权限不足、时间异常或任一标的缺失都会明确降级并阻止研究收敛。SEC 证据同样要求本机合规 `SEC_USER_AGENT` 与官方端点实际可用。两条路径都只读取研究证据，始终声明 `execution_capability=none`、`live_trading_allowed=false`，没有账户、交易上下文、解锁交易、委托或下单能力。
+
+不打开 Studio 数据库的一次性 Futu 生产路径观察可用：
+
+```powershell
+python -I -B scripts\run_futu_live_preflight.py `
+  --confirm RUN_FUTU_LIVE_PREFLIGHT_ONCE
+```
+
+该入口固定 `127.0.0.1:11111` 和四股白名单，使用隔离子进程与 15 秒 watchdog；不接受
+host/port/symbol 覆盖，不读取 `.env.local`，也不会启动 OpenD、登录、访问账户/订单、
+调用 Provider 或读写数据库。真实用户 `APPDATA` 不会传入 SDK；父进程给 Futu 一个
+一次性临时 profile 路径，并在 worker 退出后尝试整体回收，清理失败会阻止证据提升。
+这只证明启动时路径绑定，不把第三方实际写入、同用户竞态或进程后代冒充为已证明。
+通过也只表示该时间点本机只读行情路径可用，不是行情真值、24 小时连续性、交易许可
+或发布验收。
 
 冷启动的独立证据就绪检查会并行读取 SEC、公司 IR、官方业绩材料和 FRED；总等待时间由最慢的只读来源决定，不再把四类网络超时串行相加。公司 IR 与业绩材料适配器内部也按四家公司并发，单家公司多份人工目录文件使用最多四个只读探针并发核验；同一标的和 limit 的并发刷新通过 single-flight 共享一个进行中的请求。IR 错误或空结果短缓存 60 秒，业绩材料受限结果最多缓存 120 秒；`force=1` 绕过已完成缓存但仍合并同键在途刷新。人工目录的正缓存不会跨过 `valid_until` 边界，提速不改变白名单、访问验证和失败关闭语义。
 
