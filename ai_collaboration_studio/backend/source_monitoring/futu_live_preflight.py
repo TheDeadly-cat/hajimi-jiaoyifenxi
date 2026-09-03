@@ -33,6 +33,7 @@ _IMPORT_GUARD_ENV = "AI_STUDIO_FUTU_PREFLIGHT_IMPORT_GUARD"
 _IMPORT_GUARD_VALUE = "futu-live-preflight-isolated-import-v1"
 _WATCHDOG_GUARD_ENV = "AI_STUDIO_FUTU_PREFLIGHT_WATCHDOG_GUARD"
 _WATCHDOG_GUARD_VALUE = "futu-live-preflight-watchdog-v1"
+_SDK_PROFILE_DIRNAME = "futu-sdk-profile"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DATABASE_SENTINEL = _PROJECT_ROOT / ".futu-live-preflight-database-must-not-open.sqlite3"
 
@@ -85,6 +86,32 @@ class FutuLivePreflightDependencyError(FutuLivePreflightError):
     pass
 
 
+def _sdk_profile_path_checked_at_import() -> bool:
+    appdata = os.getenv("APPDATA")
+    local_appdata = os.getenv("LOCALAPPDATA")
+    if (
+        type(appdata) is not str
+        or not appdata
+        or type(local_appdata) is not str
+        or local_appdata != appdata
+    ):
+        return False
+    try:
+        raw_profile = Path(appdata)
+        if raw_profile.is_symlink():
+            return False
+        profile = raw_profile.resolve(strict=True)
+        cwd = Path.cwd().resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return bool(
+        profile.is_dir()
+        and profile.name == _SDK_PROFILE_DIRNAME
+        and profile.parent == cwd
+    )
+
+
+_SDK_PROFILE_PATH_CHECKED_AT_IMPORT = _sdk_profile_path_checked_at_import()
 _ISOLATED_CLI_IMPORT_GUARD_ATTESTED = bool(
     os.getenv(_IMPORT_GUARD_ENV) == _IMPORT_GUARD_VALUE
     and os.getenv(_WATCHDOG_GUARD_ENV) == _WATCHDOG_GUARD_VALUE
@@ -92,6 +119,7 @@ _ISOLATED_CLI_IMPORT_GUARD_ATTESTED = bool(
     and sys.flags.isolated == 1
     and sys.dont_write_bytecode is True
     and _PREIMPORT_DEPENDENCIES_CLEAN
+    and _SDK_PROFILE_PATH_CHECKED_AT_IMPORT
     and _config_module.RUNTIME_DIR == _PROJECT_ROOT
     and _config_module.DATABASE_PATH == _DATABASE_SENTINEL
     and _PROJECT_ROOT.is_dir()
@@ -291,6 +319,7 @@ class FutuLivePreflightDependencies:
     monotonic: Callable[[], float]
     snapshot_id_factory: Callable[[], str]
     evidence_class: str = "injected_offline_fixture"
+    sdk_load_error_code: str = ""
 
 
 def _source_manifest() -> dict[str, Any]:
@@ -300,6 +329,9 @@ def _source_manifest() -> dict[str, Any]:
         "port": FUTU_LIVE_PREFLIGHT_PORT,
         "symbols": list(FUTU_LIVE_PREFLIGHT_SYMBOLS),
         "quote_batch_calls": 1,
+        "sdk_profile_policy": "parent_temp_appdata_v1",
+        "sdk_import_failure_policy": "closed_worker_receipt_v1",
+        "sdk_python_stdio_policy": "devnull_during_import_and_calls_v1",
         "sdk_logical_call_upper_bounds": {
             "socket_probe": 1,
             "quote_context_open": 1,
@@ -364,6 +396,7 @@ def _base_safety(
     watchdog_parent_promoted: bool = False,
     import_guard_attested: bool | None = None,
     watchdog_guard_attested: bool | None = None,
+    sdk_profile_path_checked_at_import: bool | None = None,
 ) -> dict[str, Any]:
     effective_import_guard = (
         _ISOLATED_CLI_IMPORT_GUARD_ATTESTED
@@ -379,12 +412,23 @@ def _base_safety(
         if watchdog_guard_attested is None
         else watchdog_guard_attested
     )
+    effective_sdk_profile_path_check = (
+        _SDK_PROFILE_PATH_CHECKED_AT_IMPORT
+        if sdk_profile_path_checked_at_import is None and production
+        else False
+        if sdk_profile_path_checked_at_import is None
+        else sdk_profile_path_checked_at_import
+    )
     return {
         "read_only": True,
         "one_shot": True,
         "confirmation_required": True,
         "confirmation_verified": confirmation_verified,
         "isolated_cli_import_guard_attested": effective_import_guard,
+        "sdk_profile_path_checked_at_import": effective_sdk_profile_path_check,
+        "sdk_profile_policy": (
+            "parent_temp_appdata_v1" if production else "injected_offline"
+        ),
         "watchdog_required": True,
         "watchdog_guard_attested": effective_watchdog_guard,
         "watchdog_enforced": watchdog_parent_promoted,
@@ -482,6 +526,11 @@ def _validate_dependencies(dependencies: FutuLivePreflightDependencies) -> None:
         raise FutuLivePreflightDependencyError("dependencies must be exact")
     if type(dependencies.sdk_version) is not str:
         raise FutuLivePreflightDependencyError("SDK version must be a native string")
+    if (
+        type(dependencies.sdk_load_error_code) is not str
+        or dependencies.sdk_load_error_code not in {"", "FUTU_SDK_IMPORT_FAILED"}
+    ):
+        raise FutuLivePreflightDependencyError("SDK load error is invalid")
     if type(dependencies.evidence_class) is not str or dependencies.evidence_class not in {
         "production_path_observation",
         "watchdog_worker_observation",
@@ -520,6 +569,12 @@ def _run(
             "FUTU_PREFLIGHT_DEPENDENCY_DRIFT",
             production=True,
             status="indeterminate",
+        )
+    if dependencies.sdk_load_error_code:
+        return _error_report(
+            dependencies.sdk_load_error_code,
+            production=production,
+            sdk_version=dependencies.sdk_version,
         )
     if dependencies.sdk_version != FUTU_LIVE_PREFLIGHT_SDK_VERSION:
         code = (
@@ -650,6 +705,7 @@ def _run(
 
 
 def _production_dependencies() -> FutuLivePreflightDependencies:
+    sdk_load_error_code = ""
     try:
         version = importlib.metadata.version(FUTU_LIVE_PREFLIGHT_SDK_DISTRIBUTION)
     except importlib.metadata.PackageNotFoundError:
@@ -660,8 +716,9 @@ def _production_dependencies() -> FutuLivePreflightDependencies:
         if version == FUTU_LIVE_PREFLIGHT_SDK_VERSION:
             try:
                 sdk_module = importlib.import_module("futu")
-            except (ImportError, OSError):
-                version = ""
+            except (Exception, SystemExit):
+                sdk_module = None
+                sdk_load_error_code = "FUTU_SDK_IMPORT_FAILED"
     return FutuLivePreflightDependencies(
         sdk_module=sdk_module,
         sdk_version=version,
@@ -670,6 +727,7 @@ def _production_dependencies() -> FutuLivePreflightDependencies:
         monotonic=time.monotonic,
         snapshot_id_factory=lambda: "futu_live_preflight_snapshot_v1",
         evidence_class="watchdog_worker_observation",
+        sdk_load_error_code=sdk_load_error_code,
     )
 
 
@@ -841,6 +899,7 @@ def validate_futu_live_preflight_report(value: Any) -> dict[str, Any]:
             watchdog_parent_promoted=True,
             import_guard_attested=True,
             watchdog_guard_attested=True,
+            sdk_profile_path_checked_at_import=True,
         )
         if (
             value["evidence_profile_sha256"]
@@ -858,6 +917,7 @@ def validate_futu_live_preflight_report(value: Any) -> dict[str, Any]:
                 confirmation_verified=True,
                 import_guard_attested=True,
                 watchdog_guard_attested=True,
+                sdk_profile_path_checked_at_import=True,
             )
         ):
             raise FutuLivePreflightError("worker evidence boundary is invalid")

@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import ast
+import contextlib
 import copy
+import importlib.metadata
+import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import venv
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -114,6 +119,7 @@ def dependencies(
     connection_factory=None,
     sdk_version: str = FUTU_LIVE_PREFLIGHT_SDK_VERSION,
     evidence_class: str = "injected_offline_fixture",
+    sdk_load_error_code: str = "",
 ) -> FutuLivePreflightDependencies:
     return FutuLivePreflightDependencies(
         sdk_module=FakeSdk(context),
@@ -123,6 +129,7 @@ def dependencies(
         monotonic=lambda: 100.0,
         snapshot_id_factory=lambda: "fixture_snapshot",
         evidence_class=evidence_class,
+        sdk_load_error_code=sdk_load_error_code,
     )
 
 
@@ -247,6 +254,35 @@ class FutuLivePreflightTests(unittest.TestCase):
                 self.assertEqual(report["error_code"], expected)
                 self.assertTrue(all(count == 0 for count in report["calls"].values()))
 
+    def test_sdk_import_exception_and_system_exit_become_closed_reports(self) -> None:
+        for failure in (TypeError("SECRET_TYPE"), SystemExit("SECRET_EXIT")):
+            with (
+                self.subTest(failure=type(failure).__name__),
+                mock.patch.object(
+                    preflight_module.importlib.metadata,
+                    "version",
+                    return_value=FUTU_LIVE_PREFLIGHT_SDK_VERSION,
+                ),
+                mock.patch.object(
+                    preflight_module.importlib,
+                    "import_module",
+                    side_effect=failure,
+                ),
+            ):
+                loaded = preflight_module._production_dependencies()
+                self.assertEqual(
+                    loaded.sdk_load_error_code,
+                    "FUTU_SDK_IMPORT_FAILED",
+                )
+                report = _run_futu_live_preflight_injected(
+                    confirmation=FUTU_LIVE_PREFLIGHT_CONFIRMATION,
+                    dependencies=loaded,
+                )
+                self.assertEqual(report["error_code"], "FUTU_SDK_IMPORT_FAILED")
+                self.assertTrue(all(count == 0 for count in report["calls"].values()))
+                self.assertNotIn("SECRET", json.dumps(report, ensure_ascii=True))
+                validate_futu_live_preflight_report(report)
+
     def test_guarded_sdk_rejects_noncanonical_host_port_and_symbols(self) -> None:
         context = FakeQuoteContext(rows=quote_rows())
         ledger = preflight_module._CallLedger()
@@ -335,6 +371,64 @@ class FutuLivePreflightTests(unittest.TestCase):
 
 
 class FutuLivePreflightCliTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls._minimal_python_temp = tempfile.TemporaryDirectory(
+            prefix="futu-preflight-minimal-python-"
+        )
+        environment_root = Path(cls._minimal_python_temp.name) / "venv"
+        venv.EnvBuilder(with_pip=False, symlinks=False).create(environment_root)
+        if os.name == "nt":
+            site_packages = environment_root / "Lib" / "site-packages"
+            python = environment_root / "Scripts" / "python.exe"
+        else:
+            site_packages = (
+                environment_root
+                / "lib"
+                / f"python{sys.version_info.major}.{sys.version_info.minor}"
+                / "site-packages"
+            )
+            python = environment_root / "bin" / "python"
+        tzdata_spec = importlib.util.find_spec("tzdata")
+        if tzdata_spec is not None:
+            if tzdata_spec.submodule_search_locations:
+                source = Path(next(iter(tzdata_spec.submodule_search_locations)))
+            elif tzdata_spec.origin:
+                source = Path(tzdata_spec.origin).resolve().parent
+            else:
+                raise RuntimeError("tzdata package location is unavailable")
+            shutil.copytree(source, site_packages / "tzdata")
+        elif os.name == "nt":
+            raise RuntimeError("tzdata is required for the minimal Windows test Python")
+        smoke = subprocess.run(
+            [
+                str(python),
+                "-I",
+                "-B",
+                "-c",
+                (
+                    "import importlib.util; "
+                    "from zoneinfo import ZoneInfo; "
+                    "assert importlib.util.find_spec('futu') is None; "
+                    "ZoneInfo('America/New_York')"
+                ),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            check=False,
+        )
+        if smoke.returncode != 0:
+            raise RuntimeError("minimal test Python failed its offline dependency check")
+        cls._minimal_python = python
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._minimal_python_temp.cleanup()
+        super().tearDownClass()
+
     def run_injected(self, argv: list[str], payload: dict[str, object]) -> tuple[int, dict[str, object]]:
         output = io.StringIO()
         code = cli_injected_main(argv, output=output, runner=lambda _confirmation: payload)
@@ -358,24 +452,32 @@ class FutuLivePreflightCliTests(unittest.TestCase):
                 self.assertEqual(report["error_code"], expected)
 
     def test_environment_sanitizer_removes_credentials_and_futu_overrides(self) -> None:
-        with mock.patch.dict(
-            os.environ,
-            {
-                "OPENAI_API_KEY": "SECRET_OPENAI",
-                "DEEPSEEK_API_KEY": "SECRET_DEEPSEEK",
-                "AI_STUDIO_PROJECT_CAPABILITY_SIGNING_SECRET": "SECRET_SIGNING",
-                "SEC_USER_AGENT": "SECRET_CONTACT",
-                "FUTU_HOST": "example.com",
-                "FUTU_PORT": "9999",
-                "GH_TOKEN": "SECRET_GITHUB",
-                "AWS_SECRET_ACCESS_KEY": "SECRET_AWS",
-            },
-            clear=False,
-        ):
-            environment = cli_module._sanitized_worker_environment(
-                Path(tempfile.gettempdir()),
-                "a" * 64,
-            )
+        with tempfile.TemporaryDirectory(prefix="futu-env-test-") as temp_dir:
+            sdk_profile = Path(temp_dir) / cli_module._SDK_PROFILE_DIRNAME
+            sdk_profile.mkdir()
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "APPDATA": "SECRET_REAL_APPDATA",
+                    "LOCALAPPDATA": "SECRET_REAL_LOCALAPPDATA",
+                    "OPENAI_API_KEY": "SECRET_OPENAI",
+                    "DEEPSEEK_API_KEY": "SECRET_DEEPSEEK",
+                    "AI_STUDIO_PROJECT_CAPABILITY_SIGNING_SECRET": "SECRET_SIGNING",
+                    "SEC_USER_AGENT": "SECRET_CONTACT",
+                    "FUTU_HOST": "example.com",
+                    "FUTU_PORT": "9999",
+                    "GH_TOKEN": "SECRET_GITHUB",
+                    "AWS_SECRET_ACCESS_KEY": "SECRET_AWS",
+                },
+                clear=False,
+            ):
+                environment = cli_module._sanitized_worker_environment(
+                    Path(temp_dir),
+                    "a" * 64,
+                    sdk_profile_root=sdk_profile,
+                )
+            self.assertEqual(environment["APPDATA"], str(sdk_profile.resolve()))
+            self.assertEqual(environment["LOCALAPPDATA"], str(sdk_profile.resolve()))
         for name in cli_module._CREDENTIAL_AND_CONFIG_ENV:
             self.assertNotIn(name, environment)
         self.assertNotIn("GH_TOKEN", environment)
@@ -393,6 +495,8 @@ class FutuLivePreflightCliTests(unittest.TestCase):
                 "OPENAI_API_KEY": "SECRET_OPENAI",
                 "GH_TOKEN": "SECRET_GITHUB",
                 "FUTU_HOST": "example.com",
+                "APPDATA": "SECRET_REAL_APPDATA",
+                "LOCALAPPDATA": "SECRET_REAL_LOCALAPPDATA",
             },
             clear=True,
         ):
@@ -401,6 +505,8 @@ class FutuLivePreflightCliTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", rebuilt)
         self.assertNotIn("GH_TOKEN", rebuilt)
         self.assertNotIn("FUTU_HOST", rebuilt)
+        self.assertNotIn("APPDATA", rebuilt)
+        self.assertNotIn("LOCALAPPDATA", rebuilt)
         self.assertEqual(rebuilt["AI_STUDIO_SKIP_LOCAL_ENV"], "1")
         self.assertEqual(rebuilt["AI_STUDIO_RUNTIME_DIR"], str(project_root))
 
@@ -414,25 +520,30 @@ class FutuLivePreflightCliTests(unittest.TestCase):
             "OPENAI_API_KEY": "SECRET_OPENAI",
             "GH_TOKEN": "SECRET_GITHUB",
         })
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-I",
-                "-B",
-                str(script),
-                cli_module._WORKER_FLAG,
-                token,
-                "--confirm",
-                PREFLIGHT_CONFIRMATION,
-            ],
-            cwd=root,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=30,
-            check=False,
-        )
+        with tempfile.TemporaryDirectory(prefix="futu-direct-worker-test-") as temp_dir:
+            sdk_profile = Path(temp_dir) / cli_module._SDK_PROFILE_DIRNAME
+            sdk_profile.mkdir()
+            environment["APPDATA"] = str(sdk_profile)
+            environment["LOCALAPPDATA"] = str(sdk_profile)
+            completed = subprocess.run(
+                [
+                    str(self._minimal_python),
+                    "-I",
+                    "-B",
+                    str(script),
+                    cli_module._WORKER_FLAG,
+                    token,
+                    "--confirm",
+                    PREFLIGHT_CONFIRMATION,
+                ],
+                cwd=temp_dir,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+            )
         self.assertIn(completed.returncode, {0, 1})
         self.assertEqual(completed.stderr, b"")
         report = json.loads(completed.stdout.decode("ascii"))
@@ -443,6 +554,7 @@ class FutuLivePreflightCliTests(unittest.TestCase):
         )
         self.assertFalse(report["safety"]["watchdog_enforced"])
         self.assertFalse(report["safety"]["watchdog_parent_promoted"])
+        self.assertTrue(report["safety"]["sdk_profile_path_checked_at_import"])
         self.assertNotIn("SECRET", completed.stdout.decode("ascii"))
         validate_futu_live_preflight_report(report)
 
@@ -462,6 +574,42 @@ class FutuLivePreflightCliTests(unittest.TestCase):
         self.assertEqual(report["status"], "indeterminate")
         self.assertTrue(report["safety"]["watchdog_enforced"])
         self.assertIsNone(report["safety"]["database_writes_performed"])
+
+    def test_backend_execution_suppresses_third_party_python_stdio(self) -> None:
+        expected = {"ok": False, "marker": "kept"}
+
+        def noisy_loader(_project_root: Path):
+            print("SECRET_IMPORT_STDOUT")
+            sys.stderr.write("SECRET_IMPORT_STDERR\n")
+
+            def runner(*, confirmation: str) -> dict[str, object]:
+                self.assertEqual(confirmation, PREFLIGHT_CONFIRMATION)
+                bound_stream = sys.stdout
+                print("SECRET_CALL_STDOUT")
+                bound_stream.write("SECRET_BOUND_STREAM\n")
+                sys.stderr.write("SECRET_CALL_STDERR\n")
+                return dict(expected)
+
+            def validator(value: object) -> dict[str, object]:
+                self.assertEqual(value, expected)
+                return dict(expected)
+
+            return runner, validator
+
+        captured_stdout = io.StringIO()
+        captured_stderr = io.StringIO()
+        with (
+            mock.patch.object(cli_module, "_load_backend_runner", side_effect=noisy_loader),
+            contextlib.redirect_stdout(captured_stdout),
+            contextlib.redirect_stderr(captured_stderr),
+        ):
+            result = cli_module._run_backend_quietly(
+                Path(tempfile.gettempdir()),
+                PREFLIGHT_CONFIRMATION,
+            )
+        self.assertEqual(result, expected)
+        self.assertEqual(captured_stdout.getvalue(), "")
+        self.assertEqual(captured_stderr.getvalue(), "")
 
     def test_parent_precondition_failure_does_not_claim_watchdog_enforcement(self) -> None:
         fake_flags = type("Flags", (), {"isolated": 0})()
@@ -500,24 +648,29 @@ class FutuLivePreflightCliTests(unittest.TestCase):
         self.assertFalse(start_report["safety"]["watchdog_enforced"])
         self.assertNotIn("SECRET", json.dumps(start_report, ensure_ascii=True))
 
-        class CleanupFails:
-            def __enter__(self) -> str:
-                return tempfile.gettempdir()
+        with tempfile.TemporaryDirectory(prefix="futu-cleanup-failure-test-") as cleanup_root:
+            class CleanupFails:
+                def __enter__(self) -> str:
+                    return cleanup_root
 
-            def __exit__(self, *_args: object) -> None:
-                raise OSError("SECRET_CLEANUP")
+                def __exit__(self, *_args: object) -> None:
+                    raise OSError("SECRET_CLEANUP")
 
-        with (
-            mock.patch.object(cli_module.sys, "flags", fake_flags),
-            mock.patch.object(cli_module, "_backend_or_futu_modules_preloaded", return_value=False),
-            mock.patch.object(cli_module.tempfile, "TemporaryDirectory", return_value=CleanupFails()),
-            mock.patch.object(
-                cli_module,
-                "_run_bounded_worker",
-                return_value=subprocess.CompletedProcess([], 1, stdout=b"{}", stderr=b""),
-            ),
-        ):
-            cleanup_report = cli_module._run_watchdog_child(PREFLIGHT_CONFIRMATION)
+            with (
+                mock.patch.object(cli_module.sys, "flags", fake_flags),
+                mock.patch.object(cli_module, "_backend_or_futu_modules_preloaded", return_value=False),
+                mock.patch.object(
+                    cli_module.tempfile,
+                    "TemporaryDirectory",
+                    return_value=CleanupFails(),
+                ),
+                mock.patch.object(
+                    cli_module,
+                    "_run_bounded_worker",
+                    return_value=subprocess.CompletedProcess([], 1, stdout=b"{}", stderr=b""),
+                ),
+            ):
+                cleanup_report = cli_module._run_watchdog_child(PREFLIGHT_CONFIRMATION)
         self.assertEqual(
             cleanup_report["error_code"],
             "PREFLIGHT_WORKER_LIFECYCLE_FAILED",
@@ -557,7 +710,7 @@ class FutuLivePreflightCliTests(unittest.TestCase):
         })
         completed = subprocess.run(
             [
-                sys.executable,
+                str(self._minimal_python),
                 "-I",
                 "-B",
                 str(script),
@@ -581,11 +734,68 @@ class FutuLivePreflightCliTests(unittest.TestCase):
         self.assertTrue(report["safety"]["watchdog_guard_attested"])
         self.assertTrue(report["safety"]["watchdog_enforced"])
         self.assertTrue(report["safety"]["watchdog_parent_promoted"])
+        self.assertTrue(report["safety"]["sdk_profile_path_checked_at_import"])
         self.assertFalse(report["safety"]["live_trading_allowed"])
         self.assertTrue(all(count <= 1 for count in report["calls"].values()))
         self.assertNotIn("SECRET", completed.stdout.decode("ascii"))
         self.assertFalse(sentinel.exists())
         validate_futu_live_preflight_report(report)
+
+    def test_exact_locked_sdk_import_uses_only_disposable_profile(self) -> None:
+        try:
+            installed_version = importlib.metadata.version("futu-api")
+        except importlib.metadata.PackageNotFoundError:
+            self.skipTest("exact locked Futu SDK is not installed in this interpreter")
+        if installed_version != FUTU_LIVE_PREFLIGHT_SDK_VERSION:
+            self.skipTest("this interpreter does not contain the exact locked Futu SDK")
+
+        holder = tempfile.TemporaryDirectory(prefix="futu-sdk-import-profile-test-")
+        temp_root = Path(holder.name)
+        try:
+            sdk_profile = temp_root / cli_module._SDK_PROFILE_DIRNAME
+            sdk_profile.mkdir()
+            probe = temp_root / "probe_futu_import.py"
+            probe.write_text(
+                """from __future__ import annotations
+import importlib.metadata
+import sys
+
+def audit(event, _args):
+    if event == "socket.connect":
+        raise RuntimeError("network forbidden during SDK import probe")
+
+sys.addaudithook(audit)
+assert importlib.metadata.version("futu-api") == "10.10.7008"
+import futu
+assert futu is not None
+""",
+                encoding="utf-8",
+            )
+            environment = cli_module._sanitized_worker_environment(
+                Path(__file__).resolve().parents[1],
+                "d" * 64,
+                sdk_profile_root=sdk_profile,
+            )
+            completed = subprocess.run(
+                [sys.executable, "-I", "-B", str(probe)],
+                cwd=temp_root,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr[:500])
+            self.assertLess(len(completed.stdout), cli_module.MAX_OUTPUT_BYTES)
+            created = [path for path in temp_root.rglob("*") if path.is_file()]
+            self.assertTrue(any(path.is_relative_to(sdk_profile) for path in created))
+            self.assertTrue(
+                all(path == probe or path.is_relative_to(sdk_profile) for path in created)
+            )
+        finally:
+            holder.cleanup()
+        self.assertFalse(temp_root.exists())
 
 
 if __name__ == "__main__":

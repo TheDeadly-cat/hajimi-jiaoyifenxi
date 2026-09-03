@@ -124,7 +124,12 @@ python -I -B scripts\run_futu_live_preflight.py `
 
 它固定连接 `127.0.0.1:11111`，且只读取 MU、SNDK、WDC、STX 同批次快照；不接受
 环境中的 Futu host/port，也不读取 `.env.local`。父进程以 15 秒 watchdog 回收卡住的
-SDK 子进程。回执精确计量本方的 probe/context/snapshot/可选 market-state/close 高层
+SDK 子进程。真实用户 `APPDATA/LOCALAPPDATA` 不会传给 SDK；锁定版 SDK 必需的日志目录
+会收到父进程单次临时目录中的专用 profile 路径，worker 退出后才尝试整体回收；该路径
+只在导入时检查，第三方实际写入和同用户竞态不属于 attestation。导入失败只返回固定
+`FUTU_SDK_IMPORT_FAILED`。SDK 生命周期内的 Python stdout/stderr 与最终 JSON 协议通道
+隔离，额外输出仍会令父进程失败关闭。回执精确计量本方的
+probe/context/snapshot/可选 market-state/close 高层
 调用，但把 SDK 内部传输诚实标为 `not_instrumented`。预检只接受
 `requirements-lock-win-py314.txt` 当前固定的 `futu-api==10.10.7008`；兼容范围安装到其他
 版本会在网络 I/O 前失败关闭。命令不启动或登录 OpenD，不访问

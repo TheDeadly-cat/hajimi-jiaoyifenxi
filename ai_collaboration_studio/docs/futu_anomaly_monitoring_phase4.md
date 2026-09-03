@@ -131,6 +131,15 @@ symbols、数据库路径或凭据参数。确认通过后，它在一个由父�
 runtime/数据库路径绑定到既有项目目录和一个必须不存在的哨兵文件。它不会启动或登录
 OpenD，也不会导入 Store、Provider、Source Inbox 或监控 runtime。
 
+锁定版 Futu SDK 在 Windows 导入时会强制创建日志。父进程因此在自己的单次临时目录内
+创建专用 `APPDATA/LOCALAPPDATA` profile；worker 只接受与当前临时 cwd 精确绑定的该
+profile，不继承真实用户目录。SDK 退出后父进程才回收整个临时目录；清理失败会成为
+indeterminate 生命周期错误。SDK 导入期的普通异常或 `SystemExit` 只映射为固定
+`FUTU_SDK_IMPORT_FAILED`，不泄露异常正文，也不能降级成可提升的浅层回执。第三方 SDK
+实际写入、同用户路径竞态与进程后代仍不被冒充为已完整观测。SDK 导入和调用期间的
+Python `stdout/stderr` 被定向到空设备，最终 JSON 在恢复后的独立协议时段输出；父进程
+仍严格解析完整 stdout，不会用“最后一行”绕过额外输出。
+
 worker 即使被直接调用，也会再次重建自己的最小环境，而且只能输出
 `watchdog_worker_observation` 中间回执，其中 `watchdog_enforced=false`。只有公共父进程
 确认 worker 在限时、限流边界内退出并严格重验中间回执后，才会升级并重封为

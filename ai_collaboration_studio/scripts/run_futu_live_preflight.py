@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import hashlib
 import hmac
@@ -28,6 +29,7 @@ _IMPORT_GUARD_ENV = "AI_STUDIO_FUTU_PREFLIGHT_IMPORT_GUARD"
 _IMPORT_GUARD_VALUE = "futu-live-preflight-isolated-import-v1"
 _WATCHDOG_GUARD_ENV = "AI_STUDIO_FUTU_PREFLIGHT_WATCHDOG_GUARD"
 _WATCHDOG_GUARD_VALUE = "futu-live-preflight-watchdog-v1"
+_SDK_PROFILE_DIRNAME = "futu-sdk-profile"
 _FIXED_SYMBOLS = ("US.MU", "US.SNDK", "US.WDC", "US.STX")
 _FIXED_HOST = "127.0.0.1"
 _FIXED_PORT = 11111
@@ -106,6 +108,9 @@ _SOURCE_MANIFEST_SHA256 = _canonical_sha256({
     "port": _FIXED_PORT,
     "symbols": list(_FIXED_SYMBOLS),
     "quote_batch_calls": 1,
+    "sdk_profile_policy": "parent_temp_appdata_v1",
+    "sdk_import_failure_policy": "closed_worker_receipt_v1",
+    "sdk_python_stdio_policy": "devnull_during_import_and_calls_v1",
     "sdk_logical_call_upper_bounds": {
         "socket_probe": 1,
         "quote_context_open": 1,
@@ -300,7 +305,12 @@ def _backend_or_futu_modules_preloaded() -> bool:
     )
 
 
-def _sanitized_worker_environment(project_root: Path, token: str) -> dict[str, str]:
+def _sanitized_worker_environment(
+    project_root: Path,
+    token: str,
+    *,
+    sdk_profile_root: Path | None = None,
+) -> dict[str, str]:
     environment = {
         name: value
         for name, value in os.environ.items()
@@ -314,12 +324,45 @@ def _sanitized_worker_environment(project_root: Path, token: str) -> dict[str, s
     environment[_IMPORT_GUARD_ENV] = _IMPORT_GUARD_VALUE
     environment[_WATCHDOG_GUARD_ENV] = _WATCHDOG_GUARD_VALUE
     environment[_WORKER_TOKEN_ENV] = token
+    if sdk_profile_root is not None:
+        if sdk_profile_root.is_symlink():
+            raise ValueError("SDK profile root cannot be a symlink")
+        resolved_profile = sdk_profile_root.resolve(strict=True)
+        if (
+            resolved_profile.name != _SDK_PROFILE_DIRNAME
+            or not resolved_profile.is_dir()
+        ):
+            raise ValueError("SDK profile root is invalid")
+        environment["APPDATA"] = str(resolved_profile)
+        environment["LOCALAPPDATA"] = str(resolved_profile)
     return environment
 
 
 def _scrub_current_worker_environment(project_root: Path) -> None:
     """Rebuild the worker environment even for a direct private-mode attempt."""
 
+    appdata = os.environ.get("APPDATA")
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    validated_profile: Path | None = None
+    if (
+        type(appdata) is str
+        and appdata
+        and type(local_appdata) is str
+        and local_appdata == appdata
+    ):
+        try:
+            raw_profile = Path(appdata)
+            if not raw_profile.is_symlink():
+                candidate = raw_profile.resolve(strict=True)
+                cwd = Path.cwd().resolve(strict=True)
+                if (
+                    candidate.is_dir()
+                    and candidate.name == _SDK_PROFILE_DIRNAME
+                    and candidate.parent == cwd
+                ):
+                    validated_profile = candidate
+        except (OSError, RuntimeError):
+            validated_profile = None
     safe = {
         name: value
         for name, value in os.environ.items()
@@ -332,6 +375,9 @@ def _scrub_current_worker_environment(project_root: Path) -> None:
     )
     safe[_IMPORT_GUARD_ENV] = _IMPORT_GUARD_VALUE
     safe[_WATCHDOG_GUARD_ENV] = _WATCHDOG_GUARD_VALUE
+    if validated_profile is not None:
+        safe["APPDATA"] = str(validated_profile)
+        safe["LOCALAPPDATA"] = str(validated_profile)
     os.environ.clear()
     os.environ.update(safe)
 
@@ -343,6 +389,8 @@ def _expected_worker_safety() -> dict[str, Any]:
         "confirmation_required": True,
         "confirmation_verified": True,
         "isolated_cli_import_guard_attested": True,
+        "sdk_profile_path_checked_at_import": True,
+        "sdk_profile_policy": "parent_temp_appdata_v1",
         "watchdog_required": True,
         "watchdog_guard_attested": True,
         "watchdog_enforced": False,
@@ -648,7 +696,6 @@ def _run_watchdog_child(_confirmation: str) -> dict[str, Any]:
             indeterminate=True,
         )
     token = secrets.token_hex(32)
-    environment = _sanitized_worker_environment(project_root, token)
     try:
         command = _worker_command(token)
     except OSError:
@@ -660,6 +707,13 @@ def _run_watchdog_child(_confirmation: str) -> dict[str, Any]:
     worker_invoked = False
     try:
         with tempfile.TemporaryDirectory(prefix="ai-studio-futu-preflight-") as temp_dir:
+            sdk_profile_root = Path(temp_dir) / _SDK_PROFILE_DIRNAME
+            sdk_profile_root.mkdir()
+            environment = _sanitized_worker_environment(
+                project_root,
+                token,
+                sdk_profile_root=sdk_profile_root,
+            )
             worker_invoked = True
             completed = _run_bounded_worker(
                 command,
@@ -744,6 +798,15 @@ def _load_backend_runner(project_root: Path) -> tuple[Callable[..., dict[str, An
     return run_futu_live_preflight, validate_futu_live_preflight_report
 
 
+def _run_backend_quietly(project_root: Path, confirmation: str) -> dict[str, Any]:
+    """Keep third-party Python output off the worker's strict JSON channel."""
+
+    with open(os.devnull, "w", encoding="utf-8", errors="replace") as sink:
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            runner, validator = _load_backend_runner(project_root)
+            return validator(runner(confirmation=confirmation))
+
+
 def _internal_worker(argv: Sequence[str]) -> int:
     raw = list(argv)
     if len(raw) != 4 or raw[0] != _WORKER_FLAG or raw[2] != "--confirm":
@@ -784,8 +847,7 @@ def _internal_worker(argv: Sequence[str]) -> int:
         return 2
     _scrub_current_worker_environment(project_root)
     try:
-        runner, validator = _load_backend_runner(project_root)
-        report = validator(runner(confirmation=confirmation))
+        report = _run_backend_quietly(project_root, confirmation)
     except BaseException:
         _emit(
             sys.stdout,
