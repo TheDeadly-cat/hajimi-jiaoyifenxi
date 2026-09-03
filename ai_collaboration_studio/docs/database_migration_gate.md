@@ -21,6 +21,8 @@ Phase 8 的 `source_monitoring_operations_v1` 也只能走本硬门。它只 add
 
 Adapter 操作员控制面的 `source_monitoring_pending_initialization_authorization_v1` 同样只能走本硬门：它只向 `source_adapter_states` additive 增加 pending authorization JSON/SHA-256 两列、三个 marker guards 和 migration key；不启用 adapter、不生成授权、不轮询来源，也不回填或改写既有 state/checkpoint/run/Source Inbox。部分对象或 seal 异常失败关闭，正式 apply 后没有自动 down-migration。
 
+官方来源 24 小时 soak 只消费 `assert_database_ready_for_startup()` 的只读 readiness、startup identity 与 schema hash，并通过 `_open_existing_schema()` 打开已验证 Store。它不会运行 initializer 或自动执行/授权迁移；若当前源码仍需要迁移，`preview`/`start` 必须停止并回到本页的正式 `preview → prepare → 人工授权 → apply` 流程。soak 的 baseline/final inventory 是运行证据，不是迁移备份、候选库或 apply receipt。
+
 ```powershell
 $db = 'C:\path\to\collaboration_studio.sqlite3'
 $evidence = 'C:\path\to\migration-evidence\2026-08-12'

@@ -103,6 +103,34 @@ python -I -B scripts\run_official_source_live_preflight.py `
 
 该命令显式标记 `scope=official_macro_only`、`sec_included=false`、`company_ir_included=false`。它不读取 `.env.local`，不导入 Futu 配置，不读写 SQLite/Source Inbox/checkpoint，不调用 Provider、模型或市场接口，也没有交易能力。一次 `passed` 是可信、未修改的本机隔离进程在该时间点经默认 HTTPS 路径获得可解析响应并完成四个 adapter 投影的观察，不是独立网络见证或密码学证明；因此回执固定为 `evidence_class=production_path_observation`、`transport_mode=default_official_https_path`、`live_network_attested=false`、`in_process_tamper_resistant=false`。它不证明 SEC/IR/Futu、24 小时连续性、官方内容真值、正式迁移、Provider、交易许可或发布验收。离线 injected fixture 回执使用不同 evidence class，正式 CLI 会拒绝将其当作生产路径观察。
 
+## 官方来源 24 小时 soak 证据包
+
+soak 使用独立 CLI；它不扩展一次性 operator CLI，也不接受数据库路径、持续时间或小时数覆盖。v1 公共入口只允许 `official`，固定持续 24 小时、每 5 秒采样，允许的最大样本间隙为 120 秒。Futu 的交易时段/闭市跳过合同尚未纳入这一版，不能用 `official` soak 冒充 Futu 验收。
+
+先准备一个已存在、为空且不经过 symlink、reparse point 或 hardlink 的证据目录，再执行。该目录及所有父目录必须由操作者控制访问权限，不能允许其他本机主体在 soak 期间写入、重命名或替换；路径重验会拒绝已存在和可观察到的别名/身份漂移，但 Python 标准库不能把 Windows 父目录句柄固定为完整的 open-relative 防替换安全边界，因此具备目录替换权限的主动本机攻击者不在 v1 证据模型内：
+
+```powershell
+$bundle = 'C:\protected-evidence\official-soak-20260903'
+
+python -m backend.source_monitoring_soak_cli preview `
+  --mode official `
+  --bundle $bundle
+
+python -m backend.source_monitoring_soak_cli start `
+  --bundle $bundle `
+  --confirm START_24H_SOURCE_MONITORING_SOAK `
+  --preview-sha256 '<preview 输出的精确 SHA-256>'
+
+python -m backend.source_monitoring_soak_cli verify `
+  --bundle $bundle
+```
+
+`preview` 先取得与正式宿主相同的数据库 owner，复用只读迁移 readiness，在不初始化 schema 的前提下打开已验证 Store；它要求全局 enabled + auto-start、`dry_run=false`、impact rules 关闭、至少一个显式启用且 config current 的官方 adapter。随后只读封印 settings、registry、代码身份、数据库 startup/schema、完整 run baseline，以及每个 enabled adapter 的 config/state/checkpoint；非空 Source Inbox receipt 会从 canonical packet/receipt 与行级绑定字段独立重建，不能只信任库存储的 digest。SQLite main/WAL/SHM/journal 会逐个拒绝链接、reparse、非普通文件及身份漂移，并分别受 2 GiB / 512 MiB / 64 MiB / 512 MiB 上限约束；超限须先由单独维护流程处理，soak 不会静默复制。`preview` 不轮询来源、不写正式数据库，但会以 `O_EXCL` + 文件 fsync 新建 `baseline-inventory.json` 和最后发布的 `plan.json`，POSIX 还会同步父目录项。任一步失败都保留现场，不能覆盖或修补原 bundle。
+
+`start` 在加载任何生产 runtime 前精确检查确认字符串与 preview SHA，再取得 owner 并重做 readiness、代码、settings、registry、adapter 和 baseline 绑定。只有重建计划逐字段相同才会创建 `ledger.jsonl`。生产 runtime 构造后会再次重算代码身份；worker 的首轮调度被 start gate 挡住，直到 `SESSION_STARTED` 已经 flush + fsync；之后 ledger 每条记录都有固定 session/runtime 身份、单调时钟、前序哈希和逐条 fsync。终态 run 还绑定完整 SQLite row SHA 与已独立重建的 Source Inbox receipt SHA。正常、失败或 Ctrl+C 关闭都先停止 runtime；有界 join 超时后仍继续持有 owner，线程真正退出前既不读取 final inventory，也不返回。runtime 确认静止后还会第三次重算代码身份，任何 24 小时内持续存在的源码漂移都会在写 `SESSION_ENDED` 前失败关闭。`final-inventory.json` 只能独占新建；账本缺少 `SESSION_ENDED` 时一律是 `INCOMPLETE_UNSEALED`，旧 session 永不续写。
+
+`verify` 只读取四个固定 bundle 文件，不发现或打开数据库，不加载 settings，不连接来源。它重验计划、canonical inventory、账本结构/哈希链、精确 24h/5s/120s 策略、liveness、enabled adapter 覆盖、run row/receipt 和 baseline/final delta。即使 continuity、production binding 与 database 都通过，v1 仍固定输出 `source_acceptance_verdict=NOT_EVALUATED`、`overall_acceptance=NOT_CLAIMED`：这是同一可信本机进程生成的连续性/数据库证据，不是签名、独立网络见证、来源内容真值、SEC/IR/Fed/BLS/Treasury 分源语义验收、Provider/交易许可、PR 合并或公开发布证明。本功能加入代码与离线快进测试不代表已经执行过真实 24 小时 soak。
+
 Phase 8 没有获得 TTL、删除对象或法律保留期，因此 v1 采用最保守的版本化策略：
 
 ```text

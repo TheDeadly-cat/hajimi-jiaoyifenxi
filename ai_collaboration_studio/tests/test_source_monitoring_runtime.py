@@ -18,7 +18,10 @@ from backend.source_monitoring.adapters.base import (  # noqa: E402
 from backend.source_monitoring.contracts import AdapterPollResult  # noqa: E402
 from backend.source_monitoring.registry import SourceAdapterRegistry  # noqa: E402
 from backend.source_monitoring.runtime import (  # noqa: E402
+    SOURCE_MONITORING_RUNTIME_CYCLE_OBSERVATION_VERSION,
     SOURCE_MONITORING_RUNTIME_FATAL,
+    SOURCE_MONITORING_RUNTIME_OBSERVER_FAILED,
+    SOURCE_MONITORING_RUNTIME_START_GATE_FAILED,
     SourceMonitoringRuntime,
 )
 from backend.source_monitoring.runtime_state import (  # noqa: E402
@@ -165,6 +168,8 @@ class SourceMonitoringRuntimeTests(unittest.TestCase):
         enable: tuple[str, ...] = (),
         heartbeat_interval_ms: int = 1,
         join_timeout_ms: int = 2_000,
+        cycle_observer: Callable[[dict[str, Any]], Any] | None = None,
+        start_gate: Callable[[], Any] | None = None,
     ) -> tuple[
         SourceMonitoringRuntime,
         SourceMonitoringStateRepository,
@@ -212,6 +217,8 @@ class SourceMonitoringRuntimeTests(unittest.TestCase):
             heartbeat_interval_ms=heartbeat_interval_ms,
             join_timeout_ms=join_timeout_ms,
             clock_ms=self.clock,
+            cycle_observer=cycle_observer,
+            start_gate=start_gate,
         )
         self.runtimes.append(runtime)
         return runtime, repository, scheduler
@@ -342,6 +349,177 @@ class SourceMonitoringRuntimeTests(unittest.TestCase):
         )
         self.assertNotIn("secret", repr(snapshot))
         self.assertTrue(runtime.stop())
+
+    def test_cycle_observer_receives_one_closed_safe_terminal_receipt(self) -> None:
+        adapter = FakeAdapter("observed_runtime")
+        observations: list[dict[str, Any]] = []
+        runtime, repository, _scheduler = self.build_runtime(
+            (adapter,),
+            enable=(adapter.adapter_key,),
+            heartbeat_interval_ms=60_000,
+            cycle_observer=observations.append,
+        )
+
+        self.assertTrue(runtime.start())
+        self.assertTrue(wait_until(lambda: len(observations) == 1))
+        self.assertTrue(runtime.stop())
+
+        observation = observations[0]
+        self.assertEqual(
+            set(observation),
+            {
+                "version",
+                "runtime_id",
+                "adapter_key",
+                "run_id",
+                "status",
+                "state_recorded",
+                "source_inbox_writes_performed",
+                "market_calls_performed",
+                "market_calls_possible_max",
+                "provider_calls_performed",
+                "formal_rounds_created",
+                "execution_capability",
+                "live_trading_allowed",
+            },
+        )
+        self.assertEqual(
+            observation["version"],
+            SOURCE_MONITORING_RUNTIME_CYCLE_OBSERVATION_VERSION,
+        )
+        self.assertEqual(observation["adapter_key"], adapter.adapter_key)
+        self.assertEqual(observation["status"], "SUCCEEDED")
+        self.assertTrue(observation["state_recorded"])
+        self.assertFalse(observation["source_inbox_writes_performed"])
+        self.assertEqual(observation["market_calls_performed"], 0)
+        self.assertEqual(observation["market_calls_possible_max"], 0)
+        self.assertEqual(observation["provider_calls_performed"], 0)
+        self.assertEqual(observation["formal_rounds_created"], 0)
+        self.assertEqual(observation["execution_capability"], "none")
+        self.assertFalse(observation["live_trading_allowed"])
+        self.assertEqual(
+            repository.get_run(observation["run_id"])["status"],
+            "SUCCEEDED",
+        )
+
+    def test_cycle_observer_failure_is_fail_stop_and_redacted(self) -> None:
+        adapter = FakeAdapter("observer_failure_runtime")
+        calls: list[dict[str, Any]] = []
+
+        def failing_observer(observation: dict[str, Any]) -> None:
+            calls.append(observation)
+            raise RuntimeError("SECRET_SOAK_LEDGER_PATH")
+
+        runtime, repository, _scheduler = self.build_runtime(
+            (adapter,),
+            enable=(adapter.adapter_key,),
+            cycle_observer=failing_observer,
+        )
+        self.assertTrue(runtime.start())
+        self.assertTrue(
+            wait_until(
+                lambda: runtime.snapshot()["status"] == "failed"
+                and not runtime.snapshot()["thread_alive"]
+            )
+        )
+
+        snapshot = runtime.snapshot()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            snapshot["last_fatal_error_code"],
+            SOURCE_MONITORING_RUNTIME_OBSERVER_FAILED,
+        )
+        self.assertNotIn("SECRET", repr(snapshot))
+        runs = repository.list_runs(adapter_key=adapter.adapter_key)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["status"], "SUCCEEDED")
+        self.clock.advance(adapter.poll_interval_ms)
+        time.sleep(0.02)
+        self.assertEqual(adapter.count(), 1)
+
+    def test_cycle_observer_must_be_callable(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "cycle_observer must be callable",
+        ):
+            self.build_runtime(
+                (),
+                cycle_observer="not-callable",  # type: ignore[arg-type]
+            )
+
+    def test_start_gate_blocks_first_scheduler_cycle_until_released(self) -> None:
+        release = threading.Event()
+        adapter = FakeAdapter("start_gate_runtime")
+
+        def await_release() -> None:
+            if not release.wait(2):
+                raise RuntimeError("test start gate timed out")
+
+        runtime, repository, _scheduler = self.build_runtime(
+            (adapter,),
+            enable=(adapter.adapter_key,),
+            start_gate=await_release,
+        )
+
+        self.assertTrue(runtime.start())
+        self.assertTrue(
+            wait_until(lambda: runtime.snapshot()["status"] == "starting")
+        )
+        time.sleep(0.02)
+        self.assertEqual(adapter.count(), 0)
+        self.assertEqual(repository.list_runs(adapter_key=adapter.adapter_key), [])
+
+        release.set()
+        self.assertTrue(wait_until(lambda: adapter.count() == 1))
+
+    def test_start_gate_must_be_callable(self) -> None:
+        with self.assertRaisesRegex(ValueError, "start_gate must be callable"):
+            self.build_runtime((), start_gate="not-callable")  # type: ignore[arg-type]
+
+    def test_start_gate_failure_stops_before_any_adapter_run(self) -> None:
+        adapter = FakeAdapter("failed_start_gate_runtime")
+
+        def fail_gate() -> None:
+            raise RuntimeError("secret gate detail")
+
+        runtime, repository, _scheduler = self.build_runtime(
+            (adapter,),
+            enable=(adapter.adapter_key,),
+            start_gate=fail_gate,
+        )
+
+        self.assertTrue(runtime.start())
+        self.assertTrue(
+            wait_until(
+                lambda: runtime.snapshot()["status"] == "failed"
+                and runtime.snapshot()["thread_alive"] is False
+            )
+        )
+        self.assertEqual(adapter.count(), 0)
+        self.assertEqual(repository.list_runs(adapter_key=adapter.adapter_key), [])
+        self.assertEqual(
+            runtime.snapshot()["last_fatal_error_code"],
+            SOURCE_MONITORING_RUNTIME_START_GATE_FAILED,
+        )
+        self.assertNotIn("secret", repr(runtime.snapshot()))
+
+    def test_start_gate_non_none_return_fails_closed(self) -> None:
+        adapter = FakeAdapter("invalid_start_gate_result")
+        runtime, repository, _scheduler = self.build_runtime(
+            (adapter,),
+            enable=(adapter.adapter_key,),
+            start_gate=lambda: True,
+        )
+
+        self.assertTrue(runtime.start())
+        self.assertTrue(
+            wait_until(
+                lambda: runtime.snapshot()["status"] == "failed"
+                and runtime.snapshot()["thread_alive"] is False
+            )
+        )
+        self.assertEqual(adapter.count(), 0)
+        self.assertEqual(repository.list_runs(adapter_key=adapter.adapter_key), [])
 
     def test_stop_wakes_idle_event_wait_and_joins_worker(self) -> None:
         runtime, _repository, _scheduler = self.build_runtime(

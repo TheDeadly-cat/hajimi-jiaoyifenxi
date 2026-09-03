@@ -8,6 +8,7 @@ releases the database instance owner.
 
 from __future__ import annotations
 
+import copy
 import math
 import threading
 import time
@@ -42,8 +43,24 @@ SOURCE_MONITORING_RUNTIME_INITIALIZE_FAILED = (
 SOURCE_MONITORING_RUNTIME_THREAD_START_FAILED = (
     "SOURCE_MONITORING_RUNTIME_THREAD_START_FAILED"
 )
+SOURCE_MONITORING_RUNTIME_OBSERVER_FAILED = (
+    "SOURCE_MONITORING_RUNTIME_OBSERVER_FAILED"
+)
+SOURCE_MONITORING_RUNTIME_START_GATE_FAILED = (
+    "SOURCE_MONITORING_RUNTIME_START_GATE_FAILED"
+)
+SOURCE_MONITORING_RUNTIME_CYCLE_OBSERVATION_VERSION = (
+    "source_monitoring_runtime_cycle_observation_v1"
+)
 
 _SUCCESSFUL_RUN_STATUSES = frozenset({"SUCCEEDED", "DRY_RUN"})
+_OBSERVABLE_RUN_STATUSES = frozenset({
+    "SUCCEEDED",
+    "DRY_RUN",
+    "DEGRADED",
+    "FAILED",
+    "DRY_RUN_FAILED",
+})
 
 
 class SourceMonitoringRuntimeError(SourceMonitoringContractError):
@@ -88,6 +105,8 @@ class SourceMonitoringRuntime:
         clock_ms: Callable[[], Any] | None = None,
         monotonic_ms: Callable[[], Any] | None = None,
         stall_after_ms: Any = DEFAULT_RUNTIME_STALL_AFTER_MS,
+        cycle_observer: Callable[[dict[str, Any]], Any] | None = None,
+        start_gate: Callable[[], Any] | None = None,
     ) -> None:
         if type(scheduler) is not SourceMonitoringScheduler:
             raise SourceMonitoringRuntimeError(
@@ -114,6 +133,16 @@ class SourceMonitoringRuntime:
                 "SOURCE_MONITORING_RUNTIME_CLOCK_INVALID",
                 "monotonic_ms must be callable",
             )
+        if cycle_observer is not None and not callable(cycle_observer):
+            raise SourceMonitoringRuntimeError(
+                "SOURCE_MONITORING_RUNTIME_OBSERVER_INVALID",
+                "cycle_observer must be callable",
+            )
+        if start_gate is not None and not callable(start_gate):
+            raise SourceMonitoringRuntimeError(
+                "SOURCE_MONITORING_RUNTIME_START_GATE_INVALID",
+                "start_gate must be callable",
+            )
 
         self.scheduler = scheduler
         self.settings = settings
@@ -136,6 +165,8 @@ class SourceMonitoringRuntime:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._degraded_adapter_keys: set[str] = set()
+        self._cycle_observer = cycle_observer
+        self._start_gate = start_gate
 
     def _now_ms(self) -> int:
         value = self._clock_ms()
@@ -278,6 +309,85 @@ class SourceMonitoringRuntime:
                 self._degraded_adapter_keys.add(adapter_key)
         return len(results)
 
+    def _observe_cycle(self, active_adapter: str, cycle: Any) -> None:
+        observer = self._cycle_observer
+        if observer is None:
+            return
+        results = self._cycle_results(cycle)
+        for result in results:
+            run_id = result.get("run_id")
+            status = result.get("status")
+            state_recorded = result.get("state_recorded")
+            safety = result.get("safety")
+            source_inbox_writes = result.get(
+                "source_inbox_writes_performed"
+            )
+            if (
+                type(run_id) is not str
+                or not run_id
+                or len(run_id) > 200
+                or type(status) is not str
+                or status not in _OBSERVABLE_RUN_STATUSES
+                or type(state_recorded) is not bool
+                or type(safety) is not dict
+                or type(safety.get("execution_capability")) is not str
+                or safety.get("execution_capability") != "none"
+                or safety.get("live_trading_allowed") is not False
+                or type(safety.get("provider_calls_performed")) is not int
+                or safety.get("provider_calls_performed") != 0
+                or type(safety.get("formal_rounds_created")) is not int
+                or safety.get("formal_rounds_created") != 0
+                or not (
+                    source_inbox_writes is None
+                    or type(source_inbox_writes) is bool
+                )
+            ):
+                raise SourceMonitoringRuntimeError(
+                    "SOURCE_MONITORING_RUNTIME_CYCLE_INVALID",
+                    "scheduler result is unsafe for cycle observation",
+                )
+            market_calls = safety.get("market_calls_performed")
+            market_calls_max = safety.get("market_calls_possible_max")
+            if (
+                (
+                    market_calls is not None
+                    and (type(market_calls) is not int or market_calls < 0)
+                )
+                or type(market_calls_max) is not int
+                or market_calls_max < 0
+                or (
+                    type(market_calls) is int
+                    and market_calls > market_calls_max
+                )
+            ):
+                raise SourceMonitoringRuntimeError(
+                    "SOURCE_MONITORING_RUNTIME_CYCLE_INVALID",
+                    "scheduler market-call evidence is invalid",
+                )
+            runtime = self.state.snapshot(thread_alive=True)
+            observation = {
+                "version": SOURCE_MONITORING_RUNTIME_CYCLE_OBSERVATION_VERSION,
+                "runtime_id": runtime["runtime_id"],
+                "adapter_key": active_adapter,
+                "run_id": run_id,
+                "status": status,
+                "state_recorded": state_recorded,
+                "source_inbox_writes_performed": source_inbox_writes,
+                "market_calls_performed": market_calls,
+                "market_calls_possible_max": market_calls_max,
+                "provider_calls_performed": 0,
+                "formal_rounds_created": 0,
+                "execution_capability": "none",
+                "live_trading_allowed": False,
+            }
+            try:
+                observer(copy.deepcopy(observation))
+            except BaseException as exc:
+                raise SourceMonitoringRuntimeError(
+                    SOURCE_MONITORING_RUNTIME_OBSERVER_FAILED,
+                    "cycle observer failed closed",
+                ) from exc
+
     def _wait_delay_ms(self, *, next_due_at_ms: int, ran_count: int) -> int:
         if next_due_at_ms == 0:
             return self.heartbeat_interval_ms
@@ -293,6 +403,16 @@ class SourceMonitoringRuntime:
 
     def _worker_main(self) -> None:
         try:
+            if self._start_gate is not None:
+                try:
+                    gate_result = self._start_gate()
+                    if gate_result is not None:
+                        raise ValueError("start gate returned a value")
+                except BaseException as exc:
+                    raise SourceMonitoringRuntimeError(
+                        SOURCE_MONITORING_RUNTIME_START_GATE_FAILED,
+                        "runtime start gate failed closed",
+                    ) from exc
             self.state.mark_running()
             while not self._stop_event.is_set():
                 try:
@@ -321,6 +441,7 @@ class SourceMonitoringRuntime:
                             active_adapter,
                             cycle,
                         )
+                        self._observe_cycle(active_adapter, cycle)
                     finally:
                         self.state.set_active_adapter("")
                 if self._stop_event.is_set():
@@ -337,8 +458,14 @@ class SourceMonitoringRuntime:
                 )
                 if wait_ms:
                     self._stop_event.wait(wait_ms / 1_000)
-        except BaseException:
-            self._safe_mark_failed(SOURCE_MONITORING_RUNTIME_FATAL)
+        except BaseException as exc:
+            fatal_code = SOURCE_MONITORING_RUNTIME_FATAL
+            if isinstance(exc, SourceMonitoringRuntimeError) and exc.code in {
+                SOURCE_MONITORING_RUNTIME_OBSERVER_FAILED,
+                SOURCE_MONITORING_RUNTIME_START_GATE_FAILED,
+            }:
+                fatal_code = exc.code
+            self._safe_mark_failed(fatal_code)
             return
 
         try:
@@ -356,6 +483,8 @@ def build_source_monitoring_runtime(
     clock_ms: Callable[[], Any] | None = None,
     monotonic_ms: Callable[[], Any] | None = None,
     stall_after_ms: Any = DEFAULT_RUNTIME_STALL_AFTER_MS,
+    cycle_observer: Callable[[dict[str, Any]], Any] | None = None,
+    start_gate: Callable[[], Any] | None = None,
 ) -> SourceMonitoringRuntime:
     """Construct the production runtime graph without database or source I/O."""
 
@@ -406,6 +535,8 @@ def build_source_monitoring_runtime(
         clock_ms=clock_ms,
         monotonic_ms=monotonic_ms,
         stall_after_ms=stall_after_ms,
+        cycle_observer=cycle_observer,
+        start_gate=start_gate,
     )
 
 
@@ -414,6 +545,9 @@ __all__ = [
     "DEFAULT_RUNTIME_JOIN_TIMEOUT_MS",
     "SOURCE_MONITORING_RUNTIME_FATAL",
     "SOURCE_MONITORING_RUNTIME_INITIALIZE_FAILED",
+    "SOURCE_MONITORING_RUNTIME_CYCLE_OBSERVATION_VERSION",
+    "SOURCE_MONITORING_RUNTIME_OBSERVER_FAILED",
+    "SOURCE_MONITORING_RUNTIME_START_GATE_FAILED",
     "SOURCE_MONITORING_RUNTIME_THREAD_START_FAILED",
     "SourceMonitoringRuntime",
     "SourceMonitoringRuntimeError",
