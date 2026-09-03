@@ -10,7 +10,7 @@ import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from .action_desk import ActionDeskError, ActionDeskService
@@ -610,7 +610,18 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             try:
-                health = SourceMonitoringHealthService(STORE).snapshot()
+                runtime = getattr(
+                    self.server,
+                    "ai_studio_source_monitoring_runtime",
+                    None,
+                )
+                runtime_snapshot = getattr(runtime, "snapshot", None)
+                health = SourceMonitoringHealthService(
+                    STORE,
+                    runtime_snapshot=(
+                        runtime_snapshot if callable(runtime_snapshot) else None
+                    ),
+                ).snapshot()
             except (SourceMonitoringHealthServiceError, SourceMonitoringStateError) as exc:
                 self._send_json(
                     {
@@ -5495,6 +5506,7 @@ def run_server(
     port: int = PORT,
     *,
     instance_owner: DatabaseInstanceOwner,
+    runtime_factory: Callable[[Any], Any] | None = None,
 ) -> None:
     if not _is_loopback_address(host):
         raise ValueError("AI 共创室只能监听回环地址")
@@ -5506,10 +5518,20 @@ def run_server(
     store_path = STORE.path
     instance_owner.assert_held_for(store_path)
     server = ThreadingHTTPServer((host, port), StudioRequestHandler)
+    # Python's ThreadingHTTPServer defaults request workers to daemon threads.
+    # The database owner must outlive every handler, so make close a real drain.
+    server.daemon_threads = False
+    server.block_on_close = True
     server.ai_studio_startup_ready = False
+    server.ai_studio_source_monitoring_runtime = None
+    runtime = None
     started = False
     try:
         recovery = STORE.recover_orphaned_work(instance_owner=instance_owner)
+        if runtime_factory is not None:
+            runtime = runtime_factory(STORE)
+            server.ai_studio_source_monitoring_runtime = runtime
+            runtime.start()
         server.ai_studio_startup_ready = True
         started = True
         emit_event(
@@ -5533,5 +5555,19 @@ def run_server(
         except KeyboardInterrupt:
             emit_event("server_interrupt_received")
     finally:
-        server.server_close()
+        server.ai_studio_startup_ready = False
+        try:
+            server.server_close()
+        finally:
+            if runtime is not None and not runtime.stop():
+                emit_event(
+                    "source_monitoring_runtime_stop_timeout",
+                    severity="critical",
+                    fields={
+                        "database_owner_retained": True,
+                        "execution_capability": "none",
+                        "live_trading_allowed": False,
+                    },
+                )
+                runtime.wait_until_stopped()
         emit_event("server_stopped", fields={"started": started})

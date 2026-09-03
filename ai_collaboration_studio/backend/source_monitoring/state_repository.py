@@ -14,6 +14,7 @@ import sqlite3
 import time
 import uuid
 from contextlib import closing
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
@@ -39,6 +40,145 @@ if TYPE_CHECKING:
 SOURCE_ADAPTER_STATE_VERSION = "source_adapter_state_v1"
 SOURCE_ADAPTER_RUN_VERSION = "source_adapter_run_v1"
 SOURCE_MONITORING_MIGRATION_KEY = "source_monitoring_state_v1"
+SOURCE_MONITORING_INITIALIZATION_MIGRATION_KEY = (
+    "source_monitoring_initialization_receipt_v1"
+)
+SOURCE_MONITORING_INITIALIZATION_RECEIPT_VERSION = (
+    "source_monitoring_initialization_receipt_v1"
+)
+SOURCE_MONITORING_INITIALIZATION_VERSION = "source_monitoring_initialization_v1"
+
+INITIALIZATION_MODES = frozenset({"seed_only", "catch_up", "from_time"})
+_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+_INITIALIZATION_COLUMNS = (
+    "initialization_mode",
+    "initialization_config_version",
+    "initialization_preview_sha256",
+    "initialization_receipt_json",
+    "initialization_receipt_sha256",
+)
+_INITIALIZATION_COLUMN_DEFINITIONS = {
+    "initialization_mode": (
+        "TEXT NOT NULL DEFAULT '' CHECK(initialization_mode IN "
+        "('','seed_only','catch_up','from_time'))"
+    ),
+    "initialization_config_version": (
+        "TEXT NOT NULL DEFAULT '' CHECK(length(initialization_config_version)<=160)"
+    ),
+    "initialization_preview_sha256": (
+        "TEXT NOT NULL DEFAULT '' CHECK(initialization_preview_sha256='' OR "
+        "(length(initialization_preview_sha256)=64 AND "
+        "initialization_preview_sha256 NOT GLOB '*[^0-9a-f]*'))"
+    ),
+    "initialization_receipt_json": (
+        "TEXT NOT NULL DEFAULT '' CHECK(length(initialization_receipt_json)<=4096)"
+    ),
+    "initialization_receipt_sha256": (
+        "TEXT NOT NULL DEFAULT '' CHECK((initialization_receipt_sha256='' AND "
+        "initialization_mode='' AND initialization_config_version='' AND "
+        "initialization_preview_sha256='' AND initialization_receipt_json='') OR "
+        "(length(initialization_receipt_sha256)=64 AND "
+        "initialization_receipt_sha256 NOT GLOB '*[^0-9a-f]*' AND "
+        "initialization_mode<>'' AND initialization_config_version<>'' AND "
+        "initialization_preview_sha256<>'' AND initialization_receipt_json<>'' AND "
+        "status='SUCCEEDED' AND dry_run=0))"
+    ),
+}
+
+_INITIALIZATION_TIME_INDEX = "idx_source_adapter_runs_initialization_time"
+_INITIALIZATION_RECEIPT_INDEX = "uq_source_adapter_runs_initialization_receipt"
+_INITIALIZATION_UPDATE_TRIGGER = "trg_source_adapter_runs_initialization_no_update"
+_INITIALIZATION_DELETE_TRIGGER = "trg_source_adapter_runs_initialization_no_delete"
+_INITIALIZATION_MIGRATION_UPDATE_TRIGGER = (
+    "trg_source_monitoring_initialization_marker_no_update"
+)
+_INITIALIZATION_MIGRATION_DELETE_TRIGGER = (
+    "trg_source_monitoring_initialization_marker_no_delete"
+)
+_INITIALIZATION_MIGRATION_INSERT_TRIGGER = (
+    "trg_source_monitoring_initialization_marker_no_replace"
+)
+
+_INITIALIZATION_TIME_INDEX_DDL = f"""CREATE INDEX {_INITIALIZATION_TIME_INDEX}
+ON source_adapter_runs(
+    adapter_key,initialization_config_version,completed_at_ms DESC,run_id DESC
+)
+WHERE status='SUCCEEDED' AND initialization_mode<>''"""
+_INITIALIZATION_RECEIPT_INDEX_DDL = (
+    f"""CREATE UNIQUE INDEX {_INITIALIZATION_RECEIPT_INDEX}
+ON source_adapter_runs(initialization_receipt_sha256)
+WHERE initialization_receipt_sha256<>''"""
+)
+_INITIALIZATION_UPDATE_TRIGGER_DDL = f"""CREATE TRIGGER {_INITIALIZATION_UPDATE_TRIGGER}
+BEFORE UPDATE ON source_adapter_runs
+WHEN OLD.initialization_receipt_sha256<>''
+BEGIN
+    SELECT RAISE(ABORT,'source monitoring initialization receipts are immutable');
+END"""
+_INITIALIZATION_DELETE_TRIGGER_DDL = f"""CREATE TRIGGER {_INITIALIZATION_DELETE_TRIGGER}
+BEFORE DELETE ON source_adapter_runs
+WHEN OLD.initialization_receipt_sha256<>''
+BEGIN
+    SELECT RAISE(ABORT,'source monitoring initialization receipts are immutable');
+END"""
+_INITIALIZATION_MIGRATION_UPDATE_TRIGGER_DDL = (
+    f"""CREATE TRIGGER {_INITIALIZATION_MIGRATION_UPDATE_TRIGGER}
+BEFORE UPDATE ON schema_migrations
+WHEN OLD.key='{SOURCE_MONITORING_INITIALIZATION_MIGRATION_KEY}'
+  OR NEW.key='{SOURCE_MONITORING_INITIALIZATION_MIGRATION_KEY}'
+BEGIN
+    SELECT RAISE(ABORT,'source monitoring initialization marker is immutable');
+END"""
+)
+_INITIALIZATION_MIGRATION_DELETE_TRIGGER_DDL = (
+    f"""CREATE TRIGGER {_INITIALIZATION_MIGRATION_DELETE_TRIGGER}
+BEFORE DELETE ON schema_migrations
+WHEN OLD.key='{SOURCE_MONITORING_INITIALIZATION_MIGRATION_KEY}'
+BEGIN
+    SELECT RAISE(ABORT,'source monitoring initialization marker is immutable');
+END"""
+)
+_INITIALIZATION_MIGRATION_INSERT_TRIGGER_DDL = (
+    f"""CREATE TRIGGER {_INITIALIZATION_MIGRATION_INSERT_TRIGGER}
+BEFORE INSERT ON schema_migrations
+WHEN EXISTS (
+    SELECT 1 FROM schema_migrations existing
+     WHERE existing.key='{SOURCE_MONITORING_INITIALIZATION_MIGRATION_KEY}'
+       AND (existing.rowid=NEW.rowid
+            OR NEW.key='{SOURCE_MONITORING_INITIALIZATION_MIGRATION_KEY}')
+)
+BEGIN
+    SELECT RAISE(ABORT,'source monitoring initialization marker is immutable');
+END"""
+)
+_INITIALIZATION_SCHEMA_DDL = (
+    _INITIALIZATION_TIME_INDEX_DDL,
+    _INITIALIZATION_RECEIPT_INDEX_DDL,
+    _INITIALIZATION_UPDATE_TRIGGER_DDL,
+    _INITIALIZATION_DELETE_TRIGGER_DDL,
+    _INITIALIZATION_MIGRATION_UPDATE_TRIGGER_DDL,
+    _INITIALIZATION_MIGRATION_DELETE_TRIGGER_DDL,
+    _INITIALIZATION_MIGRATION_INSERT_TRIGGER_DDL,
+)
+_INITIALIZATION_SCHEMA_OBJECTS = {
+    _INITIALIZATION_TIME_INDEX: ("index", _INITIALIZATION_TIME_INDEX_DDL),
+    _INITIALIZATION_RECEIPT_INDEX: ("index", _INITIALIZATION_RECEIPT_INDEX_DDL),
+    _INITIALIZATION_UPDATE_TRIGGER: ("trigger", _INITIALIZATION_UPDATE_TRIGGER_DDL),
+    _INITIALIZATION_DELETE_TRIGGER: ("trigger", _INITIALIZATION_DELETE_TRIGGER_DDL),
+    _INITIALIZATION_MIGRATION_UPDATE_TRIGGER: (
+        "trigger",
+        _INITIALIZATION_MIGRATION_UPDATE_TRIGGER_DDL,
+    ),
+    _INITIALIZATION_MIGRATION_DELETE_TRIGGER: (
+        "trigger",
+        _INITIALIZATION_MIGRATION_DELETE_TRIGGER_DDL,
+    ),
+    _INITIALIZATION_MIGRATION_INSERT_TRIGGER: (
+        "trigger",
+        _INITIALIZATION_MIGRATION_INSERT_TRIGGER_DDL,
+    ),
+}
 
 RUN_STATUS_RUNNING = "RUNNING"
 RUN_STATUS_SUCCEEDED = "SUCCEEDED"
@@ -208,6 +348,166 @@ class SourceMonitoringStateError(RuntimeError):
         self.code = code
 
 
+def _compact_sql(value: str) -> str:
+    return "".join(value.lower().split())
+
+
+def _source_monitoring_initialization_schema_state(
+    connection: sqlite3.Connection,
+) -> str:
+    table_row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='source_adapter_runs'"
+    ).fetchone()
+    if table_row is None:
+        raise SourceMonitoringStateError(
+            "source adapter run table is missing",
+            code="SOURCE_MONITORING_INITIALIZATION_SCHEMA_INVALID",
+        )
+    table_sql = str(
+        table_row["sql"] if isinstance(table_row, sqlite3.Row) else table_row[0]
+    )
+    column_rows = connection.execute(
+        "PRAGMA table_info(source_adapter_runs)"
+    ).fetchall()
+    column_info = {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1]): {
+            "type": str(row["type"] if isinstance(row, sqlite3.Row) else row[2]),
+            "notnull": row["notnull"] if isinstance(row, sqlite3.Row) else row[3],
+            "default": row["dflt_value"] if isinstance(row, sqlite3.Row) else row[4],
+            "pk": row["pk"] if isinstance(row, sqlite3.Row) else row[5],
+        }
+        for row in column_rows
+    }
+    present_columns = set(_INITIALIZATION_COLUMNS).intersection(column_info)
+
+    object_names = tuple(_INITIALIZATION_SCHEMA_OBJECTS)
+    placeholders = ",".join("?" for _name in object_names)
+    object_rows = connection.execute(
+        f"SELECT type,name,sql FROM sqlite_master WHERE name IN ({placeholders})",
+        object_names,
+    ).fetchall()
+    objects = {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1]): {
+            "type": str(row["type"] if isinstance(row, sqlite3.Row) else row[0]),
+            "sql": str(row["sql"] if isinstance(row, sqlite3.Row) else row[2]),
+        }
+        for row in object_rows
+    }
+    marker = connection.execute(
+        "SELECT applied_at FROM schema_migrations WHERE key=?",
+        (SOURCE_MONITORING_INITIALIZATION_MIGRATION_KEY,),
+    ).fetchone()
+
+    no_objects = not objects and marker is None
+    if no_objects and (
+        not present_columns or present_columns == set(_INITIALIZATION_COLUMNS)
+    ):
+        return "migration_required"
+    if (
+        present_columns != set(_INITIALIZATION_COLUMNS)
+        or set(objects) != set(_INITIALIZATION_SCHEMA_OBJECTS)
+        or marker is None
+    ):
+        raise SourceMonitoringStateError(
+            "source monitoring initialization schema is incomplete",
+            code="SOURCE_MONITORING_INITIALIZATION_SCHEMA_INVALID",
+        )
+
+    compact_table_sql = _compact_sql(table_sql)
+    for name, definition in _INITIALIZATION_COLUMN_DEFINITIONS.items():
+        metadata = column_info[name]
+        if (
+            metadata != {
+                "type": "TEXT",
+                "notnull": 1,
+                "default": "''",
+                "pk": 0,
+            }
+            or _compact_sql(f"{name} {definition}") not in compact_table_sql
+        ):
+            raise SourceMonitoringStateError(
+                f"source monitoring initialization column {name} is invalid",
+                code="SOURCE_MONITORING_INITIALIZATION_SCHEMA_INVALID",
+            )
+    for name, (expected_type, expected_sql) in _INITIALIZATION_SCHEMA_OBJECTS.items():
+        if objects[name] != {"type": expected_type, "sql": expected_sql}:
+            raise SourceMonitoringStateError(
+                f"source monitoring initialization object {name} is invalid",
+                code="SOURCE_MONITORING_INITIALIZATION_SCHEMA_INVALID",
+            )
+    applied_at = marker["applied_at"] if isinstance(marker, sqlite3.Row) else marker[0]
+    if type(applied_at) is not int or not 0 <= applied_at <= MAX_NATIVE_INTEGER:
+        raise SourceMonitoringStateError(
+            "source monitoring initialization migration marker is invalid",
+            code="SOURCE_MONITORING_INITIALIZATION_SCHEMA_INVALID",
+        )
+    return "current"
+
+
+def source_monitoring_initialization_schema_state(
+    connection: sqlite3.Connection,
+) -> str:
+    """Project the additive initialization schema without mutating SQLite.
+
+    Health and migration diagnostics need to distinguish an intact legacy
+    monitoring schema from a corrupt partial migration before they deserialize
+    run rows whose five initialization columns may not exist yet.
+    """
+
+    if not isinstance(connection, sqlite3.Connection):
+        raise SourceMonitoringStateError(
+            "source monitoring initialization connection is invalid",
+            code="SOURCE_MONITORING_INITIALIZATION_SCHEMA_INVALID",
+        )
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_adapter_runs'"
+    ).fetchone()
+    if table is None:
+        return "unavailable"
+    return _source_monitoring_initialization_schema_state(connection)
+
+
+def _ensure_source_monitoring_initialization_schema(
+    connection: sqlite3.Connection,
+    *,
+    applied_at_ms: int,
+) -> None:
+    if _source_monitoring_initialization_schema_state(connection) == "current":
+        return
+
+    savepoint = "source_monitoring_initialization_receipt_v1"
+    connection.execute(f"SAVEPOINT {savepoint}")
+    try:
+        existing_columns = {
+            str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(source_adapter_runs)"
+            ).fetchall()
+        }
+        for name in _INITIALIZATION_COLUMNS:
+            if name not in existing_columns:
+                connection.execute(
+                    f"ALTER TABLE source_adapter_runs ADD COLUMN "
+                    f"{name} {_INITIALIZATION_COLUMN_DEFINITIONS[name]}"
+                )
+        for statement in _INITIALIZATION_SCHEMA_DDL:
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_migrations(key,applied_at) VALUES(?,?)",
+            (SOURCE_MONITORING_INITIALIZATION_MIGRATION_KEY, applied_at_ms),
+        )
+        if _source_monitoring_initialization_schema_state(connection) != "current":
+            raise SourceMonitoringStateError(
+                "source monitoring initialization migration did not complete",
+                code="SOURCE_MONITORING_INITIALIZATION_SCHEMA_INVALID",
+            )
+    except BaseException:
+        connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+        connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+
 def ensure_source_monitoring_schema(
     connection: sqlite3.Connection,
     *,
@@ -276,6 +576,37 @@ def ensure_source_monitoring_schema(
             source_errors_json TEXT NOT NULL DEFAULT '[]',
             receipt_id TEXT NOT NULL DEFAULT '',
             dry_run INTEGER NOT NULL DEFAULT 0 CHECK(dry_run IN (0,1)),
+            initialization_mode TEXT NOT NULL DEFAULT '' CHECK(
+                initialization_mode IN ('','seed_only','catch_up','from_time')
+            ),
+            initialization_config_version TEXT NOT NULL DEFAULT ''
+                CHECK(length(initialization_config_version)<=160),
+            initialization_preview_sha256 TEXT NOT NULL DEFAULT '' CHECK(
+                initialization_preview_sha256='' OR (
+                    length(initialization_preview_sha256)=64
+                    AND initialization_preview_sha256 NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+            initialization_receipt_json TEXT NOT NULL DEFAULT ''
+                CHECK(length(initialization_receipt_json)<=4096),
+            initialization_receipt_sha256 TEXT NOT NULL DEFAULT '' CHECK(
+                (
+                    initialization_receipt_sha256=''
+                    AND initialization_mode=''
+                    AND initialization_config_version=''
+                    AND initialization_preview_sha256=''
+                    AND initialization_receipt_json=''
+                ) OR (
+                    length(initialization_receipt_sha256)=64
+                    AND initialization_receipt_sha256 NOT GLOB '*[^0-9a-f]*'
+                    AND initialization_mode<>''
+                    AND initialization_config_version<>''
+                    AND initialization_preview_sha256<>''
+                    AND initialization_receipt_json<>''
+                    AND status='SUCCEEDED'
+                    AND dry_run=0
+                )
+            ),
             FOREIGN KEY(adapter_key) REFERENCES source_adapter_states(adapter_key)
         );
 
@@ -291,6 +622,10 @@ def ensure_source_monitoring_schema(
         """INSERT OR IGNORE INTO schema_migrations(key,applied_at)
            VALUES(?,?)""",
         (SOURCE_MONITORING_MIGRATION_KEY, applied_at_ms),
+    )
+    _ensure_source_monitoring_initialization_schema(
+        connection,
+        applied_at_ms=applied_at_ms,
     )
 
 
@@ -450,6 +785,314 @@ def _decode_json_array(value: Any, label: str) -> list[dict[str, Any]]:
             code="SOURCE_MONITORING_RECORD_CORRUPT",
         )
     return normalized
+
+
+def _sha256_digest(value: Any, label: str) -> str:
+    if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+        raise SourceMonitoringStateError(
+            f"{label} must be a lowercase SHA-256 digest",
+            code="SOURCE_MONITORING_STATE_INVALID",
+        )
+    return value
+
+
+def _canonical_initialization_time(value: Any, label: str) -> str:
+    if type(value) is not str or len(value) > 32:
+        raise SourceMonitoringStateError(
+            f"{label} must be a bounded canonical UTC timestamp or empty",
+            code="SOURCE_MONITORING_INITIALIZATION_INVALID",
+        )
+    if value == "":
+        return value
+    if re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{3})?Z",
+        value,
+    ) is None:
+        raise SourceMonitoringStateError(
+            f"{label} must be a canonical millisecond-or-coarser UTC timestamp",
+            code="SOURCE_MONITORING_INITIALIZATION_INVALID",
+        )
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as exc:
+        raise SourceMonitoringStateError(
+            f"{label} is not a real UTC timestamp",
+            code="SOURCE_MONITORING_INITIALIZATION_INVALID",
+        ) from exc
+    if parsed.tzinfo != timezone.utc:
+        raise SourceMonitoringStateError(
+            f"{label} must use UTC",
+            code="SOURCE_MONITORING_INITIALIZATION_INVALID",
+        )
+    return value
+
+
+def _normalise_initialization_request(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    expected_fields = {
+        "version",
+        "mode",
+        "config_version",
+        "preview_sha256",
+        "candidate_count",
+        "adapter_duplicate_count",
+        "selected_count",
+        "skipped_count",
+        "catch_up_max_items",
+        "from_time_ms",
+        "earliest_occurred_at",
+        "latest_occurred_at",
+        "starting_checkpoint_sha256",
+        "next_checkpoint_sha256",
+        "captured_at_ms",
+    }
+    if type(value) is not dict or set(value) != expected_fields:
+        raise SourceMonitoringStateError(
+            "initialization does not match the closed v1 projection",
+            code="SOURCE_MONITORING_INITIALIZATION_INVALID",
+        )
+    if value["version"] != SOURCE_MONITORING_INITIALIZATION_VERSION:
+        raise SourceMonitoringStateError(
+            "initialization version is invalid",
+            code="SOURCE_MONITORING_INITIALIZATION_INVALID",
+        )
+    mode = _clean_token(value["mode"], "initialization.mode", maximum=32)
+    if mode not in INITIALIZATION_MODES:
+        raise SourceMonitoringStateError(
+            "initialization mode is invalid",
+            code="SOURCE_MONITORING_INITIALIZATION_INVALID",
+        )
+    candidate_count = _native_non_negative(
+        value["candidate_count"],
+        "initialization.candidate_count",
+    )
+    adapter_duplicate_count = _native_non_negative(
+        value["adapter_duplicate_count"],
+        "initialization.adapter_duplicate_count",
+    )
+    selected_count = _native_non_negative(
+        value["selected_count"],
+        "initialization.selected_count",
+    )
+    skipped_count = _native_non_negative(
+        value["skipped_count"],
+        "initialization.skipped_count",
+    )
+    if selected_count + skipped_count != candidate_count:
+        raise SourceMonitoringStateError(
+            "initialization selection counts do not cover the candidate set",
+            code="SOURCE_MONITORING_INITIALIZATION_INVALID",
+        )
+    catch_up_max_items = _native_non_negative(
+        value["catch_up_max_items"],
+        "initialization.catch_up_max_items",
+    )
+    from_time_ms = _native_non_negative(
+        value["from_time_ms"],
+        "initialization.from_time_ms",
+    )
+    invalid_mode_policy = (
+        (
+            mode == "seed_only"
+            and (catch_up_max_items != 0 or from_time_ms != 0)
+        )
+        or (
+            mode == "catch_up"
+            and (
+                not 1 <= catch_up_max_items <= 50
+                or from_time_ms != 0
+                or selected_count != min(candidate_count, catch_up_max_items)
+            )
+        )
+        or (
+            mode == "from_time"
+            and catch_up_max_items != 0
+        )
+    )
+    if invalid_mode_policy:
+        raise SourceMonitoringStateError(
+            "initialization mode policy fields are inconsistent",
+            code="SOURCE_MONITORING_INITIALIZATION_INVALID",
+        )
+    earliest = _canonical_initialization_time(
+        value["earliest_occurred_at"],
+        "initialization.earliest_occurred_at",
+    )
+    latest = _canonical_initialization_time(
+        value["latest_occurred_at"],
+        "initialization.latest_occurred_at",
+    )
+    if (candidate_count == 0) is not (earliest == "" and latest == ""):
+        raise SourceMonitoringStateError(
+            "initialization occurrence bounds do not match candidate_count",
+            code="SOURCE_MONITORING_INITIALIZATION_INVALID",
+        )
+    if earliest and datetime.fromisoformat(earliest[:-1] + "+00:00") > datetime.fromisoformat(
+        latest[:-1] + "+00:00"
+    ):
+        raise SourceMonitoringStateError(
+            "initialization occurrence bounds are reversed",
+            code="SOURCE_MONITORING_INITIALIZATION_INVALID",
+        )
+    return {
+        "version": SOURCE_MONITORING_INITIALIZATION_VERSION,
+        "mode": mode,
+        "config_version": _clean_token(
+            value["config_version"],
+            "initialization.config_version",
+        ),
+        "preview_sha256": _sha256_digest(
+            value["preview_sha256"],
+            "initialization.preview_sha256",
+        ),
+        "candidate_count": candidate_count,
+        "adapter_duplicate_count": adapter_duplicate_count,
+        "selected_count": selected_count,
+        "skipped_count": skipped_count,
+        "catch_up_max_items": catch_up_max_items,
+        "from_time_ms": from_time_ms,
+        "earliest_occurred_at": earliest,
+        "latest_occurred_at": latest,
+        "starting_checkpoint_sha256": _sha256_digest(
+            value["starting_checkpoint_sha256"],
+            "initialization.starting_checkpoint_sha256",
+        ),
+        "next_checkpoint_sha256": _sha256_digest(
+            value["next_checkpoint_sha256"],
+            "initialization.next_checkpoint_sha256",
+        ),
+        "captured_at_ms": _native_non_negative(
+            value["captured_at_ms"],
+            "initialization.captured_at_ms",
+        ),
+    }
+
+
+def _load_canonical_initialization_receipt(value: Any) -> dict[str, Any]:
+    if type(value) is not str or not value or len(value) > 4096:
+        raise SourceMonitoringStateError(
+            "initialization receipt JSON is invalid",
+            code="SOURCE_MONITORING_INITIALIZATION_RECEIPT_CORRUPT",
+        )
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = item
+        return result
+
+    def reject_constant(_value: str) -> None:
+        raise ValueError("non-finite JSON number")
+
+    try:
+        decoded = json.loads(
+            value,
+            object_pairs_hook=unique_object,
+            parse_constant=reject_constant,
+        )
+        canonical = canonical_json(decoded)
+    except (
+        RecursionError,
+        TypeError,
+        ValueError,
+        json.JSONDecodeError,
+        SourceMonitoringContractError,
+    ) as exc:
+        raise SourceMonitoringStateError(
+            "initialization receipt JSON is corrupt",
+            code="SOURCE_MONITORING_INITIALIZATION_RECEIPT_CORRUPT",
+        ) from exc
+    if type(decoded) is not dict or canonical != value:
+        raise SourceMonitoringStateError(
+            "initialization receipt JSON is not a canonical object",
+            code="SOURCE_MONITORING_INITIALIZATION_RECEIPT_CORRUPT",
+        )
+    return decoded
+
+
+def _build_initialization_receipt(
+    *,
+    run: dict[str, Any],
+    request: dict[str, Any],
+    completed_at_ms: int,
+    counts: dict[str, int],
+) -> dict[str, Any]:
+    return {
+        "version": SOURCE_MONITORING_INITIALIZATION_RECEIPT_VERSION,
+        "adapter_key": run["adapter_key"],
+        "run_id": run["run_id"],
+        "initialization": request,
+        "terminal_counts": counts,
+        "completed_at_ms": completed_at_ms,
+    }
+
+
+def _initialization_projection(
+    data: dict[str, Any],
+    run: dict[str, Any],
+) -> dict[str, Any] | None:
+    stored = {
+        "mode": data.get("initialization_mode"),
+        "config_version": data.get("initialization_config_version"),
+        "preview_sha256": data.get("initialization_preview_sha256"),
+        "receipt_json": data.get("initialization_receipt_json"),
+        "receipt_sha256": data.get("initialization_receipt_sha256"),
+    }
+    if all(value == "" for value in stored.values()):
+        return None
+    if any(type(value) is not str or not value for value in stored.values()):
+        raise SourceMonitoringStateError(
+            "initialization receipt fields are incomplete",
+            code="SOURCE_MONITORING_INITIALIZATION_RECEIPT_CORRUPT",
+        )
+    receipt = _load_canonical_initialization_receipt(stored["receipt_json"])
+    try:
+        request = _normalise_initialization_request(receipt.get("initialization"))
+    except SourceMonitoringStateError as exc:
+        raise SourceMonitoringStateError(
+            "initialization receipt projection is corrupt",
+            code="SOURCE_MONITORING_INITIALIZATION_RECEIPT_CORRUPT",
+        ) from exc
+    if request is None:
+        raise SourceMonitoringStateError(
+            "initialization receipt projection is missing",
+            code="SOURCE_MONITORING_INITIALIZATION_RECEIPT_CORRUPT",
+        )
+    expected = _build_initialization_receipt(
+        run=run,
+        request=request,
+        completed_at_ms=run["completed_at_ms"],
+        counts={
+            "observed_count": run["observed_count"],
+            "accepted_count": run["accepted_count"],
+            "duplicate_count": run["duplicate_count"],
+            "rejected_count": run["rejected_count"],
+        },
+    )
+    if (
+        run["status"] != RUN_STATUS_SUCCEEDED
+        or run["dry_run"]
+        or request["mode"] != stored["mode"]
+        or request["config_version"] != stored["config_version"]
+        or request["preview_sha256"] != stored["preview_sha256"]
+        or receipt != expected
+        or stored["receipt_sha256"] != canonical_sha256(receipt)
+    ):
+        raise SourceMonitoringStateError(
+            "initialization receipt seal is invalid",
+            code="SOURCE_MONITORING_INITIALIZATION_RECEIPT_CORRUPT",
+        )
+    return {
+        "mode": request["mode"],
+        "config_version": request["config_version"],
+        "preview_sha256": request["preview_sha256"],
+        "receipt_sha256": stored["receipt_sha256"],
+        "catch_up_max_items": request["catch_up_max_items"],
+        "from_time_ms": request["from_time_ms"],
+    }
 
 
 def _row_mapping(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -651,6 +1294,7 @@ class SourceMonitoringStateRepository:
                 "source adapter run state version is invalid",
                 code="SOURCE_MONITORING_RECORD_CORRUPT",
             )
+        projection["initialization"] = _initialization_projection(data, projection)
         return projection
 
     @staticmethod
@@ -710,16 +1354,25 @@ class SourceMonitoringStateRepository:
             return state
 
     def get_state(self, adapter_key: Any) -> dict[str, Any] | None:
+        with self.store._lock, closing(self._connect_read_only()) as connection:
+            return self.read_state_from_connection(connection, adapter_key)
+
+    def read_state_from_connection(
+        self,
+        connection: sqlite3.Connection,
+        adapter_key: Any,
+    ) -> dict[str, Any] | None:
+        """Read and seal-validate one state from an existing snapshot connection."""
+
         clean_key = normalize_adapter_key(adapter_key)
-        with closing(self.store._connect()) as connection:
-            row = connection.execute(
-                "SELECT * FROM source_adapter_states WHERE adapter_key=?",
-                (clean_key,),
-            ).fetchone()
-            return self._state_projection(row) if row is not None else None
+        row = connection.execute(
+            "SELECT * FROM source_adapter_states WHERE adapter_key=?",
+            (clean_key,),
+        ).fetchone()
+        return self._state_projection(row) if row is not None else None
 
     def list_states(self) -> list[dict[str, Any]]:
-        with closing(self.store._connect()) as connection:
+        with self.store._lock, closing(self._connect_read_only()) as connection:
             rows = connection.execute(
                 "SELECT * FROM source_adapter_states ORDER BY adapter_key"
             ).fetchall()
@@ -1161,6 +1814,7 @@ class SourceMonitoringStateRepository:
         next_due_at_ms: int,
         source_errors: Any = (),
         receipt_id: str = "",
+        initialization: Any = None,
         source_channel: str = OFFICIAL_SOURCE_CHANNEL,
         etag: str = "",
         last_modified: str = "",
@@ -1196,6 +1850,7 @@ class SourceMonitoringStateRepository:
         normalized_errors = _normalize_source_error_records(source_errors)
         source_errors_json = canonical_json(normalized_errors)
         clean_receipt = _clean_optional_text(receipt_id, "receipt_id", maximum=200)
+        clean_initialization = _normalise_initialization_request(initialization)
         if (
             type(source_channel) is not str
             or source_channel not in SOURCE_MONITORING_SOURCE_CHANNELS
@@ -1218,7 +1873,7 @@ class SourceMonitoringStateRepository:
             maximum=500,
         )
         if status == RUN_STATUS_DRY_RUN and (
-            counts["accepted_count"] != 0 or clean_receipt
+            counts["accepted_count"] != 0 or clean_receipt or clean_initialization
         ):
             raise SourceMonitoringStateError(
                 "dry-run completion cannot record accepted items or an import receipt",
@@ -1228,6 +1883,64 @@ class SourceMonitoringStateRepository:
         with self.store._lock, closing(self.store._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             run, state = self._run_for_update(connection, clean_run_id)
+            initialization_receipt_json = ""
+            initialization_receipt_sha256 = ""
+            if clean_initialization is not None:
+                if (
+                    status != RUN_STATUS_SUCCEEDED
+                    or run["dry_run"]
+                    or normalized_errors
+                    or counts["rejected_count"] != 0
+                    or clean_error_code
+                    or clean_error_message
+                    or clean_initialization["config_version"]
+                    != state["config_version"]
+                    or clean_initialization["starting_checkpoint_sha256"]
+                    != run["started_checkpoint_sha256"]
+                    or clean_initialization["next_checkpoint_sha256"]
+                    != checkpoint_sha256
+                    or clean_initialization["adapter_duplicate_count"]
+                    > counts["duplicate_count"]
+                    or (
+                        clean_initialization["candidate_count"]
+                        + clean_initialization["adapter_duplicate_count"]
+                        + counts["rejected_count"]
+                        != counts["observed_count"]
+                    )
+                    or clean_initialization["selected_count"]
+                    != (
+                        counts["accepted_count"]
+                        + counts["duplicate_count"]
+                        - clean_initialization["adapter_duplicate_count"]
+                    )
+                    or clean_initialization["captured_at_ms"] > completed_at
+                    or (
+                        clean_initialization["mode"] == "seed_only"
+                        and (
+                            clean_initialization["selected_count"] != 0
+                            or bool(clean_receipt)
+                        )
+                    )
+                ):
+                    raise SourceMonitoringStateError(
+                        "initialization projection is not bound to the successful run",
+                        code="SOURCE_MONITORING_INITIALIZATION_INVALID",
+                    )
+                initialization_receipt = _build_initialization_receipt(
+                    run=run,
+                    request=clean_initialization,
+                    completed_at_ms=completed_at,
+                    counts=counts,
+                )
+                initialization_receipt_json = canonical_json(initialization_receipt)
+                if len(initialization_receipt_json) > 4096:
+                    raise SourceMonitoringStateError(
+                        "initialization receipt exceeds the bounded storage contract",
+                        code="SOURCE_MONITORING_INITIALIZATION_INVALID",
+                    )
+                initialization_receipt_sha256 = canonical_sha256(
+                    initialization_receipt
+                )
             if clean_receipt:
                 receipt_row = connection.execute(
                     """SELECT id,source_channel,source_key,external_run_id
@@ -1313,7 +2026,10 @@ class SourceMonitoringStateRepository:
                    SET next_checkpoint_json=?,next_checkpoint_sha256=?,completed_at_ms=?,
                        status=?,observed_count=?,accepted_count=?,duplicate_count=?,
                        rejected_count=?,duration_ms=?,error_code=?,error_message=?,
-                       source_errors_json=?,receipt_id=?,dry_run=?
+                       source_errors_json=?,receipt_id=?,dry_run=?,
+                       initialization_mode=?,initialization_config_version=?,
+                       initialization_preview_sha256=?,initialization_receipt_json=?,
+                       initialization_receipt_sha256=?
                    WHERE run_id=? AND status='RUNNING'""",
                 (
                     checkpoint_json,
@@ -1330,6 +2046,19 @@ class SourceMonitoringStateRepository:
                     source_errors_json,
                     clean_receipt,
                     int(dry_run),
+                    clean_initialization["mode"] if clean_initialization else "",
+                    (
+                        clean_initialization["config_version"]
+                        if clean_initialization
+                        else ""
+                    ),
+                    (
+                        clean_initialization["preview_sha256"]
+                        if clean_initialization
+                        else ""
+                    ),
+                    initialization_receipt_json,
+                    initialization_receipt_sha256,
                     clean_run_id,
                 ),
             )
@@ -1499,9 +2228,58 @@ class SourceMonitoringStateRepository:
                 recovered += 1
         return recovered
 
+    def get_latest_successful_initialization(
+        self,
+        adapter_key: Any,
+        *,
+        config_version: Any,
+    ) -> dict[str, Any] | None:
+        """Return bounded, fully seal-verified initialization evidence."""
+
+        with self.store._lock, closing(self._connect_read_only()) as connection:
+            return self.read_latest_successful_initialization_from_connection(
+                connection,
+                adapter_key,
+                config_version=config_version,
+            )
+
+    def read_latest_successful_initialization_from_connection(
+        self,
+        connection: sqlite3.Connection,
+        adapter_key: Any,
+        *,
+        config_version: Any,
+    ) -> dict[str, Any] | None:
+        """Read sealed initialization evidence from an existing snapshot."""
+
+        clean_key = normalize_adapter_key(adapter_key)
+        clean_config = _clean_token(config_version, "config_version")
+        rows = connection.execute(
+            """SELECT * FROM source_adapter_runs
+                WHERE adapter_key=? AND (
+                      initialization_mode<>''
+                      OR initialization_preview_sha256<>''
+                      OR initialization_receipt_json<>''
+                      OR initialization_receipt_sha256<>''
+                  )
+                ORDER BY completed_at_ms DESC,run_id DESC""",
+            (clean_key,),
+        ).fetchall()
+        for row in rows:
+            run = self._run_projection(row)
+            initialization = run["initialization"]
+            if initialization is None:  # pragma: no cover - guarded by query and seal
+                raise SourceMonitoringStateError(
+                    "initialization evidence is incomplete",
+                    code="SOURCE_MONITORING_INITIALIZATION_RECEIPT_CORRUPT",
+                )
+            if initialization["config_version"] == clean_config:
+                return initialization
+        return None
+
     def get_run(self, run_id: Any) -> dict[str, Any] | None:
         clean_run_id = _clean_token(run_id, "run_id")
-        with closing(self.store._connect()) as connection:
+        with self.store._lock, closing(self._connect_read_only()) as connection:
             row = connection.execute(
                 "SELECT * FROM source_adapter_runs WHERE run_id=?",
                 (clean_run_id,),
@@ -1525,7 +2303,7 @@ class SourceMonitoringStateRepository:
             where = "WHERE adapter_key=?"
             parameters.append(normalize_adapter_key(adapter_key))
         parameters.append(limit)
-        with closing(self.store._connect()) as connection:
+        with self.store._lock, closing(self._connect_read_only()) as connection:
             rows = connection.execute(
                 f"""SELECT * FROM source_adapter_runs {where}
                     ORDER BY started_at_ms DESC,run_id DESC LIMIT ?""",
@@ -1543,8 +2321,12 @@ __all__ = [
     "RUN_STATUS_SUCCEEDED",
     "SOURCE_ADAPTER_RUN_VERSION",
     "SOURCE_ADAPTER_STATE_VERSION",
+    "SOURCE_MONITORING_INITIALIZATION_MIGRATION_KEY",
+    "SOURCE_MONITORING_INITIALIZATION_RECEIPT_VERSION",
+    "SOURCE_MONITORING_INITIALIZATION_VERSION",
     "SOURCE_MONITORING_MIGRATION_KEY",
     "SourceMonitoringStateError",
     "SourceMonitoringStateRepository",
+    "source_monitoring_initialization_schema_state",
     "ensure_source_monitoring_schema",
 ]

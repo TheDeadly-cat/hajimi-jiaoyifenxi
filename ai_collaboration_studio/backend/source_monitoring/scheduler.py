@@ -171,19 +171,47 @@ class SourceMonitoringScheduler:
     def _now_ms(self) -> int:
         return _native_non_negative(self._clock_ms(), field="scheduler_clock_ms")
 
-    def due_adapter_keys(self) -> tuple[str, ...]:
+    def _effective_due_by_adapter(self) -> dict[str, int]:
+        """Return enabled registered adapters' effective due times without writes.
+
+        Dry-run and boundary-failure cycles intentionally do not advance the
+        persisted adapter state.  Their process-local due time therefore has
+        to participate in every scheduling projection, not only due
+        selection, or a managed worker could repeatedly poll without waiting.
+        """
+
         settings = self.supervisor.settings
         if not settings.enabled or not settings.auto_start:
+            return {}
+        registered = set(self.registry.adapter_keys)
+        return {
+            state["adapter_key"]: max(
+                state["next_due_at_ms"],
+                self._ephemeral_due_at_ms.get(state["adapter_key"], 0),
+            )
+            for state in self.repository.list_states()
+            if state["enabled"] and state["adapter_key"] in registered
+        }
+
+    def effective_next_due_at_ms(self) -> int:
+        """Return the nearest effective due time, or zero when none is enabled.
+
+        This is a read-only projection.  In particular, it never creates an
+        adapter state or changes an adapter's explicit enablement.
+        """
+
+        effective = self._effective_due_by_adapter()
+        return min(effective.values(), default=0)
+
+    def due_adapter_keys(self) -> tuple[str, ...]:
+        effective = self._effective_due_by_adapter()
+        if not effective:
             return ()
         now = self._now_ms()
-        registered = set(self.registry.adapter_keys)
         due = [
-            state["adapter_key"]
-            for state in self.repository.list_states()
-            if state["enabled"]
-            and state["adapter_key"] in registered
-            and state["next_due_at_ms"] <= now
-            and self._ephemeral_due_at_ms.get(state["adapter_key"], 0) <= now
+            adapter_key
+            for adapter_key, due_at_ms in effective.items()
+            if due_at_ms <= now
         ]
         return tuple(sorted(due))
 

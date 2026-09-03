@@ -17,8 +17,13 @@ from .contracts import (
     SourceMonitoringContractError,
     canonical_json,
 )
+from .initialization import (
+    SourceMonitoringInitialPlan,
+    plan_initial_poll,
+    require_catch_up_confirmation_before_poll,
+    require_initial_preview_match,
+)
 from .packet_builder import (
-    build_packet_from_poll_result,
     canonical_source_import_payload,
 )
 from .registry import SourceAdapterRegistry
@@ -55,6 +60,42 @@ def _clean_error(exc: Exception) -> tuple[str, str]:
     )
     message = " ".join(str(exc).split())[:500]
     return code, message or exc.__class__.__name__[:500]
+
+
+def _initialization_result(
+    plan: SourceMonitoringInitialPlan,
+    *,
+    dry_run: bool,
+    committed: bool,
+) -> dict[str, Any]:
+    preview = plan.preview
+    if plan.initialization_blocked:
+        outcome = "blocked"
+    elif not plan.initial_required:
+        outcome = "continuous_filter" if preview["mode"] == "from_time" else "not_required"
+    elif committed:
+        outcome = "seeded" if preview["mode"] == "seed_only" else "initialized"
+    elif dry_run:
+        outcome = "would_seed" if preview["mode"] == "seed_only" else "would_import"
+    else:
+        outcome = "not_committed"
+    return {
+        "version": "source_monitoring_initialization_result_v1",
+        "mode": preview["mode"],
+        "required": plan.initial_required,
+        "outcome": outcome,
+        "preview_sha256": preview["preview_sha256"],
+        "candidate_count": preview["candidate_count"],
+        "selected_count": preview["selected_count"],
+        "skipped_count": preview["skipped_count"],
+        "earliest_occurred_at": preview["earliest_occurred_at"],
+        "latest_occurred_at": preview["latest_occurred_at"],
+        "checkpoint_committed": committed,
+        "source_inbox_writes_performed": 0 if dry_run or not committed else None,
+        "provider_calls_performed": 0,
+        "execution_capability": "none",
+        "live_trading_allowed": False,
+    }
 
 
 class SourceMonitoringSupervisor:
@@ -479,14 +520,40 @@ class SourceMonitoringSupervisor:
         self.initialize()
         adapter = self.registry.require(adapter_key)
         metadata = self.registry.metadata_for(adapter.adapter_key)
-        state = self.repository.get_or_create_state(
-            metadata.adapter_key,
-            config_version=metadata.config_version,
-        )
-        if state["enabled"] is not True:
+        state = self.repository.get_state(metadata.adapter_key)
+        if state is None or state["enabled"] is not True:
             raise SourceMonitoringSupervisorError(
                 "SOURCE_MONITORING_ADAPTER_DISABLED",
                 f"adapter {metadata.adapter_key} is disabled",
+            )
+        if state["config_version"] != metadata.config_version:
+            raise SourceMonitoringSupervisorError(
+                "SOURCE_MONITORING_CONFIG_MIGRATION_REQUIRED",
+                f"adapter {metadata.adapter_key} config migration is required",
+            )
+        initialization_evidence = self.repository.get_latest_successful_initialization(
+            metadata.adapter_key,
+            config_version=metadata.config_version,
+        )
+        if initialization_evidence is not None and (
+            initialization_evidence["mode"] != self.settings.initial_mode
+            or initialization_evidence["catch_up_max_items"]
+            != self.settings.catch_up_max_items
+            or initialization_evidence["from_time_ms"]
+            != self.settings.from_time_ms
+        ):
+            raise SourceMonitoringSupervisorError(
+                "SOURCE_MONITORING_INITIAL_POLICY_MISMATCH",
+                "configured initial policy differs from the sealed adapter receipt",
+            )
+        legacy_initialized = bool(
+            state["checkpoint"] != {} or state["last_success_at_ms"] > 0
+        )
+        initial_required = initialization_evidence is None and not legacy_initialized
+        if not self.settings.dry_run:
+            require_catch_up_confirmation_before_poll(
+                self.settings,
+                initial_required=initial_required,
             )
         started = self.repository.start_run(
             metadata.adapter_key,
@@ -502,6 +569,9 @@ class SourceMonitoringSupervisor:
             },
         )
         poll_result: AdapterPollResult | None = None
+        import_result: dict[str, Any] | None = None
+        import_summary: dict[str, Any] | None = None
+        source_inbox_writes_performed: bool | None = False
         try:
             observed_at_ms = self._now_ms()
             candidate = adapter.poll(
@@ -538,13 +608,22 @@ class SourceMonitoringSupervisor:
                     "SOURCE_MONITORING_CHECKPOINT_START_MISMATCH",
                     "poll result is not bound to the persisted starting checkpoint",
                 )
-            packet = build_packet_from_poll_result(
+            validation_time_ms = max(self._now_ms(), candidate.captured_at_ms)
+            initial_plan = plan_initial_poll(
+                candidate,
+                metadata=metadata,
+                settings=self.settings,
+                initial_required=initial_required,
+                received_at_ms=validation_time_ms,
+            )
+            if not self.settings.dry_run:
+                require_initial_preview_match(initial_plan, self.settings)
+            packet = initial_plan.selected_packet(
                 candidate,
                 external_run_id=run_id,
                 max_items=self.settings.max_items_per_run,
                 source_channel=metadata.source_channel,
             )
-            validation_time_ms = max(self._now_ms(), candidate.captured_at_ms)
             payload = canonical_source_import_payload(
                 packet,
                 received_at_ms=validation_time_ms,
@@ -596,6 +675,12 @@ class SourceMonitoringSupervisor:
                     "run": completed["run"],
                     "state": completed["state"],
                     "state_recorded": True,
+                    "source_inbox_writes_performed": False,
+                    "initialization": _initialization_result(
+                        initial_plan,
+                        dry_run=True,
+                        committed=False,
+                    ),
                 })
                 if impact_accounting is not None:
                     result["trading_impact_rules"] = impact_accounting
@@ -605,7 +690,6 @@ class SourceMonitoringSupervisor:
                 )
                 return result
 
-            import_result: dict[str, Any] | None = None
             accepted_count = 0
             inbox_duplicate_count = 0
             receipt_id = ""
@@ -619,6 +703,9 @@ class SourceMonitoringSupervisor:
                 else None
             )
             if packet["items"]:
+                # Once the call begins, a raised transport/storage boundary
+                # cannot truthfully prove whether its transaction committed.
+                source_inbox_writes_performed = None
                 if self.settings.trading_impact_rules_enabled:
                     import_result = self.source_inbox.import_packet(
                         payload,
@@ -645,6 +732,13 @@ class SourceMonitoringSupervisor:
                         "SOURCE_MONITORING_IMPORT_RESULT_INVALID",
                         "Source Inbox returned an invalid import result",
                     )
+                source_inbox_writes_performed = not idempotent_replay
+                import_summary = {
+                    "import_id": receipt_id,
+                    "created_item_count": accepted_count,
+                    "duplicate_item_count": inbox_duplicate_count,
+                    "idempotent_replay": idempotent_replay,
+                }
                 if self.settings.trading_impact_rules_enabled:
                     impact_accounting = self._validate_impact_accounting(
                         import_result.get("trading_impact_rules"),
@@ -698,6 +792,11 @@ class SourceMonitoringSupervisor:
                 last_modified=candidate.last_modified,
                 error_code=error_code,
                 error_message=error_message,
+                initialization=(
+                    initial_plan.initialization_receipt()
+                    if terminal_status == RUN_STATUS_SUCCEEDED
+                    else None
+                ),
             )
             result = self._base_result(
                 adapter_key=metadata.adapter_key,
@@ -711,14 +810,16 @@ class SourceMonitoringSupervisor:
                 "state": completed["state"],
                 "state_recorded": True,
                 "import": (
-                    {
-                        "import_id": import_result["import_id"],
-                        "created_item_count": accepted_count,
-                        "duplicate_item_count": inbox_duplicate_count,
-                        "idempotent_replay": idempotent_replay,
-                    }
-                    if import_result is not None
-                    else None
+                    import_summary
+                ),
+                "source_inbox_writes_performed": source_inbox_writes_performed,
+                "initialization": _initialization_result(
+                    initial_plan,
+                    dry_run=False,
+                    committed=(
+                        terminal_status == RUN_STATUS_SUCCEEDED
+                        and initial_plan.initial_required
+                    ),
                 ),
             })
             if impact_accounting is not None:
@@ -839,7 +940,8 @@ class SourceMonitoringSupervisor:
                 "state_recorded": state_recorded,
                 "run": failure["run"] if failure is not None else None,
                 "state": failure["state"] if failure is not None else None,
-                "import": None,
+                "import": import_summary,
+                "source_inbox_writes_performed": source_inbox_writes_performed,
                 "recording_error": recording_error,
             })
             if recording_error_code:

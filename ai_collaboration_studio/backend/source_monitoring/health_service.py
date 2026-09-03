@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import shutil
 import tempfile
@@ -25,11 +26,23 @@ from .operations import (
     SourceMonitoringOperationsError,
     source_monitoring_operations_health,
 )
+from .runtime_state import (
+    DEFAULT_RUNTIME_STALL_AFTER_MS,
+    SOURCE_MONITORING_RUNTIME_HEALTH_VERSION,
+    SOURCE_MONITORING_RUNTIME_STATUSES,
+)
 from .settings import SourceMonitoringSettings, load_source_monitoring_settings
-from .state_repository import SourceMonitoringStateRepository
+from .state_repository import (
+    SourceMonitoringStateRepository,
+    source_monitoring_initialization_schema_state,
+)
 
 
-SOURCE_MONITORING_HEALTH_SERVICE_VERSION = "source_monitoring_health_service_v1"
+SOURCE_MONITORING_HEALTH_SERVICE_VERSION = "source_monitoring_health_service_v2"
+
+_RUNTIME_ID_RE = re.compile(r"source_monitor_runtime_[0-9a-f]{32}\Z")
+_RUNTIME_ERROR_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,99}\Z")
+_RUNTIME_ADAPTER_KEY_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 
 
 class SourceMonitoringHealthServiceError(RuntimeError):
@@ -37,6 +50,160 @@ class SourceMonitoringHealthServiceError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.status = status
+
+
+def _runtime_without_host(settings: SourceMonitoringSettings) -> dict[str, Any]:
+    return {
+        "version": SOURCE_MONITORING_RUNTIME_HEALTH_VERSION,
+        "status": "disabled" if not settings.enabled else "stopped",
+        "runtime_id": "",
+        "started_at": 0,
+        "heartbeat_at": 0,
+        "last_loop_at": 0,
+        "active_adapter": "",
+        "next_due_at": 0,
+        "thread_alive": False,
+        "last_fatal_error_code": "",
+        "heartbeat_age_ms": 0,
+        "stall_after_ms": DEFAULT_RUNTIME_STALL_AFTER_MS,
+        "liveness_verified": False,
+        "enabled": settings.enabled,
+        "auto_start": settings.auto_start,
+        "dry_run": settings.dry_run,
+        "execution_capability": "none",
+        "live_trading_allowed": False,
+    }
+
+
+def _validated_runtime_snapshot(
+    value: Any,
+    *,
+    settings: SourceMonitoringSettings,
+) -> dict[str, Any]:
+    expected_fields = {
+        "version",
+        "status",
+        "runtime_id",
+        "started_at",
+        "heartbeat_at",
+        "last_loop_at",
+        "active_adapter",
+        "next_due_at",
+        "thread_alive",
+        "last_fatal_error_code",
+        "heartbeat_age_ms",
+        "stall_after_ms",
+        "liveness_verified",
+        "enabled",
+        "auto_start",
+        "dry_run",
+        "execution_capability",
+        "live_trading_allowed",
+    }
+    invalid = type(value) is not dict or set(value) != expected_fields
+    if invalid:
+        raise SourceMonitoringHealthServiceError(
+            "Source Monitoring runtime health is invalid.",
+            code="SOURCE_MONITORING_RUNTIME_HEALTH_INVALID",
+        )
+    status = value.get("status")
+    runtime_id = value.get("runtime_id")
+    active_adapter = value.get("active_adapter")
+    fatal_code = value.get("last_fatal_error_code")
+    integers = (
+        "started_at",
+        "heartbeat_at",
+        "last_loop_at",
+        "next_due_at",
+        "heartbeat_age_ms",
+        "stall_after_ms",
+    )
+    invalid = (
+        value.get("version") != SOURCE_MONITORING_RUNTIME_HEALTH_VERSION
+        or status not in SOURCE_MONITORING_RUNTIME_STATUSES
+        or type(runtime_id) is not str
+        or (
+            bool(runtime_id)
+            and _RUNTIME_ID_RE.fullmatch(runtime_id) is None
+        )
+        or (
+            status in {"starting", "running", "degraded", "stalled", "stopping"}
+            and not runtime_id
+        )
+        or type(active_adapter) is not str
+        or (
+            bool(active_adapter)
+            and _RUNTIME_ADAPTER_KEY_RE.fullmatch(active_adapter) is None
+        )
+        or type(fatal_code) is not str
+        or (
+            bool(fatal_code)
+            and _RUNTIME_ERROR_CODE_RE.fullmatch(fatal_code) is None
+        )
+        or any(
+            type(value.get(field)) is not int
+            or not 0 <= value[field] <= MAX_NATIVE_INTEGER
+            for field in integers
+        )
+        or value.get("stall_after_ms", 0) < 1
+        or any(
+            type(value.get(field)) is not bool
+            for field in (
+                "thread_alive",
+                "liveness_verified",
+                "enabled",
+                "auto_start",
+                "dry_run",
+                "live_trading_allowed",
+            )
+        )
+        or value.get("enabled") is not settings.enabled
+        or value.get("auto_start") is not settings.auto_start
+        or value.get("dry_run") is not settings.dry_run
+        or value.get("execution_capability") != "none"
+        or value.get("live_trading_allowed") is not False
+        or (
+            value.get("liveness_verified") is True
+            and (
+                value.get("thread_alive") is not True
+                or status not in {"running", "degraded"}
+                or value["heartbeat_age_ms"] > value["stall_after_ms"]
+            )
+        )
+        or (
+            status in {"running", "degraded"}
+            and (
+                value.get("thread_alive") is not True
+                or value["heartbeat_age_ms"] > value["stall_after_ms"]
+            )
+        )
+        or (
+            status == "stalled"
+            and (
+                value.get("thread_alive") is not True
+                or value.get("liveness_verified") is not False
+                or value["heartbeat_age_ms"] <= value["stall_after_ms"]
+            )
+        )
+        or (
+            status in {"disabled", "stopped"}
+            and value.get("thread_alive") is not False
+        )
+        or (status in {"starting", "stopping"} and value.get("thread_alive") is not True)
+        or (status == "failed" and not fatal_code)
+        or (status != "failed" and bool(fatal_code))
+        or (
+            bool(active_adapter)
+            and status not in {"running", "degraded", "stalled"}
+        )
+        or (status == "disabled" and bool(runtime_id))
+    )
+    if invalid:
+        raise SourceMonitoringHealthServiceError(
+            "Source Monitoring runtime health is invalid.",
+            code="SOURCE_MONITORING_RUNTIME_HEALTH_INVALID",
+        )
+    return dict(value)
 
 
 def _catalog_metadata() -> list[dict[str, Any]]:
@@ -115,7 +282,7 @@ def _file_signature(path: Path) -> tuple[int, int, int] | None:
 
 
 @contextmanager
-def _health_snapshot_connection(path: Path):
+def source_monitoring_read_only_snapshot(path: Path):
     """Read a stable source snapshot without joining or mutating its WAL family."""
 
     journal_path = Path(f"{path}-journal")
@@ -172,6 +339,67 @@ def _health_snapshot_connection(path: Path):
         ) from exc
 
 
+# Compatibility for the operations preflight's lazy import. New consumers use
+# the public name above; retaining the alias avoids a cross-module flag day.
+_health_snapshot_connection = source_monitoring_read_only_snapshot
+
+
+def read_source_monitoring_adapter_evidence(
+    store: Any,
+    adapter_key: Any,
+    *,
+    config_version: Any,
+    repository: SourceMonitoringStateRepository | None = None,
+) -> dict[str, Any]:
+    """Read one adapter's sealed state and initialization from one safe snapshot.
+
+    The source database and its WAL/SHM family are never opened by SQLite.  If
+    sidecars exist, main+WAL are copied first and SQLite joins only the
+    disposable copy.
+    """
+
+    try:
+        path = Path(store.path)
+        lock = store._lock
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise SourceMonitoringHealthServiceError(
+            "Source Monitoring database path is invalid.",
+            code="SOURCE_MONITORING_HEALTH_STORE_INVALID",
+        ) from exc
+    if not path.is_file():
+        raise SourceMonitoringHealthServiceError(
+            "Source Monitoring database is unavailable.",
+            code="SOURCE_MONITORING_HEALTH_READ_FAILED",
+        )
+    resolved_repository = repository or SourceMonitoringStateRepository(store)
+    try:
+        with lock:
+            with source_monitoring_read_only_snapshot(path) as connection:
+                connection.execute("BEGIN")
+                state = resolved_repository.read_state_from_connection(
+                    connection,
+                    adapter_key,
+                )
+                initialization = (
+                    resolved_repository.read_latest_successful_initialization_from_connection(
+                        connection,
+                        adapter_key,
+                        config_version=config_version,
+                    )
+                )
+    except SourceMonitoringHealthServiceError:
+        raise
+    except sqlite3.Error as exc:
+        raise SourceMonitoringHealthServiceError(
+            "Source Monitoring adapter evidence could not be read.",
+            code="SOURCE_MONITORING_HEALTH_READ_FAILED",
+        ) from exc
+    return {
+        "state": state,
+        "initialization": initialization,
+    }
+
+
 class SourceMonitoringHealthService:
     """Combine code metadata and persisted evidence without starting monitoring."""
 
@@ -183,6 +411,7 @@ class SourceMonitoringHealthService:
         environment: Mapping[str, str] | None = None,
         settings: SourceMonitoringSettings | None = None,
         catalog: list[dict[str, Any]] | None = None,
+        runtime_snapshot: Callable[[], Any] | None = None,
     ) -> None:
         self.store = store
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
@@ -213,6 +442,12 @@ class SourceMonitoringHealthService:
                 "Source Monitoring adapter catalog could not be projected.",
                 code="SOURCE_MONITORING_HEALTH_CATALOG_INVALID",
             ) from exc
+        if runtime_snapshot is not None and not callable(runtime_snapshot):
+            raise SourceMonitoringHealthServiceError(
+                "Source Monitoring runtime snapshot provider is invalid.",
+                code="SOURCE_MONITORING_RUNTIME_HEALTH_INVALID",
+            )
+        self._runtime_snapshot = runtime_snapshot
 
     def _now(self) -> int:
         value = self._clock_ms()
@@ -248,9 +483,17 @@ class SourceMonitoringHealthService:
                 # legitimate WAL family exists, copy main+WAL under the store lock
                 # and query only the disposable snapshot. The source SHM is never
                 # joined, created, deleted, or mutated by this health read.
-                with _health_snapshot_connection(path) as connection:
+                with source_monitoring_read_only_snapshot(path) as connection:
                     connection.execute("BEGIN")
+                    initialization_schema_status = (
+                        source_monitoring_initialization_schema_state(connection)
+                    )
                     operations = source_monitoring_operations_health(connection)
+                    if initialization_schema_status != "current":
+                        operations = {
+                            **operations,
+                            "schema_status": "migration_required",
+                        }
                     state_rows = connection.execute(
                         "SELECT * FROM source_adapter_states ORDER BY adapter_key"
                     ).fetchall()
@@ -259,17 +502,23 @@ class SourceMonitoringHealthService:
                     ]
                     latest_runs = {}
                     for state in states:
-                        run_row = connection.execute(
-                            """SELECT * FROM source_adapter_runs
-                                WHERE adapter_key=?
-                                ORDER BY started_at_ms DESC,run_id DESC LIMIT 1""",
-                            (state["adapter_key"],),
-                        ).fetchone()
-                        latest_runs[state["adapter_key"]] = (
-                            repository._run_projection(run_row)
-                            if run_row is not None
-                            else None
-                        )
+                        if initialization_schema_status == "current":
+                            run_row = connection.execute(
+                                """SELECT * FROM source_adapter_runs
+                                    WHERE adapter_key=?
+                                    ORDER BY started_at_ms DESC,run_id DESC LIMIT 1""",
+                                (state["adapter_key"],),
+                            ).fetchone()
+                            latest_runs[state["adapter_key"]] = (
+                                repository._run_projection(run_row)
+                                if run_row is not None
+                                else None
+                            )
+                        else:
+                            # Legacy run rows predate the initialization columns.
+                            # Do not deserialize them as corrupt receipts while the
+                            # additive migration is still pending.
+                            latest_runs[state["adapter_key"]] = None
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).lower():
                 return False, [], {}, source_monitoring_operations_health(None)
@@ -292,6 +541,23 @@ class SourceMonitoringHealthService:
 
     def snapshot(self) -> dict[str, Any]:
         captured_at_ms = self._now()
+        try:
+            runtime_value = (
+                _runtime_without_host(self.settings)
+                if self._runtime_snapshot is None
+                else self._runtime_snapshot()
+            )
+            runtime = _validated_runtime_snapshot(
+                runtime_value,
+                settings=self.settings,
+            )
+        except SourceMonitoringHealthServiceError:
+            raise
+        except Exception as exc:
+            raise SourceMonitoringHealthServiceError(
+                "Source Monitoring runtime health could not be read.",
+                code="SOURCE_MONITORING_RUNTIME_HEALTH_READ_FAILED",
+            ) from exc
         (
             persistence_available,
             states,
@@ -347,15 +613,16 @@ class SourceMonitoringHealthService:
                     "last_error_code": "",
                 }
             )
-        running_keys = [
-            adapter_key
-            for adapter_key, run in latest_runs.items()
+        active_adapter = runtime["active_adapter"]
+        running_keys = (
+            [active_adapter]
             if (
-                effective_enabled_by_key.get(adapter_key) is True
-                and run is not None
-                and run["status"] == "RUNNING"
+                runtime["liveness_verified"] is True
+                and active_adapter
+                and effective_enabled_by_key.get(active_adapter) is True
             )
-        ]
+            else []
+        )
         projected = project_monitoring_health(
             projection_states,
             captured_at_ms,
@@ -409,7 +676,10 @@ class SourceMonitoringHealthService:
                     else None
                 ),
                 "latest_run": _latest_run_projection(latest_runs.get(adapter_key)),
-                "runtime_liveness_verified": False,
+                "runtime_liveness_verified": bool(
+                    runtime["liveness_verified"]
+                    and effective_enabled_by_key.get(adapter_key) is True
+                ),
             })
         return {
             "version": SOURCE_MONITORING_HEALTH_SERVICE_VERSION,
@@ -421,7 +691,8 @@ class SourceMonitoringHealthService:
             "adapters": adapters,
             "settings": self.settings.to_dict(),
             "persistence_available": persistence_available,
-            "runtime_liveness_verified": False,
+            "runtime_liveness_verified": runtime["liveness_verified"],
+            "runtime": runtime,
             "operations": operations,
             "safety": {
                 "database_writes_performed": 0,
@@ -439,4 +710,6 @@ __all__ = [
     "SOURCE_MONITORING_HEALTH_SERVICE_VERSION",
     "SourceMonitoringHealthService",
     "SourceMonitoringHealthServiceError",
+    "read_source_monitoring_adapter_evidence",
+    "source_monitoring_read_only_snapshot",
 ]
