@@ -13,8 +13,8 @@ python scripts\run_backend_tests_isolated.py --layer full --durations 30
 
 层定义由 `scripts/backend_test_layers.json` 唯一管理：
 
-- `migration`：P0 SQLite 启动、预检、备份、授权、提交、恢复、owner 门，以及 Phase 8 monitoring operations 的 additive apply/精确 rollback 演练。
-- `core`：快速宿主内核、协议、启动计划、账本、安全、本地 HTTP 与 retain-all policy attestation 门。
+- `migration`：P0 SQLite 启动、预检、备份、授权、提交、恢复、owner 门，以及 Phase 8 monitoring operations 的 additive apply/精确 rollback 与 soak DB 全量清单/CLI owner 演练。
+- `core`：快速宿主内核、协议、启动计划、账本、安全、本地 HTTP、retain-all policy attestation，以及 soak 的 runtime gate、不可续写 ledger、固定计划、runner 与 verifier 合同。
 - `domains`：football、stock、candidate 及通用 domain adapter/round context 门。
 - `delivery`：bootstrap、宿主交付、CI 合同、源码备份、静态安全、结构化日志与 release lifecycle 门。
 - `full`：发现全部 `tests/test_*.py`。
