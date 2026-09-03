@@ -218,15 +218,25 @@ class SourceMonitoringRuntimeTests(unittest.TestCase):
 
     def test_enabled_auto_start_runs_due_adapter_in_two_cycles(self) -> None:
         adapter = FakeAdapter("runtime_two_cycles")
-        runtime, _repository, _scheduler = self.build_runtime(
+        runtime, repository, _scheduler = self.build_runtime(
             (adapter,),
             enable=(adapter.adapter_key,),
         )
 
         self.assertTrue(runtime.start())
-        self.assertTrue(wait_until(lambda: adapter.count() == 1))
+        self.assertTrue(
+            wait_until(
+                lambda: repository.get_state(adapter.adapter_key)["checkpoint"]
+                == {"cursor": 1}
+            )
+        )
         self.clock.advance(adapter.poll_interval_ms)
-        self.assertTrue(wait_until(lambda: adapter.count() >= 2))
+        self.assertTrue(
+            wait_until(
+                lambda: repository.get_state(adapter.adapter_key)["checkpoint"]
+                == {"cursor": 2}
+            )
+        )
         self.assertTrue(runtime.stop())
 
         self.assertEqual(adapter.started_checkpoints[:2], [{}, {"cursor": 1}])
