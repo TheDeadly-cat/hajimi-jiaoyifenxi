@@ -957,6 +957,8 @@ class OfficialAdapterSupervisorTests(unittest.TestCase):
                 official_only=True,
                 dry_run=False,
                 max_items_per_run=50,
+                initial_mode="from_time",
+                from_time="1970-01-01T00:00:00Z",
             ),
             clock_ms=lambda: self.clock[0],
         )

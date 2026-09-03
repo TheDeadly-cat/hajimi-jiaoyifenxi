@@ -331,9 +331,12 @@ class SourceInboxHttpTests(unittest.TestCase):
         status, payload = self.request("/api/monitoring/health")
         self.assertEqual(status, 200)
         health = payload["source_monitoring_health"]
-        self.assertEqual(health["version"], "source_monitoring_health_service_v1")
+        self.assertEqual(health["version"], "source_monitoring_health_service_v2")
         self.assertEqual(health["adapter_count"], 7)
         self.assertFalse(health["runtime_liveness_verified"])
+        self.assertEqual(health["runtime"]["status"], "disabled")
+        self.assertFalse(health["runtime"]["thread_alive"])
+        self.assertFalse(health["runtime"]["liveness_verified"])
         self.assertEqual(health["safety"]["database_writes_performed"], 0)
         self.assertEqual(health["safety"]["provider_calls_performed"], 0)
         self.assertEqual(health["safety"]["network_requests_performed"], 0)

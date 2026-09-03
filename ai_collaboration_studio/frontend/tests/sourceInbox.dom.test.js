@@ -208,7 +208,7 @@ function monitoringHealth() {
   return {
     ok: true,
     source_monitoring_health: {
-      version: "source_monitoring_health_service_v1",
+      version: "source_monitoring_health_service_v2",
       health_projection_version: "source_monitoring_health_v1",
       captured_at_ms: 1_777_777_777_000,
       state: "disabled",
@@ -222,10 +222,34 @@ function monitoringHealth() {
         allow_readonly_market: false,
         trading_impact_rules_enabled: false,
         dry_run: true,
-        max_items_per_run: 100,
+        max_items_per_run: 50,
+        initial_mode: "seed_only",
+        catch_up_max_items: 0,
+        initial_preview_sha256: "",
+        from_time: "",
       },
       persistence_available: true,
       runtime_liveness_verified: false,
+      runtime: {
+        version: "source_monitoring_runtime_health_v1",
+        status: "disabled",
+        runtime_id: "",
+        started_at: 0,
+        heartbeat_at: 0,
+        last_loop_at: 0,
+        active_adapter: "",
+        next_due_at: 0,
+        thread_alive: false,
+        last_fatal_error_code: "",
+        heartbeat_age_ms: 0,
+        stall_after_ms: 120000,
+        liveness_verified: false,
+        enabled: false,
+        auto_start: false,
+        dry_run: true,
+        execution_capability: "none",
+        live_trading_allowed: false,
+      },
       safety: {
         database_writes_performed: 0,
         provider_calls_performed: 0,
@@ -237,6 +261,76 @@ function monitoringHealth() {
       },
     },
   };
+}
+
+function activeMonitoringHealth({ failed = false, stalled = false } = {}) {
+  const payload = monitoringHealth();
+  const view = payload.source_monitoring_health;
+  const unhealthy = failed || stalled;
+  Object.assign(view.settings, { enabled: true, auto_start: true });
+  Object.assign(view.runtime, {
+    status: failed ? "failed" : stalled ? "stalled" : "running",
+    runtime_id: `source_monitor_runtime_${"1".repeat(32)}`,
+    started_at: 1_777_777_776_000,
+    heartbeat_at: 1_777_777_776_900,
+    last_loop_at: 1_777_777_776_900,
+    active_adapter: failed ? "" : "sec_filings",
+    next_due_at: 1_777_777_780_000,
+    thread_alive: !failed,
+    last_fatal_error_code: failed ? "SOURCE_MONITORING_RUNTIME_FATAL" : "",
+    heartbeat_age_ms: stalled ? 120001 : 100,
+    liveness_verified: !unhealthy,
+    enabled: true,
+    auto_start: true,
+  });
+  view.runtime_liveness_verified = !unhealthy;
+  view.state = unhealthy ? "healthy" : "running";
+  view.adapter_count = 1;
+  view.counts = {
+    disabled: 0,
+    idle: 0,
+    running: unhealthy ? 0 : 1,
+    healthy: unhealthy ? 1 : 0,
+    degraded: 0,
+    backing_off: 0,
+    failed: 0,
+  };
+  view.adapters = [{
+    version: "source_adapter_health_v1",
+    adapter_key: "sec_filings",
+    catalog_registered: true,
+    persisted_state: true,
+    persisted_enabled: true,
+    config_status: "current",
+    persisted_config_version: "sec_filings_config_v1",
+    runtime_liveness_verified: !unhealthy,
+    metadata: {
+      contract_version: "source_adapter_contract_v1",
+      config_version: "sec_filings_config_v1",
+      poll_interval_ms: 900000,
+      max_candidates_per_poll: 50,
+      source_class: "official_source",
+      source_channel: "official_source_monitor",
+      official_source: true,
+      max_market_calls_per_poll: 0,
+      execution_capability: "none",
+      live_trading_allowed: false,
+    },
+    latest_run: null,
+    state: unhealthy ? "healthy" : "running",
+    enabled: true,
+    running: !unhealthy,
+    last_checked_at_ms: 1_777_777_776_900,
+    last_success_at_ms: 1_777_777_776_900,
+    last_event_at_ms: 0,
+    next_due_at_ms: 1_777_777_780_000,
+    consecutive_failures: 0,
+    discovery_delay_ms: 0,
+    last_error_code: "",
+    execution_capability: "none",
+    live_trading_allowed: false,
+  }];
+  return payload;
 }
 
 function sourceImportPreview() {
@@ -751,6 +845,52 @@ test("deep-linked events, source filters, sector mappings, health, and notificat
   await click(buttonWithText(host, "复制此事件链接"));
   assert.deepEqual(copied, ["source_item_deep"]);
   assert.equal(requests.some((request) => request.options.method === "POST"), false);
+});
+
+test("runtime health renders fresh progress neutrally and stalled state accessibly", async () => {
+  let healthPayload = activeMonitoringHealth();
+  globalThis.fetch = async (path) => {
+    if (path === "/api/monitoring/health") return response(healthPayload);
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const runningHost = await mountPanel();
+  assert.match(runningHost.textContent, /Runtime运行中/);
+  assert.match(runningHost.textContent, /活动 Adapter sec_filings/);
+  assert.match(runningHost.textContent, /下次检查/);
+  assert.match(runningHost.textContent, /dry-run 已启用/);
+  assert.match(
+    runningHost.textContent,
+    /新鲜本机心跳只证明 worker 有进展，不证明来源可用、内容为事实或具备交易权限/,
+  );
+  assert.equal(runningHost.querySelector('[role="alert"]'), null);
+
+  healthPayload = activeMonitoringHealth({ stalled: true });
+  const stalledHost = await mountPanel();
+  assert.match(stalledHost.textContent, /Runtime心跳停滞/);
+  const stalledSummary = stalledHost.querySelector(".source-inbox-health summary");
+  assert.doesNotMatch(stalledSummary.textContent, /最近检查成功/);
+  assert.match(stalledSummary.textContent, /心跳停滞/);
+  const warning = stalledSummary.querySelector('[role="alert"]');
+  assert.ok(warning);
+  assert.match(warning.textContent, /心跳停滞/);
+
+  healthPayload = activeMonitoringHealth({ failed: true });
+  const failedHost = await mountPanel();
+  const failedSummary = failedHost.querySelector(".source-inbox-health summary");
+  assert.doesNotMatch(failedSummary.textContent, /最近检查成功/);
+  assert.match(failedSummary.textContent, /运行失败/);
+  assert.equal(failedSummary.querySelector('[role="alert"]')?.textContent, "运行失败 · 1 个 Adapter");
+
+  healthPayload = activeMonitoringHealth();
+  healthPayload.source_monitoring_health.runtime.thread_alive = false;
+  const forgedHost = await mountPanel();
+  const forgedWarning = forgedHost.querySelector('.source-inbox-health [role="alert"]');
+  assert.ok(forgedWarning);
+  assert.match(forgedWarning.textContent, /未满足零执行与 Runtime 在线性边界/);
 });
 
 test("requested event details load independently of list availability", async () => {

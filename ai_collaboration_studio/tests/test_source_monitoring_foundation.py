@@ -243,6 +243,10 @@ class SourceMonitoringSettingsTests(unittest.TestCase):
                 "trading_impact_rules_enabled": False,
                 "dry_run": True,
                 "max_items_per_run": 50,
+                "initial_mode": "seed_only",
+                "catch_up_max_items": 0,
+                "initial_preview_sha256": "",
+                "from_time": "",
             },
         )
 

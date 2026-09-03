@@ -624,7 +624,7 @@ test("list normalization and replacement keep bounded current records", () => {
 test("monitoring health remains textual, default-off, and nonexecuting", () => {
   const healthPayload = {
     source_monitoring_health: {
-      version: "source_monitoring_health_service_v1",
+      version: "source_monitoring_health_service_v2",
       health_projection_version: "source_monitoring_health_v1",
       runtime_liveness_verified: false,
       settings: {
@@ -634,7 +634,31 @@ test("monitoring health remains textual, default-off, and nonexecuting", () => {
         allow_readonly_market: false,
         trading_impact_rules_enabled: false,
         dry_run: true,
-        max_items_per_run: 100,
+        max_items_per_run: 50,
+        initial_mode: "seed_only",
+        catch_up_max_items: 0,
+        initial_preview_sha256: "",
+        from_time: "",
+      },
+      runtime: {
+        version: "source_monitoring_runtime_health_v1",
+        status: "disabled",
+        runtime_id: "",
+        started_at: 0,
+        heartbeat_at: 0,
+        last_loop_at: 0,
+        active_adapter: "",
+        next_due_at: 0,
+        thread_alive: false,
+        last_fatal_error_code: "",
+        heartbeat_age_ms: 0,
+        stall_after_ms: 120000,
+        liveness_verified: false,
+        enabled: false,
+        auto_start: false,
+        dry_run: true,
+        execution_capability: "none",
+        live_trading_allowed: false,
       },
       captured_at_ms: 1_777_777_777_000,
       state: "disabled",
@@ -692,10 +716,52 @@ test("monitoring health remains textual, default-off, and nonexecuting", () => {
   assert.equal(normalized.stateLabel, "已停用");
   assert.equal(normalized.globalEnabled, false);
   assert.equal(normalized.adapters[0].persistedStatePresent, false);
+  assert.equal(normalized.runtime.status, "disabled");
+  assert.equal(normalized.runtime.statusLabel, "已停用");
+  assert.equal(normalized.initialMode, "seed_only");
+
+  const legacyServicePayload = structuredClone(healthPayload);
+  legacyServicePayload.source_monitoring_health.version = "source_monitoring_health_service_v1";
+  const legacyService = normalizeSourceMonitoringHealth(legacyServicePayload);
+  assert.equal(legacyService.valid, false);
+  assert.ok(legacyService.issues.includes("health_view_version_invalid"));
+
+  const catchUpPayload = structuredClone(healthPayload);
+  Object.assign(catchUpPayload.source_monitoring_health.settings, {
+    initial_mode: "catch_up",
+    catch_up_max_items: 10,
+    initial_preview_sha256: "2".repeat(64),
+  });
+  assert.equal(normalizeSourceMonitoringHealth(catchUpPayload).valid, true);
+
+  const fromTimePayload = structuredClone(healthPayload);
+  Object.assign(fromTimePayload.source_monitoring_health.settings, {
+    initial_mode: "from_time",
+    from_time: "2026-08-28T12:55:00.123Z",
+  });
+  assert.equal(normalizeSourceMonitoringHealth(fromTimePayload).valid, true);
+
+  const noncanonicalFromTimePayload = structuredClone(fromTimePayload);
+  noncanonicalFromTimePayload.source_monitoring_health.settings.from_time = "2026-08-28T12:55:00.000Z";
+  const noncanonicalFromTime = normalizeSourceMonitoringHealth(noncanonicalFromTimePayload);
+  assert.equal(noncanonicalFromTime.valid, false);
+  assert.ok(noncanonicalFromTime.issues.includes("health_settings_invalid"));
+
+  const conflictingInitialModePayload = structuredClone(catchUpPayload);
+  conflictingInitialModePayload.source_monitoring_health.settings.from_time = "2026-08-28T12:55:00Z";
+  const conflictingInitialMode = normalizeSourceMonitoringHealth(conflictingInitialModePayload);
+  assert.equal(conflictingInitialMode.valid, false);
+  assert.ok(conflictingInitialMode.issues.includes("health_settings_invalid"));
+
+  const extraRuntimeFieldPayload = structuredClone(healthPayload);
+  extraRuntimeFieldPayload.source_monitoring_health.runtime.pid = 42;
+  const extraRuntimeField = normalizeSourceMonitoringHealth(extraRuntimeFieldPayload);
+  assert.equal(extraRuntimeField.valid, false);
+  assert.ok(extraRuntimeField.issues.includes("health_runtime_invalid"));
 
   const unsafe = normalizeSourceMonitoringHealth({
     source_monitoring_health: {
-      version: "source_monitoring_health_service_v1",
+      version: "source_monitoring_health_service_v2",
       health_projection_version: "source_monitoring_health_v1",
       runtime_liveness_verified: true,
       settings: {},
@@ -708,7 +774,7 @@ test("monitoring health remains textual, default-off, and nonexecuting", () => {
 
   const incomplete = normalizeSourceMonitoringHealth({
     source_monitoring_health: {
-      version: "source_monitoring_health_service_v1",
+      version: "source_monitoring_health_service_v2",
       health_projection_version: "source_monitoring_health_v1",
       runtime_liveness_verified: false,
       state: "healthy",
@@ -742,6 +808,103 @@ test("monitoring health remains textual, default-off, and nonexecuting", () => {
   assert.equal(forgedAggregate.valid, false);
   assert.ok(forgedAggregate.issues.includes("health_state_accounting_invalid"));
   assert.ok(forgedAggregate.issues.includes("health_overall_state_invalid"));
+
+  const runningPayload = structuredClone(healthPayload);
+  Object.assign(runningPayload.source_monitoring_health.settings, {
+    enabled: true,
+    auto_start: true,
+  });
+  Object.assign(runningPayload.source_monitoring_health.runtime, {
+    status: "running",
+    runtime_id: `source_monitor_runtime_${"1".repeat(32)}`,
+    started_at: 1_777_777_776_000,
+    heartbeat_at: 1_777_777_776_900,
+    last_loop_at: 1_777_777_776_900,
+    active_adapter: "sec_filings",
+    next_due_at: 1_777_777_780_000,
+    thread_alive: true,
+    heartbeat_age_ms: 100,
+    liveness_verified: true,
+    enabled: true,
+    auto_start: true,
+  });
+  runningPayload.source_monitoring_health.runtime_liveness_verified = true;
+  Object.assign(runningPayload.source_monitoring_health.adapters[0], {
+    persisted_state: true,
+    persisted_enabled: true,
+    config_status: "current",
+    persisted_config_version: "sec_filings_config_v1",
+    state: "running",
+    enabled: true,
+    running: true,
+    runtime_liveness_verified: true,
+  });
+  runningPayload.source_monitoring_health.state = "running";
+  runningPayload.source_monitoring_health.counts = {
+    disabled: 0,
+    idle: 0,
+    running: 1,
+    healthy: 0,
+    degraded: 0,
+    backing_off: 0,
+    failed: 0,
+  };
+  const running = normalizeSourceMonitoringHealth(runningPayload);
+  assert.equal(running.valid, true);
+  assert.equal(running.runtime.livenessVerified, true);
+  assert.equal(running.adapters[0].running, true);
+
+  const forgedLivenessPayload = structuredClone(runningPayload);
+  forgedLivenessPayload.source_monitoring_health.runtime.thread_alive = false;
+  const forgedLiveness = normalizeSourceMonitoringHealth(forgedLivenessPayload);
+  assert.equal(forgedLiveness.valid, false);
+  assert.ok(forgedLiveness.issues.includes("health_runtime_invalid"));
+
+  const forgedAdapterPayload = structuredClone(runningPayload);
+  forgedAdapterPayload.source_monitoring_health.runtime.active_adapter = "";
+  const forgedAdapter = normalizeSourceMonitoringHealth(forgedAdapterPayload);
+  assert.equal(forgedAdapter.valid, false);
+  assert.ok(forgedAdapter.issues.includes("health_adapter_runtime_invalid_0"));
+
+  const stalledPayload = structuredClone(runningPayload);
+  Object.assign(stalledPayload.source_monitoring_health.runtime, {
+    status: "stalled",
+    heartbeat_age_ms: 120001,
+    liveness_verified: false,
+  });
+  stalledPayload.source_monitoring_health.runtime_liveness_verified = false;
+  Object.assign(stalledPayload.source_monitoring_health.adapters[0], {
+    state: "healthy",
+    running: false,
+    runtime_liveness_verified: false,
+  });
+  stalledPayload.source_monitoring_health.state = "healthy";
+  stalledPayload.source_monitoring_health.counts = {
+    disabled: 0,
+    idle: 0,
+    running: 0,
+    healthy: 1,
+    degraded: 0,
+    backing_off: 0,
+    failed: 0,
+  };
+  const stalled = normalizeSourceMonitoringHealth(stalledPayload);
+  assert.equal(stalled.valid, true);
+  assert.equal(stalled.runtime.status, "stalled");
+  assert.equal(stalled.runtime.livenessVerified, false);
+
+  const failedPayload = structuredClone(stalledPayload);
+  Object.assign(failedPayload.source_monitoring_health.runtime, {
+    status: "failed",
+    active_adapter: "",
+    thread_alive: false,
+    heartbeat_age_ms: 100,
+    last_fatal_error_code: "SOURCE_MONITORING_RUNTIME_FATAL",
+  });
+  const failed = normalizeSourceMonitoringHealth(failedPayload);
+  assert.equal(failed.valid, true);
+  assert.equal(failed.runtime.status, "failed");
+  assert.equal(failed.runtime.statusLabel, "运行失败");
 });
 
 test("notification feed accepts only cursor-bound unacknowledged zero-authority events", () => {

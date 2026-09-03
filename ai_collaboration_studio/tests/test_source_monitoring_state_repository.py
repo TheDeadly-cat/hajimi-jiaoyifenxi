@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
 os.environ["AI_STUDIO_SKIP_LOCAL_ENV"] = "1"
 
@@ -64,6 +65,35 @@ class SourceMonitoringStateRepositoryTests(unittest.TestCase):
             config_version=self.config_version,
             enabled=True,
         )
+
+    def test_public_readers_lock_the_store_before_opening_sqlite(self) -> None:
+        self.enable()
+        real_connect = self.repository._connect_read_only
+        connection_count = [0]
+
+        def guarded_connect() -> sqlite3.Connection:
+            is_owned = getattr(self.store._lock, "_is_owned", None)
+            self.assertTrue(callable(is_owned) and is_owned())
+            connection_count[0] += 1
+            return real_connect()
+
+        with mock.patch.object(
+            self.repository,
+            "_connect_read_only",
+            side_effect=guarded_connect,
+        ):
+            self.assertIsNotNone(self.repository.get_state(self.adapter_key))
+            self.assertEqual(len(self.repository.list_states()), 1)
+            self.assertIsNone(
+                self.repository.get_latest_successful_initialization(
+                    self.adapter_key,
+                    config_version=self.config_version,
+                )
+            )
+            self.assertIsNone(self.repository.get_run("missing_run"))
+            self.assertEqual(self.repository.list_runs(), [])
+
+        self.assertEqual(connection_count, [5])
 
     def import_for_run(
         self,

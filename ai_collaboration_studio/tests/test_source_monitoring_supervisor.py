@@ -188,6 +188,8 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
             official_only=True,
             dry_run=dry_run,
             max_items_per_run=50,
+            initial_mode="from_time",
+            from_time="1970-01-01T00:00:00Z",
         )
 
     def supervisor(
@@ -394,14 +396,27 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
         self.assertEqual(self.inbox_counts(), (0, 0))
 
     def test_degraded_partial_import_keeps_checkpoint_until_clean_replay(self) -> None:
-        adapter = FakeAdapter("fake_degraded", mode="degraded")
-        supervisor = self.supervisor((adapter,))
+        adapter = FakeAdapter("fake_degraded", mode="normal")
+        seed_supervisor = SourceMonitoringSupervisor(
+            registry=SourceAdapterRegistry((adapter,)),
+            repository=self.repository,
+            source_inbox=self.inbox,
+            settings=SourceMonitoringSettings(enabled=True, dry_run=False),
+            backoff_policy=self.backoff,
+            clock_ms=lambda: self.clock[0],
+        )
         self.enable(adapter)
+        seeded = seed_supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(seeded["initialization"]["outcome"], "seeded")
+        self.assertEqual(self.inbox_counts(), (0, 0))
+
+        adapter.mode = "degraded"
+        supervisor = seed_supervisor
 
         degraded = supervisor.run_once(adapter.adapter_key)
         self.assertEqual(degraded["status"], "DEGRADED")
         self.assertEqual(degraded["import"]["created_item_count"], 2)
-        self.assertEqual(degraded["state"]["checkpoint"], {})
+        self.assertEqual(degraded["state"]["checkpoint"], {"cursor": 1})
         self.assertEqual(degraded["state"]["consecutive_failures"], 1)
 
         adapter.mode = "normal"
@@ -409,7 +424,7 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
         recovered = supervisor.run_once(adapter.adapter_key)
         self.assertEqual(recovered["status"], "SUCCEEDED")
         self.assertEqual(recovered["import"]["duplicate_item_count"], 2)
-        self.assertEqual(recovered["state"]["checkpoint"], {"cursor": 1})
+        self.assertEqual(recovered["state"]["checkpoint"], {"cursor": 2})
         self.assertEqual(recovered["state"]["consecutive_failures"], 0)
         self.assertEqual(self.inbox_counts()[1], 2)
 
@@ -448,6 +463,27 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
         self.assertEqual(replay["state"]["checkpoint"], {"cursor": 1})
         self.assertIn(RUN_STATUS_ABANDONED, {run["status"] for run in runs})
         self.assertEqual(self.inbox_counts(), (2, 2))
+
+    def test_failure_after_committed_import_reports_the_write_truthfully(self) -> None:
+        adapter = FakeAdapter("fake_after_import_failure")
+
+        def fail_after_import(_run_id: str, _result: dict) -> None:
+            raise RuntimeError("secret post-import fixture detail")
+
+        supervisor = self.supervisor(
+            (adapter,),
+            after_import_hook=fail_after_import,
+        )
+        self.enable(adapter)
+
+        result = supervisor.run_once(adapter.adapter_key)
+
+        self.assertEqual(result["status"], "FAILED")
+        self.assertTrue(result["source_inbox_writes_performed"])
+        self.assertEqual(result["import"]["created_item_count"], 2)
+        self.assertFalse(result["import"]["idempotent_replay"])
+        self.assertEqual(result["state"]["checkpoint"], {})
+        self.assertEqual(self.inbox_counts(), (1, 2))
 
     def test_scheduler_isolates_adapters_and_respects_auto_start(self) -> None:
         healthy = FakeAdapter("fake_a_healthy")
@@ -586,6 +622,20 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
         self.assertEqual(captured.exception.code, "SOURCE_MONITORING_DISABLED")
         self.assertIsNone(self.repository.get_state(adapter.adapter_key))
 
+    def test_missing_adapter_state_is_not_created_or_polled_by_supervisor(self) -> None:
+        adapter = FakeAdapter("fake_missing_state")
+        supervisor = self.supervisor((adapter,))
+
+        with self.assertRaises(SourceMonitoringSupervisorError) as captured:
+            supervisor.run_once(adapter.adapter_key)
+
+        self.assertEqual(
+            captured.exception.code,
+            "SOURCE_MONITORING_ADAPTER_DISABLED",
+        )
+        self.assertEqual(adapter.poll_count, 0)
+        self.assertIsNone(self.repository.get_state(adapter.adapter_key))
+
     def test_readonly_market_mode_uses_its_channel_and_truthful_call_receipt(self) -> None:
         adapter = FakeReadonlyMarketAdapter("fixture_readonly_market")
         settings = SourceMonitoringSettings(
@@ -606,6 +656,11 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
         )
         self.enable(adapter)
         provider_before = self.provider_counts()
+
+        seeded = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(seeded["status"], "SUCCEEDED")
+        self.assertEqual(seeded["initialization"]["outcome"], "seeded")
+        self.assertEqual(self.inbox_counts(), (0, 0))
 
         result = supervisor.run_once(adapter.adapter_key)
 

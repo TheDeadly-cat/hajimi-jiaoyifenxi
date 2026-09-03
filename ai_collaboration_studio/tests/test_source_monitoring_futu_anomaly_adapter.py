@@ -42,6 +42,7 @@ from backend.source_monitoring.scheduler import (  # noqa: E402
 from backend.source_monitoring.settings import SourceMonitoringSettings  # noqa: E402
 from backend.source_monitoring.state_repository import (  # noqa: E402
     RUN_STATUS_ABANDONED,
+    RUN_STATUS_SUCCEEDED,
     SourceMonitoringStateRepository,
 )
 from backend.source_monitoring.supervisor import (  # noqa: E402
@@ -295,6 +296,23 @@ class FutuAnomalySupervisorIntegrationTests(unittest.TestCase):
             enabled=True,
         )
 
+    def _mark_legacy_initialized(self, adapter) -> None:
+        started = self.repository.start_run(
+            adapter.adapter_key,
+            config_version=adapter.config_version,
+            dry_run=False,
+        )["run"]
+        self.repository.complete_run(
+            started["run_id"],
+            next_checkpoint={},
+            status=RUN_STATUS_SUCCEEDED,
+            observed_count=0,
+            accepted_count=0,
+            duplicate_count=0,
+            rejected_count=0,
+            next_due_at_ms=self.clock[0] + 60_000,
+        )
+
     def _side_effect_counts(self) -> tuple[int, int, int, int]:
         with closing(sqlite3.connect(self.database_path)) as connection:
             return tuple(
@@ -313,6 +331,7 @@ class FutuAnomalySupervisorIntegrationTests(unittest.TestCase):
         )
         supervisor = self._supervisor(adapter)
         self._enable(adapter)
+        self._mark_legacy_initialized(adapter)
         side_effects_before = self._side_effect_counts()
 
         first = supervisor.run_once(adapter.adapter_key)
@@ -347,6 +366,7 @@ class FutuAnomalySupervisorIntegrationTests(unittest.TestCase):
 
         crashing = self._supervisor(adapter, hook=crash_after_import)
         self._enable(adapter)
+        self._mark_legacy_initialized(adapter)
         with self.assertRaises(SystemExit):
             crashing.run_once(adapter.adapter_key)
         self.assertEqual(
@@ -386,10 +406,7 @@ class FutuAnomalySupervisorIntegrationTests(unittest.TestCase):
                 with self.assertRaises(SourceMonitoringSupervisorError):
                     supervisor.run_once(adapter.adapter_key)
                 self.assertEqual(client.calls, [])
-                if global_enabled:
-                    self.assertIsNotNone(self.repository.get_state(adapter.adapter_key))
-                else:
-                    self.assertIsNone(self.repository.get_state(adapter.adapter_key))
+                self.assertIsNone(self.repository.get_state(adapter.adapter_key))
 
     def test_scheduler_aggregates_one_exact_readonly_market_call(self) -> None:
         adapter = FutuAnomalySourceAdapter(

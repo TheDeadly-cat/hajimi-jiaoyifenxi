@@ -34,6 +34,7 @@ from backend.source_monitoring.scheduler import BackoffPolicy  # noqa: E402
 from backend.source_monitoring.settings import SourceMonitoringSettings  # noqa: E402
 from backend.source_monitoring.state_repository import (  # noqa: E402
     RUN_STATUS_ABANDONED,
+    RUN_STATUS_SUCCEEDED,
     SourceMonitoringStateRepository,
 )
 from backend.source_monitoring.supervisor import (  # noqa: E402
@@ -147,6 +148,8 @@ class SourceMonitoringTradingImpactTests(unittest.TestCase):
             trading_impact_rules_enabled=True,
             dry_run=dry_run,
             max_items_per_run=50,
+            initial_mode=("from_time" if official_only else "seed_only"),
+            from_time=("1970-01-01T00:00:00Z" if official_only else ""),
         )
 
     @staticmethod
@@ -159,6 +162,8 @@ class SourceMonitoringTradingImpactTests(unittest.TestCase):
             trading_impact_rules_enabled=False,
             dry_run=True,
             max_items_per_run=50,
+            initial_mode="from_time",
+            from_time="1970-01-01T00:00:00Z",
         )
 
     @staticmethod
@@ -217,6 +222,23 @@ class SourceMonitoringTradingImpactTests(unittest.TestCase):
             adapter.adapter_key,
             config_version=adapter.config_version,
             enabled=True,
+        )
+
+    def mark_legacy_initialized(self, adapter) -> None:
+        started = self.repository.start_run(
+            adapter.adapter_key,
+            config_version=adapter.config_version,
+            dry_run=False,
+        )["run"]
+        self.repository.complete_run(
+            started["run_id"],
+            next_checkpoint={},
+            status=RUN_STATUS_SUCCEEDED,
+            observed_count=0,
+            accepted_count=0,
+            duplicate_count=0,
+            rejected_count=0,
+            next_due_at_ms=self.clock[0] + 60_000,
         )
 
     def side_effect_counts(self) -> tuple[int, int, int, int, int, int]:
@@ -433,6 +455,7 @@ class SourceMonitoringTradingImpactTests(unittest.TestCase):
             official_only=False,
         )
         self.enable(adapter)
+        self.mark_legacy_initialized(adapter)
         state_before = self.repository.get_state(adapter.adapter_key)
 
         result = supervisor.run_once(adapter.adapter_key)

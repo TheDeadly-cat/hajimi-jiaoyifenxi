@@ -64,6 +64,11 @@ class SourceMonitoringHealthServiceTests(unittest.TestCase):
         self.assertEqual(snapshot["adapter_count"], 7)
         self.assertTrue(snapshot["persistence_available"])
         self.assertFalse(snapshot["runtime_liveness_verified"])
+        self.assertEqual(snapshot["runtime"]["status"], "disabled")
+        self.assertFalse(snapshot["runtime"]["thread_alive"])
+        self.assertFalse(snapshot["runtime"]["liveness_verified"])
+        self.assertEqual(snapshot["runtime"]["execution_capability"], "none")
+        self.assertFalse(snapshot["runtime"]["live_trading_allowed"])
         self.assertEqual(snapshot["settings"], self.settings.to_dict())
         self.assertFalse(snapshot["settings"]["enabled"])
         self.assertFalse(snapshot["settings"]["auto_start"])
@@ -142,6 +147,100 @@ class SourceMonitoringHealthServiceTests(unittest.TestCase):
             sorted(path.name for path in self.database_path.parent.iterdir()),
             sidecars_before,
         )
+
+    def test_pre_initialization_schema_reports_migration_required_without_reading_legacy_runs(self) -> None:
+        initial = self.service().snapshot()
+        sec = next(
+            adapter
+            for adapter in initial["adapters"]
+            if adapter["adapter_key"] == "sec_filings"
+        )
+        config_version = sec["metadata"]["config_version"]
+        repository = SourceMonitoringStateRepository(
+            self.store,
+            clock_ms=lambda: self.clock,
+        )
+        repository.get_or_create_state(
+            "sec_filings",
+            config_version=config_version,
+        )
+        repository.set_enabled(
+            "sec_filings",
+            config_version=config_version,
+            enabled=True,
+        )
+        started = repository.start_run(
+            "sec_filings",
+            config_version=config_version,
+        )
+        self.clock += 100
+        repository.fail_run(
+            started["run"]["run_id"],
+            error_code="LEGACY_FAILURE",
+            error_message="legacy detail must not be projected",
+            next_due_at_ms=self.clock + 60_000,
+        )
+
+        with closing(sqlite3.connect(self.database_path)) as connection, connection:
+            connection.executescript(
+                """
+                DROP TRIGGER trg_source_adapter_runs_initialization_no_update;
+                DROP TRIGGER trg_source_adapter_runs_initialization_no_delete;
+                DROP TRIGGER trg_source_monitoring_initialization_marker_no_update;
+                DROP TRIGGER trg_source_monitoring_initialization_marker_no_delete;
+                DROP TRIGGER trg_source_monitoring_initialization_marker_no_replace;
+                DROP INDEX idx_source_adapter_runs_initialization_time;
+                DROP INDEX uq_source_adapter_runs_initialization_receipt;
+                DELETE FROM schema_migrations
+                 WHERE key='source_monitoring_initialization_receipt_v1';
+                ALTER TABLE source_adapter_runs
+                    DROP COLUMN initialization_receipt_sha256;
+                ALTER TABLE source_adapter_runs
+                    DROP COLUMN initialization_receipt_json;
+                ALTER TABLE source_adapter_runs
+                    DROP COLUMN initialization_preview_sha256;
+                ALTER TABLE source_adapter_runs
+                    DROP COLUMN initialization_config_version;
+                ALTER TABLE source_adapter_runs
+                    DROP COLUMN initialization_mode;
+                """
+            )
+
+        family_paths = (
+            self.database_path,
+            Path(f"{self.database_path}-wal"),
+            Path(f"{self.database_path}-shm"),
+            Path(f"{self.database_path}-journal"),
+        )
+
+        def file_family_signature() -> dict[str, tuple[bytes, int, int]]:
+            return {
+                path.name: (
+                    path.read_bytes(),
+                    path.stat().st_size,
+                    path.stat().st_mtime_ns,
+                )
+                for path in family_paths
+                if path.exists()
+            }
+
+        before = file_family_signature()
+        snapshot = self.service().snapshot()
+        after = file_family_signature()
+
+        self.assertTrue(snapshot["persistence_available"])
+        self.assertEqual(
+            snapshot["operations"]["schema_status"],
+            "migration_required",
+        )
+        sec_health = next(
+            adapter
+            for adapter in snapshot["adapters"]
+            if adapter["adapter_key"] == "sec_filings"
+        )
+        self.assertTrue(sec_health["persisted_state"])
+        self.assertIsNone(sec_health["latest_run"])
+        self.assertEqual(after, before)
 
     def test_persisted_failure_and_latest_run_are_redacted_read_only_evidence(self) -> None:
         initial = self.service().snapshot()
@@ -242,7 +341,7 @@ class SourceMonitoringHealthServiceTests(unittest.TestCase):
         self.assertEqual(sec_health["latest_run"]["status"], "RUNNING")
         self.assertFalse(sec_health["runtime_liveness_verified"])
 
-    def test_source_mode_excludes_other_registered_class_from_effective_running(self) -> None:
+    def test_only_fresh_runtime_can_project_running_and_other_source_mode_stays_off(self) -> None:
         initial = self.service().snapshot()
         by_key = {adapter["adapter_key"]: adapter for adapter in initial["adapters"]}
         repository = SourceMonitoringStateRepository(
@@ -265,23 +364,83 @@ class SourceMonitoringHealthServiceTests(unittest.TestCase):
                 config_version=config_version,
             )
 
+        settings = SourceMonitoringSettings(enabled=True, auto_start=True)
+        persisted_only = SourceMonitoringHealthService(
+            self.store,
+            clock_ms=lambda: self.clock,
+            settings=settings,
+        ).snapshot()
+        persisted_projected = {
+            adapter["adapter_key"]: adapter
+            for adapter in persisted_only["adapters"]
+        }
+        self.assertEqual(persisted_only["state"], "idle")
+        self.assertFalse(persisted_only["runtime_liveness_verified"])
+        self.assertFalse(persisted_projected["sec_filings"]["running"])
+
+        runtime_health = {
+            "version": "source_monitoring_runtime_health_v1",
+            "status": "running",
+            "runtime_id": "source_monitor_runtime_" + "a" * 32,
+            "started_at": self.clock - 1_000,
+            "heartbeat_at": self.clock,
+            "last_loop_at": self.clock,
+            "active_adapter": "sec_filings",
+            "next_due_at": self.clock + 60_000,
+            "thread_alive": True,
+            "last_fatal_error_code": "",
+            "heartbeat_age_ms": 0,
+            "stall_after_ms": 120_000,
+            "liveness_verified": True,
+            "enabled": True,
+            "auto_start": True,
+            "dry_run": True,
+            "execution_capability": "none",
+            "live_trading_allowed": False,
+        }
         snapshot = SourceMonitoringHealthService(
             self.store,
             clock_ms=lambda: self.clock,
-            settings=SourceMonitoringSettings(enabled=True),
+            settings=settings,
+            runtime_snapshot=lambda: runtime_health,
         ).snapshot()
         projected = {
             adapter["adapter_key"]: adapter for adapter in snapshot["adapters"]
         }
 
         self.assertEqual(snapshot["state"], "running")
+        self.assertTrue(snapshot["runtime_liveness_verified"])
+        self.assertEqual(snapshot["runtime"], runtime_health)
         self.assertTrue(projected["sec_filings"]["enabled"])
         self.assertTrue(projected["sec_filings"]["running"])
+        self.assertTrue(projected["sec_filings"]["runtime_liveness_verified"])
         self.assertEqual(projected["sec_filings"]["state"], "running")
         self.assertTrue(projected["futu_anomaly_signals"]["persisted_enabled"])
         self.assertFalse(projected["futu_anomaly_signals"]["enabled"])
         self.assertFalse(projected["futu_anomaly_signals"]["running"])
+        self.assertFalse(
+            projected["futu_anomaly_signals"]["runtime_liveness_verified"]
+        )
         self.assertEqual(projected["futu_anomaly_signals"]["state"], "disabled")
+
+    def test_invalid_runtime_snapshot_fails_closed_without_exception_details(self) -> None:
+        settings = SourceMonitoringSettings(enabled=True, auto_start=True)
+
+        with self.assertRaises(SourceMonitoringHealthServiceError) as raised:
+            SourceMonitoringHealthService(
+                self.store,
+                clock_ms=lambda: self.clock,
+                settings=settings,
+                runtime_snapshot=lambda: {
+                    "unexpected": "secret-runtime-detail",
+                },
+            ).snapshot()
+
+        self.assertEqual(
+            raised.exception.code,
+            "SOURCE_MONITORING_RUNTIME_HEALTH_INVALID",
+        )
+        self.assertNotIn("secret-runtime-detail", str(raised.exception))
 
     def test_migration_required_state_is_not_effectively_enabled(self) -> None:
         repository = SourceMonitoringStateRepository(
