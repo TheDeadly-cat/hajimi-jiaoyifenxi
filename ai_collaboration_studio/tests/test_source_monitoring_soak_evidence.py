@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from backend.source_monitoring import soak_evidence as soak_evidence_module
 from backend.source_monitoring.contracts import canonical_json, canonical_sha256
 from backend.source_monitoring.soak_evidence import (
     MAX_SOAK_RECORD_BYTES,
@@ -404,12 +405,29 @@ class SourceMonitoringSoakEvidenceTests(unittest.TestCase):
                 self.assertEqual(len(changed), len(raw))
                 self.assertNotEqual(changed, raw)
                 stream.seek(0)
-                stream.write(changed)
+                self.assertEqual(stream.write(changed), len(changed))
                 stream.flush()
                 os.fsync(stream.fileno())
             mutated = True
 
-        with self.assertRaises(SourceMonitoringSoakEvidenceError) as captured:
+        def signature_without_timestamp(
+            metadata: os.stat_result,
+        ) -> tuple[int, int, int, int]:
+            return (
+                int(metadata.st_dev),
+                int(metadata.st_ino),
+                int(metadata.st_size),
+                0,
+            )
+
+        with (
+            mock.patch.object(
+                soak_evidence_module,
+                "_stable_file_signature",
+                side_effect=signature_without_timestamp,
+            ),
+            self.assertRaises(SourceMonitoringSoakEvidenceError) as captured,
+        ):
             validate_soak_evidence(path, on_record=mutate_after_first_record)
 
         self.assertTrue(mutated)

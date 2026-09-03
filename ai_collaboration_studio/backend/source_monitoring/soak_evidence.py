@@ -13,6 +13,7 @@ or an independently anchored anti-tamper attestation.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import re
@@ -520,6 +521,34 @@ def _stable_file_signature(metadata: os.stat_result) -> tuple[int, int, int, int
     )
 
 
+def _reread_stream_digest(
+    stream: BinaryIO,
+    *,
+    expected_length: int,
+) -> tuple[int, bytes]:
+    """Hash current bytes through a duplicate of the already-verified fd."""
+
+    descriptor = os.dup(stream.fileno())
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        length = 0
+        while True:
+            maximum_read = min(1024 * 1024, expected_length - length + 1)
+            chunk = os.read(descriptor, maximum_read)
+            if chunk == b"":
+                return length, digest.digest()
+            length += len(chunk)
+            if length > expected_length:
+                raise _error(
+                    "SOURCE_MONITORING_SOAK_FILE_CHANGED",
+                    "soak ledger grew while its content was revalidated",
+                )
+            digest.update(chunk)
+    finally:
+        os.close(descriptor)
+
+
 def _fsync_parent_directory(path: Path) -> None:
     """Persist a newly created directory entry where directory fsync exists."""
 
@@ -791,6 +820,8 @@ def validate_soak_evidence(
     terminal = False
     last_event = ""
     last_hash = ZERO_SHA256
+    first_pass_digest = hashlib.sha256()
+    first_pass_length = 0
     try:
         with ledger_path.open("rb") as stream:
             opened = os.fstat(stream.fileno())
@@ -812,6 +843,13 @@ def validate_soak_evidence(
                         "SOURCE_MONITORING_SOAK_LIMIT_EXCEEDED",
                         "one soak evidence record exceeds 64 KiB",
                     )
+                first_pass_length += len(raw)
+                if first_pass_length > MAX_SOAK_LEDGER_BYTES:
+                    raise _error(
+                        "SOURCE_MONITORING_SOAK_FILE_CHANGED",
+                        "soak ledger grew while it was being validated",
+                    )
+                first_pass_digest.update(raw)
                 count += 1
                 if count > MAX_SOAK_RECORDS:
                     raise _error(
@@ -840,6 +878,23 @@ def validate_soak_evidence(
                 last_hash = expected_previous
                 if on_record is not None:
                     on_record(copy.deepcopy(record))
+            if first_pass_length != int(opened.st_size):
+                raise _error(
+                    "SOURCE_MONITORING_SOAK_FILE_CHANGED",
+                    "soak ledger length changed while it was being validated",
+                )
+            reread_length, reread_digest = _reread_stream_digest(
+                stream,
+                expected_length=first_pass_length,
+            )
+            if (
+                reread_length != first_pass_length
+                or reread_digest != first_pass_digest.digest()
+            ):
+                raise _error(
+                    "SOURCE_MONITORING_SOAK_FILE_CHANGED",
+                    "soak ledger content changed while it was being validated",
+                )
             after_fd = os.fstat(stream.fileno())
         after_path = ledger_path.lstat()
     except SourceMonitoringSoakEvidenceError:
