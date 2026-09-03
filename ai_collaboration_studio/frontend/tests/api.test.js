@@ -117,10 +117,33 @@ test("source inbox API keeps reads and explicit CAS mutations on isolated monito
     await api.listSourceInbox({
       state: "AWAITING_USER",
       query: "CI 失败",
+      source: "official_source_monitor:sec_filings",
+      unread: true,
       limit: 12,
       signal: controller.signal,
     });
+    await api.sourceMonitoringHealth(controller.signal);
+    await api.sourceMonitoringOperatorControl(controller.signal);
+    await api.previewSourceMonitoringAdapterInitialization("sec/一", {
+      expected_state_version: 3,
+      expected_config_version: "config_v1",
+    }, controller.signal);
+    await api.setSourceMonitoringAdapterEnablement("sec/一", {
+      expected_state_version: 3,
+      expected_config_version: "config_v1",
+      enabled: true,
+      preview_sha256: "a".repeat(64),
+      confirmation: "ENABLE_SOURCE_MONITORING_ADAPTER",
+    }, controller.signal);
+    await api.sourceInboxNotifications({ limit: 25, signal: controller.signal });
+    await api.sourceInboxNotifications({
+      after: "opaque/cursor+一",
+      limit: 25,
+      signal: controller.signal,
+    });
     await api.sourceInboxItem("event/一", controller.signal);
+    await api.sourceMonitoringPromptTemplate(controller.signal);
+    await api.previewSourceInboxImport(content, controller.signal);
     await api.importSourceInbox(content, controller.signal);
     await api.acknowledgeSourceInboxItem("event/一", 3, controller.signal);
     await api.attachSourceInboxItem("event/一", "room/二", 4, controller.signal);
@@ -137,30 +160,58 @@ test("source inbox API keeps reads and explicit CAS mutations on isolated monito
 
   assert.equal(
     requests[0].path,
-    "/api/monitoring/inbox?limit=12&state=AWAITING_USER&q=CI+%E5%A4%B1%E8%B4%A5",
+    "/api/monitoring/inbox?limit=12&state=AWAITING_USER&q=CI+%E5%A4%B1%E8%B4%A5&source=official_source_monitor%3Asec_filings&unread=true",
   );
   assert.equal(requests[0].options.signal, controller.signal);
-  assert.equal(requests[1].path, "/api/monitoring/events/event%2F%E4%B8%80");
-  assert.equal(requests[1].options.method, undefined);
-  assert.equal(requests[2].path, "/api/monitoring/imports/chatgpt");
-  assert.deepEqual(JSON.parse(requests[2].options.body), { content });
-  assert.equal(requests[3].path, "/api/monitoring/events/event%2F%E4%B8%80/acknowledge");
+  assert.equal(requests[1].path, "/api/monitoring/health");
+  assert.equal(requests[2].path, "/api/monitoring/adapters/control");
+  assert.equal(requests[2].options.method, undefined);
+  assert.equal(
+    requests[3].path,
+    "/api/monitoring/adapters/sec%2F%E4%B8%80/initialization-preview",
+  );
   assert.deepEqual(JSON.parse(requests[3].options.body), {
+    expected_state_version: 3,
+    expected_config_version: "config_v1",
+  });
+  assert.equal(requests[4].path, "/api/monitoring/adapters/sec%2F%E4%B8%80/enablement");
+  assert.deepEqual(JSON.parse(requests[4].options.body), {
+    expected_state_version: 3,
+    expected_config_version: "config_v1",
+    enabled: true,
+    preview_sha256: "a".repeat(64),
+    confirmation: "ENABLE_SOURCE_MONITORING_ADAPTER",
+  });
+  assert.equal(requests[5].path, "/api/monitoring/notifications?limit=25");
+  assert.equal(
+    requests[6].path,
+    "/api/monitoring/notifications?limit=25&after=opaque%2Fcursor%2B%E4%B8%80",
+  );
+  assert.equal(requests[7].path, "/api/monitoring/events/event%2F%E4%B8%80");
+  assert.equal(requests[7].options.method, undefined);
+  assert.equal(requests[8].path, "/api/monitoring/imports/chatgpt/prompt-template");
+  assert.equal(requests[8].options.method, undefined);
+  assert.equal(requests[9].path, "/api/monitoring/imports/chatgpt/preview");
+  assert.deepEqual(JSON.parse(requests[9].options.body), { content });
+  assert.equal(requests[10].path, "/api/monitoring/imports/chatgpt");
+  assert.deepEqual(JSON.parse(requests[10].options.body), { content });
+  assert.equal(requests[11].path, "/api/monitoring/events/event%2F%E4%B8%80/acknowledge");
+  assert.deepEqual(JSON.parse(requests[11].options.body), {
     expected_state_version: 3,
     acknowledgement: true,
   });
-  assert.equal(requests[4].path, "/api/monitoring/events/event%2F%E4%B8%80/attach");
-  assert.deepEqual(JSON.parse(requests[4].options.body), {
+  assert.equal(requests[12].path, "/api/monitoring/events/event%2F%E4%B8%80/attach");
+  assert.deepEqual(JSON.parse(requests[12].options.body), {
     room_id: "room/二",
     expected_state_version: 4,
   });
-  assert.equal(requests[5].path, "/api/monitoring/events/event%2F%E4%B8%80/round-draft");
-  assert.deepEqual(JSON.parse(requests[5].options.body), {
+  assert.equal(requests[13].path, "/api/monitoring/events/event%2F%E4%B8%80/round-draft");
+  assert.deepEqual(JSON.parse(requests[13].options.body), {
     room_id: "room/二",
     expected_state_version: 5,
     objective: "仅形成待审阅草稿",
   });
-  assert.equal(requests.slice(2).every((request) => request.options.method === "POST"), true);
+  assert.equal(requests.filter((request) => request.options.method === "POST").length, 7);
   assert.equal(requests.every((request) => request.options.signal === controller.signal), true);
 });
 

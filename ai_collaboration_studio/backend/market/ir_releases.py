@@ -9,43 +9,45 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from types import MappingProxyType
 from typing import Any, Callable
 from urllib.parse import urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from .futu_readonly import STORAGE_SYMBOLS, _utc_iso
+from .official_http import open_official_https
 
 
-IR_FEEDS = {
-    "US.MU": {
+IR_FEEDS = MappingProxyType({
+    "US.MU": MappingProxyType({
         "publisher": "Micron Technology Investor Relations",
         "url": "https://investors.micron.com/rss/news-releases.xml?items=30",
-        "hosts": {"investors.micron.com"},
+        "hosts": frozenset({"investors.micron.com"}),
         "presentation_hub_url": "https://investors.micron.com/quarterly-results",
-        "technology_scope": ["DRAM", "NAND"],
-    },
-    "US.SNDK": {
+        "technology_scope": ("DRAM", "NAND"),
+    }),
+    "US.SNDK": MappingProxyType({
         "publisher": "Sandisk Corporation Investor Relations",
         "url": "https://investor.sandisk.com/rss/news-releases.xml",
-        "hosts": {"investor.sandisk.com", "www.sandisk.com"},
+        "hosts": frozenset({"investor.sandisk.com", "www.sandisk.com"}),
         "presentation_hub_url": "https://investor.sandisk.com/news-events/presentations",
-        "technology_scope": ["NAND"],
-    },
-    "US.WDC": {
+        "technology_scope": ("NAND",),
+    }),
+    "US.WDC": MappingProxyType({
         "publisher": "Western Digital Corporation Investor Relations",
         "url": "https://investor.wdc.com/rss/news-releases.xml",
-        "hosts": {"investor.wdc.com", "www.westerndigital.com"},
+        "hosts": frozenset({"investor.wdc.com", "www.westerndigital.com"}),
         "presentation_hub_url": "https://investor.wdc.com/financial-information/earnings-documents",
-        "technology_scope": ["HDD"],
-    },
-    "US.STX": {
+        "technology_scope": ("HDD",),
+    }),
+    "US.STX": MappingProxyType({
         "publisher": "Seagate Technology Investor Relations",
         "url": "https://investors.seagate.com/rss/pressrelease.aspx",
-        "hosts": {"investors.seagate.com"},
+        "hosts": frozenset({"investors.seagate.com"}),
         "presentation_hub_url": "https://investors.seagate.com/financials/quarterly-results/default.aspx",
-        "technology_scope": ["HDD"],
-    },
-}
+        "technology_scope": ("HDD",),
+    }),
+})
 IR_MAX_RESPONSE_BYTES = 1_000_000
 
 _FISCAL_QUARTERS = {
@@ -71,8 +73,8 @@ class OfficialIrReleaseAdapter:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic or time.monotonic
         self.cache_ttl_seconds = max(60.0, float(cache_ttl_seconds))
-        self._cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
-        self._inflight: dict[tuple[str, int], Future[dict[str, Any]]] = {}
+        self._cache: dict[tuple[str, int, bool], tuple[float, dict[str, Any]]] = {}
+        self._inflight: dict[tuple[str, int, bool], Future[dict[str, Any]]] = {}
         self._lock = threading.RLock()
 
     def status(self) -> dict[str, Any]:
@@ -109,6 +111,39 @@ class OfficialIrReleaseAdapter:
         limit: int = 8,
         force: bool = False,
     ) -> dict[str, Any]:
+        """Return the legacy title-and-URL-deduplicated release view."""
+
+        return self._recent_releases_batch(
+            symbols,
+            limit=limit,
+            force=force,
+            monitoring_raw_items=False,
+        )
+
+    def monitoring_releases_batch(
+        self,
+        symbols: tuple[str, ...] | list[str] = STORAGE_SYMBOLS,
+        *,
+        limit: int = 8,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Return every normalized feed item so monitoring can detect conflicts."""
+
+        return self._recent_releases_batch(
+            symbols,
+            limit=limit,
+            force=force,
+            monitoring_raw_items=True,
+        )
+
+    def _recent_releases_batch(
+        self,
+        symbols: tuple[str, ...] | list[str],
+        *,
+        limit: int,
+        force: bool,
+        monitoring_raw_items: bool,
+    ) -> dict[str, Any]:
         requested = self._normalize_symbols(symbols)
         safe_limit = min(20, max(1, int(limit)))
         captured_at = self._clock().astimezone(timezone.utc)
@@ -125,7 +160,13 @@ class OfficialIrReleaseAdapter:
             "live_trading_allowed": False,
         }
         if len(requested) == 1:
-            outcomes = [self._release_outcome(requested[0], safe_limit, captured_at, force=force)]
+            outcomes = [self._release_outcome(
+                requested[0],
+                safe_limit,
+                captured_at,
+                force=force,
+                monitoring_raw_items=monitoring_raw_items,
+            )]
         else:
             with ThreadPoolExecutor(
                 max_workers=min(4, len(requested)),
@@ -138,6 +179,7 @@ class OfficialIrReleaseAdapter:
                         safe_limit,
                         captured_at,
                         force=force,
+                        monitoring_raw_items=monitoring_raw_items,
                     )
                     for symbol in requested
                 ]
@@ -157,8 +199,9 @@ class OfficialIrReleaseAdapter:
         captured_at: datetime,
         *,
         force: bool,
+        monitoring_raw_items: bool,
     ) -> dict[str, Any]:
-        cache_key = (symbol, safe_limit)
+        cache_key = (symbol, safe_limit, monitoring_raw_items)
         with self._lock:
             cached = self._cache.get(cache_key)
             if cached and cached[0] > self._monotonic() and not force:
@@ -175,7 +218,12 @@ class OfficialIrReleaseAdapter:
                 singleflight_shared=True,
             )
         try:
-            outcome = self._fetch_release_outcome(symbol, safe_limit, captured_at)
+            outcome = self._fetch_release_outcome(
+                symbol,
+                safe_limit,
+                captured_at,
+                monitoring_raw_items=monitoring_raw_items,
+            )
             cache_ttl = (
                 self.cache_ttl_seconds
                 if outcome.get("row")
@@ -218,6 +266,8 @@ class OfficialIrReleaseAdapter:
         symbol: str,
         safe_limit: int,
         captured_at: datetime,
+        *,
+        monitoring_raw_items: bool,
     ) -> dict[str, Any]:
         config = IR_FEEDS[symbol]
         try:
@@ -227,9 +277,10 @@ class OfficialIrReleaseAdapter:
                 symbol=symbol,
                 allowed_hosts=set(config["hosts"]),
                 captured_at=captured_at,
-                limit=safe_limit,
+                limit=None if monitoring_raw_items else safe_limit,
                 presentation_hub_url=str(config["presentation_hub_url"]),
                 technology_scope=list(config["technology_scope"]),
+                deduplicate_legacy=not monitoring_raw_items,
             )
         except Exception as exc:
             return {
@@ -280,11 +331,11 @@ class OfficialIrReleaseAdapter:
             "User-Agent": "AI-Collaboration-Studio/0.1 local-read-only-research",
             "Accept": "application/rss+xml, application/xml, text/xml",
         })
-        with urlopen(request, timeout=12) as response:
-            final_url = str(response.geturl() or "")
-            final = urlparse(final_url)
-            if final.scheme != "https" or final.hostname not in allowed_hosts:
-                raise ValueError("官方 IR RSS 重定向到了非白名单端点")
+        with open_official_https(
+            request,
+            allowed_hosts=allowed_hosts,
+            timeout=12,
+        ) as response:
             declared_length = response.headers.get("Content-Length")
             if declared_length and int(declared_length) > IR_MAX_RESPONSE_BYTES:
                 raise ValueError("官方 IR RSS 超过 1 MB 上限")
@@ -300,9 +351,10 @@ class OfficialIrReleaseAdapter:
         symbol: str,
         allowed_hosts: set[str],
         captured_at: datetime,
-        limit: int,
+        limit: int | None,
         presentation_hub_url: str,
         technology_scope: list[str],
+        deduplicate_legacy: bool = True,
     ) -> list[dict[str, Any]]:
         try:
             root = ET.fromstring(raw)
@@ -312,6 +364,7 @@ class OfficialIrReleaseAdapter:
         seen: set[str] = set()
         for item in root.findall(".//item"):
             title = OfficialIrReleaseAdapter._node_text(item, "title")[:300]
+            guid = OfficialIrReleaseAdapter._node_text(item, "guid")[:1_000]
             link = OfficialIrReleaseAdapter._safe_official_link(
                 OfficialIrReleaseAdapter._node_text(item, "link"),
                 allowed_hosts,
@@ -327,9 +380,10 @@ class OfficialIrReleaseAdapter:
             if not title or not link or published > captured_at:
                 continue
             dedupe_key = f"{title.casefold()}|{link}"
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
+            if deduplicate_legacy:
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
             description = OfficialIrReleaseAdapter._plain_text(
                 OfficialIrReleaseAdapter._node_text(item, "description")
             )[:800]
@@ -337,6 +391,7 @@ class OfficialIrReleaseAdapter:
             fiscal_period = OfficialIrReleaseAdapter._fiscal_period(title)
             releases.append({
                 "title": title,
+                "guid": guid,
                 "published_at": _utc_iso(published),
                 "published_date": published.date().isoformat(),
                 "official_url": link,
@@ -357,7 +412,7 @@ class OfficialIrReleaseAdapter:
                 "symbol": symbol,
             })
         releases.sort(key=lambda release: release["published_at"], reverse=True)
-        return releases[:limit]
+        return releases if limit is None else releases[:limit]
 
     @staticmethod
     def _classify_event(title: str, summary: str = "") -> str:

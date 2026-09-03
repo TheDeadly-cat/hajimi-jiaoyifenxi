@@ -70,6 +70,12 @@ class StructuredLoggingUnitTests(unittest.TestCase):
             ),
             "api:integration",
         )
+        self.assertEqual(
+            structured_logging.classify_request_target(
+                "/api/monitoring/events/private-item-id?token=secret"
+            ),
+            "api:monitoring",
+        )
 
 
 class StructuredHttpLoggingTests(unittest.TestCase):

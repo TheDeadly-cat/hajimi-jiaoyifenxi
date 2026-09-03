@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from ..config import SEC_CACHE_TTL_SECONDS, SEC_USER_AGENT
 from .futu_readonly import STORAGE_SYMBOLS, US_EASTERN, _utc_iso
+from .official_http import open_official_https
 
 
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -18,7 +20,43 @@ SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 SEC_ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data"
 SEC_ALLOWED_FORMS = frozenset({"10-K", "10-Q", "8-K", "20-F", "40-F", "6-K"})
 SEC_DEFAULT_FORMS = ("10-K", "10-Q", "8-K", "20-F", "40-F", "6-K")
+SEC_MONITOR_SYMBOLS = (
+    "US.MU",
+    "US.SNDK",
+    "US.WDC",
+    "US.STX",
+    "US.NVDA",
+    "US.MRVL",
+    "US.AMD",
+)
 SEC_MAX_RESPONSE_BYTES = 2_000_000
+
+_SEC_ACCESSION_RE = re.compile(r"[0-9]{10}-[0-9]{2}-[0-9]{6}\Z")
+_SEC_SYMBOL_RE = re.compile(r"US\.[A-Z][A-Z0-9.-]{0,14}\Z")
+_SEC_PRIMARY_DOCUMENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,239}\Z")
+
+
+def _is_allowed_sec_fetch_url(value: Any) -> bool:
+    if type(value) is not str:
+        return False
+    if value == SEC_TICKERS_URL:
+        return True
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    return bool(
+        parsed.scheme == "https"
+        and parsed.hostname == "data.sec.gov"
+        and parsed.username is None
+        and parsed.password is None
+        and port in {None, 443}
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+        and re.fullmatch(r"/submissions/CIK[0-9]{10}\.json", parsed.path)
+    )
 
 
 class SecEdgarAdapter:
@@ -32,17 +70,22 @@ class SecEdgarAdapter:
         fetch_json: Callable[[str, str], dict[str, Any]] | None = None,
         clock: Callable[[], datetime] | None = None,
         min_request_interval_seconds: float = 0.11,
+        allowed_symbols: tuple[str, ...] | list[str] = STORAGE_SYMBOLS,
     ) -> None:
         self.user_agent = str(user_agent or "").strip()[:300]
         self.cache_ttl_seconds = max(60.0, float(cache_ttl_seconds))
         self._fetch_json = fetch_json or self._default_fetch_json
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._min_interval = max(0.11, float(min_request_interval_seconds))
+        self.allowed_symbols = self._normalize_allowed_symbols(allowed_symbols)
         self._last_request_monotonic = 0.0
         self._request_lock = threading.Lock()
         self._cache_lock = threading.RLock()
         self._ticker_cache: tuple[float, dict[str, dict[str, str]]] | None = None
-        self._filings_cache: dict[tuple[str, tuple[str, ...], int], tuple[float, dict[str, Any]]] = {}
+        self._filings_cache: dict[
+            tuple[str, tuple[str, ...], int, bool],
+            tuple[float, dict[str, Any]],
+        ] = {}
 
     def status(self) -> dict[str, Any]:
         configured = self._is_declared_user_agent()
@@ -54,7 +97,7 @@ class SecEdgarAdapter:
             "official_submissions": True,
             "authentication_required": False,
             "user_agent_declared": configured,
-            "allowed_symbols": list(STORAGE_SYMBOLS),
+            "allowed_symbols": list(self.allowed_symbols),
             "allowed_forms": list(SEC_DEFAULT_FORMS),
             "execution_capability": "none",
             "live_trading_allowed": False,
@@ -69,17 +112,29 @@ class SecEdgarAdapter:
         )
 
     @staticmethod
-    def _normalize_symbols(symbols: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    def _normalize_allowed_symbols(
+        symbols: tuple[str, ...] | list[str],
+    ) -> tuple[str, ...]:
         requested: list[str] = []
         for raw_symbol in symbols:
             symbol = str(raw_symbol or "").strip().upper()
             if symbol and symbol not in requested:
                 requested.append(symbol)
-        unsupported = [symbol for symbol in requested if symbol not in STORAGE_SYMBOLS]
+        unsupported = [symbol for symbol in requested if not _SEC_SYMBOL_RE.fullmatch(symbol)]
         if unsupported:
-            raise ValueError(f"不在存储产业研究白名单：{', '.join(unsupported)}")
+            raise ValueError(f"SEC 标的代码格式无效：{', '.join(unsupported)}")
         if not requested:
-            raise ValueError("至少需要一个 SEC 标的代码")
+            raise ValueError("SEC allowed_symbols 至少需要一个标的代码")
+        return tuple(requested)
+
+    def _normalize_symbols(
+        self,
+        symbols: tuple[str, ...] | list[str],
+    ) -> tuple[str, ...]:
+        requested = list(self._normalize_allowed_symbols(symbols))
+        unsupported = [symbol for symbol in requested if symbol not in self.allowed_symbols]
+        if unsupported:
+            raise ValueError(f"不在 SEC 适配器白名单：{', '.join(unsupported)}")
         return tuple(requested)
 
     @staticmethod
@@ -99,13 +154,52 @@ class SecEdgarAdapter:
 
     def recent_filings_batch(
         self,
-        symbols: tuple[str, ...] | list[str] = STORAGE_SYMBOLS,
+        symbols: tuple[str, ...] | list[str] | None = None,
         *,
         forms: tuple[str, ...] | list[str] | None = None,
         limit: int = 8,
         force: bool = False,
     ) -> dict[str, Any]:
-        requested = self._normalize_symbols(symbols)
+        """Return the legacy per-symbol bounded filings view."""
+
+        return self._recent_filings_batch(
+            symbols,
+            forms=forms,
+            limit=limit,
+            force=force,
+            monitoring_raw_items=False,
+        )
+
+    def monitoring_filings_batch(
+        self,
+        symbols: tuple[str, ...] | list[str] | None = None,
+        *,
+        forms: tuple[str, ...] | list[str] | None = None,
+        limit: int = 8,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Return every normalized recent filing so monitoring can drain unseen rows."""
+
+        return self._recent_filings_batch(
+            symbols,
+            forms=forms,
+            limit=limit,
+            force=force,
+            monitoring_raw_items=True,
+        )
+
+    def _recent_filings_batch(
+        self,
+        symbols: tuple[str, ...] | list[str] | None,
+        *,
+        forms: tuple[str, ...] | list[str] | None,
+        limit: int,
+        force: bool,
+        monitoring_raw_items: bool,
+    ) -> dict[str, Any]:
+        requested = self._normalize_symbols(
+            list(self.allowed_symbols) if symbols is None else symbols
+        )
         normalized_forms = self._normalize_forms(forms)
         safe_limit = min(40, max(1, int(limit)))
         captured_at = self._clock().astimezone(timezone.utc)
@@ -152,7 +246,12 @@ class SecEdgarAdapter:
                     "message": "SEC 官方 ticker/CIK 映射中未找到该标的",
                 })
                 continue
-            cache_key = (symbol, normalized_forms, safe_limit)
+            cache_key = (
+                symbol,
+                normalized_forms,
+                safe_limit,
+                monitoring_raw_items,
+            )
             with self._cache_lock:
                 cached = self._filings_cache.get(cache_key)
                 if cached and cached[0] > time.monotonic() and not force:
@@ -161,13 +260,26 @@ class SecEdgarAdapter:
                     result["rows"].append(row)
                     continue
             try:
-                submissions = self._request_json(SEC_SUBMISSIONS_URL.format(cik=company["cik"]))
+                requested_cik = company["cik"]
+                submissions = self._request_json(
+                    SEC_SUBMISSIONS_URL.format(cik=requested_cik)
+                )
+                submissions_cik = submissions.get("cik")
+                if (
+                    type(submissions_cik) is not str
+                    or not re.fullmatch(r"[0-9]{10}\Z", submissions_cik)
+                    or submissions_cik != requested_cik
+                ):
+                    raise ValueError(
+                        "SEC submissions payload CIK does not match the requested entity"
+                    )
                 filings = self._normalize_recent_filings(
                     submissions,
-                    cik=company["cik"],
+                    cik=requested_cik,
                     forms=normalized_forms,
-                    limit=safe_limit,
+                    limit=None if monitoring_raw_items else safe_limit,
                     today=today,
+                    captured_at=captured_at,
                 )
             except Exception as exc:
                 result["source_errors"].append({
@@ -218,7 +330,9 @@ class SecEdgarAdapter:
                 cik = f"{int(item.get('cik_str')):010d}"
             except (TypeError, ValueError):
                 continue
-            if ticker and ticker in {symbol.removeprefix("US.") for symbol in STORAGE_SYMBOLS}:
+            if ticker and ticker in {
+                symbol.removeprefix("US.") for symbol in self.allowed_symbols
+            }:
                 ticker_map[ticker] = {
                     "cik": cik,
                     "title": str(item.get("title") or "")[:240],
@@ -242,17 +356,20 @@ class SecEdgarAdapter:
 
     @staticmethod
     def _default_fetch_json(url: str, user_agent: str) -> dict[str, Any]:
-        if url != SEC_TICKERS_URL and not url.startswith("https://data.sec.gov/submissions/CIK"):
+        if not _is_allowed_sec_fetch_url(url):
             raise ValueError("SEC 适配器拒绝非官方固定端点")
         request = Request(url, headers={
             "User-Agent": user_agent,
             "Accept": "application/json",
         })
-        with urlopen(request, timeout=12) as response:
-            final_url = str(response.geturl() or "")
-            parsed = urlparse(final_url)
-            if parsed.scheme != "https" or parsed.hostname not in {"www.sec.gov", "data.sec.gov"}:
-                raise ValueError("SEC 响应重定向到了非官方端点")
+        with open_official_https(
+            request,
+            allowed_hosts={"www.sec.gov", "data.sec.gov"},
+            timeout=12,
+            url_validator=lambda candidate: (
+                candidate == url and _is_allowed_sec_fetch_url(candidate)
+            ),
+        ) as response:
             declared_length = response.headers.get("Content-Length")
             if declared_length and int(declared_length) > SEC_MAX_RESPONSE_BYTES:
                 raise ValueError("SEC 响应超过 2 MB 上限")
@@ -267,8 +384,9 @@ class SecEdgarAdapter:
         *,
         cik: str,
         forms: tuple[str, ...],
-        limit: int,
+        limit: int | None,
         today: Any,
+        captured_at: datetime,
     ) -> list[dict[str, Any]]:
         recent = ((payload.get("filings") or {}).get("recent") or {})
         if not isinstance(recent, dict):
@@ -288,18 +406,36 @@ class SecEdgarAdapter:
                 continue
             accession_number = str(accession or "").strip()
             primary_document = SecEdgarAdapter._column_value(recent, "primaryDocument", index)
-            if not accession_number or not primary_document or "/" in primary_document or "\\" in primary_document:
+            if (
+                not _SEC_ACCESSION_RE.fullmatch(accession_number)
+                or not _SEC_PRIMARY_DOCUMENT_RE.fullmatch(primary_document)
+                or primary_document in {".", ".."}
+            ):
                 continue
             accession_compact = accession_number.replace("-", "")
             filing_url = f"{SEC_ARCHIVES_BASE}/{int(cik)}/{accession_compact}/{primary_document}"
             acceptance_time = SecEdgarAdapter._column_value(recent, "acceptanceDateTime", index)
+            accepted_at = ""
+            if acceptance_time:
+                try:
+                    accepted = datetime.fromisoformat(
+                        acceptance_time.replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    continue
+                if accepted.tzinfo is None:
+                    continue
+                accepted = accepted.astimezone(timezone.utc)
+                if accepted > captured_at:
+                    continue
+                accepted_at = _utc_iso(accepted)
             filings.append({
                 "accession_number": accession_number[:40],
                 "form": form,
                 "filing_date": filing_date,
                 "report_date": SecEdgarAdapter._column_value(recent, "reportDate", index)[:20],
-                "accepted_at": acceptance_time[:40],
-                "published_at": acceptance_time[:40] or filing_date,
+                "accepted_at": accepted_at,
+                "published_at": accepted_at or filing_date,
                 "primary_document": primary_document[:240],
                 "description": SecEdgarAdapter._column_value(recent, "primaryDocDescription", index)[:300],
                 "items": SecEdgarAdapter._column_value(recent, "items", index)[:240],
@@ -307,7 +443,7 @@ class SecEdgarAdapter:
                 "source_type": "regulatory_filing",
                 "source_tier": "primary",
             })
-            if len(filings) >= limit:
+            if limit is not None and len(filings) >= limit:
                 break
         return filings
 

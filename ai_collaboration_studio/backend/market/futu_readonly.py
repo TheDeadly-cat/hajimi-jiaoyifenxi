@@ -44,6 +44,7 @@ REVENUE_BREAKDOWN_TYPES = {
 }
 US_EASTERN = ZoneInfo("America/New_York")
 _AUTO_SDK = object()
+MAX_SNAPSHOT_ID_LENGTH = 128
 
 
 def _finite_number(value: Any) -> float | None:
@@ -477,6 +478,8 @@ class FutuUsMarketAdapter:
         sdk_module: Any = _AUTO_SDK,
         socket_probe: Callable[[str, int], bool] | None = None,
         clock: Callable[[], datetime] | None = None,
+        monotonic_clock: Callable[[], int | float] | None = None,
+        snapshot_id_factory: Callable[[], str] | None = None,
     ) -> None:
         self.host = host
         self.port = int(port)
@@ -486,6 +489,16 @@ class FutuUsMarketAdapter:
         self._sdk_import_error = ""
         self._socket_probe = socket_probe or self._default_socket_probe
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._monotonic_clock = time.monotonic if monotonic_clock is None else monotonic_clock
+        self._snapshot_id_factory = (
+            self._default_snapshot_id
+            if snapshot_id_factory is None
+            else snapshot_id_factory
+        )
+        if not callable(self._monotonic_clock):
+            raise TypeError("monotonic_clock 必须可调用")
+        if not callable(self._snapshot_id_factory):
+            raise TypeError("snapshot_id_factory 必须可调用")
         self._cache: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
         self._revenue_request_times: list[float] = []
         self._lock = threading.RLock()
@@ -497,6 +510,39 @@ class FutuUsMarketAdapter:
                 return True
         except OSError:
             return False
+
+    @staticmethod
+    def _default_snapshot_id() -> str:
+        return f"futu_{uuid.uuid4().hex[:16]}"
+
+    def _monotonic_now(self) -> float:
+        value = self._monotonic_clock()
+        if type(value) not in (int, float):
+            raise TypeError("monotonic_clock 必须返回原生 int 或 float")
+        try:
+            number = float(value)
+        except OverflowError as exc:
+            raise ValueError("monotonic_clock 必须返回有限非负数") from exc
+        if not math.isfinite(number) or number < 0:
+            raise ValueError("monotonic_clock 必须返回有限非负数")
+        return number
+
+    def _new_snapshot_id(self) -> str:
+        value = self._snapshot_id_factory()
+        if type(value) is not str:
+            raise TypeError("snapshot_id_factory 必须返回原生 str")
+        if not 1 <= len(value) <= MAX_SNAPSHOT_ID_LENGTH:
+            raise ValueError(
+                f"snapshot_id 长度必须在 1 到 {MAX_SNAPSHOT_ID_LENGTH} 之间"
+            )
+        if value != value.strip():
+            raise ValueError("snapshot_id 必须是无首尾空白的规范单行文本")
+        if value.splitlines() != [value] or any(
+            ord(character) < 32 or ord(character) == 127
+            for character in value
+        ):
+            raise ValueError("snapshot_id 必须是无控制字符的规范单行文本")
+        return value
 
     def _sdk(self) -> Any | None:
         if self._sdk_module is _AUTO_SDK:
@@ -585,7 +631,7 @@ class FutuUsMarketAdapter:
     ) -> dict[str, Any]:
         requested = self._normalize_symbols(symbols)
         cache_key = tuple(requested)
-        now_monotonic = time.monotonic()
+        now_monotonic = self._monotonic_now()
         with self._lock:
             cached = self._cache.get(cache_key)
             if cached and cached[0] > now_monotonic and not force:
@@ -593,15 +639,19 @@ class FutuUsMarketAdapter:
                 payload["cache"] = {"hit": True, "ttl_seconds": self.cache_ttl_seconds}
                 return payload
 
+            cache_expires_at = self._monotonic_now() + self.cache_ttl_seconds
             payload = self._fetch_quote_batch(requested)
             payload["cache"] = {"hit": False, "ttl_seconds": self.cache_ttl_seconds}
-            self._cache[cache_key] = (time.monotonic() + self.cache_ttl_seconds, copy.deepcopy(payload))
+            self._cache[cache_key] = (
+                cache_expires_at,
+                copy.deepcopy(payload),
+            )
             return payload
 
     def _fetch_quote_batch(self, symbols: tuple[str, ...]) -> dict[str, Any]:
         captured_at = self._clock().astimezone(timezone.utc)
         base = {
-            "snapshot_id": f"futu_{uuid.uuid4().hex[:16]}",
+            "snapshot_id": self._new_snapshot_id(),
             "source": "futu_opend",
             "market": "US",
             "symbols": list(symbols),
@@ -1426,6 +1476,7 @@ class FutuUsMarketAdapter:
         symbols: tuple[str, ...] | list[str] = STORAGE_SYMBOLS,
     ) -> dict[str, Any]:
         requested = self._normalize_symbols(symbols)
+        first_request_monotonic = self._monotonic_now()
         captured_at = self._clock().astimezone(timezone.utc)
         result: dict[str, Any] = {
             "ok": False,
@@ -1464,9 +1515,11 @@ class FutuUsMarketAdapter:
                     "message": "当前 Futu SDK 不提供主营构成只读接口",
                 })
                 return result
-            for symbol in requested:
+            for index, symbol in enumerate(requested):
                 try:
-                    self._reserve_revenue_request()
+                    self._reserve_revenue_request(
+                        now_monotonic=(first_request_monotonic if index == 0 else None)
+                    )
                     ret, data = getter(symbol)
                     if ret != getattr(sdk, "RET_OK", 0):
                         result["source_errors"].append({
@@ -1512,8 +1565,9 @@ class FutuUsMarketAdapter:
         result["ok"] = bool(result["rows"])
         return result
 
-    def _reserve_revenue_request(self) -> None:
-        now_monotonic = time.monotonic()
+    def _reserve_revenue_request(self, *, now_monotonic: float | None = None) -> None:
+        if now_monotonic is None:
+            now_monotonic = self._monotonic_now()
         with self._lock:
             self._revenue_request_times = [
                 moment for moment in self._revenue_request_times

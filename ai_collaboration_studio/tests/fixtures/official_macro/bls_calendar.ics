@@ -1,0 +1,13 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//U.S. Bureau of Labor Statistics//Release Calendar//EN
+BEGIN:VEVENT
+UID:cpi-2026-08@bls.gov
+DTSTART;TZID=America/New_York:20260911T083000
+SUMMARY:Consumer Price Index for August 2026
+DESCRIPTION:Official scheduled release for August 2026.
+URL:https://www.bls.gov/schedule/news_release/cpi.htm
+SEQUENCE:0
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR

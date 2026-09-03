@@ -39,8 +39,14 @@ def main() -> None:
         # Keep application import and the schema-read-only default-store open
         # behind database ownership so a second server cannot recover work.
         from backend.http_server import run_server
+        from backend.source_monitoring.runtime import (
+            build_source_monitoring_runtime,
+        )
 
-        run_server(instance_owner=owner)
+        run_server(
+            instance_owner=owner,
+            runtime_factory=build_source_monitoring_runtime,
+        )
     except Exception as exc:
         _startup_failure("database_preflight_or_host_start", exc)
     finally:

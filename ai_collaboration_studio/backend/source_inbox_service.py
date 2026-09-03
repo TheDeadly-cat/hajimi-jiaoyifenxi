@@ -8,6 +8,8 @@ Imported packets describe externally discovered source items, remain
 can be attached to a room.  A round draft never creates or starts a round.
 """
 
+import base64
+import binascii
 import hashlib
 import json
 import re
@@ -33,6 +35,22 @@ from .source_inbox_contracts import (
     canonical_sha256,
     project_source_item_fingerprint,
 )
+from .source_inbox_import_ux import build_source_import_preview
+from .source_inbox_trading_impact import (
+    SourceInboxTradingImpactError,
+    insert_or_verify_trading_impact_projection,
+    list_verified_trading_impact_projections,
+)
+from .source_monitoring.contracts import (
+    FUTU_ANOMALY_SOURCE_CHANNEL,
+    OFFICIAL_SOURCE_CHANNEL,
+    OFFICIAL_SOURCE_CLASS,
+    READONLY_MARKET_SOURCE_CLASS,
+)
+from .source_monitoring.trading_impact_rules import (
+    TradingImpactProjection,
+    TradingImpactRulesV1,
+)
 
 if TYPE_CHECKING:
     from .store import StudioStore
@@ -45,9 +63,19 @@ SOURCE_INBOX_ATTACHMENT_VERSION = "source_inbox_attachment_v1"
 SOURCE_INBOX_ROUND_DRAFT_VERSION = "source_inbox_round_draft_v1"
 SOURCE_INBOX_IMPORT_RESULT_VERSION = "source_inbox_import_result_v1"
 SOURCE_INBOX_LIST_VERSION = "source_inbox_list_v1"
+SOURCE_INBOX_NOTIFICATION_CURSOR_VERSION = "source_inbox_notification_cursor_v1"
+SOURCE_INBOX_NOTIFICATION_FEED_VERSION = "source_inbox_notification_feed_v1"
+SOURCE_INBOX_NOTIFICATION_VERSION = "source_inbox_notification_v1"
+TRADING_IMPACT_IMPORT_ACCOUNTING_VERSION = "trading_impact_import_accounting_v1"
+
+_SOURCE_MONITORING_WORKER_ACTOR = "source_monitoring_worker"
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+_SOURCE_CHANNEL_RE = re.compile(r"[a-z][a-z0-9_-]{0,79}\Z")
+_SOURCE_KEY_RE = re.compile(r"[a-z][a-z0-9_-]{0,79}\Z")
+_CURSOR_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{1,512}\Z")
+_MAX_NATIVE_INTEGER = (1 << 63) - 1
 
 
 class SourceInboxError(ValueError):
@@ -304,6 +332,23 @@ def _clean_actor(value: Any) -> str:
     return _clean_identifier(str(value or "local_user"), "actor", maximum=80)
 
 
+def _require_import_channel_authorized(
+    packet: dict[str, Any],
+    *,
+    actor: str,
+) -> None:
+    if (
+        packet["source_channel"]
+        in {OFFICIAL_SOURCE_CHANNEL, FUTU_ANOMALY_SOURCE_CHANNEL}
+        and actor != _SOURCE_MONITORING_WORKER_ACTOR
+    ):
+        raise SourceInboxError(
+            "保留的持续监控来源通道只能由内部监控 Worker 导入。",
+            code="SOURCE_INBOX_MONITORING_CHANNEL_UNAUTHORIZED",
+            status=403,
+        )
+
+
 def _clean_state_version(value: Any) -> int:
     if type(value) is not int or value < 1:
         raise SourceInboxError(
@@ -315,6 +360,290 @@ def _clean_state_version(value: Any) -> int:
 
 def _row_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return dict(row)
+
+
+def _source_tier(source_channel: Any) -> str:
+    """Project a total provenance tier without changing claim verification."""
+
+    if source_channel == OFFICIAL_SOURCE_CHANNEL:
+        return OFFICIAL_SOURCE_CLASS
+    if source_channel == FUTU_ANOMALY_SOURCE_CHANNEL:
+        return READONLY_MARKET_SOURCE_CLASS
+    return "external_manual"
+
+
+def _clean_source_filter(value: Any) -> tuple[str, str, str]:
+    if value is None:
+        return "", "", ""
+    if type(value) is not str:
+        raise SourceInboxError(
+            "source 必须是 <channel>:<key> 字符串。",
+            code="SOURCE_INBOX_REQUEST_INVALID",
+        )
+    clean = value
+    if not clean:
+        raise SourceInboxError(
+            "source 必须是规范的 <channel>:<key>。",
+            code="SOURCE_INBOX_REQUEST_INVALID",
+        )
+    if len(clean) > 161:
+        raise SourceInboxError(
+            "source 过滤器过长。",
+            code="SOURCE_INBOX_REQUEST_INVALID",
+        )
+    channel, separator, source_key = clean.partition(":")
+    if (
+        separator != ":"
+        or _SOURCE_CHANNEL_RE.fullmatch(channel) is None
+        or _SOURCE_KEY_RE.fullmatch(source_key) is None
+    ):
+        raise SourceInboxError(
+            "source 必须是规范的 <channel>:<key>。",
+            code="SOURCE_INBOX_REQUEST_INVALID",
+        )
+    return f"{channel}:{source_key}", channel, source_key
+
+
+def _clean_unread_filter(value: Any) -> tuple[str, bool | None]:
+    if value is None:
+        return "", None
+    if type(value) is not str:
+        raise SourceInboxError(
+            "unread 必须是 true 或 false。",
+            code="SOURCE_INBOX_REQUEST_INVALID",
+        )
+    if value == "true":
+        return value, True
+    if value == "false":
+        return value, False
+    raise SourceInboxError(
+        "unread 必须是规范的小写 true 或 false。",
+        code="SOURCE_INBOX_REQUEST_INVALID",
+    )
+
+
+def _encode_notification_cursor(
+    sequence: int,
+    created_at: int,
+    item_id: str,
+) -> str:
+    if (
+        type(sequence) is not int
+        or not 0 <= sequence <= _MAX_NATIVE_INTEGER
+        or type(created_at) is not int
+        or not 0 <= created_at <= _MAX_NATIVE_INTEGER
+        or type(item_id) is not str
+        or (
+            item_id != ""
+            and (
+                len(item_id) > 160
+                or _IDENTIFIER_RE.fullmatch(item_id) is None
+            )
+        )
+        or (
+            (sequence == 0 and (created_at != 0 or item_id != ""))
+            or (sequence > 0 and item_id == "")
+        )
+    ):
+        raise SourceInboxError(
+            "通知游标位置无效。",
+            code="SOURCE_INBOX_CURSOR_INVALID",
+        )
+    basis = {
+        "version": SOURCE_INBOX_NOTIFICATION_CURSOR_VERSION,
+        "sequence": sequence,
+        "created_at": created_at,
+        "item_id": item_id,
+    }
+    envelope = {**basis, "sha256": canonical_sha256(basis)}
+    return base64.urlsafe_b64encode(
+        _canonical_json(envelope).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+
+
+def _decode_notification_cursor(value: Any) -> tuple[int, int, str]:
+    if type(value) is not str or _CURSOR_TOKEN_RE.fullmatch(value) is None:
+        raise SourceInboxError(
+            "通知游标无效。",
+            code="SOURCE_INBOX_CURSOR_INVALID",
+        )
+    padding = "=" * ((4 - len(value) % 4) % 4)
+    try:
+        raw = base64.b64decode(
+            (value + padding).encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
+        if len(raw) > 1_024:
+            raise ValueError("cursor payload too large")
+        envelope = json.loads(raw.decode("utf-8", errors="strict"))
+    except (
+        UnicodeError,
+        ValueError,
+        TypeError,
+        binascii.Error,
+        json.JSONDecodeError,
+    ) as exc:
+        raise SourceInboxError(
+            "通知游标无法解析。",
+            code="SOURCE_INBOX_CURSOR_INVALID",
+        ) from exc
+    if type(envelope) is not dict or set(envelope) != {
+        "version",
+        "sequence",
+        "created_at",
+        "item_id",
+        "sha256",
+    }:
+        raise SourceInboxError(
+            "通知游标结构无效。",
+            code="SOURCE_INBOX_CURSOR_INVALID",
+        )
+    sequence = envelope.get("sequence")
+    created_at = envelope.get("created_at")
+    item_id = envelope.get("item_id")
+    basis = {
+        "version": envelope.get("version"),
+        "sequence": sequence,
+        "created_at": created_at,
+        "item_id": item_id,
+    }
+    if (
+        envelope.get("version") != SOURCE_INBOX_NOTIFICATION_CURSOR_VERSION
+        or type(sequence) is not int
+        or not 0 <= sequence <= _MAX_NATIVE_INTEGER
+        or type(created_at) is not int
+        or not 0 <= created_at <= _MAX_NATIVE_INTEGER
+        or type(item_id) is not str
+        or (
+            item_id != ""
+            and (
+                len(item_id) > 160
+                or _IDENTIFIER_RE.fullmatch(item_id) is None
+            )
+        )
+        or (
+            (sequence == 0 and (created_at != 0 or item_id != ""))
+            or (sequence > 0 and item_id == "")
+        )
+        or type(envelope.get("sha256")) is not str
+        or envelope["sha256"] != canonical_sha256(basis)
+        or _encode_notification_cursor(sequence, created_at, item_id) != value
+    ):
+        raise SourceInboxError(
+            "通知游标校验失败。",
+            code="SOURCE_INBOX_CURSOR_INVALID",
+        )
+    return sequence, created_at, item_id
+
+
+def _trading_impact_source_class(source_channel: Any) -> str:
+    if source_channel == OFFICIAL_SOURCE_CHANNEL:
+        return OFFICIAL_SOURCE_CLASS
+    if source_channel == FUTU_ANOMALY_SOURCE_CHANNEL:
+        return READONLY_MARKET_SOURCE_CLASS
+    raise SourceInboxError(
+        "确定性影响规则只接受封闭的监控来源通道。",
+        code="SOURCE_INBOX_IMPACT_SOURCE_BINDING_INVALID",
+        status=409,
+    )
+
+
+def _trading_impact_accounting(
+    rules: TradingImpactRulesV1,
+    records: list[dict[str, Any]],
+    *,
+    evaluated_count: int,
+    created_projection_count: int,
+    reused_projection_count: int,
+    not_evaluated_count: int,
+) -> dict[str, Any]:
+    counters = (
+        evaluated_count,
+        created_projection_count,
+        reused_projection_count,
+        not_evaluated_count,
+    )
+    if any(type(value) is not int or value < 0 for value in counters):
+        raise SourceInboxError(
+            "确定性影响规则计数无效。",
+            code="SOURCE_INBOX_IMPACT_ACCOUNTING_INVALID",
+            status=500,
+        )
+    matched_count = 0
+    no_match_count = 0
+    current_record_count = 0
+    for record in records:
+        if type(record) is not dict or type(record.get("projection")) is not dict:
+            raise SourceInboxError(
+                "确定性影响投影读回无效。",
+                code="SOURCE_INBOX_RECORD_CORRUPT",
+                status=409,
+            )
+        projection = record["projection"]
+        if projection.get("ruleset_version") != rules.ruleset_version:
+            continue
+        current_record_count += 1
+        if projection.get("ruleset_sha256") != rules.ruleset_sha256:
+            raise SourceInboxError(
+                "同一确定性影响规则版本的 manifest 已漂移。",
+                code="SOURCE_INBOX_IMPACT_RULESET_CONFLICT",
+                status=409,
+            )
+        evaluation = projection.get("evaluation")
+        if evaluation == "matched":
+            matched_count += 1
+        elif evaluation == "no_match":
+            no_match_count += 1
+        else:
+            raise SourceInboxError(
+                "确定性影响投影状态无效。",
+                code="SOURCE_INBOX_RECORD_CORRUPT",
+                status=409,
+            )
+    if current_record_count != created_projection_count + reused_projection_count:
+        raise SourceInboxError(
+            "确定性影响投影处置计数不一致。",
+            code="SOURCE_INBOX_IMPACT_ACCOUNTING_INVALID",
+            status=500,
+        )
+    if (
+        (evaluated_count == 0 and created_projection_count != 0)
+        or (
+            evaluated_count > 0
+            and (
+                evaluated_count != current_record_count
+                or not_evaluated_count != 0
+            )
+        )
+    ):
+        raise SourceInboxError(
+            "确定性影响评估计数与持久化处置不一致。",
+            code="SOURCE_INBOX_IMPACT_ACCOUNTING_INVALID",
+            status=500,
+        )
+    return {
+        "version": TRADING_IMPACT_IMPORT_ACCOUNTING_VERSION,
+        "enabled": True,
+        "scope": "impact_engine_only",
+        "ruleset_version": rules.ruleset_version,
+        "ruleset_sha256": rules.ruleset_sha256,
+        "evaluated_count": evaluated_count,
+        "matched_count": matched_count,
+        "no_match_count": no_match_count,
+        "created_projection_count": created_projection_count,
+        "reused_projection_count": reused_projection_count,
+        "not_evaluated_count": not_evaluated_count,
+        "safety": {
+            "execution_capability": "none",
+            "live_trading_allowed": False,
+            "provider_calls_performed": 0,
+            "model_calls_performed": 0,
+            "network_requests_performed": 0,
+            "market_calls_performed": 0,
+            "formal_rounds_created": 0,
+        },
+    }
 
 
 class SourceInboxService:
@@ -756,6 +1085,19 @@ class SourceInboxService:
             )
             and (expires_at == 0 or expires_at >= created_at)
         )
+        try:
+            impact_rule_projections = list_verified_trading_impact_projections(
+                connection,
+                item_id=item_id,
+                source_item=item,
+                source_item_sha256=item_sha256,
+            )
+        except SourceInboxTradingImpactError as exc:
+            raise SourceInboxError(
+                "来源条目的确定性影响 sidecar 已损坏。",
+                code="SOURCE_INBOX_RECORD_CORRUPT",
+                status=409,
+            ) from exc
         attachment_rows = connection.execute(
             """SELECT * FROM source_inbox_attachments
                WHERE item_id=? ORDER BY attached_at,id""",
@@ -948,11 +1290,13 @@ class SourceInboxService:
                 )
             )
         )
+        source_channel = str(import_record["row"].get("source_channel") or "")
         projection = {
             "version": SOURCE_INBOX_ITEM_RECORD_VERSION,
             "id": item_id,
-            "source_channel": str(import_record["row"].get("source_channel") or ""),
+            "source_channel": source_channel,
             "source_key": str(import_record["row"].get("source_key") or ""),
+            "source_tier": _source_tier(source_channel),
             "external_run_id": str(import_record["row"].get("external_run_id") or ""),
             "received_at": _stored_int(import_record["row"], "received_at"),
             "server_fingerprint": str(data.get("server_fingerprint") or ""),
@@ -967,6 +1311,7 @@ class SourceInboxService:
             "updated_at": updated_at,
             "external_claims_verification": EXTERNAL_UNVERIFIED,
             "item": item,
+            "impact_rule_projections": impact_rule_projections,
             "attachments": attachments,
             "round_drafts": drafts,
             "safety": {
@@ -995,12 +1340,58 @@ class SourceInboxService:
             (item_id,),
         ).fetchone()
 
-    def import_packet(self, raw: Any, *, actor: str = "local_user") -> dict[str, Any]:
+    def preview_packet(
+        self,
+        raw: Any,
+        *,
+        actor: str = "local_user",
+    ) -> dict[str, Any]:
+        """Validate one exact manual packet without opening the store."""
+
         received_at = self._now_ms()
         clean_actor = _clean_actor(actor)
         packet, provisional_receipt = accept_source_import(
             raw,
             received_at_ms=received_at,
+        )
+        _require_import_channel_authorized(packet, actor=clean_actor)
+        return build_source_import_preview(
+            packet,
+            provisional_receipt,
+            received_at_ms=received_at,
+        )
+
+    def import_packet(
+        self,
+        raw: Any,
+        *,
+        actor: str = "local_user",
+        impact_rules: TradingImpactRulesV1 | None = None,
+    ) -> dict[str, Any]:
+        received_at = self._now_ms()
+        clean_actor = _clean_actor(actor)
+        if impact_rules is not None:
+            if type(impact_rules) is not TradingImpactRulesV1:
+                raise SourceInboxError(
+                    "确定性影响规则引擎类型无效。",
+                    code="SOURCE_INBOX_IMPACT_RULES_INVALID",
+                    status=409,
+                )
+            if clean_actor != _SOURCE_MONITORING_WORKER_ACTOR:
+                raise SourceInboxError(
+                    "只有内部监控 Worker 可以请求确定性影响投影。",
+                    code="SOURCE_INBOX_IMPACT_RULES_UNAUTHORIZED",
+                    status=403,
+                )
+        packet, provisional_receipt = accept_source_import(
+            raw,
+            received_at_ms=received_at,
+        )
+        _require_import_channel_authorized(packet, actor=clean_actor)
+        impact_source_class = (
+            _trading_impact_source_class(packet["source_channel"])
+            if impact_rules is not None
+            else ""
         )
         import_key_sha256 = str(provisional_receipt["import_key_sha256"])
         normalized_sha256 = str(provisional_receipt["normalized_packet_sha256"])
@@ -1029,19 +1420,37 @@ class SourceInboxService:
                     for link in verified_import["links"]
                 ]
                 _require_record(all(item_row is not None for item_row in item_rows))
-                return {
+                projected_items = [
+                    self._item_projection(connection, row, include_events=False)
+                    for row in item_rows
+                ]
+                result = {
                     "version": SOURCE_INBOX_IMPORT_RESULT_VERSION,
                     "import_id": str(verified_import["row"]["id"]),
                     "status": str(verified_import["row"]["status"]),
                     "receipt": verified_import["receipt"],
-                    "items": [
-                        self._item_projection(connection, row, include_events=False)
-                        for row in item_rows
-                    ],
+                    "items": projected_items,
                     "idempotent_replay": True,
                     "created_item_count": 0,
                     "duplicate_item_count": len(item_rows),
                 }
+                if impact_rules is not None:
+                    stored_records = [
+                        record
+                        for projected_item in projected_items
+                        for record in projected_item["impact_rule_projections"]
+                        if record["projection"].get("ruleset_version")
+                        == impact_rules.ruleset_version
+                    ]
+                    result["trading_impact_rules"] = _trading_impact_accounting(
+                        impact_rules,
+                        stored_records,
+                        evaluated_count=0,
+                        created_projection_count=0,
+                        reused_projection_count=len(stored_records),
+                        not_evaluated_count=len(item_rows) - len(stored_records),
+                    )
+                return result
 
             decisions: list[dict[str, Any]] = []
             created_count = 0
@@ -1080,6 +1489,29 @@ class SourceInboxService:
                     "fingerprint": fingerprint,
                     "existing_item_id": existing_item_id,
                 })
+            impact_candidates = (
+                [
+                    TradingImpactRulesV1.project_item(
+                        decision["item"],
+                        item_sha256=decision["item_sha256"],
+                        adapter_id=packet["source_key"],
+                        source_class=impact_source_class,
+                        source_channel=packet["source_channel"],
+                    )
+                    for decision in decisions
+                ]
+                if impact_rules is not None
+                else []
+            )
+            if any(
+                type(candidate) is not TradingImpactProjection
+                for candidate in impact_candidates
+            ):
+                raise SourceInboxError(
+                    "确定性影响规则返回了无效投影类型。",
+                    code="SOURCE_INBOX_IMPACT_PROJECTION_INVALID",
+                    status=409,
+                )
             status = (
                 SOURCE_STATUS_DUPLICATE
                 if decisions and created_count == 0
@@ -1198,6 +1630,25 @@ class SourceInboxService:
                     (import_id, item_id, position, disposition),
                 )
                 item_ids.append(item_id)
+            impact_insert_results = []
+            if impact_rules is not None:
+                for item_id, decision, projection in zip(
+                    item_ids,
+                    decisions,
+                    impact_candidates,
+                    strict=True,
+                ):
+                    impact_insert_results.append(
+                        insert_or_verify_trading_impact_projection(
+                            connection,
+                            evaluation_import_id=import_id,
+                            item_id=item_id,
+                            source_item=decision["item"],
+                            source_item_sha256=decision["item_sha256"],
+                            projection=projection,
+                            created_at_ms=received_at,
+                        )
+                    )
             self._verify_import_record(connection, import_id)
             projected_items = []
             for item_id in item_ids:
@@ -1211,7 +1662,7 @@ class SourceInboxService:
                 projected_items.append(
                     self._item_projection(connection, row, include_events=False)
                 )
-            return {
+            result = {
                 "version": SOURCE_INBOX_IMPORT_RESULT_VERSION,
                 "import_id": import_id,
                 "status": status,
@@ -1221,12 +1672,33 @@ class SourceInboxService:
                 "created_item_count": created_count,
                 "duplicate_item_count": duplicate_count,
             }
+            if impact_rules is not None:
+                impact_records = [entry["record"] for entry in impact_insert_results]
+                impact_created_count = sum(
+                    entry["disposition"] == "CREATED"
+                    for entry in impact_insert_results
+                )
+                impact_reused_count = sum(
+                    entry["disposition"] == "REUSED"
+                    for entry in impact_insert_results
+                )
+                result["trading_impact_rules"] = _trading_impact_accounting(
+                    impact_rules,
+                    impact_records,
+                    evaluated_count=len(impact_candidates),
+                    created_projection_count=impact_created_count,
+                    reused_projection_count=impact_reused_count,
+                    not_evaluated_count=0,
+                )
+            return result
 
     def list_items(
         self,
         *,
         state: str = "",
         query: str = "",
+        source: str | None = None,
+        unread: str | None = None,
         limit: int = 100,
     ) -> dict[str, Any]:
         clean_state = str(state or "").strip().upper()
@@ -1241,6 +1713,8 @@ class SourceInboxService:
                 code="SOURCE_INBOX_REQUEST_INVALID",
             )
         clean_query = str(query or "").strip()[:200]
+        clean_source, source_channel, source_key = _clean_source_filter(source)
+        clean_unread, unread_filter = _clean_unread_filter(unread)
         clauses: list[str] = []
         parameters: list[Any] = []
         if clean_state:
@@ -1250,35 +1724,81 @@ class SourceInboxService:
             clauses.append("(item.headline LIKE ? ESCAPE '\\' OR item.summary LIKE ? ESCAPE '\\')")
             escaped = clean_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             parameters.extend([f"%{escaped}%", f"%{escaped}%"])
+        if clean_source:
+            clauses.extend(("imports.source_channel=?", "imports.source_key=?"))
+            parameters.extend((source_channel, source_key))
+        if unread_filter is True:
+            clauses.append("item.acknowledged_at=0")
+        elif unread_filter is False:
+            clauses.append("item.acknowledged_at>0")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        parameters.append(limit)
         with closing(self.store._connect()) as connection:
             connection.execute("BEGIN")
             rows = connection.execute(
                 f"""SELECT item.*,imports.source_channel,imports.source_key,
                            imports.external_run_id,imports.received_at
-                    FROM source_inbox_items item
-                    JOIN source_inbox_imports imports ON imports.id=item.origin_import_id
-                    {where}
-                    ORDER BY item.updated_at DESC,item.id DESC LIMIT ?""",
-                parameters,
+                     FROM source_inbox_items item
+                     JOIN source_inbox_imports imports ON imports.id=item.origin_import_id
+                     {where}
+                     ORDER BY item.updated_at DESC,item.id DESC LIMIT ?""",
+                [*parameters, limit],
             ).fetchall()
             items = [
                 self._item_projection(connection, row, include_events=False)
                 for row in rows
             ]
+            matched_row = connection.execute(
+                f"""SELECT COUNT(*) AS count
+                     FROM source_inbox_items item
+                     JOIN source_inbox_imports imports ON imports.id=item.origin_import_id
+                     {where}""",
+                parameters,
+            ).fetchone()
+            totals_row = connection.execute(
+                """SELECT COUNT(*) AS total_count,
+                          SUM(CASE WHEN acknowledged_at=0 THEN 1 ELSE 0 END) AS unread_count
+                     FROM source_inbox_items"""
+            ).fetchone()
             counts = {
                 str(row["state"]): int(row["count"])
                 for row in connection.execute(
                     "SELECT state,COUNT(*) AS count FROM source_inbox_items GROUP BY state"
                 ).fetchall()
             }
+            source_facets = []
+            for row in connection.execute(
+                """SELECT imports.source_channel,imports.source_key,
+                          COUNT(*) AS count,
+                          SUM(CASE WHEN item.acknowledged_at=0 THEN 1 ELSE 0 END)
+                              AS unread_count
+                     FROM source_inbox_items item
+                     JOIN source_inbox_imports imports ON imports.id=item.origin_import_id
+                    GROUP BY imports.source_channel,imports.source_key
+                    ORDER BY imports.source_channel,imports.source_key"""
+            ).fetchall():
+                facet_channel = str(row["source_channel"])
+                facet_key = str(row["source_key"])
+                source_facets.append({
+                    "source": f"{facet_channel}:{facet_key}",
+                    "source_channel": facet_channel,
+                    "source_key": facet_key,
+                    "source_tier": _source_tier(facet_channel),
+                    "count": int(row["count"]),
+                    "unread_count": int(row["unread_count"] or 0),
+                })
+            assert matched_row is not None and totals_row is not None
         return {
             "version": SOURCE_INBOX_LIST_VERSION,
             "items": items,
             "counts": counts,
+            "total_count": int(totals_row["total_count"]),
+            "unread_count": int(totals_row["unread_count"] or 0),
+            "matched_count": int(matched_row["count"]),
+            "source_facets": source_facets,
             "query": clean_query,
             "state": clean_state,
+            "source": clean_source,
+            "unread": clean_unread,
             "limit": limit,
         }
 
@@ -1292,6 +1812,161 @@ class SourceInboxService:
                 if row is not None
                 else None
             )
+
+    def list_notifications(
+        self,
+        *,
+        after: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Return a cursor-bounded feed without replaying historical items."""
+
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise SourceInboxError(
+                "limit 必须位于 1 到 100。",
+                code="SOURCE_INBOX_REQUEST_INVALID",
+            )
+        after_position = None if after is None else _decode_notification_cursor(after)
+        with closing(self.store._connect()) as connection:
+            connection.execute("BEGIN")
+            # Source Inbox items are append-only through this service. SQLite rowid
+            # therefore supplies the total insertion order that created_at alone
+            # cannot provide within one millisecond. Every nonzero cursor is bound
+            # back to its row below, so VACUUM/deletion/foreign-database cursors fail
+            # closed instead of silently skipping or replaying events.
+            head_row = connection.execute(
+                """SELECT rowid AS notification_sequence,created_at,id
+                     FROM source_inbox_items
+                    ORDER BY rowid DESC LIMIT 1"""
+            ).fetchone()
+            head_position = (
+                (
+                    int(head_row["notification_sequence"]),
+                    int(head_row["created_at"]),
+                    str(head_row["id"]),
+                )
+                if head_row is not None
+                else (0, 0, "")
+            )
+            head_cursor = _encode_notification_cursor(*head_position)
+            unread_row = connection.execute(
+                """SELECT COUNT(*) AS count FROM source_inbox_items
+                   WHERE acknowledged_at=0"""
+            ).fetchone()
+            assert unread_row is not None
+            unread_count = int(unread_row["count"])
+            if after_position is None:
+                return {
+                    "version": SOURCE_INBOX_NOTIFICATION_FEED_VERSION,
+                    "baseline": True,
+                    "notifications": [],
+                    "cursor": head_cursor,
+                    "head_cursor": head_cursor,
+                    "unread_count": unread_count,
+                    "has_more": False,
+                    "limit": limit,
+                    "safety": {
+                        "external_claims_verification": EXTERNAL_UNVERIFIED,
+                        "execution_capability": "none",
+                        "live_trading_allowed": False,
+                        "provider_calls_performed": 0,
+                        "market_calls_performed": 0,
+                        "formal_rounds_created": 0,
+                    },
+                }
+            if after_position[0] > head_position[0]:
+                raise SourceInboxError(
+                    "通知游标超出当前不可变事件头。",
+                    code="SOURCE_INBOX_CURSOR_INVALID",
+                )
+            if after_position[0] > 0:
+                cursor_row = connection.execute(
+                    """SELECT rowid AS notification_sequence,created_at,id
+                         FROM source_inbox_items WHERE rowid=?""",
+                    (after_position[0],),
+                ).fetchone()
+                if (
+                    cursor_row is None
+                    or (
+                        int(cursor_row["notification_sequence"]),
+                        int(cursor_row["created_at"]),
+                        str(cursor_row["id"]),
+                    )
+                    != after_position
+                ):
+                    raise SourceInboxError(
+                        "通知游标不属于当前不可变事件序列。",
+                        code="SOURCE_INBOX_CURSOR_INVALID",
+                    )
+            rows = connection.execute(
+                """SELECT item.rowid AS notification_sequence,item.*,
+                          imports.source_channel,imports.source_key,
+                          imports.external_run_id,imports.received_at
+                     FROM source_inbox_items item
+                     JOIN source_inbox_imports imports
+                       ON imports.id=item.origin_import_id
+                    WHERE item.acknowledged_at=0
+                      AND item.rowid>?
+                      AND item.rowid<=?
+                    ORDER BY item.rowid LIMIT ?""",
+                (
+                    after_position[0],
+                    head_position[0],
+                    limit + 1,
+                ),
+            ).fetchall()
+            has_more = len(rows) > limit
+            page_rows = rows[:limit]
+            notifications = []
+            for row in page_rows:
+                item = self._item_projection(connection, row, include_events=False)
+                source_item = item["item"]
+                notifications.append({
+                    "version": SOURCE_INBOX_NOTIFICATION_VERSION,
+                    "id": item["id"],
+                    "created_at": item["created_at"],
+                    "source_channel": item["source_channel"],
+                    "source_key": item["source_key"],
+                    "source_tier": item["source_tier"],
+                    "item_type": source_item["item_type"],
+                    "severity": source_item["severity"],
+                    "occurred_at": source_item["occurred_at"],
+                    "headline": source_item["headline"],
+                    "acknowledged": False,
+                    "external_claims_verification": EXTERNAL_UNVERIFIED,
+                    "safety": {
+                        "fact_confirmation": False,
+                        "approval": False,
+                        "execution_authorization": False,
+                    },
+                })
+            next_position = (
+                (
+                    int(page_rows[-1]["notification_sequence"]),
+                    int(page_rows[-1]["created_at"]),
+                    str(page_rows[-1]["id"]),
+                )
+                if has_more and page_rows
+                else head_position
+            )
+        return {
+            "version": SOURCE_INBOX_NOTIFICATION_FEED_VERSION,
+            "baseline": False,
+            "notifications": notifications,
+            "cursor": _encode_notification_cursor(*next_position),
+            "head_cursor": head_cursor,
+            "unread_count": unread_count,
+            "has_more": has_more,
+            "limit": limit,
+            "safety": {
+                "external_claims_verification": EXTERNAL_UNVERIFIED,
+                "execution_capability": "none",
+                "live_trading_allowed": False,
+                "provider_calls_performed": 0,
+                "market_calls_performed": 0,
+                "formal_rounds_created": 0,
+            },
+        }
 
     def acknowledge(
         self,
@@ -1797,6 +2472,9 @@ __all__ = [
     "SOURCE_INBOX_IMPORT_RESULT_VERSION",
     "SOURCE_INBOX_ITEM_RECORD_VERSION",
     "SOURCE_INBOX_LIST_VERSION",
+    "SOURCE_INBOX_NOTIFICATION_CURSOR_VERSION",
+    "SOURCE_INBOX_NOTIFICATION_FEED_VERSION",
+    "SOURCE_INBOX_NOTIFICATION_VERSION",
     "SOURCE_INBOX_ROUND_DRAFT_VERSION",
     "SourceInboxError",
     "SourceInboxService",

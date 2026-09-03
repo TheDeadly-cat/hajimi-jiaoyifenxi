@@ -520,6 +520,172 @@ class FutuReadOnlyAdapterTests(unittest.TestCase):
         self.assertEqual(first["snapshot_id"], second["snapshot_id"])
         self.assertEqual(len(sdk.snapshot_calls), 1)
 
+    def test_quote_cache_uses_only_injected_monotonic_clock(self) -> None:
+        ticks = {"value": 100.0, "calls": 0}
+
+        def monotonic_clock() -> float:
+            ticks["calls"] += 1
+            return ticks["value"]
+
+        sdk = FakeFutuSdk()
+        adapter = FutuUsMarketAdapter(
+            sdk_module=sdk,
+            socket_probe=lambda _host, _port: True,
+            clock=lambda: FIXED_NOW,
+            monotonic_clock=monotonic_clock,
+            cache_ttl_seconds=30,
+        )
+
+        first = adapter.quote_batch(STORAGE_SYMBOLS)
+        self.assertFalse(first["cache"]["hit"])
+        self.assertEqual(ticks["calls"], 2)
+
+        ticks["value"] = 129.999
+        second = adapter.quote_batch(STORAGE_SYMBOLS)
+        self.assertTrue(second["cache"]["hit"])
+        self.assertEqual(ticks["calls"], 3)
+
+        ticks["value"] = 130.0
+        third = adapter.quote_batch(STORAGE_SYMBOLS)
+        self.assertFalse(third["cache"]["hit"])
+        self.assertEqual(ticks["calls"], 5)
+        self.assertEqual(len(sdk.snapshot_calls), 2)
+
+    def test_revenue_rate_limit_uses_only_injected_monotonic_clock(self) -> None:
+        ticks = {"value": 100.0, "calls": 0}
+
+        def monotonic_clock() -> float:
+            ticks["calls"] += 1
+            return ticks["value"]
+
+        adapter = FutuUsMarketAdapter(
+            sdk_module=FakeFutuSdk(),
+            socket_probe=lambda _host, _port: True,
+            clock=lambda: FIXED_NOW,
+            monotonic_clock=monotonic_clock,
+        )
+
+        for _index in range(30):
+            adapter._reserve_revenue_request()
+        with self.assertRaises(RuntimeError):
+            adapter._reserve_revenue_request()
+
+        ticks["value"] = 130.0
+        adapter._reserve_revenue_request()
+
+        self.assertEqual(ticks["calls"], 32)
+        self.assertEqual(adapter._revenue_request_times, [130.0])
+
+    def test_invalid_monotonic_values_fail_before_any_opend_call(self) -> None:
+        class FloatSubclass(float):
+            pass
+
+        invalid_values = (
+            True,
+            "100",
+            FloatSubclass(100.0),
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            -0.001,
+            10**1000,
+        )
+        for invalid_value in invalid_values:
+            for operation in ("quotes", "revenue"):
+                with self.subTest(value=repr(invalid_value), operation=operation):
+                    sdk = FakeFutuSdk()
+                    probe_calls: list[tuple[str, int]] = []
+                    adapter = FutuUsMarketAdapter(
+                        sdk_module=sdk,
+                        socket_probe=lambda host, port: probe_calls.append((host, port)) or True,
+                        clock=lambda: FIXED_NOW,
+                        monotonic_clock=lambda invalid_value=invalid_value: invalid_value,
+                    )
+
+                    with self.assertRaises((TypeError, ValueError)):
+                        if operation == "quotes":
+                            adapter.quote_batch(["US.MU"])
+                        else:
+                            adapter.revenue_breakdown_batch(["US.MU"])
+
+                    self.assertEqual(probe_calls, [])
+                    self.assertEqual(sdk.open_calls, 0)
+                    self.assertEqual(sdk.snapshot_calls, [])
+                    self.assertEqual(sdk.revenue_breakdown_calls, [])
+
+        sdk = FakeFutuSdk()
+        probe_calls: list[tuple[str, int]] = []
+        monotonic_values = iter((100.0, float("nan")))
+        adapter = FutuUsMarketAdapter(
+            sdk_module=sdk,
+            socket_probe=lambda host, port: probe_calls.append((host, port)) or True,
+            clock=lambda: FIXED_NOW,
+            monotonic_clock=lambda: next(monotonic_values),
+        )
+
+        with self.assertRaises(ValueError):
+            adapter.quote_batch(["US.MU"])
+
+        self.assertEqual(probe_calls, [])
+        self.assertEqual(sdk.open_calls, 0)
+        self.assertEqual(sdk.snapshot_calls, [])
+
+    def test_snapshot_id_factory_is_injected_and_strictly_validated(self) -> None:
+        factory_calls: list[str] = []
+        sdk = FakeFutuSdk()
+        adapter = FutuUsMarketAdapter(
+            sdk_module=sdk,
+            socket_probe=lambda _host, _port: True,
+            clock=lambda: FIXED_NOW,
+            monotonic_clock=lambda: 100.0,
+            snapshot_id_factory=lambda: factory_calls.append("called") or "futu_fixture_snapshot",
+        )
+
+        first = adapter.quote_batch(["US.MU"])
+        second = adapter.quote_batch(["US.MU"])
+
+        self.assertEqual(first["snapshot_id"], "futu_fixture_snapshot")
+        self.assertEqual(second["snapshot_id"], "futu_fixture_snapshot")
+        self.assertEqual(factory_calls, ["called"])
+        self.assertRegex(
+            self.make_adapter(FakeFutuSdk()).quote_batch(["US.MU"])["snapshot_id"],
+            r"^futu_[0-9a-f]{16}$",
+        )
+
+    def test_invalid_snapshot_ids_fail_before_any_opend_call(self) -> None:
+        class StrSubclass(str):
+            pass
+
+        invalid_values = (
+            None,
+            123,
+            StrSubclass("futu_subclass"),
+            "",
+            " futu_leading_space",
+            "futu_trailing_space ",
+            "futu_two\nlines",
+            "futu_control\tcharacter",
+            "x" * 129,
+        )
+        for invalid_value in invalid_values:
+            with self.subTest(value=repr(invalid_value)):
+                sdk = FakeFutuSdk()
+                probe_calls: list[tuple[str, int]] = []
+                adapter = FutuUsMarketAdapter(
+                    sdk_module=sdk,
+                    socket_probe=lambda host, port: probe_calls.append((host, port)) or True,
+                    clock=lambda: FIXED_NOW,
+                    monotonic_clock=lambda: 100.0,
+                    snapshot_id_factory=lambda invalid_value=invalid_value: invalid_value,
+                )
+
+                with self.assertRaises((TypeError, ValueError)):
+                    adapter.quote_batch(["US.MU"])
+
+                self.assertEqual(probe_calls, [])
+                self.assertEqual(sdk.open_calls, 0)
+                self.assertEqual(sdk.snapshot_calls, [])
+
     def test_upstream_failure_never_creates_fake_quotes(self) -> None:
         payload = self.make_adapter(FakeFutuSdk(snapshot_error=True)).quote_batch(STORAGE_SYMBOLS)
 

@@ -18,6 +18,18 @@ const railFocusKeys = new Set([
   "End",
 ]);
 
+const MAX_SOURCE_INBOX_UNREAD_COUNT = 100;
+
+function sourceInboxUnreadBadge(value) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    return { count: 0, label: "", text: "" };
+  }
+  const count = Math.min(value, MAX_SOURCE_INBOX_UNREAD_COUNT);
+  return count === MAX_SOURCE_INBOX_UNREAD_COUNT
+    ? { count, label: "99 条以上未读", text: "99+" }
+    : { count, label: `${count} 条未读`, text: String(count) };
+}
+
 function moveRailFocus(event) {
   if (!railFocusKeys.has(event.key)) return;
   const buttons = Array.from(
@@ -45,7 +57,9 @@ export function IconRail({
   onNavigate,
   onPreloadInspector,
   onPreloadSourceInbox,
+  sourceInboxUnreadCount = 0,
 }) {
+  const unreadBadge = sourceInboxUnreadBadge(sourceInboxUnreadCount);
   return (
     <nav className="icon-rail" aria-label="全局导航">
       <div className="brand-mark" role="img" aria-label="AI 共创室·值班喵">
@@ -58,16 +72,19 @@ export function IconRail({
             : section === "rooms"
               ? undefined
               : onPreloadInspector;
+          const accessibleLabel = section === "source-inbox" && unreadBadge.count
+            ? `${label}，${unreadBadge.label}`
+            : label;
           return (
             <button
               key={section}
               className={activeSection === section ? "rail-button active" : "rail-button"}
               type="button"
-              title={label}
-              aria-label={label}
+              title={accessibleLabel}
+              aria-label={accessibleLabel}
               aria-current={activeSection === section ? "page" : undefined}
               tabIndex={activeSection === section ? 0 : -1}
-              data-label={label}
+              data-label={accessibleLabel}
               data-section={section}
               onClick={(event) => onNavigate(section, event.currentTarget)}
               onKeyDown={moveRailFocus}
@@ -76,6 +93,11 @@ export function IconRail({
               onPointerEnter={preload}
             >
               <Icon size={20} strokeWidth={1.8} aria-hidden="true" focusable="false" />
+              {section === "source-inbox" && unreadBadge.count ? (
+                <span className="source-inbox-unread-badge" aria-hidden="true">
+                  {unreadBadge.text}
+                </span>
+              ) : null}
             </button>
           );
         })}

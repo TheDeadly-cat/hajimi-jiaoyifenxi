@@ -3,7 +3,7 @@
   "layers": [
     {
       "id": "migration",
-      "description": "P0 SQLite startup, preview, backup, authorization, apply, recovery, and ownership gates.",
+      "description": "P0 SQLite startup, preview, backup, authorization, apply, recovery, ownership, and soak-inventory gates.",
       "selection": "modules",
       "tests": [
         "tests.test_database_migration",
@@ -11,6 +11,9 @@
         "tests.test_database_migration_hard_gate_edges",
         "tests.test_database_migration_recovery",
         "tests.test_instance_ownership",
+        "tests.test_source_monitoring_operations_migration",
+        "tests.test_source_monitoring_soak_cli",
+        "tests.test_source_monitoring_soak_db_inventory",
         "tests.test_store_import_isolation",
         "tests.test_store_startup_hardening"
       ],
@@ -19,7 +22,7 @@
     },
     {
       "id": "core",
-      "description": "Fast host-kernel, protocol, launch, ledger, safety, and local HTTP gates.",
+      "description": "Fast host-kernel, protocol, launch, ledger, soak-runtime, safety, and local HTTP gates.",
       "selection": "modules",
       "tests": [
         "tests.test_backend_test_layers",
@@ -38,6 +41,12 @@
         "tests.test_round_launch_plan",
         "tests.test_round_objective_validation",
         "tests.test_server_pause",
+        "tests.test_source_monitoring_operations",
+        "tests.test_source_monitoring_runtime",
+        "tests.test_source_monitoring_soak_evidence",
+        "tests.test_source_monitoring_soak_plan",
+        "tests.test_source_monitoring_soak_runner",
+        "tests.test_source_monitoring_soak_verifier",
         "tests.test_turn_contract",
         "tests.test_turn_envelope",
         "tests.test_workflow_policy",

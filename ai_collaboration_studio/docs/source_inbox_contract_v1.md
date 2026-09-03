@@ -21,6 +21,8 @@ authorization.
 ## Implemented host workflow
 
 ```text
+GET  /api/monitoring/imports/chatgpt/prompt-template
+POST /api/monitoring/imports/chatgpt/preview
 POST /api/monitoring/imports/chatgpt
 GET  /api/monitoring/inbox
 GET  /api/monitoring/events/{item_id}
@@ -36,6 +38,39 @@ preselected by the server. The draft endpoint stores a sealed launch-plan
 preview with `formal_round_created=false`, zero Provider/market calls, and a
 fresh user confirmation still required before any existing formal round launch
 flow can be entered.
+
+## Manual preview and GPT monitoring prompt
+
+`source_monitoring_prompt_template_v1` is a deterministic, hash-sealed template
+for manual copy/paste. Its default channel is `chatgpt_manual`; every visible
+`{{...}}` placeholder is intentionally non-importable until a person replaces
+it. The template asks for one `source_import_packet_v1`, public HTTP(S) evidence,
+and `external_unverified` handling. It does not open, log in to, navigate, or
+control a ChatGPT page, and it does not create or update a Scheduled Task.
+
+The template endpoint is read-only and `no-store`. It does not claim that the
+current account or workspace can create a task. If a user chooses to create one,
+that remains an explicit action in the current ChatGPT UI and its first runs
+must be reviewed there. OpenAI's current [Scheduled tasks
+documentation](https://learn.chatgpt.com/docs/automations) remains the external
+authority for product availability and runtime requirements. This applies only
+when Scheduled Tasks are enabled for the workspace; a desktop task that needs
+local files requires the computer on and the ChatGPT app running, while a web
+task cannot access a local folder directly.
+
+`source_import_preview_v1` reuses the same parser and normalizer as the real
+import, but returns before the SQLite lock or connection is touched. It reports
+normalized items, source counts, candidate hashes, and a zero-side-effect safety
+projection. It deliberately does not predict `new`, `duplicate`, replay, or
+conflict status because only the later import transaction can decide those
+states without a race.
+
+The frontend binds confirmation to the exact raw textarea snapshot sent to the
+preview endpoint. Any edit, including whitespace, invalidates the preview;
+restoring the old text does not revive it. Confirmation sends that stored raw
+snapshot to the existing import endpoint, which independently reparses and
+revalidates it inside the normal persistence workflow. Direct API import remains
+supported without a prior preview so existing callers are not silently changed.
 
 ## Public API
 
@@ -169,6 +204,19 @@ source URLs, and supplied content hashes. A store should place a uniqueness
 constraint on `(server_fingerprint_version, server_fingerprint)` and classify a
 replay as `DUPLICATE`; it must not silently discard a hash collision.
 
+The continuous-monitoring channels `official_source_monitor` and
+`futu_anomaly_monitor` are reserved for the in-process
+`source_monitoring_worker`. Local-user and ChatGPT/manual imports receive a
+403 before transaction start if they claim either channel. Manual JSON import
+remains available through its non-reserved channels and cannot manufacture
+official-monitor provenance by choosing a `source_key` label.
+
+The worker actor is an in-process routing boundary, not a sandbox against
+arbitrary Python already executing inside the trusted host. Dynamic third-party
+code execution is outside this version; code with host-process or raw-SQL
+authority can already bypass application provenance controls and must not be
+treated as an untrusted Source Inbox client.
+
 ## Receipt
 
 `source_import_receipt_v1` includes:
@@ -219,9 +267,9 @@ hosts, noncanonical numeric IP forms, and IP literals that are not globally
 routable. A later fetcher must still perform its own DNS resolution, redirect,
 rebinding, response-size, and content-type controls.
 
-## Integration boundary
+## Host persistence and remaining retention boundary
 
-A future store/HTTP integration should:
+The implemented store/HTTP integration must:
 
 1. call `accept_source_import` before opening the write transaction;
 2. recheck the deterministic import key and item fingerprints inside one
@@ -229,7 +277,35 @@ A future store/HTTP integration should:
 3. persist import receipt, items, and sources atomically;
 4. return `DUPLICATE` on an exact replay and a conflict on reused external run
    identity with different normalized semantics;
-5. keep raw packet retention policy-driven and default to hash/manifest-only;
+5. persist the normalized packet and sealed receipt under the current schema;
+   Phase 8 now binds these records to
+   `source_monitoring_retention_policy_v1 / retain_all_evidence`: there is no
+   automatic or scheduled cleanup, and an explicit attestation appends only a
+   zero-delete receipt. Any future destructive policy requires a new version
+   and new user authorization; see
+   [the Source Monitoring operations runbook](./source_monitoring_operations_runbook.md);
 6. expose only sanitized, bounded projections in a separately scoped read-only
    MCP capability;
 7. require an explicit user action before attachment or round drafting.
+
+## Versioned deterministic impact projections
+
+`trading_impact_rules_v1` does not extend or rewrite the normalized
+`project_source_item_v1`. Its result is an immutable sibling record exposed as
+`impact_rule_projections`; the stored item JSON, full-item SHA-256, server
+fingerprint, import receipt, attachment material, and round-draft hashes remain
+unchanged.
+
+The sidecar binds the exact source item and admitted monitoring source, stores
+both matched and explicit no-match evaluations, and declares
+`external_unverified`, zero model/provider/network/extra-market calls, zero
+formal rounds, and no execution capability. A same-version projection drift is
+a conflict. Exact import-key replay reads existing sidecars without recomputing
+or backfilling them. Its nested `trading_impact_source_semantics_v1` binding
+pins the parent-derived rule, security/form or macro/Futu selectors, actual
+evidence source index, and time anchor semantics. Projection validation binds
+every statement, area, evidence index, and time dimension to that value;
+insert/readback separately reproduce only the parent binding and require exact
+equality, without generating a projection or writing data. See
+`trading_impact_rules_phase5.md` for the closed rules,
+confidence meaning, counterevidence state, migration, and rollback boundary.

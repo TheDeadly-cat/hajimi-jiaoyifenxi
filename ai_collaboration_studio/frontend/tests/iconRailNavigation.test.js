@@ -22,6 +22,10 @@ test("icon rail binds list identity to sections and keeps activation explicit", 
   assert.match(source, /label: "来源收件箱", section: "source-inbox"/);
   assert.match(source, /section === "source-inbox"[\s\S]*onPreloadSourceInbox/);
   assert.match(source, /onFocus=\{preload\}[\s\S]*onPointerDown=\{preload\}[\s\S]*onPointerEnter=\{preload\}/);
+  assert.match(source, /sourceInboxUnreadCount = 0/);
+  assert.match(source, /aria-label=\{accessibleLabel\}/);
+  assert.match(source, /className="source-inbox-unread-badge" aria-hidden="true"/);
+  assert.doesNotMatch(source, /source-inbox-unread-badge[^>]*aria-live/);
 });
 
 test("rail focus wraps across vertical and compact horizontal orientations", () => {
@@ -62,5 +66,13 @@ test("rail visual focus feedback remains restrained under reduced motion", () =>
   assert.match(
     styles,
     /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.rail-button:focus-visible svg\s*\{\s*transform:\s*none;/,
+  );
+  assert.match(
+    styles,
+    /\.icon-rail \.source-inbox-unread-badge\s*\{[\s\S]*min-width:\s*17px;[\s\S]*pointer-events:\s*none;/,
+  );
+  assert.match(
+    styles,
+    /@media \(forced-colors: active\)[\s\S]*\.source-inbox-unread-badge\s*\{[\s\S]*border-color:\s*CanvasText;/,
   );
 });

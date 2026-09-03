@@ -53,7 +53,7 @@ try {
   });
 
   await page.goto(baseUrl.href, { waitUntil: "networkidle" });
-  await page.getByRole("button", { name: "来源收件箱", exact: true }).click();
+  await page.getByRole("button", { name: /^来源收件箱/ }).click();
   const panel = page.locator(".source-inbox-panel.open");
   await panel.waitFor({ state: "visible" });
   await page.getByText("external_unverified", { exact: true }).first().waitFor();
@@ -64,12 +64,23 @@ try {
     "已阅，不代表事实确认",
     "目标房间（手动选择）",
     "草稿不启动 Provider",
+    "工作状态（全局计数）",
+    "来源与阅读状态（全局计数）",
+    "确定性研究影响映射",
+    "不是方向预测、因果结论、盈利声明或执行授权",
   ]) {
     if (!initialText.includes(expected)) throw new Error(`missing boundary copy: ${expected}`);
   }
   if (await panel.locator(".source-inbox-room-actions select").inputValue() !== "") {
     throw new Error("room target was preselected");
   }
+  await panel.locator(".source-inbox-health summary").click();
+  await panel.getByText(/运行时在线性未核验/).waitFor();
+  await panel.getByRole("button", { name: "启用通知", exact: true }).waitFor();
+  const firstRow = panel.locator(".source-inbox-list-items .source-inbox-row").first();
+  await firstRow.click();
+  const selectedItemId = new URL(page.url()).searchParams.get("source_event");
+  if (!selectedItemId) throw new Error("selected Source Inbox event did not create a deep link");
 
   await page.screenshot({
     path: path.join(outputDir, "source-inbox-desktop-before.png"),
