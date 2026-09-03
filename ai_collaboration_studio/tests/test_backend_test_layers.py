@@ -144,6 +144,7 @@ class BackendTestLayerTests(unittest.TestCase):
             "tests.test_ci_delivery_contract",
             "tests.test_delivery_bootstrap",
             "tests.test_dependency_inventory",
+            "tests.test_formal_source_promotion_plan",
             "tests.test_host_delivery_endpoints",
             "tests.test_release_drill",
             "tests.test_source_backup",
