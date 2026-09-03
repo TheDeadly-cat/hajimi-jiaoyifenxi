@@ -496,15 +496,19 @@ function SourceMonitoringHealth({
   const notificationSupported = notificationState?.supported === true;
   const notificationEnabled = notificationState?.enabled === true;
   const notificationPermission = String(notificationState?.permission || "unsupported");
+  const runtimeNeedsAttention = health?.valid === true
+    && ["stalled", "failed"].includes(health.runtime.status);
   return (
     <details className="source-inbox-health">
       <summary>
         <span><Activity aria-hidden="true" size={15} /><strong>Adapter 健康</strong></span>
-        <small>
+        <small role={runtimeNeedsAttention ? "alert" : undefined}>
           {healthState.status === "loading"
             ? "读取中"
             : health?.valid
-              ? `${health.stateLabel} · ${health.adapters.length} 个`
+              ? runtimeNeedsAttention
+                ? `${health.runtime.statusLabel} · ${health.adapters.length} 个 Adapter`
+                : `${health.stateLabel} · ${health.adapters.length} 个`
               : healthState.status === "error"
                 ? "读取失败"
                 : "尚未读取"}
@@ -516,14 +520,36 @@ function SourceMonitoringHealth({
         ) : null}
         {health && !health.valid ? (
           <p className="source-inbox-notice error" role="alert">
-            Adapter 健康响应未满足零执行与在线性边界，未将其解释为健康状态。
+            Adapter 健康响应未满足零执行与 Runtime 在线性边界，未将其解释为健康状态。
           </p>
         ) : null}
         {health?.valid ? (
           <>
+            <div className="source-inbox-health-adapters" role="group" aria-label="Monitoring Runtime 状态">
+              <article>
+                <header>
+                  <strong>Runtime</strong>
+                  <em>{health.runtime.statusLabel}</em>
+                </header>
+                <small>
+                  心跳 {formatServerTime(health.runtime.heartbeatAt)}
+                  {health.runtime.activeAdapter ? ` · 活动 Adapter ${health.runtime.activeAdapter}` : " · 当前无活动 Adapter"}
+                </small>
+                <small>
+                  下次检查 {formatServerTime(health.runtime.nextDueAt)}
+                  {health.runtime.dryRun ? " · dry-run 已启用" : " · dry-run 已关闭"}
+                </small>
+                {["stalled", "failed"].includes(health.runtime.status) ? (
+                  <small>
+                    Runtime {health.runtime.status === "stalled" ? "心跳已停滞" : "运行失败"}
+                    {health.runtime.lastFatalErrorCode ? ` · 错误码 ${health.runtime.lastFatalErrorCode}` : ""}。
+                  </small>
+                ) : null}
+              </article>
+            </div>
             <p className="source-inbox-health-boundary">
               捕获于 {formatServerTime(health.capturedAt)}。{health.globalEnabled ? "全局监控已启用" : "全局监控默认关闭"}
-              {health.dryRun ? " · dry-run" : ""}。运行时在线性未核验；健康记录不代表来源事实、交易许可或执行权限。
+              {health.dryRun ? " · dry-run" : ""}。新鲜本机心跳只证明 worker 有进展，不证明来源可用、内容为事实或具备交易权限。
             </p>
             <div className="source-inbox-health-adapters" role="list" aria-label="Adapter 健康记录">
               {health.adapters.map((adapter) => (

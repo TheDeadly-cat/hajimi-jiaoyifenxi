@@ -21,7 +21,7 @@ export const SOURCE_INBOX_TIER_META = Object.freeze({
 export const SOURCE_MONITORING_HEALTH_LABELS = Object.freeze({
   disabled: "已停用",
   idle: "等待首次检查",
-  running: "运行记录存在（在线性未核验）",
+  running: "本次检查进行中",
   healthy: "最近检查成功",
   degraded: "最近检查有异常",
   backing_off: "退避等待中",
@@ -54,6 +54,17 @@ const ACTIONABLE_STATES = new Set([
 const KNOWN_STATES = new Set(Object.keys(SOURCE_INBOX_STATE_LABELS));
 const KNOWN_SOURCE_TIERS = new Set(Object.keys(SOURCE_INBOX_TIER_META));
 const KNOWN_HEALTH_STATES = new Set(Object.keys(SOURCE_MONITORING_HEALTH_LABELS));
+const SOURCE_MONITORING_RUNTIME_LABELS = Object.freeze({
+  disabled: "已停用",
+  stopped: "已停止",
+  starting: "启动中",
+  running: "运行中",
+  degraded: "运行中（有异常）",
+  stalled: "心跳停滞",
+  failed: "运行失败",
+  stopping: "停止中",
+});
+const KNOWN_RUNTIME_STATUSES = new Set(Object.keys(SOURCE_MONITORING_RUNTIME_LABELS));
 const KNOWN_HEALTH_CONFIG_STATES = new Set([
   "absent",
   "unregistered",
@@ -63,6 +74,43 @@ const KNOWN_HEALTH_CONFIG_STATES = new Set([
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const SOURCE_INBOX_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
 const SOURCE_INBOX_CURSOR_RE = /^[A-Za-z0-9_-]{1,512}$/;
+const SOURCE_MONITORING_RUNTIME_ID_RE = /^source_monitor_runtime_[0-9a-f]{32}$/;
+const SOURCE_MONITORING_RUNTIME_ERROR_RE = /^[A-Z][A-Z0-9_]{0,99}$/;
+const SOURCE_MONITORING_ADAPTER_KEY_RE = /^[a-z][a-z0-9_]{0,63}$/;
+const SOURCE_MONITORING_FROM_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
+const SOURCE_MONITORING_SETTINGS_FIELDS = Object.freeze([
+  "enabled",
+  "auto_start",
+  "official_only",
+  "allow_readonly_market",
+  "trading_impact_rules_enabled",
+  "dry_run",
+  "max_items_per_run",
+  "initial_mode",
+  "catch_up_max_items",
+  "initial_preview_sha256",
+  "from_time",
+]);
+const SOURCE_MONITORING_RUNTIME_FIELDS = Object.freeze([
+  "version",
+  "status",
+  "runtime_id",
+  "started_at",
+  "heartbeat_at",
+  "last_loop_at",
+  "active_adapter",
+  "next_due_at",
+  "thread_alive",
+  "last_fatal_error_code",
+  "heartbeat_age_ms",
+  "stall_after_ms",
+  "liveness_verified",
+  "enabled",
+  "auto_start",
+  "dry_run",
+  "execution_capability",
+  "live_trading_allowed",
+]);
 
 const IMPACT_ZERO_FIELDS = Object.freeze([
   "model_calls_performed",
@@ -91,6 +139,21 @@ function arrayOfStrings(value) {
 function boundedNumber(value, fallback = 0) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function hasExactFields(value, fields) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === fields.length && fields.every((field) => Object.hasOwn(value, field));
+}
+
+function validCanonicalFromTime(value) {
+  if (typeof value !== "string" || !SOURCE_MONITORING_FROM_TIME_RE.test(value)) return false;
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp) || timestamp < 0) return false;
+  const iso = new Date(timestamp).toISOString();
+  const canonical = iso.endsWith(".000Z") ? iso.replace(".000Z", "Z") : iso;
+  return canonical === value;
 }
 
 function boundedCount(value, fallback = 0) {
@@ -576,11 +639,12 @@ export function normalizeSourceInboxResponse(payload) {
 export function normalizeSourceMonitoringHealth(payload) {
   const view = objectValue(objectValue(payload).source_monitoring_health);
   const settings = objectValue(view.settings);
+  const runtime = objectValue(view.runtime);
   const safety = objectValue(view.safety);
   const rawAdapters = arrayOfObjects(view.adapters);
   const counts = objectValue(view.counts);
   const issues = [];
-  if (view.version !== "source_monitoring_health_service_v1") issues.push("health_view_version_invalid");
+  if (view.version !== "source_monitoring_health_service_v2") issues.push("health_view_version_invalid");
   if (view.health_projection_version !== "source_monitoring_health_v1") {
     issues.push("health_version_invalid");
   }
@@ -606,7 +670,9 @@ export function normalizeSourceMonitoringHealth(payload) {
     issues.push("health_counts_invalid");
   }
   if (
-    typeof settings.enabled !== "boolean"
+    !hasExactFields(settings, SOURCE_MONITORING_SETTINGS_FIELDS)
+    || !["seed_only", "catch_up", "from_time"].includes(settings.initial_mode)
+    || typeof settings.enabled !== "boolean"
     || typeof settings.auto_start !== "boolean"
     || typeof settings.official_only !== "boolean"
     || typeof settings.allow_readonly_market !== "boolean"
@@ -614,10 +680,94 @@ export function normalizeSourceMonitoringHealth(payload) {
     || typeof settings.dry_run !== "boolean"
     || !Number.isSafeInteger(settings.max_items_per_run)
     || settings.max_items_per_run < 1
+    || settings.max_items_per_run > 50
+    || !Number.isSafeInteger(settings.catch_up_max_items)
+    || settings.catch_up_max_items < 0
+    || settings.catch_up_max_items > 50
+    || typeof settings.initial_preview_sha256 !== "string"
+    || (settings.initial_preview_sha256 !== "" && !SHA256_RE.test(settings.initial_preview_sha256))
+    || typeof settings.from_time !== "string"
+    || settings.official_only === settings.allow_readonly_market
+    || (settings.auto_start && !settings.enabled)
+    || (settings.initial_mode === "seed_only" && (
+      settings.catch_up_max_items !== 0
+      || settings.initial_preview_sha256 !== ""
+      || settings.from_time !== ""
+    ))
+    || (settings.initial_mode === "catch_up" && (
+      settings.catch_up_max_items < 1
+      || settings.catch_up_max_items > settings.max_items_per_run
+      || settings.from_time !== ""
+    ))
+    || (settings.initial_mode === "from_time" && (
+      settings.catch_up_max_items !== 0
+      || settings.initial_preview_sha256 !== ""
+      || !validCanonicalFromTime(settings.from_time)
+    ))
   ) {
     issues.push("health_settings_invalid");
   }
-  if (view.runtime_liveness_verified !== false) issues.push("health_liveness_boundary_invalid");
+  const runtimeIntegerFields = [
+    "started_at",
+    "heartbeat_at",
+    "last_loop_at",
+    "next_due_at",
+    "heartbeat_age_ms",
+    "stall_after_ms",
+  ];
+  const runtimeNeedsId = ["starting", "running", "degraded", "stalled", "stopping"]
+    .includes(runtime.status);
+  const expectedRuntimeLiveness = (
+    runtime.thread_alive === true
+    && ["running", "degraded"].includes(runtime.status)
+    && Number.isSafeInteger(runtime.heartbeat_age_ms)
+    && Number.isSafeInteger(runtime.stall_after_ms)
+    && runtime.heartbeat_age_ms <= runtime.stall_after_ms
+  );
+  if (
+    !hasExactFields(runtime, SOURCE_MONITORING_RUNTIME_FIELDS)
+    || runtime.version !== "source_monitoring_runtime_health_v1"
+    || !KNOWN_RUNTIME_STATUSES.has(String(runtime.status || ""))
+    || typeof runtime.runtime_id !== "string"
+    || (runtime.runtime_id !== "" && !SOURCE_MONITORING_RUNTIME_ID_RE.test(runtime.runtime_id))
+    || (runtimeNeedsId && runtime.runtime_id === "")
+    || typeof runtime.active_adapter !== "string"
+    || (runtime.active_adapter !== "" && !SOURCE_MONITORING_ADAPTER_KEY_RE.test(runtime.active_adapter))
+    || typeof runtime.last_fatal_error_code !== "string"
+    || (runtime.last_fatal_error_code !== "" && !SOURCE_MONITORING_RUNTIME_ERROR_RE.test(runtime.last_fatal_error_code))
+    || runtimeIntegerFields.some((field) => !Number.isSafeInteger(runtime[field]) || runtime[field] < 0)
+    || runtime.stall_after_ms < 1
+    || typeof runtime.thread_alive !== "boolean"
+    || typeof runtime.liveness_verified !== "boolean"
+    || typeof runtime.enabled !== "boolean"
+    || typeof runtime.auto_start !== "boolean"
+    || typeof runtime.dry_run !== "boolean"
+    || runtime.enabled !== settings.enabled
+    || runtime.auto_start !== settings.auto_start
+    || runtime.dry_run !== settings.dry_run
+    || runtime.execution_capability !== "none"
+    || runtime.live_trading_allowed !== false
+    || runtime.liveness_verified !== expectedRuntimeLiveness
+    || (["running", "degraded"].includes(runtime.status) && (
+      !runtime.thread_alive
+      || runtime.heartbeat_age_ms > runtime.stall_after_ms
+    ))
+    || (runtime.status === "stalled" && (
+      !runtime.thread_alive
+      || runtime.liveness_verified
+      || runtime.heartbeat_age_ms <= runtime.stall_after_ms
+    ))
+    || (["disabled", "stopped"].includes(runtime.status) && runtime.thread_alive)
+    || (["starting", "stopping"].includes(runtime.status) && !runtime.thread_alive)
+    || (runtime.status === "failed" && runtime.last_fatal_error_code === "")
+    || (runtime.status !== "failed" && runtime.last_fatal_error_code !== "")
+    || (runtime.active_adapter !== "" && !["running", "degraded", "stalled"].includes(runtime.status))
+    || (runtime.status === "disabled" && runtime.runtime_id !== "")
+    || typeof view.runtime_liveness_verified !== "boolean"
+    || view.runtime_liveness_verified !== runtime.liveness_verified
+  ) {
+    issues.push("health_runtime_invalid");
+  }
   if (
     safety.execution_capability !== "none"
     || safety.live_trading_allowed !== false
@@ -638,7 +788,7 @@ export function normalizeSourceMonitoringHealth(payload) {
     if (adapter.execution_capability !== "none" || adapter.live_trading_allowed !== false) {
       adapterIssues.push("execution");
     }
-    if (adapter.runtime_liveness_verified !== false) adapterIssues.push("liveness");
+    if (typeof adapter.runtime_liveness_verified !== "boolean") adapterIssues.push("liveness");
     if (
       !SOURCE_INBOX_ID_RE.test(String(adapter.adapter_key || ""))
       || typeof adapter.enabled !== "boolean"
@@ -681,6 +831,8 @@ export function normalizeSourceMonitoringHealth(payload) {
       officialSource: metadata.official_source === true,
       state: String(adapter.state || "failed"),
       enabled: adapter.enabled === true,
+      running: adapter.running === true,
+      runtimeLivenessVerified: adapter.runtime_liveness_verified === true,
       persistedStatePresent: adapter.persisted_state === true,
       persistedEnabled: adapter.persisted_enabled === true,
       configStatus: String(adapter.config_status || ""),
@@ -696,6 +848,23 @@ export function normalizeSourceMonitoringHealth(payload) {
   if (new Set(adapters.map((adapter) => adapter.adapterKey)).size !== adapters.length) {
     issues.push("health_adapter_identity_invalid");
   }
+  const adapterByKey = new Map(adapters.map((adapter) => [adapter.adapterKey, adapter]));
+  if (
+    runtime.active_adapter !== ""
+    && (!adapterByKey.has(runtime.active_adapter) || !adapterByKey.get(runtime.active_adapter).enabled)
+  ) {
+    issues.push("health_runtime_active_adapter_invalid");
+  }
+  rawAdapters.forEach((adapter, index) => {
+    const expectedLiveness = view.runtime_liveness_verified === true && adapter.enabled === true;
+    const expectedRunning = expectedLiveness && runtime.active_adapter === adapter.adapter_key;
+    if (
+      adapter.runtime_liveness_verified !== expectedLiveness
+      || adapter.running !== expectedRunning
+    ) {
+      issues.push(`health_adapter_runtime_invalid_${index}`);
+    }
+  });
   for (const state of Object.keys(SOURCE_MONITORING_HEALTH_LABELS)) {
     if (counts[state] !== adapters.filter((adapter) => adapter.state === state).length) {
       issues.push("health_state_accounting_invalid");
@@ -731,6 +900,31 @@ export function normalizeSourceMonitoringHealth(payload) {
     globalEnabled: settings.enabled === true,
     autoStart: settings.auto_start === true,
     dryRun: settings.dry_run === true,
+    initialMode: String(settings.initial_mode || ""),
+    catchUpMaxItems: boundedCount(settings.catch_up_max_items),
+    initialPreviewSha256: String(settings.initial_preview_sha256 || ""),
+    fromTime: String(settings.from_time || ""),
+    runtime: {
+      version: String(runtime.version || ""),
+      status: String(runtime.status || "failed"),
+      statusLabel: SOURCE_MONITORING_RUNTIME_LABELS[runtime.status] || "Runtime 状态异常",
+      runtimeId: String(runtime.runtime_id || ""),
+      startedAt: boundedNumber(runtime.started_at),
+      heartbeatAt: boundedNumber(runtime.heartbeat_at),
+      lastLoopAt: boundedNumber(runtime.last_loop_at),
+      activeAdapter: String(runtime.active_adapter || ""),
+      nextDueAt: boundedNumber(runtime.next_due_at),
+      threadAlive: runtime.thread_alive === true,
+      lastFatalErrorCode: String(runtime.last_fatal_error_code || ""),
+      heartbeatAgeMs: boundedNumber(runtime.heartbeat_age_ms),
+      stallAfterMs: boundedNumber(runtime.stall_after_ms),
+      livenessVerified: runtime.liveness_verified === true,
+      enabled: runtime.enabled === true,
+      autoStart: runtime.auto_start === true,
+      dryRun: runtime.dry_run === true,
+      executionCapability: String(runtime.execution_capability || ""),
+      liveTradingAllowed: runtime.live_trading_allowed === true,
+    },
     adapters,
     persistenceAvailable: view.persistence_available === true,
     executionCapability: String(safety.execution_capability || ""),
