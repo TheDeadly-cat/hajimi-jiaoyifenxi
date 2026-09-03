@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .contracts import canonical_sha256
 from .soak_db_inventory import (
@@ -320,16 +320,23 @@ def _seal_result(result: dict[str, Any], issues: _IssueCollector) -> dict[str, A
     return result
 
 
-def verify_soak_evidence(
+def _verify_soak_evidence(
     ledger_path: str | Path,
     *,
     baseline_inventory: Any,
     final_inventory: Any,
     expected_bindings: Any = None,
     expected_enabled_adapter_keys: Any = None,
+    validated_record_observer: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Verify one ledger without reading any database or external source."""
 
+    if validated_record_observer is not None and not callable(
+        validated_record_observer
+    ):
+        raise SourceMonitoringSoakVerifierError(
+            "validated_record_observer must be callable"
+        )
     result = _blank_result()
     issues = _IssueCollector()
     start_record: dict[str, Any] | None = None
@@ -350,6 +357,8 @@ def verify_soak_evidence(
         nonlocal maximum_observed_sample_gap_ns
         nonlocal run_terminal_count, unrecorded_terminal_count
         record_count += 1
+        if validated_record_observer is not None:
+            validated_record_observer(record)
         event_type = record["event_type"]
         if event_type == SOAK_EVENT_SESSION_STARTED:
             start_record = record
@@ -678,6 +687,46 @@ def verify_soak_evidence(
         else "FAILED"
     )
     return _seal_result(result, issues)
+
+
+def verify_soak_evidence(
+    ledger_path: str | Path,
+    *,
+    baseline_inventory: Any,
+    final_inventory: Any,
+    expected_bindings: Any = None,
+    expected_enabled_adapter_keys: Any = None,
+) -> dict[str, Any]:
+    """Verify one ledger without exposing an observation callback publicly."""
+
+    return _verify_soak_evidence(
+        ledger_path,
+        baseline_inventory=baseline_inventory,
+        final_inventory=final_inventory,
+        expected_bindings=expected_bindings,
+        expected_enabled_adapter_keys=expected_enabled_adapter_keys,
+    )
+
+
+def _verify_soak_evidence_with_observer(
+    ledger_path: str | Path,
+    *,
+    baseline_inventory: Any,
+    final_inventory: Any,
+    expected_bindings: Any = None,
+    expected_enabled_adapter_keys: Any = None,
+    validated_record_observer: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Private one-pass bridge for a trusted layered verifier."""
+
+    return _verify_soak_evidence(
+        ledger_path,
+        baseline_inventory=baseline_inventory,
+        final_inventory=final_inventory,
+        expected_bindings=expected_bindings,
+        expected_enabled_adapter_keys=expected_enabled_adapter_keys,
+        validated_record_observer=validated_record_observer,
+    )
 
 
 __all__ = [

@@ -103,6 +103,17 @@ python -I -B scripts\run_official_source_live_preflight.py `
 
 该命令显式标记 `scope=official_macro_only`、`sec_included=false`、`company_ir_included=false`。它不读取 `.env.local`，不导入 Futu 配置，不读写 SQLite/Source Inbox/checkpoint，不调用 Provider、模型或市场接口，也没有交易能力。一次 `passed` 是可信、未修改的本机隔离进程在该时间点经默认 HTTPS 路径获得可解析响应并完成四个 adapter 投影的观察，不是独立网络见证或密码学证明；因此回执固定为 `evidence_class=production_path_observation`、`transport_mode=default_official_https_path`、`live_network_attested=false`、`in_process_tamper_resistant=false`。它不证明 SEC/IR/Futu、24 小时连续性、官方内容真值、正式迁移、Provider、交易许可或发布验收。离线 injected fixture 回执使用不同 evidence class，正式 CLI 会拒绝将其当作生产路径观察。
 
+SEC 与公司 IR 使用另一个同样无数据库的隔离入口。SEC User-Agent 必须由调用进程显式设置；入口在导入配置前强制跳过 `.env.local`，不会顺带加载 Provider/Futu 密钥：
+
+```powershell
+$env:SEC_USER_AGENT = 'AI Studio operator contact@example.com'
+python -I -B scripts\run_sec_ir_live_preflight.py --help
+python -I -B scripts\run_sec_ir_live_preflight.py `
+  --confirm RUN_SEC_IR_LIVE_PREFLIGHT_ONCE
+```
+
+该观察固定执行一次 SEC ticker 表、由其中七个白名单标的 CIK 严格派生的七个 submissions 请求，以及四条代码固定公司 IR RSS feed；每个逻辑 endpoint 最多调用一次，不做应用层重试。SEC JSON 与 IR bytes 分别受 2 MiB / 1 MiB 上限约束，错误只输出固定分类，绝不输出 User-Agent、URL、响应或异常正文。默认 IR transport 允许在代码固定 host 集内跳转，因此报告如实保留 `final_endpoint_identity_attested=false`，只给出保守 network request 上限；`passed` 仍只是 production-path observation，不是独立网络见证、来源内容真值或整体验收。
+
 ## 官方来源 24 小时 soak 证据包
 
 soak 使用独立 CLI；它不扩展一次性 operator CLI，也不接受数据库路径、持续时间或小时数覆盖。v1 公共入口只允许 `official`，固定持续 24 小时、每 5 秒采样，允许的最大样本间隙为 120 秒。Futu 的交易时段/闭市跳过合同尚未纳入这一版，不能用 `official` soak 冒充 Futu 验收。
@@ -130,6 +141,15 @@ python -m backend.source_monitoring_soak_cli verify `
 `start` 在加载任何生产 runtime 前精确检查确认字符串与 preview SHA，再取得 owner 并重做 readiness、代码、settings、registry、adapter 和 baseline 绑定。只有重建计划逐字段相同才会创建 `ledger.jsonl`。生产 runtime 构造后会再次重算代码身份；worker 的首轮调度被 start gate 挡住，直到 `SESSION_STARTED` 已经 flush + fsync；之后 ledger 每条记录都有固定 session/runtime 身份、单调时钟、前序哈希和逐条 fsync。终态 run 还绑定完整 SQLite row SHA 与已独立重建的 Source Inbox receipt SHA。正常、失败或 Ctrl+C 关闭都先停止 runtime；有界 join 超时后仍继续持有 owner，线程真正退出前既不读取 final inventory，也不返回。runtime 确认静止后还会第三次重算代码身份，任何 24 小时内持续存在的源码漂移都会在写 `SESSION_ENDED` 前失败关闭。`final-inventory.json` 只能独占新建；账本缺少 `SESSION_ENDED` 时一律是 `INCOMPLETE_UNSEALED`，旧 session 永不续写。
 
 `verify` 只读取四个固定 bundle 文件，不发现或打开数据库，不加载 settings，不连接来源。它重验计划、canonical inventory、账本结构/哈希链、精确 24h/5s/120s 策略、liveness、enabled adapter 覆盖、run row/receipt 和 baseline/final delta。即使 continuity、production binding 与 database 都通过，v1 仍固定输出 `source_acceptance_verdict=NOT_EVALUATED`、`overall_acceptance=NOT_CLAIMED`：这是同一可信本机进程生成的连续性/数据库证据，不是签名、独立网络见证、来源内容真值、SEC/IR/Fed/BLS/Treasury 分源语义验收、Provider/交易许可、PR 合并或公开发布证明。本功能加入代码与离线快进测试不代表已经执行过真实 24 小时 soak。
+
+在 v1 `verify` 通过后，可对同一四件套运行独立的六源 operational acceptance：
+
+```powershell
+python -I -B scripts\run_source_monitoring_acceptance.py verify `
+  --bundle $bundle
+```
+
+v2 只接受本机文件系统上的 bundle，并会在任何目录或文件检查前拒绝 UNC、Windows 设备命名空间与远程映射盘；不要把网络共享路径交给该命令。它要求 plan 中精确且仅有 `sec_filings`、`company_ir`、`federal_reserve`、`bls_releases`、`treasury_releases`、`official_macro_calendar` 六个 adapter；每个来源至少一条带数据库 row 绑定的 `SUCCEEDED`，且整个 session 中不能出现 `DEGRADED`、`FAILED`、`DRY_RUN*`、`ABANDONED`、rejected item、非空 source error、config drift 或市场调用。若 accepted item 非零，还必须有绑定的 Source Inbox import receipt。v1 与 v2 在同一遍已验证 ledger 流中完成检查，不按 pathname 再开第二遍。只有这些条件和 v1 continuity/production/database 三门都通过时才输出 `source_acceptance_verdict=PASS`；该 PASS 明确为 `operational_only=true`，仍固定 `content_truth_attested=false`、`independent_network_witness=false`、`overall_acceptance=NOT_CLAIMED`，不覆盖 Futu、Provider、正式迁移授权、交易、合并或发布。
 
 Phase 8 没有获得 TTL、删除对象或法律保留期，因此 v1 采用最保守的版本化策略：
 
