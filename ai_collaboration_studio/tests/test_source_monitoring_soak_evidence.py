@@ -516,10 +516,11 @@ class SourceMonitoringSoakEvidenceTests(unittest.TestCase):
             monotonic_elapsed_ns=0,
             payload=start_payload(),
         )
+        ledger_path = writer.path
         real_lstat = Path.lstat
 
         def replaced_lstat(path_value: Path) -> os.stat_result:
-            if path_value == path:
+            if path_value == ledger_path:
                 return replacement_metadata
             return real_lstat(path_value)
 
