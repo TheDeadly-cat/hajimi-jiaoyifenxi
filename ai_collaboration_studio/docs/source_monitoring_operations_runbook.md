@@ -87,6 +87,22 @@ python -m backend.source_monitoring_cli run-once sec_filings --confirm RUN_ONCE
 
 CLI 输出不包含外部 item、URL、headline、summary、checkpoint/ETag、数据库路径、异常文本或 secret；始终声明 Provider 调用为 0、执行能力为 none、真实交易为 false。退出码：0 为成功/dry-run/seed，2 为配置/合同/非成功结果，3 为 owner 冲突，1 为已脱敏的意外内部错误。
 
+## 宏观来源生产路径一次性观察
+
+正式迁移或 soak 前，可以先在不打开 Studio 数据库的独立进程中检查当前 Fed、BLS 与 Treasury 宏观端点：
+
+```powershell
+python scripts\run_official_source_live_preflight.py --help
+python -I -B scripts\run_official_source_live_preflight.py `
+  --confirm RUN_OFFICIAL_SOURCE_LIVE_PREFLIGHT_ONCE
+```
+
+确认字符串在公共联网边界内再次精确校验；缺少、大小写错误或重复参数都在加载生产 transport 前失败。带确认的执行还强制要求 Python `-I` 隔离模式，并拒绝已经预载任何 `backend` 模块的进程；这是缩小路径注入面的进程卫生门，不是抗篡改证明。成功执行固定覆盖 `federal_reserve`、`bls_releases`、`treasury_releases` 与 `official_macro_calendar`，对八个固定端点各发起一次顶层 fetch，不做应用层重试、不覆盖系统代理、不关闭 TLS 或主机名验证。redirect/socket 层实际请求数没有被 transport 精确计量，因此回执只把 `endpoint_fetch_attempts_performed` 标为 exact，`network_requests_performed` 保持 `null/not_instrumented`。
+
+输出是单行、闭集、最多 16 KiB 的 JSON，只含时间、计数、固定错误分类、source manifest/transport evidence profile 哈希和安全字段；不含 URL、正文、标题、路径、代理详情或原始异常。三个 SHA-256 只绑定预期配置与报告 profile，不证明响应来自哪个远端。当前代理若在 TLS ClientHello 后关闭连接会得到固定 `TLS_HANDSHAKE_EOF`，不得据此自动直连、切换端点或降级证书验证。
+
+该命令显式标记 `scope=official_macro_only`、`sec_included=false`、`company_ir_included=false`。它不读取 `.env.local`，不导入 Futu 配置，不读写 SQLite/Source Inbox/checkpoint，不调用 Provider、模型或市场接口，也没有交易能力。一次 `passed` 是可信、未修改的本机隔离进程在该时间点经默认 HTTPS 路径获得可解析响应并完成四个 adapter 投影的观察，不是独立网络见证或密码学证明；因此回执固定为 `evidence_class=production_path_observation`、`transport_mode=default_official_https_path`、`live_network_attested=false`、`in_process_tamper_resistant=false`。它不证明 SEC/IR/Futu、24 小时连续性、官方内容真值、正式迁移、Provider、交易许可或发布验收。离线 injected fixture 回执使用不同 evidence class，正式 CLI 会拒绝将其当作生产路径观察。
+
 Phase 8 没有获得 TTL、删除对象或法律保留期，因此 v1 采用最保守的版本化策略：
 
 ```text
