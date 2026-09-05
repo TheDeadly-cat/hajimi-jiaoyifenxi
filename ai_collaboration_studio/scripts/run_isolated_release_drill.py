@@ -9,9 +9,11 @@ import re
 import shutil
 import socket
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import zipfile
+from contextlib import closing
 from ctypes import wintypes
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,7 +32,7 @@ else:
 
 DRILL_VERSION = "isolated_release_drill_v1"
 INSTALL_RECEIPT_VERSION = "release_install_receipt_v1"
-POINTER_VERSION = "release_activation_pointer_v1"
+POINTER_VERSION = "release_activation_pointer_v2"
 ACTIVATION_RECEIPT_VERSION = "release_activation_receipt_v1"
 FAILURE_RECEIPT_VERSION = "release_readiness_failure_v1"
 _RELEASE_ID_RE = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}")
@@ -245,6 +247,7 @@ def read_activation_pointer(release_root: Path) -> dict[str, Any] | None:
         "active_release_id",
         "previous_release_id",
         "source_total_sha256",
+        "database_binding_sha256",
         "pointer_sha256",
     }:
         raise ReleaseDrillError("activation pointer is not closed")
@@ -252,6 +255,8 @@ def read_activation_pointer(release_root: Path) -> dict[str, Any] | None:
         raise ReleaseDrillError("activation pointer version drifted")
     if type(pointer["generation"]) is not int or pointer["generation"] < 1:
         raise ReleaseDrillError("activation pointer generation is invalid")
+    if type(pointer["database_binding_sha256"]) is not str or _SHA256_RE.fullmatch(pointer["database_binding_sha256"]) is None:
+        raise ReleaseDrillError("activation pointer database binding is invalid")
     _validate_seal(pointer, "pointer_sha256")
     return pointer
 
@@ -263,9 +268,32 @@ def _publish_pointer(
     active_release_id: str,
     previous_release_id: str | None,
     generation: int,
+    database_path: Path,
+    expected_pointer: dict[str, Any] | None,
 ) -> dict[str, Any]:
     root = Path(os.path.abspath(os.fspath(release_root)))
+    database = _temporary_database(database_path)
+    metadata = database.stat()
+    database_binding = _value_sha256({
+        "path": str(database), "identity": [metadata.st_dev, metadata.st_ino],
+    })
+    if expected_pointer is not None and expected_pointer["database_binding_sha256"] != database_binding:
+        raise ReleaseDrillError("RELEASE_READER_DATABASE_BINDING_MISMATCH")
+    database_before = _database_family_state(database)
     install = _read_install_receipt(root, active_release_id)
+    compatibility = check_release_reader(
+        root / "releases" / active_release_id, database_path,
+    )
+    if compatibility["compatible"] is not True:
+        raise ReleaseDrillError("RELEASE_READER_INCOMPATIBLE")
+    # The actual installed reader, not a claimed version string, was probed.
+    # Recheck its immutable manifest after the child has finished reading.
+    if _read_install_receipt(root, active_release_id) != install:
+        raise ReleaseDrillError("RELEASE_READER_SOURCE_CHANGED")
+    if read_activation_pointer(root) != expected_pointer:
+        raise ReleaseDrillError("activation pointer changed during reader check")
+    if _database_family_state(database) != database_before:
+        raise ReleaseDrillError("RELEASE_READER_DATABASE_CHANGED")
     pointer = _sealed(
         {
             "version": POINTER_VERSION,
@@ -274,6 +302,7 @@ def _publish_pointer(
             "active_release_id": active_release_id,
             "previous_release_id": previous_release_id,
             "source_total_sha256": install["source_total_sha256"],
+            "database_binding_sha256": database_binding,
         },
         "pointer_sha256",
     )
@@ -302,6 +331,7 @@ def activate_release(
     release_id: str,
     *,
     expected_active_release_id: str | None,
+    database_path: Path,
 ) -> dict[str, Any]:
     root = Path(os.path.abspath(os.fspath(release_root)))
     current = read_activation_pointer(root)
@@ -314,6 +344,8 @@ def activate_release(
         active_release_id=release_id,
         previous_release_id=actual,
         generation=(int(current["generation"]) + 1 if current else 1),
+        database_path=database_path,
+        expected_pointer=current,
     )
 
 
@@ -337,6 +369,7 @@ def rollback_release(
     target_release_id: str,
     expected_generation: int,
     failure_receipt: dict[str, Any],
+    database_path: Path,
 ) -> dict[str, Any]:
     if not isinstance(failure_receipt, dict) or set(failure_receipt) != {
         "version",
@@ -371,6 +404,8 @@ def rollback_release(
         active_release_id=target_release_id,
         previous_release_id=failed_release_id,
         generation=expected_generation + 1,
+        database_path=database_path,
+        expected_pointer=current,
     )
 
 
@@ -379,11 +414,204 @@ def _database_family_state(database_path: Path) -> dict[str, dict[str, Any]]:
     for suffix in ("", "-wal", "-shm", "-journal"):
         path = Path(str(database_path) + suffix)
         if path.is_file():
+            metadata = path.stat()
             result[path.name] = {
-                "bytes": path.stat().st_size,
+                "bytes": metadata.st_size,
                 "sha256": _file_sha256(path),
+                "identity": [metadata.st_dev, metadata.st_ino, metadata.st_nlink],
+                "mtime_ns": metadata.st_mtime_ns,
             }
     return result
+
+
+def _temporary_database(path: Path) -> Path:
+    requested = Path(path).absolute()
+    clean = requested.resolve()
+    try:
+        relative = clean.relative_to(Path(tempfile.gettempdir()).resolve())
+    except ValueError as exc:
+        raise ReleaseDrillError("RELEASE_READER_TEMP_DATABASE_REQUIRED") from exc
+    if not relative.parts or not clean.is_file() or requested != clean:
+        raise ReleaseDrillError("RELEASE_READER_DATABASE_REQUIRED")
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        member = Path(str(clean) + suffix)
+        if member.exists() or member.is_symlink():
+            metadata = member.lstat()
+            if (
+                member.resolve() != member
+                or source_backup._is_reparse_or_symlink(member, metadata)
+                or not member.is_file() or metadata.st_nlink != 1
+            ):
+                raise ReleaseDrillError("RELEASE_READER_DATABASE_ALIAS_INVALID")
+    return clean
+
+
+def check_release_reader(reader_source_root: Path, database_path: Path) -> dict[str, Any]:
+    """Probe one actual reader against a consistent copy of explicit TEMP data.
+
+    This does not initialize the target store, migrate data, start the app, or
+    authorize future writes. Every activation must repeat the check against its
+    then-current data. Source installation alone has no data compatibility claim.
+    """
+
+    if os.environ.get("AI_STUDIO_SKIP_LOCAL_ENV", "").strip() != "1":
+        raise ReleaseDrillError("AI_STUDIO_SKIP_LOCAL_ENV=1 is required")
+    database = _temporary_database(database_path)
+    source = Path(reader_source_root).resolve()
+    if not (source / "backend" / "store.py").is_file():
+        raise ReleaseDrillError("RELEASE_READER_UNAVAILABLE")
+    from backend.source_monitoring.health_service import source_monitoring_read_only_snapshot
+
+    before = _database_family_state(database)
+    with tempfile.TemporaryDirectory(prefix="ai-studio-release-reader-") as work_text:
+        work = Path(work_text)
+        snapshot = work / "consistent.sqlite3"
+        # SQLite backup reads one consistent database snapshot, including any
+        # committed WAL records. The existing helper never joins the source WAL.
+        with source_monitoring_read_only_snapshot(database) as connection:
+            with closing(sqlite3.connect(snapshot)) as destination:
+                connection.backup(destination)
+        snapshot_before = _database_family_state(snapshot)
+        try:
+            process = subprocess.run(
+                [sys.executable, "-I", "-B", str(Path(__file__).resolve()),
+                 "--reader-worker", "--reader-source-root", str(source), "--reader-database", str(snapshot)],
+                cwd=work, capture_output=True, text=True, encoding="utf-8", timeout=60,
+                check=False,
+            )
+            result = json.loads(process.stdout)
+        except (OSError, subprocess.SubprocessError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ReleaseDrillError("RELEASE_READER_CHECK_FAILED") from exc
+        if (
+            process.returncode != 0
+            or type(result) is not dict
+            or set(result) != {"compatible", "checks", "reader_source_root", "network", "reader_files_sha256"}
+            or type(result["compatible"]) is not bool
+            or type(result["checks"]) is not dict
+            or result["reader_source_root"] != str(source)
+            or type(result["reader_files_sha256"]) is not dict
+            or type(result["network"]) is not dict
+            or result["network"].get("blocked_attempt_count") != 0
+            or result["network"].get("allowed_loopback_connections") != 0
+            or result["network"].get("simulated_offline_connections") != 0
+        ):
+            raise ReleaseDrillError("RELEASE_READER_CHECK_FAILED")
+        if snapshot_before != _database_family_state(snapshot):
+            raise ReleaseDrillError("RELEASE_READER_SNAPSHOT_CHANGED")
+    if before != _database_family_state(database):
+        raise ReleaseDrillError("RELEASE_READER_DATABASE_CHANGED")
+    return result
+
+
+def _reader_check_worker(source: Path, database_path: Path) -> dict[str, Any]:
+    """Fresh-process probe: all application imports resolve to the target tree."""
+
+    from scripts.run_backend_tests_isolated import (
+        configure_isolated_test_environment, isolated_backend_test_network_guard,
+    )
+
+    database = _temporary_database(database_path)
+    if any(Path(str(database) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")):
+        raise ReleaseDrillError("RELEASE_READER_CONSISTENT_SNAPSHOT_REQUIRED")
+    source = source.resolve()
+    reader_files = (
+        "backend/store.py", "backend/source_inbox_service.py",
+        "backend/source_monitoring/state_repository.py",
+        "backend/source_monitoring/adapters/sec_filings.py",
+        "backend/source_monitoring/adapters/company_ir.py",
+        "backend/source_inbox_trading_impact.py",
+    )
+    if any(name == "backend" or name.startswith("backend.") for name in sys.modules):
+        raise ReleaseDrillError("RELEASE_READER_IMPORT_CONTEXT_INVALID")
+    sys.path.insert(0, str(source))
+    checks: dict[str, Any] = {}
+
+    def check(name: str, operation) -> Any:
+        try:
+            value = operation()
+            if value is None:
+                raise ReleaseDrillError("RELEASE_READER_RECORD_MISSING")
+            checks[name] = {"ok": True, "error_code": ""}
+            return value
+        except Exception as exc:
+            code = getattr(exc, "code", "")
+            checks[name] = {
+                "ok": False,
+                "error_code": code if type(code) is str and re.fullmatch(r"[A-Z0-9_]+", code) else "RELEASE_READER_RECORD_INVALID",
+            }
+            return None
+
+    with tempfile.TemporaryDirectory(prefix="ai-studio-release-reader-runtime-") as runtime:
+        configure_isolated_test_environment(runtime)
+        with isolated_backend_test_network_guard() as audit:
+            from backend.store import StudioStore
+            from backend.source_inbox_service import SourceInboxService
+            from backend.source_monitoring.state_repository import SourceMonitoringStateRepository
+            from backend.source_monitoring.adapters.sec_filings import _normalize_checkpoint as read_sec
+            from backend.source_monitoring.adapters.company_ir import _normalize_checkpoint as read_ir
+
+            for name, module in tuple(sys.modules.items()):
+                if name == "backend" or name.startswith("backend."):
+                    module_file = getattr(module, "__file__", None)
+                    if module_file is not None and not Path(module_file).resolve().is_relative_to(source):
+                        raise ReleaseDrillError("RELEASE_READER_IMPORT_CONTEXT_INVALID")
+
+            def readonly_connection():
+                connection = sqlite3.connect(database.as_uri() + "?mode=ro&immutable=1", uri=True)
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA query_only=ON")
+                connection.execute("PRAGMA foreign_keys=ON")
+                return connection
+
+            store = StudioStore._open_existing_schema(database)
+            store._connect = readonly_connection
+            inbox = SourceInboxService(store)
+            repository = SourceMonitoringStateRepository(store)
+            repository._connect_read_only = readonly_connection
+            with closing(readonly_connection()) as connection:
+                if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise ReleaseDrillError("RELEASE_READER_DATABASE_INVALID")
+                if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    raise ReleaseDrillError("RELEASE_READER_DATABASE_INVALID")
+                item_ids = [row[0] for row in connection.execute("SELECT id FROM source_inbox_items ORDER BY id")]
+                if len(item_ids) > 10_000:
+                    raise ReleaseDrillError("RELEASE_READER_CHECK_LIMIT_EXCEEDED")
+            states = check("monitoring_states", repository.list_states)
+            for state in states or []:
+                parser = {"sec_filings": read_sec, "company_ir": read_ir}.get(state["adapter_key"])
+                if parser is None:
+                    continue
+                name = "checkpoint:" + state["adapter_key"]
+                check(name, lambda state=state, parser=parser: parser(state["checkpoint"]))
+                # Known legacy formats remain explicitly stopped until an
+                # operator upgrades the baseline. This is not writer approval.
+                if (
+                    state["enabled"] is False
+                    and checks[name]["error_code"] in {
+                        "SEC_BASELINE_UPGRADE_REQUIRED", "COMPANY_IR_BASELINE_UPGRADE_REQUIRED",
+                    }
+                ):
+                    checks[name]["ok"] = True
+                    checks[name]["baseline_upgrade_required"] = True
+            rooms = check("rooms", store.list_rooms)
+            for room in rooms or []:
+                room_id = room["id"]
+                check("room_snapshot:" + room_id, lambda room_id=room_id: store.room_snapshot(room_id))
+                materials = check("materials:" + room_id, lambda room_id=room_id: store.list_materials(room_id, include_inactive=True))
+                for material in materials or []:
+                    check("material:" + material["id"], lambda room_id=room_id, material=material: store.get_material(room_id, material["id"]))
+            check("unfiltered_inbox", lambda: inbox.list_items(limit=200))
+            # Detail readers verify attachments, draft bindings and all sidecars;
+            # enumerate every item so the list's 200-item cap cannot hide one.
+            for item_id in item_ids:
+                check("inbox_item:" + item_id, lambda item_id=item_id: inbox.get_item(item_id))
+            report = {
+                "compatible": all(row["ok"] is True for row in checks.values()),
+                "checks": checks, "reader_source_root": str(source),
+                "network": audit.report(),
+                "reader_files_sha256": {name: _file_sha256(source / name) for name in reader_files},
+            }
+    return report
 
 
 class _MibTcpRowOwnerPid(ctypes.Structure):
@@ -554,11 +782,13 @@ def run_drill(source_root: Path) -> dict[str, Any]:
                 release_root,
                 str(baseline_install["release_id"]),
                 expected_active_release_id=None,
+                database_path=database_path,
             )
             upgraded = activate_release(
                 release_root,
                 str(current_install["release_id"]),
                 expected_active_release_id=str(baseline_install["release_id"]),
+                database_path=database_path,
             )
             failure = build_synthetic_failure_receipt(
                 str(current_install["release_id"])
@@ -569,6 +799,7 @@ def run_drill(source_root: Path) -> dict[str, Any]:
                 target_release_id=str(baseline_install["release_id"]),
                 expected_generation=int(upgraded["generation"]),
                 failure_receipt=failure,
+                database_path=database_path,
             )
             database_after = _database_family_state(database_path)
         finally:
@@ -601,6 +832,7 @@ def run_drill(source_root: Path) -> dict[str, Any]:
                 release_root,
                 str(current_install["release_id"]),
                 expected_active_release_id=str(current_install["release_id"]),
+                database_path=database_path,
             )
         except ReleaseDrillError:
             stale_activation_blocked = True
@@ -672,11 +904,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--source-root")
     parser.add_argument("--report")
+    parser.add_argument("--reader-source-root", help="read-only compatibility probe of this exact source tree")
+    parser.add_argument("--reader-database", help="existing temporary application database to copy consistently and probe")
+    parser.add_argument("--reader-worker", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
+    if arguments.reader_source_root or arguments.reader_database or arguments.reader_worker:
+        try:
+            if not arguments.reader_source_root or not arguments.reader_database or arguments.source_root or arguments.report:
+                raise ReleaseDrillError("RELEASE_READER_ARGUMENTS_INVALID")
+            reader = _reader_check_worker if arguments.reader_worker else check_release_reader
+            result = reader(Path(arguments.reader_source_root), Path(arguments.reader_database))
+        except Exception as exc:
+            code = str(exc)
+            print(json.dumps({"compatible": False, "error_code": (
+                code if re.fullmatch(r"RELEASE_READER_[A-Z0-9_]+", code) else "RELEASE_READER_CHECK_FAILED"
+            )}, ensure_ascii=True))
+            return 1
+        print(json.dumps(result, ensure_ascii=True, sort_keys=True))
+        return 0 if arguments.reader_worker or result["compatible"] else 2
     source_root = Path(
         arguments.source_root or Path(__file__).resolve().parents[1]
     )
