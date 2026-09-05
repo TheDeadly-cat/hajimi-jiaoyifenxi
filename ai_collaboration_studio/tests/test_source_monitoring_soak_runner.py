@@ -64,11 +64,13 @@ class IntegrationAdapter:
         checkpoint: dict[str, Any],
         *,
         observed_at_ms: int,
+        deadline_monotonic_ms: int = 0,
+        cancel_event=None,
         etag: str = "",
         last_modified: str = "",
         max_items: int = 50,
     ) -> AdapterPollResult:
-        del etag, last_modified, max_items
+        del deadline_monotonic_ms, cancel_event, etag, last_modified, max_items
         return AdapterPollResult.build(
             adapter_key=self.adapter_key,
             started_checkpoint=checkpoint,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import json
 import os
 import tempfile
 import unittest
@@ -10,11 +12,18 @@ from unittest.mock import patch
 os.environ["AI_STUDIO_SKIP_LOCAL_ENV"] = "1"
 
 from backend.source_inbox_service import SourceInboxService  # noqa: E402
+from backend.source_poll_control import (  # noqa: E402
+    SourcePollCancelled,
+    SourcePollDeadlineExceeded,
+)
 from backend.source_monitoring.operator_service import (  # noqa: E402
     DISABLE_SOURCE_MONITORING_ADAPTER,
     ENABLE_SOURCE_MONITORING_ADAPTER,
     SourceMonitoringOperatorError,
     SourceMonitoringOperatorService,
+)
+from backend.source_monitoring.adapters.futu_anomaly import (  # noqa: E402
+    FutuAnomalySourceAdapter,
 )
 from backend.source_monitoring.registry import SourceAdapterRegistry  # noqa: E402
 from backend.source_monitoring.settings import SourceMonitoringSettings  # noqa: E402
@@ -27,6 +36,32 @@ from tests.test_source_monitoring_supervisor import FakeAdapter  # noqa: E402
 
 
 NOW_MS = 1_900_000_000_000
+FUTU_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "futu_anomaly"
+
+
+def _futu_fixture(name: str) -> dict[str, object]:
+    return json.loads((FUTU_FIXTURE_DIR / name).read_text(encoding="utf-8"))
+
+
+class _NoPollQuoteClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def quote_batch(self, symbols, *, force=False):
+        del symbols, force
+        self.calls += 1
+        raise AssertionError("static seed authorization must not poll quotes")
+
+
+class _MutableQuoteClient:
+    def __init__(self, snapshot: dict[str, object]) -> None:
+        self.snapshot = copy.deepcopy(snapshot)
+        self.calls = 0
+
+    def quote_batch(self, symbols, *, force=False):
+        del symbols, force
+        self.calls += 1
+        return copy.deepcopy(self.snapshot)
 
 
 class SourceMonitoringOperatorServiceTests(unittest.TestCase):
@@ -80,7 +115,7 @@ class SourceMonitoringOperatorServiceTests(unittest.TestCase):
             set(control),
             {"version", "captured_at_ms", "settings", "adapters", "safety"},
         )
-        self.assertEqual(control["version"], "source_monitoring_operator_control_v1")
+        self.assertEqual(control["version"], "source_monitoring_operator_control_v2")
         adapter = control["adapters"][0]
         self.assertEqual(
             set(adapter),
@@ -142,6 +177,200 @@ class SourceMonitoringOperatorServiceTests(unittest.TestCase):
             },
         )
         self.assertIsNone(self.repository.get_state(self.adapter.adapter_key))
+
+    def test_market_seed_preview_and_enable_authorize_static_policy_without_poll(self) -> None:
+        quote_client = _NoPollQuoteClient()
+        adapter = FutuAnomalySourceAdapter(market_adapter=quote_client, clock_ms=lambda: self.clock[0])
+        registry = SourceAdapterRegistry((adapter,), official_only=False)
+        settings = SourceMonitoringSettings(
+            enabled=True,
+            official_only=False,
+            allow_readonly_market=True,
+            dry_run=False,
+        )
+        service = SourceMonitoringOperatorService(
+            store=self.store,
+            settings=settings,
+            registry=registry,
+            repository=self.repository,
+            clock_ms=lambda: self.clock[0],
+        )
+
+        preview = service.preview(
+            adapter.adapter_key,
+            expected_config_version=adapter.config_version,
+            expected_state_version=0,
+        )
+        self.assertEqual(
+            preview["version"],
+            "source_monitoring_operator_static_seed_preview_v2",
+        )
+        self.assertEqual(preview["preview_kind"], "static_seed_policy")
+        self.assertEqual(
+            preview["candidate_evidence"],
+            "deferred_to_first_runtime_poll",
+        )
+        self.assertEqual(preview["candidate_count"], 0)
+        self.assertEqual(preview["safety"]["market_calls_performed"], 0)
+        self.assertEqual(quote_client.calls, 0)
+
+        enabled = service.set_enablement(
+            adapter.adapter_key,
+            enabled=True,
+            expected_config_version=adapter.config_version,
+            expected_state_version=0,
+            confirmation=ENABLE_SOURCE_MONITORING_ADAPTER,
+            preview_sha256=preview["preview_sha256"],
+        )
+
+        self.assertTrue(enabled["initialization_authorized"])
+        self.assertEqual(enabled["safety"]["market_calls_performed"], 0)
+        self.assertEqual(enabled["safety"]["network_requests_performed"], 0)
+        self.assertEqual(quote_client.calls, 0)
+        pending = self.repository.get_state(adapter.adapter_key)[
+            "pending_initialization_authorization"
+        ]
+        self.assertEqual(
+            pending["version"],
+            "source_monitoring_pending_initialization_authorization_v2",
+        )
+        self.assertEqual(
+            pending["source_policy_sha256"],
+            preview["source_policy_sha256"],
+        )
+
+    def test_market_static_seed_authorization_survives_live_change_and_first_poll_receipts_it(self) -> None:
+        self.clock[0] = 1_788_184_800_000
+        normal_snapshot = _futu_fixture("live_normal_snapshot.json")
+        changed_snapshot = _futu_fixture("live_anomaly_snapshot.json")
+        self.assertNotEqual(
+            normal_snapshot["snapshot_id"],
+            changed_snapshot["snapshot_id"],
+        )
+        quote_client = _MutableQuoteClient(normal_snapshot)
+        adapter = FutuAnomalySourceAdapter(market_adapter=quote_client, clock_ms=lambda: self.clock[0])
+        registry = SourceAdapterRegistry((adapter,), official_only=False)
+        settings = SourceMonitoringSettings(
+            enabled=True,
+            official_only=False,
+            allow_readonly_market=True,
+            dry_run=False,
+        )
+        service = SourceMonitoringOperatorService(
+            store=self.store,
+            settings=settings,
+            registry=registry,
+            repository=self.repository,
+            clock_ms=lambda: self.clock[0],
+        )
+
+        before_change = service.preview(
+            adapter.adapter_key,
+            expected_config_version=adapter.config_version,
+            expected_state_version=0,
+        )
+        quote_client.snapshot = changed_snapshot
+        after_change = service.preview(
+            adapter.adapter_key,
+            expected_config_version=adapter.config_version,
+            expected_state_version=0,
+        )
+
+        self.assertEqual(quote_client.calls, 0)
+        self.assertEqual(
+            before_change["preview_sha256"],
+            after_change["preview_sha256"],
+        )
+        self.assertEqual(
+            before_change["source_policy_sha256"],
+            after_change["source_policy_sha256"],
+        )
+        service.set_enablement(
+            adapter.adapter_key,
+            enabled=True,
+            expected_config_version=adapter.config_version,
+            expected_state_version=0,
+            confirmation=ENABLE_SOURCE_MONITORING_ADAPTER,
+            preview_sha256=before_change["preview_sha256"],
+        )
+        self.assertEqual(quote_client.calls, 0)
+
+        seeded = SourceMonitoringSupervisor(
+            registry=registry,
+            repository=self.repository,
+            source_inbox=SourceInboxService(
+                self.store,
+                clock=lambda: self.clock[0] / 1_000,
+            ),
+            settings=settings,
+            clock_ms=lambda: self.clock[0],
+        ).run_once(adapter.adapter_key)
+
+        self.assertEqual(quote_client.calls, 1)
+        self.assertEqual(seeded["status"], "SUCCEEDED")
+        self.assertEqual(seeded["initialization"]["outcome"], "seeded")
+        self.assertGreater(seeded["initialization"]["candidate_count"], 0)
+        self.assertEqual(seeded["initialization"]["selected_count"], 0)
+        self.assertIsNone(seeded["import"])
+        self.assertEqual(seeded["run"]["accepted_count"], 0)
+        self.assertNotEqual(seeded["state"]["checkpoint"], {})
+        mu_checkpoint = next(
+            item
+            for item in seeded["state"]["checkpoint"]["symbols"]
+            if item["symbol"] == "US.MU"
+        )
+        self.assertTrue(mu_checkpoint["active_rule_ids"])
+
+        receipt = self.repository.get_latest_successful_initialization(
+            adapter.adapter_key,
+            config_version=adapter.config_version,
+        )
+        self.assertEqual(receipt["authorization_kind"], "static_seed_policy")
+        self.assertEqual(
+            receipt["preview_sha256"],
+            before_change["preview_sha256"],
+        )
+        self.assertEqual(
+            receipt["source_policy_sha256"],
+            before_change["source_policy_sha256"],
+        )
+        self.assertNotEqual(
+            receipt["execution_preview_sha256"],
+            receipt["preview_sha256"],
+        )
+
+    def test_combined_catalog_projects_official_catch_up_and_market_seed_separately(self) -> None:
+        quote_client = _NoPollQuoteClient()
+        market_adapter = FutuAnomalySourceAdapter(market_adapter=quote_client, clock_ms=lambda: self.clock[0])
+        market_registry = SourceAdapterRegistry(
+            (market_adapter,),
+            official_only=False,
+        )
+        settings = SourceMonitoringSettings(
+            enabled=True,
+            official_only=True,
+            allow_readonly_market=True,
+            dry_run=False,
+            initial_mode="catch_up",
+            catch_up_max_items=2,
+        )
+        service = SourceMonitoringOperatorService(
+            store=self.store,
+            settings=settings,
+            registry_catalog=(self.registry, market_registry),
+            repository=self.repository,
+            clock_ms=lambda: self.clock[0],
+        )
+
+        control = service.control_snapshot()
+        modes = {
+            item["adapter_key"]: item["initialization_mode"]
+            for item in control["adapters"]
+        }
+
+        self.assertEqual(modes[self.adapter.adapter_key], "catch_up")
+        self.assertEqual(modes[market_adapter.adapter_key], "seed_only")
+        self.assertEqual(quote_client.calls, 0)
 
     def test_ui_authorization_survives_restart_and_success_consumes_it(self) -> None:
         settings = self.settings()
@@ -349,11 +578,21 @@ class SourceMonitoringOperatorServiceTests(unittest.TestCase):
             checkpoint: dict[str, object],
             *,
             observed_at_ms: int,
+            deadline_monotonic_ms: int = 0,
+            cancel_event=None,
             etag: str = "",
             last_modified: str = "",
             max_items: int = 50,
         ) -> None:
-            del checkpoint, observed_at_ms, etag, last_modified, max_items
+            del (
+                checkpoint,
+                observed_at_ms,
+                deadline_monotonic_ms,
+                cancel_event,
+                etag,
+                last_modified,
+                max_items,
+            )
             raise SystemExit(secret)
 
         self.adapter.poll = exit_with_secret  # type: ignore[method-assign]
@@ -399,6 +638,52 @@ class SourceMonitoringOperatorServiceTests(unittest.TestCase):
             "SOURCE_MONITORING_OPERATOR_READ_FAILED",
         )
         self.assertNotIn(secret, str(state_error.exception))
+
+    def test_preview_preserves_poll_cancellation_and_deadline_codes(self) -> None:
+        failures = (
+            SourcePollCancelled(
+                "SOURCE_MONITORING_POLL_CANCELLED",
+                "secret cancellation detail",
+            ),
+            SourcePollDeadlineExceeded(
+                "SOURCE_MONITORING_POLL_DEADLINE_EXCEEDED",
+                "secret deadline detail",
+            ),
+        )
+        original_poll = self.adapter.poll
+        for failure in failures:
+            def interrupted_poll(
+                checkpoint: dict[str, object],
+                *,
+                observed_at_ms: int,
+                deadline_monotonic_ms: int = 0,
+                cancel_event=None,
+                etag: str = "",
+                last_modified: str = "",
+                max_items: int = 50,
+            ) -> None:
+                del (
+                    checkpoint,
+                    observed_at_ms,
+                    deadline_monotonic_ms,
+                    cancel_event,
+                    etag,
+                    last_modified,
+                    max_items,
+                )
+                raise failure
+
+            self.adapter.poll = interrupted_poll  # type: ignore[method-assign]
+            with self.subTest(code=failure.code):
+                with self.assertRaises(SourceMonitoringOperatorError) as caught:
+                    self.service().preview(
+                        self.adapter.adapter_key,
+                        expected_config_version=self.adapter.config_version,
+                        expected_state_version=0,
+                    )
+            self.assertEqual(caught.exception.code, failure.code)
+            self.assertNotIn("secret", str(caught.exception))
+        self.adapter.poll = original_poll  # type: ignore[method-assign]
 
     def test_completed_initialization_preview_is_rejected_before_poll(self) -> None:
         settings = self.settings()

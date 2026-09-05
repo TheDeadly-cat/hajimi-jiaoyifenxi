@@ -8,9 +8,17 @@ from __future__ import annotations
 
 import math
 import random
+import threading
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
+from ..source_poll_control import (
+    SourcePollCancelled,
+    SourcePollDeadlineExceeded,
+    ensure_source_poll_active,
+    validate_source_poll_control,
+)
 from .contracts import MAX_NATIVE_INTEGER, SourceMonitoringContractError
 from .registry import SourceAdapterRegistry
 from .state_repository import SourceMonitoringStateRepository
@@ -24,6 +32,20 @@ MAX_SCHEDULED_RUNS_PER_CYCLE = 50
 
 class SourceMonitoringScheduleError(SourceMonitoringContractError):
     """Raised when a scheduler input violates the closed local contract."""
+
+
+class SourceMonitoringSelectionChanged(SourceMonitoringScheduleError):
+    """An enabled/configured state changed before its selected run began."""
+
+
+@dataclass(frozen=True)
+class SourceMonitoringRunSelection:
+    """One due decision, bound to the state that authorized that decision."""
+
+    adapter_key: str
+    config_version: str
+    state_version: int
+    due_at_ms: int
 
 
 def _native_non_negative(value: Any, *, field: str) -> int:
@@ -203,6 +225,22 @@ class SourceMonitoringScheduler:
         effective = self._effective_due_by_adapter()
         return min(effective.values(), default=0)
 
+    def effective_due_entries(self) -> tuple[tuple[int, str], ...]:
+        """Return deterministic ``(due_at_ms, adapter_key)`` entries.
+
+        A multi-pipeline coordinator uses this read-only projection to choose
+        one globally earliest adapter without flattening the registries or
+        sharing their process-local backoff maps.
+        """
+
+        effective = self._effective_due_by_adapter()
+        return tuple(
+            sorted(
+                (due_at_ms, adapter_key)
+                for adapter_key, due_at_ms in effective.items()
+            )
+        )
+
     def due_adapter_keys(self) -> tuple[str, ...]:
         effective = self._effective_due_by_adapter()
         if not effective:
@@ -215,66 +253,47 @@ class SourceMonitoringScheduler:
         ]
         return tuple(sorted(due))
 
-    def run_due(self, *, max_runs: Any = MAX_SCHEDULED_RUNS_PER_CYCLE) -> dict[str, Any]:
-        if (
-            type(max_runs) is not int
-            or not 1 <= max_runs <= MAX_SCHEDULED_RUNS_PER_CYCLE
-        ):
-            raise SourceMonitoringScheduleError(
-                "SOURCE_MONITORING_SCHEDULE_LIMIT_INVALID",
-                "max_runs must be a native integer between 1 and 50",
+    def due_run_selections(
+        self,
+        *,
+        now_ms: int | None = None,
+    ) -> tuple[SourceMonitoringRunSelection, ...]:
+        """Read each candidate's identity and due time from the same snapshot."""
+
+        settings = self.supervisor.settings
+        if not settings.enabled or not settings.auto_start:
+            return ()
+        now = (
+            self._now_ms() if now_ms is None
+            else _native_non_negative(now_ms, field="now_ms")
+        )
+        registered = set(self.registry.adapter_keys)
+        selections: list[SourceMonitoringRunSelection] = []
+        for state in self.repository.list_states():
+            key = state["adapter_key"]
+            if not state["enabled"] or key not in registered:
+                continue
+            due_at = max(
+                state["next_due_at_ms"], self._ephemeral_due_at_ms.get(key, 0),
             )
-        started_at = self._now_ms()
-        results: list[dict[str, Any]] = []
-        for adapter_key in self.due_adapter_keys()[:max_runs]:
-            boundary_failed = False
-            try:
-                result = self.supervisor.run_once(adapter_key)
-            except Exception as exc:  # isolate one worker boundary from its peers
-                boundary_failed = True
-                metadata = self.registry.metadata_for(adapter_key)
-                result = {
-                    "version": "source_monitoring_run_result_v1",
-                    "adapter_key": adapter_key,
-                    "status": "FAILED",
-                    "error_code": "SOURCE_MONITORING_SCHEDULER_BOUNDARY",
-                    "error_message": " ".join(str(exc).split())[:500],
-                    "state_recorded": False,
-                    "safety": {
-                        "execution_capability": "none",
-                        "live_trading_allowed": False,
-                        "provider_calls_performed": 0,
-                        "market_calls_performed": (
-                            0 if metadata.max_market_calls_per_poll == 0 else None
-                        ),
-                        "market_calls_accounting": (
-                            "exact"
-                            if metadata.max_market_calls_per_poll == 0
-                            else "unknown"
-                        ),
-                        "market_calls_possible_max": (
-                            metadata.max_market_calls_per_poll
-                        ),
-                        "formal_rounds_created": 0,
-                    },
-                }
-            results.append(result)
-            if boundary_failed or (
-                result.get("status") == "FAILED"
-                and result.get("state_recorded") is not True
-            ):
-                self._ephemeral_due_at_ms[adapter_key] = min(
-                    MAX_NATIVE_INTEGER,
-                    started_at + self.supervisor.backoff_policy.initial_delay_ms,
-                )
-            elif result.get("status") in {"DRY_RUN", "DRY_RUN_FAILED"}:
-                metadata = self.registry.metadata_for(adapter_key)
-                self._ephemeral_due_at_ms[adapter_key] = min(
-                    MAX_NATIVE_INTEGER,
-                    started_at + metadata.poll_interval_ms,
-                )
-            else:
-                self._ephemeral_due_at_ms.pop(adapter_key, None)
+            if due_at <= now:
+                selections.append(SourceMonitoringRunSelection(
+                    adapter_key=key,
+                    config_version=state["config_version"],
+                    state_version=state["state_version"],
+                    due_at_ms=due_at,
+                ))
+        return tuple(sorted(
+            selections, key=lambda selection: selection.adapter_key,
+        ))
+
+    @staticmethod
+    def _cycle_payload(
+        *,
+        started_at: int,
+        completed_at: int,
+        results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         market_call_values = [
             result.get("safety", {}).get("market_calls_performed")
             for result in results
@@ -287,7 +306,7 @@ class SourceMonitoringScheduler:
         return {
             "version": "source_monitoring_schedule_cycle_v1",
             "started_at_ms": started_at,
-            "completed_at_ms": self._now_ms(),
+            "completed_at_ms": completed_at,
             "run_count": len(results),
             "results": results,
             "safety": {
@@ -304,10 +323,188 @@ class SourceMonitoringScheduler:
             },
         }
 
+    def _run_adapter(
+        self,
+        selection: SourceMonitoringRunSelection,
+        *,
+        started_at: int,
+        deadline_monotonic_ms: int,
+        cancel_event: threading.Event | None,
+    ) -> dict[str, Any] | None:
+        adapter_key = selection.adapter_key
+        boundary_failed = False
+        try:
+            result = self.supervisor.run_once(
+                adapter_key,
+                expected_config_version=selection.config_version,
+                expected_state_version=selection.state_version,
+                deadline_monotonic_ms=deadline_monotonic_ms,
+                cancel_event=cancel_event,
+            )
+        except (SourcePollCancelled, SourcePollDeadlineExceeded):
+            raise
+        except SourceMonitoringSelectionChanged:
+            # No request or run was started. Recompute selection on the next
+            # cycle without inventing an adapter failure or failure backoff.
+            return None
+        except Exception as exc:  # isolate one worker boundary from its peers
+            boundary_failed = True
+            metadata = self.registry.metadata_for(adapter_key)
+            result = {
+                "version": "source_monitoring_run_result_v1",
+                "adapter_key": adapter_key,
+                "status": "FAILED",
+                "error_code": "SOURCE_MONITORING_SCHEDULER_BOUNDARY",
+                "error_message": " ".join(str(exc).split())[:500],
+                "state_recorded": False,
+                "safety": {
+                    "execution_capability": "none",
+                    "live_trading_allowed": False,
+                    "provider_calls_performed": 0,
+                    "market_calls_performed": (
+                        0 if metadata.max_market_calls_per_poll == 0 else None
+                    ),
+                    "market_calls_accounting": (
+                        "exact"
+                        if metadata.max_market_calls_per_poll == 0
+                        else "unknown"
+                    ),
+                    "market_calls_possible_max": (
+                        metadata.max_market_calls_per_poll
+                    ),
+                    "formal_rounds_created": 0,
+                },
+            }
+        if boundary_failed or (
+            result.get("status") == "FAILED"
+            and result.get("state_recorded") is not True
+        ):
+            self._ephemeral_due_at_ms[adapter_key] = min(
+                MAX_NATIVE_INTEGER,
+                started_at + self.supervisor.backoff_policy.initial_delay_ms,
+            )
+        elif result.get("status") in {"DRY_RUN", "DRY_RUN_FAILED"}:
+            metadata = self.registry.metadata_for(adapter_key)
+            self._ephemeral_due_at_ms[adapter_key] = min(
+                MAX_NATIVE_INTEGER,
+                started_at + metadata.poll_interval_ms,
+            )
+        else:
+            self._ephemeral_due_at_ms.pop(adapter_key, None)
+        return result
+
+    def run_one_due(
+        self,
+        adapter_key: Any,
+        *,
+        selection: SourceMonitoringRunSelection | None = None,
+        deadline_monotonic_ms: Any = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """Run one named adapter only when it is currently due.
+
+        The explicit key prevents a coordinator from selecting one adapter and
+        the pipeline scheduler silently running a different alphabetic peer.
+        A supplied selection keeps its original config/state versions through
+        the supervisor's atomic start gate; rechecking due never reselects a key.
+        """
+
+        deadline, event = validate_source_poll_control(
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
+        adapter = self.registry.require(adapter_key)
+        clean_adapter_key = adapter.adapter_key
+        started_at = self._now_ms()
+        ensure_source_poll_active(
+            deadline_monotonic_ms=deadline,
+            cancel_event=event,
+        )
+        if selection is None:
+            selection = next((
+                candidate for candidate in self.due_run_selections(now_ms=started_at)
+                if candidate.adapter_key == clean_adapter_key
+            ), None)
+        elif (
+            type(selection) is not SourceMonitoringRunSelection
+            or type(selection.adapter_key) is not str
+            or selection.adapter_key != clean_adapter_key
+            or type(selection.config_version) is not str
+            or not selection.config_version
+            or type(selection.state_version) is not int
+            or not 1 <= selection.state_version <= MAX_NATIVE_INTEGER
+            or type(selection.due_at_ms) is not int
+            or not 0 <= selection.due_at_ms <= MAX_NATIVE_INTEGER
+        ):
+            raise SourceMonitoringScheduleError(
+                "SOURCE_MONITORING_SELECTION_INVALID",
+                "selected run identity is outside the announced adapter boundary",
+            )
+        current_due = self._effective_due_by_adapter().get(clean_adapter_key)
+        if selection is None or current_due is None or current_due > started_at:
+            return self._cycle_payload(
+                started_at=started_at,
+                completed_at=self._now_ms(),
+                results=[],
+            )
+        result = self._run_adapter(
+            selection,
+            started_at=started_at,
+            deadline_monotonic_ms=deadline,
+            cancel_event=event,
+        )
+        return self._cycle_payload(
+            started_at=started_at,
+            completed_at=self._now_ms(),
+            results=[] if result is None else [result],
+        )
+
+    def run_due(
+        self,
+        *,
+        max_runs: Any = MAX_SCHEDULED_RUNS_PER_CYCLE,
+        deadline_monotonic_ms: Any = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        if (
+            type(max_runs) is not int
+            or not 1 <= max_runs <= MAX_SCHEDULED_RUNS_PER_CYCLE
+        ):
+            raise SourceMonitoringScheduleError(
+                "SOURCE_MONITORING_SCHEDULE_LIMIT_INVALID",
+                "max_runs must be a native integer between 1 and 50",
+            )
+        deadline, event = validate_source_poll_control(
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
+        started_at = self._now_ms()
+        results: list[dict[str, Any]] = []
+        for selection in self.due_run_selections(now_ms=started_at)[:max_runs]:
+            ensure_source_poll_active(
+                deadline_monotonic_ms=deadline,
+                cancel_event=event,
+            )
+            result = self._run_adapter(
+                selection,
+                started_at=started_at,
+                deadline_monotonic_ms=deadline,
+                cancel_event=event,
+            )
+            if result is not None:
+                results.append(result)
+        return self._cycle_payload(
+            started_at=started_at,
+            completed_at=self._now_ms(),
+            results=results,
+        )
+
 
 __all__ = [
     "MAX_SCHEDULED_RUNS_PER_CYCLE",
     "BackoffPolicy",
     "SourceMonitoringScheduleError",
+    "SourceMonitoringRunSelection",
+    "SourceMonitoringSelectionChanged",
     "SourceMonitoringScheduler",
 ]

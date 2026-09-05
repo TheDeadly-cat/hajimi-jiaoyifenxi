@@ -12,7 +12,13 @@ from urllib.request import Request
 
 from ..config import SEC_CACHE_TTL_SECONDS, SEC_USER_AGENT
 from .futu_readonly import STORAGE_SYMBOLS, US_EASTERN, _utc_iso
-from .official_http import open_official_https
+from ..source_poll_control import (
+    SourcePollCancelled,
+    SourcePollDeadlineExceeded,
+    ensure_source_poll_active,
+    wait_for_source_poll,
+)
+from .official_http import open_official_https, read_official_https_body
 
 
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -30,6 +36,7 @@ SEC_MONITOR_SYMBOLS = (
     "US.AMD",
 )
 SEC_MAX_RESPONSE_BYTES = 2_000_000
+SEC_MONITORING_RECENT_SCOPE_VERSION = "sec_monitoring_recent_scope_v1"
 
 _SEC_ACCESSION_RE = re.compile(r"[0-9]{10}-[0-9]{2}-[0-9]{6}\Z")
 _SEC_SYMBOL_RE = re.compile(r"US\.[A-Z][A-Z0-9.-]{0,14}\Z")
@@ -75,6 +82,7 @@ class SecEdgarAdapter:
         self.user_agent = str(user_agent or "").strip()[:300]
         self.cache_ttl_seconds = max(60.0, float(cache_ttl_seconds))
         self._fetch_json = fetch_json or self._default_fetch_json
+        self._fetch_json_is_default = fetch_json is None
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._min_interval = max(0.11, float(min_request_interval_seconds))
         self.allowed_symbols = self._normalize_allowed_symbols(allowed_symbols)
@@ -159,6 +167,8 @@ class SecEdgarAdapter:
         forms: tuple[str, ...] | list[str] | None = None,
         limit: int = 8,
         force: bool = False,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         """Return the legacy per-symbol bounded filings view."""
 
@@ -168,6 +178,8 @@ class SecEdgarAdapter:
             limit=limit,
             force=force,
             monitoring_raw_items=False,
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
         )
 
     def monitoring_filings_batch(
@@ -177,6 +189,8 @@ class SecEdgarAdapter:
         forms: tuple[str, ...] | list[str] | None = None,
         limit: int = 8,
         force: bool = False,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
         """Return every normalized recent filing so monitoring can drain unseen rows."""
 
@@ -186,6 +200,8 @@ class SecEdgarAdapter:
             limit=limit,
             force=force,
             monitoring_raw_items=True,
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
         )
 
     def _recent_filings_batch(
@@ -196,7 +212,13 @@ class SecEdgarAdapter:
         limit: int,
         force: bool,
         monitoring_raw_items: bool,
+        deadline_monotonic_ms: int,
+        cancel_event: threading.Event | None,
     ) -> dict[str, Any]:
+        ensure_source_poll_active(
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
         requested = self._normalize_symbols(
             list(self.allowed_symbols) if symbols is None else symbols
         )
@@ -225,7 +247,13 @@ class SecEdgarAdapter:
             return result
 
         try:
-            ticker_map = self._ticker_map(force=force)
+            ticker_map = self._ticker_map(
+                force=force,
+                deadline_monotonic_ms=deadline_monotonic_ms,
+                cancel_event=cancel_event,
+            )
+        except (SourcePollCancelled, SourcePollDeadlineExceeded):
+            raise
         except Exception as exc:
             result["source_errors"].append({
                 "source": "sec_edgar",
@@ -236,6 +264,10 @@ class SecEdgarAdapter:
 
         today = captured_at.astimezone(US_EASTERN).date()
         for symbol in requested:
+            ensure_source_poll_active(
+                deadline_monotonic_ms=deadline_monotonic_ms,
+                cancel_event=cancel_event,
+            )
             ticker = symbol.removeprefix("US.")
             company = ticker_map.get(ticker)
             if not company:
@@ -262,7 +294,9 @@ class SecEdgarAdapter:
             try:
                 requested_cik = company["cik"]
                 submissions = self._request_json(
-                    SEC_SUBMISSIONS_URL.format(cik=requested_cik)
+                    SEC_SUBMISSIONS_URL.format(cik=requested_cik),
+                    deadline_monotonic_ms=deadline_monotonic_ms,
+                    cancel_event=cancel_event,
                 )
                 submissions_cik = submissions.get("cik")
                 if (
@@ -281,6 +315,8 @@ class SecEdgarAdapter:
                     today=today,
                     captured_at=captured_at,
                 )
+            except (SourcePollCancelled, SourcePollDeadlineExceeded):
+                raise
             except Exception as exc:
                 result["source_errors"].append({
                     "source": "sec_edgar",
@@ -289,7 +325,7 @@ class SecEdgarAdapter:
                     "message": str(exc)[:300],
                 })
                 continue
-            if not filings:
+            if not filings and not monitoring_raw_items:
                 result["source_errors"].append({
                     "source": "sec_edgar",
                     "symbol": symbol,
@@ -307,6 +343,10 @@ class SecEdgarAdapter:
                 "filing_count": len(filings),
                 "filings": filings,
             }
+            if monitoring_raw_items:
+                row["recent_scope_complete"] = self._recent_scope_complete(
+                    submissions, forms=normalized_forms, normalized_filings=filings
+                )
             with self._cache_lock:
                 self._filings_cache[cache_key] = (
                     time.monotonic() + self.cache_ttl_seconds,
@@ -314,13 +354,60 @@ class SecEdgarAdapter:
                 )
             result["rows"].append(row)
         result["ok"] = bool(result["rows"])
+        if monitoring_raw_items:
+            result["monitoring_recent_scope_version"] = SEC_MONITORING_RECENT_SCOPE_VERSION
+            result["monitoring_recent_scope_complete"] = (
+                not result["source_errors"]
+                and [row["symbol"] for row in result["rows"]] == list(requested)
+                and all(row.get("recent_scope_complete") is True for row in result["rows"])
+            )
         return result
 
-    def _ticker_map(self, *, force: bool) -> dict[str, dict[str, str]]:
+    @staticmethod
+    def _recent_scope_complete(
+        payload: dict[str, Any],
+        *,
+        forms: tuple[str, ...],
+        normalized_filings: list[dict[str, Any]],
+    ) -> bool:
+        """Prove that no selected-form recent record was truncated or rejected.
+
+        This covers only the fetched current recent arrays, never archive files.
+        The ordinary on-demand view retains its existing filtering behavior.
+        """
+
+        root = payload.get("filings")
+        recent = root.get("recent") if type(root) is dict else None
+        if type(recent) is not dict or type(recent.get("accessionNumber")) is not list:
+            return False
+        size = len(recent["accessionNumber"])
+        required = ("accessionNumber", "form", "filingDate", "primaryDocument")
+        for name in required + (("acceptanceDateTime",) if "acceptanceDateTime" in recent else ()):
+            values = recent.get(name)
+            if type(values) is not list or len(values) != size or any(type(value) is not str for value in values):
+                return False
+        expected = [
+            accession.strip()
+            for accession, form in zip(recent["accessionNumber"], recent["form"])
+            if form.strip().upper() in forms
+        ]
+        return expected == [filing["accession_number"] for filing in normalized_filings]
+
+    def _ticker_map(
+        self,
+        *,
+        force: bool,
+        deadline_monotonic_ms: int,
+        cancel_event: threading.Event | None,
+    ) -> dict[str, dict[str, str]]:
         with self._cache_lock:
             if self._ticker_cache and self._ticker_cache[0] > time.monotonic() and not force:
                 return copy.deepcopy(self._ticker_cache[1])
-        payload = self._request_json(SEC_TICKERS_URL)
+        payload = self._request_json(
+            SEC_TICKERS_URL,
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
         ticker_map: dict[str, dict[str, str]] = {}
         for item in payload.values():
             if not isinstance(item, dict):
@@ -341,13 +428,39 @@ class SecEdgarAdapter:
             self._ticker_cache = (time.monotonic() + 86_400, copy.deepcopy(ticker_map))
         return ticker_map
 
-    def _request_json(self, url: str) -> dict[str, Any]:
+    def _request_json(
+        self,
+        url: str,
+        *,
+        deadline_monotonic_ms: int,
+        cancel_event: threading.Event | None,
+    ) -> dict[str, Any]:
         with self._request_lock:
             remaining = self._min_interval - (time.monotonic() - self._last_request_monotonic)
             if remaining > 0:
-                time.sleep(remaining)
+                wait_for_source_poll(
+                    remaining,
+                    deadline_monotonic_ms=deadline_monotonic_ms,
+                    cancel_event=cancel_event,
+                )
             try:
-                payload = self._fetch_json(url, self.user_agent)
+                ensure_source_poll_active(
+                    deadline_monotonic_ms=deadline_monotonic_ms,
+                    cancel_event=cancel_event,
+                )
+                if self._fetch_json_is_default:
+                    payload = self._fetch_json(
+                        url,
+                        self.user_agent,
+                        deadline_monotonic_ms=deadline_monotonic_ms,
+                        cancel_event=cancel_event,
+                    )
+                else:
+                    payload = self._fetch_json(url, self.user_agent)
+                ensure_source_poll_active(
+                    deadline_monotonic_ms=deadline_monotonic_ms,
+                    cancel_event=cancel_event,
+                )
             finally:
                 self._last_request_monotonic = time.monotonic()
         if not isinstance(payload, dict):
@@ -355,7 +468,13 @@ class SecEdgarAdapter:
         return payload
 
     @staticmethod
-    def _default_fetch_json(url: str, user_agent: str) -> dict[str, Any]:
+    def _default_fetch_json(
+        url: str,
+        user_agent: str,
+        *,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
         if not _is_allowed_sec_fetch_url(url):
             raise ValueError("SEC 适配器拒绝非官方固定端点")
         request = Request(url, headers={
@@ -369,13 +488,24 @@ class SecEdgarAdapter:
             url_validator=lambda candidate: (
                 candidate == url and _is_allowed_sec_fetch_url(candidate)
             ),
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
         ) as response:
             declared_length = response.headers.get("Content-Length")
             if declared_length and int(declared_length) > SEC_MAX_RESPONSE_BYTES:
                 raise ValueError("SEC 响应超过 2 MB 上限")
-            raw = response.read(SEC_MAX_RESPONSE_BYTES + 1)
-        if len(raw) > SEC_MAX_RESPONSE_BYTES:
-            raise ValueError("SEC 响应超过 2 MB 上限")
+            try:
+                raw = read_official_https_body(
+                    response,
+                    SEC_MAX_RESPONSE_BYTES,
+                    deadline_seconds=12,
+                    deadline_monotonic_ms=deadline_monotonic_ms,
+                    cancel_event=cancel_event,
+                )
+            except (SourcePollCancelled, SourcePollDeadlineExceeded):
+                raise
+            except ValueError as exc:
+                raise ValueError("SEC 响应超过 2 MB 上限") from exc
         return json.loads(raw.decode("utf-8"))
 
     @staticmethod

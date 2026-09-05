@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import inspect
 import re
+import threading
 from typing import Any, Protocol, runtime_checkable
+
+from ...source_poll_control import validate_source_poll_control
 
 from ..contracts import (
     FUTU_ANOMALY_SOURCE_CHANNEL,
@@ -24,7 +27,7 @@ from ..contracts import (
 )
 
 
-SOURCE_ADAPTER_CONTRACT_VERSION = "source_adapter_v1"
+SOURCE_ADAPTER_CONTRACT_VERSION = "source_adapter_v2"
 MIN_POLL_INTERVAL_MS = 60_000
 MAX_POLL_INTERVAL_MS = 7 * 24 * 60 * 60 * 1_000
 
@@ -246,6 +249,8 @@ class SourceAdapter(Protocol):
         checkpoint: dict[str, Any],
         *,
         observed_at_ms: int,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
         etag: str = "",
         last_modified: str = "",
         max_items: int = 50,
@@ -277,6 +282,8 @@ def validate_source_adapter(adapter: Any) -> SourceAdapterMetadata:
     expected_names = (
         "checkpoint",
         "observed_at_ms",
+        "deadline_monotonic_ms",
+        "cancel_event",
         "etag",
         "last_modified",
         "max_items",
@@ -294,20 +301,28 @@ def validate_source_adapter(adapter: Any) -> SourceAdapterMetadata:
             for parameter in parameters[1:]
         )
         or parameters[1].default is not inspect.Parameter.empty
-        or type(parameters[2].default) is not str
-        or parameters[2].default != ""
-        or type(parameters[3].default) is not str
-        or parameters[3].default != ""
-        or type(parameters[4].default) is not int
-        or parameters[4].default != 50
+        or type(parameters[2].default) is not int
+        or parameters[2].default != 0
+        or parameters[3].default is not None
+        or type(parameters[4].default) is not str
+        or parameters[4].default != ""
+        or type(parameters[5].default) is not str
+        or parameters[5].default != ""
+        or type(parameters[6].default) is not int
+        or parameters[6].default != 50
     ):
         raise SourceAdapterContractError(
             "SOURCE_ADAPTER_POLL_SIGNATURE_INVALID",
             (
                 "adapter poll must be poll(checkpoint, *, observed_at_ms, "
-                "etag='', last_modified='', max_items=50)"
+                "deadline_monotonic_ms=0, cancel_event=None, etag='', "
+                "last_modified='', max_items=50)"
             ),
         )
+    validate_source_poll_control(
+        deadline_monotonic_ms=parameters[2].default,
+        cancel_event=parameters[3].default,
+    )
     official_source = getattr(adapter, "official_source", None)
     return SourceAdapterMetadata(
         contract_version=getattr(adapter, "contract_version", None),

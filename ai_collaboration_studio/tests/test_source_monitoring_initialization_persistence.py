@@ -15,7 +15,9 @@ from backend.source_monitoring.state_repository import (  # noqa: E402
     RUN_STATUS_SUCCEEDED,
     SOURCE_MONITORING_INITIALIZATION_MIGRATION_KEY,
     SOURCE_MONITORING_INITIALIZATION_VERSION,
+    SOURCE_MONITORING_INITIALIZATION_VERSION_V2,
     SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY,
+    SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION_V2,
     SourceMonitoringStateError,
     SourceMonitoringStateRepository,
     ensure_source_monitoring_schema,
@@ -414,6 +416,68 @@ class SourceMonitoringInitializationPersistenceTests(unittest.TestCase):
         )
         self.assertEqual(completed["run"]["status"], RUN_STATUS_SUCCEEDED)
         self.assertEqual(completed["run"]["initialization"]["mode"], "seed_only")
+
+    def test_static_seed_v2_receipt_binds_and_consumes_matching_policy_authority(self) -> None:
+        preview_sha256 = "a" * 64
+        source_policy_sha256 = "b" * 64
+        authorization = {
+            "version": SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION_V2,
+            "adapter_key": self.adapter_key,
+            "config_version": self.config_version,
+            "mode": "seed_only",
+            "catch_up_max_items": 0,
+            "from_time_ms": 0,
+            "starting_checkpoint_sha256": canonical_sha256({}),
+            "preview_sha256": preview_sha256,
+            "confirmed_at_ms": self.clock[0],
+            "authorization_kind": "static_seed_policy",
+            "source_policy_sha256": source_policy_sha256,
+        }
+        self.repository.authorize_initialization_and_enable(
+            self.adapter_key,
+            config_version=self.config_version,
+            expected_state_version=0,
+            authorization=authorization,
+        )
+        run = self.repository.start_run(
+            self.adapter_key,
+            config_version=self.config_version,
+        )["run"]
+        checkpoint = {"cursor": 2}
+        initialization = self._initialization(run, checkpoint)
+        initialization.update({
+            "version": SOURCE_MONITORING_INITIALIZATION_VERSION_V2,
+            "preview_sha256": preview_sha256,
+            "authorization_kind": "static_seed_policy",
+            "source_policy_sha256": source_policy_sha256,
+            "execution_preview_sha256": "c" * 64,
+        })
+        self.clock[0] += 10
+
+        completed = self.repository.complete_run(
+            run["run_id"],
+            next_checkpoint=checkpoint,
+            status=RUN_STATUS_SUCCEEDED,
+            observed_count=2,
+            accepted_count=0,
+            duplicate_count=0,
+            rejected_count=0,
+            next_due_at_ms=self.clock[0] + 60_000,
+            initialization=initialization,
+        )
+
+        self.assertEqual(completed["state"]["checkpoint"], checkpoint)
+        self.assertIsNone(
+            completed["state"]["pending_initialization_authorization"]
+        )
+        self.assertEqual(
+            completed["run"]["initialization"]["source_policy_sha256"],
+            source_policy_sha256,
+        )
+        self.assertEqual(
+            completed["run"]["initialization"]["execution_preview_sha256"],
+            "c" * 64,
+        )
 
     def test_mode_policy_fields_are_sealed_and_fail_closed_on_drift(self) -> None:
         run = self._start()

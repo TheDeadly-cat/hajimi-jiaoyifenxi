@@ -345,7 +345,7 @@ class SourceInboxHttpTests(unittest.TestCase):
         status, payload = self.request("/api/monitoring/health")
         self.assertEqual(status, 200)
         health = payload["source_monitoring_health"]
-        self.assertEqual(health["version"], "source_monitoring_health_service_v2")
+        self.assertEqual(health["version"], "source_monitoring_health_service_v3")
         self.assertEqual(health["adapter_count"], 7)
         self.assertFalse(health["runtime_liveness_verified"])
         self.assertEqual(health["runtime"]["status"], "disabled")
@@ -388,7 +388,7 @@ class SourceInboxHttpTests(unittest.TestCase):
         owner = self.attach_operator_runtime()
         service = Mock()
         service.control_snapshot.return_value = {
-            "version": "source_monitoring_operator_control_v1"
+            "version": "source_monitoring_operator_control_v2"
         }
         service.preview.return_value = {
             "version": "source_monitoring_operator_preview_v1"
@@ -408,7 +408,7 @@ class SourceInboxHttpTests(unittest.TestCase):
             self.assertEqual(headers.get("Cache-Control"), "no-store")
             self.assertEqual(
                 payload["source_monitoring_operator_control"]["version"],
-                "source_monitoring_operator_control_v1",
+                "source_monitoring_operator_control_v2",
             )
 
             preview_status, preview_payload, preview_headers = (

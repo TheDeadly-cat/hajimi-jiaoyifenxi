@@ -182,12 +182,15 @@ class SourceMonitoringTradingImpactTests(unittest.TestCase):
     @staticmethod
     def futu_adapter() -> FutuAnomalySourceAdapter:
         snapshot = json.loads(FUTU_FIXTURE.read_text(encoding="utf-8"))
-        return FutuAnomalySourceAdapter(market_adapter=FakeQuoteClient(snapshot))
+        return FutuAnomalySourceAdapter(
+            market_adapter=FakeQuoteClient(snapshot), clock_ms=lambda: FUTU_OBSERVED_AT_MS
+        )
 
     @staticmethod
     def company_ir_other_adapter() -> CompanyIrSourceAdapter:
         return CompanyIrSourceAdapter(
             adapter=OfficialIrReleaseAdapter(
+                source_format="rss",
                 fetch_bytes=OtherIrFixtureFetcher(),
                 clock=lambda: FIXED_NOW,
             ),

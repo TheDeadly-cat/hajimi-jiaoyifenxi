@@ -14,7 +14,7 @@ AI_STUDIO_SOURCE_MONITOR_MAX_ITEMS_PER_RUN=50
 AI_STUDIO_SOURCE_MONITOR_TRADING_IMPACT_RULES_ENABLED=0
 ```
 
-`build_official_source_registry()` 没有依赖注入参数，只能构造代码固定的真实 SEC、Company IR、Federal Reserve、BLS、Treasury 与官方宏观日历适配器；它不会创建线程、启动服务或发起网络请求。外层适配器同时封印构造时 inner client 的实例身份、精确类型和 transport callable；SEC 还封印声明的 User-Agent，宏观适配器额外封印固定 endpoint/series/dataset manifest。运行前任一项被替换都会在网络访问前失败，生产 builder 另断言六者都使用默认 HTTPS transport。测试替身只能直接使用普通 `SourceAdapterRegistry`，不能通过生产官方 builder 获得官方来源 provenance。注册前还会闭合验证 `poll(checkpoint, *, observed_at_ms, etag='', last_modified='', max_items=50)` 签名，因此旧协议适配器不会在创建 `RUNNING` 记录后才失败。每个适配器还必须在数据库中按其确定性 `config_version` 显式启用；该版本封印白名单、表单/feed/API、checkpoint/身份/投影版本、窗口、响应与候选上界、inner 类型、default/injected transport 模式及轮询周期。配置变化时旧状态不能被静默复用，必须在 disabled 状态下显式迁移。SEC v1→v2 额外要求先做只读迁移预览，把旧 checkpoint 与已持久化官方 SEC accession 精确合并；通用迁移若与预览不一致会原子拒绝。
+`build_official_source_registry()` 没有依赖注入参数，只能构造代码固定的真实 SEC、Company IR、Federal Reserve、BLS、Treasury 与官方宏观日历适配器；它不会创建线程、启动服务或发起网络请求。外层适配器同时封印构造时 inner client 的实例身份、精确类型和 transport callable；SEC 还封印声明的 User-Agent，宏观适配器额外封印固定 endpoint/series/dataset manifest。运行前任一项被替换都会在网络访问前失败，生产 builder 另断言六者都使用默认 HTTPS transport。测试替身只能直接使用普通 `SourceAdapterRegistry`，不能通过生产官方 builder 获得官方来源 provenance。注册前还会闭合验证 `poll(checkpoint, *, observed_at_ms, deadline_monotonic_ms=0, cancel_event=None, etag='', last_modified='', max_items=50)` v2 签名，因此旧协议适配器不会在创建 `RUNNING` 记录后才失败。绝对单调时钟 deadline 与共享取消事件会贯穿适配器及默认官方 HTTPS 客户端；Runtime 停止时会触发取消并中断受管响应体读取。每个适配器还必须在数据库中按其确定性 `config_version` 显式启用；该版本封印白名单、表单/feed/API、checkpoint/身份/投影版本、窗口、响应与候选上界、inner 类型、default/injected transport 模式及轮询周期。配置变化时旧状态不能被静默复用，必须在 disabled 状态下显式迁移。SEC v1→v2 额外要求先做只读迁移预览，把旧 checkpoint 与已持久化官方 SEC accession 精确合并；通用迁移若与预览不一致会原子拒绝。
 
 ## 交付顺序与恢复
 
@@ -43,4 +43,4 @@ Dry-run 只验证候选 packet 并保存终态 run receipt，不写 Source Inbox
 - `execution_capability=none`、`live_trading_allowed=false`；没有订单、账户、资金、支付或钱包能力。
 - 关闭监控不会删除已存监控数据，也不改变原有房间、材料、Manual ChatGPT 或 Source Inbox 状态机。
 
-阶段 3 的宏观源只投递官方计划/发布/修订事实，不计算影响、不生成交易语言。阶段 4 的独立 Futu 异常信号已经实现。阶段 5 以独立默认关闭的不可变 sidecar 提供零 Token 影响规则，详见 [确定性影响规则边界](./trading_impact_rules_phase5.md)。阶段 6 已提供未读、筛选、健康记录、浏览器通知与深链接；阶段 7 保留人工 JSON 导入并增加绑定原文的预览和只供手动复制的 GPT 模板，不控制 ChatGPT 页面。阶段 8 增加有界生命周期日志、只读 operations health、`retain_all_evidence` 零删除政策证明，以及 additive migration/rollback 合同，详见 [运行手册](./source_monitoring_operations_runbook.md)。自动启动仍未启用，也没有自动清理任务。
+阶段 3 的宏观源只投递官方计划/发布/修订事实，不计算影响、不生成交易语言。阶段 4 的独立 Futu 异常信号已经实现。阶段 5 以独立默认关闭的不可变 sidecar 提供零 Token 影响规则，详见 [确定性影响规则边界](./trading_impact_rules_phase5.md)。阶段 6 已提供未读、筛选、健康记录、浏览器通知与深链接；阶段 7 保留人工 JSON 导入并增加绑定原文的预览和只供手动复制的 GPT 模板，不控制 ChatGPT 页面。阶段 8 增加有界生命周期日志、只读 operations health、`retain_all_evidence` 零删除政策证明，以及 additive migration/rollback 合同，详见 [运行手册](./source_monitoring_operations_runbook.md)。自动启动能力仍默认关闭；明确同时启用官方与只读行情时，由 Runtime convergence v2 在单一 worker 中串行协调两个独立 pipeline。系统没有自动清理任务。

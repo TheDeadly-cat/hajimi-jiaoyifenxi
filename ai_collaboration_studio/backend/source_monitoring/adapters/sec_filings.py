@@ -9,6 +9,7 @@ adapter remains injectable so unit tests can be fixture-only.
 from __future__ import annotations
 
 import re
+import threading
 from datetime import datetime, timezone
 from typing import Any, Protocol
 from urllib.parse import urlsplit
@@ -18,7 +19,14 @@ from ...market.sec_edgar import (
     SEC_ALLOWED_FORMS,
     SEC_DEFAULT_FORMS,
     SEC_MONITOR_SYMBOLS,
+    SEC_MONITORING_RECENT_SCOPE_VERSION,
     SecEdgarAdapter,
+)
+from ...source_poll_control import (
+    SourcePollCancelled,
+    SourcePollDeadlineExceeded,
+    ensure_source_poll_active,
+    validate_source_poll_control,
 )
 from ...source_inbox_contracts import PROJECT_SOURCE_ITEM_VERSION
 from ..contracts import (
@@ -39,7 +47,7 @@ from .base import (
 
 
 SEC_FILINGS_ADAPTER_KEY = "sec_filings"
-SEC_FILINGS_CHECKPOINT_VERSION = "sec_filings_checkpoint_v1"
+SEC_FILINGS_CHECKPOINT_VERSION = "sec_filings_checkpoint_v2"
 SEC_FILINGS_CONFIG_BASIS_VERSION = "sec_filings_config_basis_v2"
 SEC_FILINGS_PROJECTION_VERSION = "sec_v1"
 SEC_FILINGS_DISCOVERY_TIME_SEMANTICS = "official_event_time_epoch_ms_v1"
@@ -62,6 +70,8 @@ class _SecBatchAdapter(Protocol):
         forms: tuple[str, ...] | list[str] | None = None,
         limit: int = 8,
         force: bool = False,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -163,8 +173,13 @@ def _normalize_checkpoint(value: Any) -> tuple[dict[str, Any], list[str]]:
     checkpoint = normalize_checkpoint(value)
     if checkpoint == {}:
         return checkpoint, []
+    if checkpoint.get("version") == "sec_filings_checkpoint_v1":
+        raise SourceMonitoringContractError(
+            "SEC_BASELINE_UPGRADE_REQUIRED",
+            "Legacy SEC checkpoint cannot prove a complete seed baseline; disable the adapter and explicitly migrate its config with an empty replacement checkpoint to establish a new bounded baseline. Existing inbox items and materials must be retained.",
+        )
     if set(checkpoint) != {"version", "seen_accessions"}:
-        raise _checkpoint_error("SEC checkpoint fields do not match v1")
+        raise _checkpoint_error("SEC checkpoint fields do not match v2")
     if checkpoint.get("version") != SEC_FILINGS_CHECKPOINT_VERSION:
         raise _checkpoint_error("SEC checkpoint version is unsupported")
     raw_seen = checkpoint.get("seen_accessions")
@@ -511,11 +526,66 @@ class SecFilingsSourceAdapter:
         checkpoint: Any,
         *,
         observed_at_ms: Any,
+        deadline_monotonic_ms: Any = 0,
+        cancel_event: threading.Event | None = None,
         etag: Any = "",
         last_modified: Any = "",
         max_items: Any = 50,
     ) -> AdapterPollResult:
+        return self._poll(
+            checkpoint,
+            observed_at_ms=observed_at_ms,
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+            etag=etag,
+            last_modified=last_modified,
+            max_items=max_items,
+            seed_baseline=False,
+        )
+
+    def poll_seed_baseline(
+        self,
+        checkpoint: Any,
+        *,
+        observed_at_ms: Any,
+        deadline_monotonic_ms: Any = 0,
+        cancel_event: threading.Event | None = None,
+        etag: Any = "",
+        last_modified: Any = "",
+        max_items: Any = 50,
+    ) -> AdapterPollResult:
+        """Seed all IDs in one complete bounded recent snapshot, not one delivery batch."""
+
+        if normalize_checkpoint(checkpoint) != {}:
+            raise _checkpoint_error("SEC initial baseline requires an explicitly empty checkpoint")
+        return self._poll(
+            checkpoint,
+            observed_at_ms=observed_at_ms,
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+            etag=etag,
+            last_modified=last_modified,
+            max_items=max_items,
+            seed_baseline=True,
+        )
+
+    def _poll(
+        self,
+        checkpoint: Any,
+        *,
+        observed_at_ms: Any,
+        deadline_monotonic_ms: Any,
+        cancel_event: threading.Event | None,
+        etag: Any,
+        last_modified: Any,
+        max_items: Any,
+        seed_baseline: bool,
+    ) -> AdapterPollResult:
         self._assert_config_seal()
+        deadline, event = validate_source_poll_control(
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
         clean_etag, clean_last_modified, safe_max_items = validate_poll_context(
             etag=etag,
             last_modified=last_modified,
@@ -533,25 +603,55 @@ class SecFilingsSourceAdapter:
         started_checkpoint, seen_order = _normalize_checkpoint(checkpoint)
         seen = set(seen_order)
         try:
+            ensure_source_poll_active(
+                deadline_monotonic_ms=deadline,
+                cancel_event=event,
+            )
             monitoring_batch = getattr(
                 self._adapter,
                 "monitoring_filings_batch",
                 None,
             )
             if callable(monitoring_batch):
-                payload = monitoring_batch(
-                    list(self.allowed_symbols),
-                    forms=list(self.allowed_forms),
-                    limit=self.per_symbol_limit,
-                    force=self.force,
-                )
+                if self._seal_transport_identity:
+                    payload = monitoring_batch(
+                        list(self.allowed_symbols),
+                        forms=list(self.allowed_forms),
+                        limit=self.per_symbol_limit,
+                        force=self.force,
+                        deadline_monotonic_ms=deadline,
+                        cancel_event=event,
+                    )
+                else:
+                    payload = monitoring_batch(
+                        list(self.allowed_symbols),
+                        forms=list(self.allowed_forms),
+                        limit=self.per_symbol_limit,
+                        force=self.force,
+                    )
             else:
-                payload = self._adapter.recent_filings_batch(
-                    list(self.allowed_symbols),
-                    forms=list(self.allowed_forms),
-                    limit=self.per_symbol_limit,
-                    force=self.force,
-                )
+                if self._seal_transport_identity:
+                    payload = self._adapter.recent_filings_batch(
+                        list(self.allowed_symbols),
+                        forms=list(self.allowed_forms),
+                        limit=self.per_symbol_limit,
+                        force=self.force,
+                        deadline_monotonic_ms=deadline,
+                        cancel_event=event,
+                    )
+                else:
+                    payload = self._adapter.recent_filings_batch(
+                        list(self.allowed_symbols),
+                        forms=list(self.allowed_forms),
+                        limit=self.per_symbol_limit,
+                        force=self.force,
+                    )
+            ensure_source_poll_active(
+                deadline_monotonic_ms=deadline,
+                cancel_event=event,
+            )
+        except (SourcePollCancelled, SourcePollDeadlineExceeded):
+            raise
         except Exception as exc:
             return AdapterPollResult.build(
                 adapter_key=self.adapter_key,
@@ -573,6 +673,13 @@ class SecFilingsSourceAdapter:
             payload = {}
         errors = _source_errors(payload)
         rows = payload.get("rows") if type(payload.get("rows")) is list else []
+        complete_recent_scope = (
+            payload.get("monitoring_recent_scope_version") == SEC_MONITORING_RECENT_SCOPE_VERSION
+            and payload.get("monitoring_recent_scope_complete") is True
+            and len(rows) == len(self.allowed_symbols)
+            and all(type(row) is dict for row in rows)
+            and [row.get("symbol") for row in rows] == list(self.allowed_symbols)
+        )
         observed_items: list[dict[str, Any]] = []
         new_accessions: list[str] = []
         candidate_order: list[str] = []
@@ -649,13 +756,14 @@ class SecFilingsSourceAdapter:
                     "projection_sha256": canonical_sha256(item),
                 })
 
-        if len(candidate_groups) > MAX_SEEN_ACCESSIONS:
+        scope_and_seen_count = len(set(candidate_groups) | seen)
+        if scope_and_seen_count > MAX_SEEN_ACCESSIONS:
             errors = errors[: MAX_SOURCE_ERRORS_PER_POLL - 1]
             errors.append(SourcePollError.build(
                 "SEC_CHECKPOINT_CAPACITY_EXCEEDED",
                 (
-                    f"SEC poll returned {len(candidate_groups)} unique accessions; "
-                    f"the checkpoint capacity is {MAX_SEEN_ACCESSIONS}"
+                    f"SEC recent scope and retained identities require {scope_and_seen_count} unique accessions; "
+                    f"the checkpoint capacity is {MAX_SEEN_ACCESSIONS}; committed identities are never evicted"
                 ),
                 "sec_edgar",
             ))
@@ -695,10 +803,30 @@ class SecFilingsSourceAdapter:
             seen.add(accession)
             new_accessions.append(accession)
 
-        next_seen = new_accessions + [
+        if seed_baseline and (not complete_recent_scope or errors or rejected_count):
+            errors = errors[: MAX_SOURCE_ERRORS_PER_POLL - 1]
+            errors.append(SourcePollError.build(
+                "SEC_BASELINE_SCOPE_INCOMPLETE",
+                "SEC seed requires every selected-form ID in the complete bounded recent scope; incomplete, malformed or filtered source evidence cannot establish a baseline",
+                "sec_edgar",
+            ))
+            return AdapterPollResult.build(
+                adapter_key=self.adapter_key,
+                started_checkpoint=started_checkpoint,
+                next_checkpoint=started_checkpoint,
+                observed_items=(),
+                source_errors=errors,
+                retry_after_ms=60_000,
+                captured_at_ms=captured_at_ms,
+                etag=clean_etag,
+                last_modified=clean_last_modified,
+                rejected_count=rejected_count,
+            )
+
+        next_seen = candidate_order if seed_baseline else new_accessions + [
             accession
             for accession in seen_order
-            if accession in candidate_groups and accession not in new_accessions
+            if accession not in new_accessions
         ]
         next_checkpoint = {
             "version": SEC_FILINGS_CHECKPOINT_VERSION,

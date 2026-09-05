@@ -4,15 +4,17 @@ import copy
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 os.environ["AI_STUDIO_SKIP_LOCAL_ENV"] = "1"
 
-from backend.market.futu_readonly import STORAGE_SYMBOLS  # noqa: E402
+from backend.market.futu_readonly import FutuUsMarketAdapter, STORAGE_SYMBOLS  # noqa: E402
 from backend.source_inbox_service import SourceInboxService  # noqa: E402
 from backend.source_monitoring.adapters.base import (  # noqa: E402
     validate_source_adapter,
@@ -26,10 +28,19 @@ from backend.source_monitoring.contracts import (  # noqa: E402
     FUTU_ANOMALY_SOURCE_CHANNEL,
     READONLY_MARKET_SOURCE_CLASS,
     canonical_json,
+    canonical_sha256,
 )
 from backend.source_monitoring.default_registry import (  # noqa: E402
     build_futu_anomaly_registry,
     build_official_source_registry,
+)
+from backend.source_monitoring.futu_readonly_broker import (  # noqa: E402
+    FUTU_READONLY_BROKER_POLICY_SHA256,
+    FutuReadOnlyBroker,
+)
+from backend.source_monitoring.operator_service import (  # noqa: E402
+    ENABLE_SOURCE_MONITORING_ADAPTER,
+    SourceMonitoringOperatorService,
 )
 from backend.source_monitoring.registry import (  # noqa: E402
     SourceAdapterRegistry,
@@ -88,10 +99,155 @@ class FakeQuoteClient:
         return copy.deepcopy(selected)
 
 
+class AdvancingQuoteSdk:
+    """Only the quote SDK boundary is fake; production normalization still runs."""
+
+    RET_OK = 0
+
+    def __init__(self, clock_ms: list[int]) -> None:
+        self.clock_ms = clock_ms
+        self.quote_offset_ms = -500
+        self.snapshot_calls: list[list[str]] = []
+        self.close_calls = 0
+
+    def OpenQuoteContext(self, **_kwargs):
+        return self
+
+    def get_market_snapshot(self, symbols):
+        self.snapshot_calls.append(list(symbols))
+        self.clock_ms[0] += 1_500
+        quote_updated_at = datetime.fromtimestamp(
+            (self.clock_ms[0] + self.quote_offset_ms) / 1_000, tz=timezone.utc
+        ).isoformat(timespec="milliseconds")
+        return self.RET_OK, [{
+            "code": symbol,
+            "update_time": quote_updated_at,
+            "last_price": 106 if symbol == "US.MU" else 100,
+            "prev_close_price": 100,
+            "amplitude": 1,
+            "volume_ratio": 1,
+            "sec_status": "NORMAL",
+            "suspension": False,
+        } for symbol in symbols]
+
+    def close(self):
+        self.close_calls += 1
+
+
+class FutuAnomalyTimeIntegrationTests(unittest.TestCase):
+    def _adapter(self, clock_ms, sdk, *, market_clock_offset_ms=None):
+        offset = [0] if market_clock_offset_ms is None else market_clock_offset_ms
+        market = FutuUsMarketAdapter(
+            sdk_module=sdk,
+            socket_probe=lambda *_args: True,
+            clock=lambda: datetime.fromtimestamp(
+                (clock_ms[0] + offset[0]) / 1_000, tz=timezone.utc
+            ),
+            monotonic_clock=lambda: 0,
+        )
+        return FutuAnomalySourceAdapter(
+            market_adapter=market, clock_ms=lambda: clock_ms[0]
+        )
+
+    def test_real_market_adapter_accepts_clock_advance_during_sdk_call(self) -> None:
+        clock_ms = [OBSERVED_AT_MS]
+        sdk = AdvancingQuoteSdk(clock_ms)
+        market = FutuUsMarketAdapter(
+            sdk_module=sdk,
+            socket_probe=lambda *_args: True,
+            clock=lambda: datetime.fromtimestamp(clock_ms[0] / 1_000, tz=timezone.utc),
+            monotonic_clock=lambda: 0,
+        )
+        adapter = FutuAnomalySourceAdapter(market_adapter=market)
+        with patch(
+            "backend.source_monitoring.adapters.futu_anomaly.datetime", wraps=datetime
+        ) as local_datetime:
+            local_datetime.now.side_effect = lambda _zone: datetime.fromtimestamp(
+                clock_ms[0] / 1_000, tz=timezone.utc
+            )
+            result = adapter.poll({}, observed_at_ms=OBSERVED_AT_MS)
+
+        self.assertEqual(clock_ms[0], OBSERVED_AT_MS + 1_500)
+        self.assertEqual(sdk.snapshot_calls, [list(STORAGE_SYMBOLS)])
+        self.assertEqual(sdk.close_calls, 1)
+        self.assertEqual(result.source_errors, ())
+        self.assertEqual(len(result.observed_items), 1)
+        self.assertEqual(result.captured_at_ms, OBSERVED_AT_MS)
+        self.assertTrue(all(
+            entry["last_observed_at"] == "2026-08-31T14:00:01.000Z"
+            for entry in result.next_checkpoint["symbols"]
+        ))
+
+    def test_future_sdk_quote_is_rejected_without_advancing_checkpoint(self) -> None:
+        clock_ms = [OBSERVED_AT_MS]
+        sdk = AdvancingQuoteSdk(clock_ms)
+        adapter = self._adapter(clock_ms, sdk)
+        seeded = adapter.poll({}, observed_at_ms=clock_ms[0])
+        self.assertEqual(seeded.source_errors, ())
+        checkpoint_before = canonical_json(seeded.next_checkpoint)
+
+        sdk.quote_offset_ms = 1
+        rejected = adapter.poll(seeded.next_checkpoint, observed_at_ms=clock_ms[0])
+
+        # Production normalization rejects even one millisecond of future quote
+        # data before projection can admit the returned snapshot.
+        self.assertEqual(rejected.observed_items, ())
+        self.assertEqual(rejected.source_errors[0].code, "FUTU_ANOMALY_SNAPSHOT_INVALID")
+        self.assertEqual(canonical_json(rejected.next_checkpoint), checkpoint_before)
+        self.assertEqual(canonical_json(seeded.next_checkpoint), checkpoint_before)
+        self.assertEqual(len(sdk.snapshot_calls), 2)
+        self.assertEqual(sdk.close_calls, 2)
+
+    def test_future_snapshot_capture_cannot_supply_its_own_reception_time(self) -> None:
+        clock_ms = [OBSERVED_AT_MS]
+        market_clock_offset_ms = [0]
+        sdk = AdvancingQuoteSdk(clock_ms)
+        adapter = self._adapter(clock_ms, sdk, market_clock_offset_ms=market_clock_offset_ms)
+        seeded = adapter.poll({}, observed_at_ms=clock_ms[0])
+        self.assertEqual(seeded.source_errors, ())
+        checkpoint_before = canonical_json(seeded.next_checkpoint)
+
+        market_clock_offset_ms[0] = 1
+        rejected = adapter.poll(seeded.next_checkpoint, observed_at_ms=clock_ms[0])
+
+        self.assertEqual(rejected.observed_items, ())
+        self.assertEqual(rejected.source_errors[0].code, "FUTU_ANOMALY_OBSERVATION_FUTURE")
+        self.assertEqual(canonical_json(rejected.next_checkpoint), checkpoint_before)
+        self.assertEqual(canonical_json(seeded.next_checkpoint), checkpoint_before)
+
+    def test_invalid_or_reversed_reception_clock_preserves_checkpoint(self) -> None:
+        class IntegerSubclass(int):
+            pass
+
+        received_at_ms = [OBSERVED_AT_MS]
+        adapter = FutuAnomalySourceAdapter(
+            market_adapter=FakeQuoteClient(_fixture("live_normal_snapshot.json")),
+            clock_ms=lambda: received_at_ms[0],
+        )
+        seeded = adapter.poll({}, observed_at_ms=OBSERVED_AT_MS)
+        self.assertEqual(seeded.source_errors, ())
+        checkpoint_before = canonical_json(seeded.next_checkpoint)
+        for invalid in (True, -1, 1.5, "1", IntegerSubclass(OBSERVED_AT_MS), 10**30):
+            with self.subTest(received_at_ms=invalid):
+                received_at_ms[0] = invalid
+                rejected = adapter.poll(seeded.next_checkpoint, observed_at_ms=OBSERVED_AT_MS)
+                self.assertEqual(rejected.source_errors[0].code, "FUTU_ANOMALY_OBSERVED_TIME_INVALID")
+                self.assertEqual(rejected.observed_items, ())
+                self.assertEqual(canonical_json(rejected.next_checkpoint), checkpoint_before)
+        received_at_ms[0] = OBSERVED_AT_MS - 1
+        reversed_clock = adapter.poll(seeded.next_checkpoint, observed_at_ms=OBSERVED_AT_MS)
+        self.assertEqual(reversed_clock.source_errors[0].code, "FUTU_ANOMALY_RECEIVED_TIME_REVERSED")
+        self.assertEqual(reversed_clock.observed_items, ())
+        self.assertEqual(canonical_json(reversed_clock.next_checkpoint), checkpoint_before)
+
+
 class FutuAnomalyAdapterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.clock = [OBSERVED_AT_MS]
+
     def test_construction_is_zero_io_and_metadata_is_truthful(self) -> None:
         client = FakeQuoteClient(_fixture("live_anomaly_snapshot.json"))
-        adapter = FutuAnomalySourceAdapter(market_adapter=client)
+        adapter = FutuAnomalySourceAdapter(market_adapter=client, clock_ms=lambda: self.clock[0])
         metadata = validate_source_adapter(adapter)
 
         self.assertEqual(client.calls, [])
@@ -115,9 +271,10 @@ class FutuAnomalyAdapterTests(unittest.TestCase):
         first_snapshot = _fixture("live_anomaly_snapshot.json")
         changed_tick = _next_tick(first_snapshot)
         client = FakeQuoteClient(first_snapshot, changed_tick)
-        adapter = FutuAnomalySourceAdapter(market_adapter=client)
+        adapter = FutuAnomalySourceAdapter(market_adapter=client, clock_ms=lambda: self.clock[0])
 
         first = adapter.poll({}, observed_at_ms=OBSERVED_AT_MS)
+        self.clock[0] += 60_000
         replay_from_same_checkpoint = adapter.poll(
             {},
             observed_at_ms=OBSERVED_AT_MS + 60_000,
@@ -145,7 +302,7 @@ class FutuAnomalyAdapterTests(unittest.TestCase):
     def test_committed_checkpoint_suppresses_same_episode(self) -> None:
         snapshot = _fixture("live_anomaly_snapshot.json")
         client = FakeQuoteClient(snapshot)
-        adapter = FutuAnomalySourceAdapter(market_adapter=client)
+        adapter = FutuAnomalySourceAdapter(market_adapter=client, clock_ms=lambda: self.clock[0])
 
         first = adapter.poll({}, observed_at_ms=OBSERVED_AT_MS)
         duplicate = adapter.poll(
@@ -160,9 +317,10 @@ class FutuAnomalyAdapterTests(unittest.TestCase):
 
     def test_source_failures_are_atomic_and_preserve_checkpoint(self) -> None:
         seed_client = FakeQuoteClient(_fixture("live_normal_snapshot.json"))
-        seed_adapter = FutuAnomalySourceAdapter(market_adapter=seed_client)
+        seed_adapter = FutuAnomalySourceAdapter(market_adapter=seed_client, clock_ms=lambda: self.clock[0])
         seed = seed_adapter.poll({}, observed_at_ms=OBSERVED_AT_MS)
         checkpoint = seed.next_checkpoint
+        self.clock[0] += 60_000
 
         for response, expected_code in (
             (_fixture("opend_offline_snapshot.json"), "FUTU_ANOMALY_SNAPSHOT_INVALID"),
@@ -171,7 +329,7 @@ class FutuAnomalyAdapterTests(unittest.TestCase):
             with self.subTest(expected_code=expected_code):
                 client = FakeQuoteClient(response)
                 result = FutuAnomalySourceAdapter(
-                    market_adapter=client
+                    market_adapter=client, clock_ms=lambda: self.clock[0]
                 ).poll(checkpoint, observed_at_ms=OBSERVED_AT_MS + 60_000)
                 self.assertEqual(result.observed_items, ())
                 self.assertEqual(result.next_checkpoint, checkpoint)
@@ -180,7 +338,7 @@ class FutuAnomalyAdapterTests(unittest.TestCase):
 
     def test_capacity_and_config_drift_fail_before_quote_read(self) -> None:
         client = FakeQuoteClient(_fixture("live_anomaly_snapshot.json"))
-        adapter = FutuAnomalySourceAdapter(market_adapter=client)
+        adapter = FutuAnomalySourceAdapter(market_adapter=client, clock_ms=lambda: self.clock[0])
 
         with self.assertRaisesRegex(
             Exception,
@@ -203,6 +361,7 @@ class FutuAnomalyAdapterTests(unittest.TestCase):
         client.quote_batch = original
 
     def test_production_registries_remain_separate_and_construction_only(self) -> None:
+        loaded_before = {name for name in sys.modules if name == "futu" or name.startswith("futu.")}
         official = build_official_source_registry()
         market = build_futu_anomaly_registry()
 
@@ -212,35 +371,59 @@ class FutuAnomalyAdapterTests(unittest.TestCase):
         self.assertFalse(market.official_only)
         self.assertEqual(market.adapter_keys, (FUTU_ANOMALY_ADAPTER_KEY,))
         market_adapter = market.require(FUTU_ANOMALY_ADAPTER_KEY)
-        self.assertEqual(market_adapter._market_adapter._cache, {})
-        self.assertFalse(market_adapter._market_adapter._sdk_installed)
-        self.assertEqual(market_adapter._market_adapter._sdk_import_error, "")
+        broker = market_adapter._market_adapter
+        self.assertIs(type(broker), FutuReadOnlyBroker)
+        self.assertEqual(broker.mode, "managed")
+        self.assertEqual(broker.policy_sha256, FUTU_READONLY_BROKER_POLICY_SHA256)
+        self.assertIsNone(broker._process)
+        self.assertIsNone(broker._temporary_directory)
+        self.assertEqual(
+            {name for name in sys.modules if name == "futu" or name.startswith("futu.")},
+            loaded_before,
+        )
+
+    def test_initial_seed_policy_is_static_self_sealed_and_defensive(self) -> None:
+        adapter = FutuAnomalySourceAdapter(
+            market_adapter=FakeQuoteClient(_fixture("live_normal_snapshot.json")),
+            clock_ms=lambda: self.clock[0],
+        )
+
+        first = adapter.initial_seed_policy()
+        unsigned = {key: copy.deepcopy(value) for key, value in first.items() if key != "source_policy_sha256"}
+        self.assertEqual(first["source_policy_sha256"], canonical_sha256(unsigned))
+        self.assertEqual(first["symbol_allowlist"], list(STORAGE_SYMBOLS))
+        self.assertEqual(first["initial_mode"], "seed_only")
+        self.assertEqual(first["execution_capability"], "none")
+        self.assertFalse(first["live_trading_allowed"])
+        self.assertNotIn("snapshot", first)
+        first["symbol_allowlist"].clear()
+        self.assertEqual(adapter.initial_seed_policy()["symbol_allowlist"], list(STORAGE_SYMBOLS))
 
     def test_production_registry_rejects_nonliteral_or_nonloopback_host(self) -> None:
         class RemoteFutuClient:
-            def __init__(self) -> None:
+            def __init__(self, *, mode="managed") -> None:
                 self.host = "remote.invalid"
                 self.port = 11111
                 self.cache_ttl_seconds = 5.0
-                self._socket_probe = lambda *_args: True
-                self._clock = lambda: None
-                self._monotonic_clock = lambda: 0.0
-                self._snapshot_id_factory = lambda: "fixture"
+                self.mode = mode
+                self.timeout_ms = 15_000
+                self.policy_sha256 = FUTU_READONLY_BROKER_POLICY_SHA256
+                self._monotonic_ms = lambda: 0
 
-            def quote_batch(self, symbols, *, force=False):
+            def quote_batch(self, symbols, *, force=False, **_kwargs):
                 raise AssertionError((symbols, force))
 
         with (
             patch(
-                "backend.source_monitoring.adapters.futu_anomaly.FutuUsMarketAdapter",
+                "backend.source_monitoring.adapters.futu_anomaly.FutuReadOnlyBroker",
                 RemoteFutuClient,
             ),
             patch(
-                "backend.source_monitoring.default_registry.FutuUsMarketAdapter",
+                "backend.source_monitoring.default_registry.FutuReadOnlyBroker",
                 RemoteFutuClient,
             ),
         ):
-            with self.assertRaisesRegex(RuntimeError, "literal loopback"):
+            with self.assertRaisesRegex(RuntimeError, "sealed local read-only"):
                 build_futu_anomaly_registry()
 
 
@@ -325,9 +508,79 @@ class FutuAnomalySupervisorIntegrationTests(unittest.TestCase):
                 )
             )
 
+    def test_real_sdk_chain_seeds_then_imports_anomaly_across_market_open(self) -> None:
+        class MutableQuoteSdk(AdvancingQuoteSdk):
+            anomaly = False
+
+            def get_market_snapshot(self, symbols):
+                ret, rows = super().get_market_snapshot(symbols)
+                if not self.anomaly:
+                    for row in rows:
+                        row["last_price"] = 100
+                return ret, rows
+
+        open_ms = int(datetime(2026, 8, 31, 13, 30, tzinfo=timezone.utc).timestamp() * 1_000)
+        self.clock[0] = open_ms - 5_000
+        sdk = MutableQuoteSdk(self.clock)
+        market = FutuUsMarketAdapter(
+            sdk_module=sdk,
+            socket_probe=lambda *_args: True,
+            clock=lambda: datetime.fromtimestamp(self.clock[0] / 1_000, tz=timezone.utc),
+            monotonic_clock=lambda: 0,
+        )
+        adapter = FutuAnomalySourceAdapter(market_adapter=market, clock_ms=lambda: self.clock[0])
+        operator = SourceMonitoringOperatorService(
+            store=self.store,
+            settings=self._settings(),
+            registry=SourceAdapterRegistry((adapter,), official_only=False),
+            repository=self.repository,
+            clock_ms=lambda: self.clock[0],
+        )
+        preview = operator.preview(
+            adapter.adapter_key, expected_config_version=adapter.config_version, expected_state_version=0,
+        )
+        operator.set_enablement(
+            adapter.adapter_key, enabled=True, expected_config_version=adapter.config_version,
+            expected_state_version=0, confirmation=ENABLE_SOURCE_MONITORING_ADAPTER,
+            preview_sha256=preview["preview_sha256"],
+        )
+        self.assertEqual(sdk.snapshot_calls, [])
+        supervisor = self._supervisor(adapter)
+        side_effects_before = self._side_effect_counts()
+        seeded = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(seeded["status"], "SUCCEEDED")
+        self.assertEqual(seeded["initialization"]["outcome"], "seeded")
+        self.assertIsNone(seeded["import"])
+        self.assertTrue(seeded["state"]["checkpoint"])
+
+        self.clock[0] = open_ms - 1_000
+        sdk.anomaly = True
+        imported = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(imported["status"], "SUCCEEDED")
+        self.assertEqual(imported["import"]["created_item_count"], 1)
+        self.assertEqual(self.clock[0], open_ms + 500)
+        self.assertEqual(imported["run"]["duration_ms"], 1_500)
+        self.assertEqual(self._side_effect_counts(), side_effects_before)
+        self.assertEqual(sdk.snapshot_calls, [list(STORAGE_SYMBOLS), list(STORAGE_SYMBOLS)])
+        self.assertEqual(sdk.close_calls, 2)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            packet_text, received_at = connection.execute(
+                "SELECT packet_json,received_at FROM source_inbox_imports"
+            ).fetchone()
+            packet = json.loads(packet_text)
+            # checked_at keeps the poll-start identity. occurred_at is the
+            # sealed session-open episode anchor, not the quote update time.
+            # Generic Source Inbox also accepts scheduled-event timestamps;
+            # Futu's strict future quote gate runs before this import layer.
+            self.assertEqual(packet["checked_at"], "2026-08-31T13:29:59Z")
+            self.assertEqual(packet["items"][0]["occurred_at"], "2026-08-31T13:30:00Z")
+            self.assertEqual(received_at, open_ms + 500)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM source_inbox_items").fetchone()[0], 1)
+
     def test_import_once_repeat_suppressed_and_side_effect_ledgers_unchanged(self) -> None:
         adapter = FutuAnomalySourceAdapter(
-            market_adapter=FakeQuoteClient(_fixture("live_anomaly_snapshot.json"))
+            market_adapter=FakeQuoteClient(_fixture("live_anomaly_snapshot.json")),
+            clock_ms=lambda: self.clock[0],
         )
         supervisor = self._supervisor(adapter)
         self._enable(adapter)
@@ -358,7 +611,8 @@ class FutuAnomalySupervisorIntegrationTests(unittest.TestCase):
     def test_crash_replay_with_changed_tick_is_source_inbox_duplicate(self) -> None:
         first_snapshot = _fixture("live_anomaly_snapshot.json")
         adapter = FutuAnomalySourceAdapter(
-            market_adapter=FakeQuoteClient(first_snapshot, _next_tick(first_snapshot))
+            market_adapter=FakeQuoteClient(first_snapshot, _next_tick(first_snapshot)),
+            clock_ms=lambda: self.clock[0],
         )
 
         def crash_after_import(_run_id, _result):
@@ -399,7 +653,7 @@ class FutuAnomalySupervisorIntegrationTests(unittest.TestCase):
                 enable_adapter=enable_adapter,
             ):
                 client = FakeQuoteClient(_fixture("live_anomaly_snapshot.json"))
-                adapter = FutuAnomalySourceAdapter(market_adapter=client)
+                adapter = FutuAnomalySourceAdapter(market_adapter=client, clock_ms=lambda: self.clock[0])
                 supervisor = self._supervisor(adapter, enabled=global_enabled)
                 if enable_adapter:
                     self._enable(adapter)
@@ -410,10 +664,13 @@ class FutuAnomalySupervisorIntegrationTests(unittest.TestCase):
 
     def test_scheduler_aggregates_one_exact_readonly_market_call(self) -> None:
         adapter = FutuAnomalySourceAdapter(
-            market_adapter=FakeQuoteClient(_fixture("live_anomaly_snapshot.json"))
+            market_adapter=FakeQuoteClient(_fixture("live_anomaly_snapshot.json")),
+            clock_ms=lambda: self.clock[0],
         )
         supervisor = self._supervisor(adapter, auto_start=True)
         self._enable(adapter)
+        self._mark_legacy_initialized(adapter)
+        self.clock[0] += 60_000
         scheduler = SourceMonitoringScheduler(
             registry=supervisor.registry,
             repository=self.repository,

@@ -28,7 +28,12 @@ from urllib.parse import urljoin, urlparse, urlunparse
 from urllib.request import Request
 from zoneinfo import ZoneInfo
 
-from .official_http import open_official_https
+from ..source_poll_control import (
+    SourcePollCancelled,
+    SourcePollDeadlineExceeded,
+    ensure_source_poll_active,
+)
+from .official_http import open_official_https, read_official_https_body
 
 
 FEDERAL_RESERVE_MONETARY_RSS_URL = (
@@ -355,6 +360,9 @@ def _read_official_response_body(
     response: Any,
     maximum: int,
     deadline_seconds: int | float = OFFICIAL_MACRO_RESPONSE_BODY_DEADLINE_SECONDS,
+    *,
+    deadline_monotonic_ms: int = 0,
+    cancel_event: threading.Event | None = None,
 ) -> bytes:
     """Read one body within both a byte cap and an absolute elapsed deadline.
 
@@ -365,54 +373,21 @@ def _read_official_response_body(
     explicit fetch; constructing a client starts no thread.
     """
 
-    if type(maximum) is not int or maximum <= 0:
-        raise ValueError("official source response byte limit is invalid")
-    if (
-        type(deadline_seconds) not in {int, float}
-        or deadline_seconds <= 0
-    ):
-        raise ValueError("official source response body deadline is invalid")
-    reader = getattr(response, "read", None)
-    if not callable(reader):
-        raise ValueError(
-            "official source response lacks a bounded body reader"
-        )
-    sock = _official_response_socket(response)
-    deadline = time.monotonic() + deadline_seconds
-    expired = threading.Event()
-    watchdog = threading.Timer(
-        deadline_seconds,
-        _expire_official_response_body,
-        args=(sock, expired),
+    return read_official_https_body(
+        response,
+        maximum,
+        deadline_seconds=deadline_seconds,
+        deadline_monotonic_ms=deadline_monotonic_ms,
+        cancel_event=cancel_event,
     )
-    watchdog.daemon = True
-    watchdog.start()
-    try:
-        try:
-            body = reader(maximum + 1)
-        except Exception as exc:
-            if expired.is_set():
-                raise TimeoutError(
-                    "official source response body exceeded its sealed deadline"
-                ) from exc
-            raise
-    finally:
-        watchdog.cancel()
-        watchdog.join(timeout=0.1)
-    if expired.is_set() or time.monotonic() >= deadline:
-        raise TimeoutError(
-            "official source response body exceeded its sealed deadline"
-        )
-    if type(body) is not bytes:
-        raise TypeError("official source response returned non-bytes data")
-    if len(body) > maximum:
-        raise ValueError(
-            "official source response exceeds its sealed byte limit"
-        )
-    return body
 
 
-def _fetch_official_macro_bytes(url: str) -> bytes:
+def _fetch_official_macro_bytes(
+    url: str,
+    *,
+    deadline_monotonic_ms: int = 0,
+    cancel_event: threading.Event | None = None,
+) -> bytes:
     """Fetch one exact endpoint through the shared redirect-safe transport."""
 
     if type(url) is not str or url not in _RESPONSE_POLICIES:
@@ -438,6 +413,8 @@ def _fetch_official_macro_bytes(url: str) -> bytes:
         allowed_hosts={host},
         timeout=OFFICIAL_MACRO_TIMEOUT_SECONDS,
         url_validator=lambda candidate: type(candidate) is str and candidate == url,
+        deadline_monotonic_ms=deadline_monotonic_ms,
+        cancel_event=cancel_event,
     ) as response:
         content_type = response.headers.get("Content-Type")
         if type(content_type) is not str:
@@ -451,7 +428,12 @@ def _fetch_official_macro_bytes(url: str) -> bytes:
                 raise ValueError("official source returned an invalid Content-Length")
             if int(declared_length.strip()) > maximum:
                 raise ValueError("official source response exceeds its sealed byte limit")
-        raw = _read_official_response_body(response, maximum)
+        raw = _read_official_response_body(
+            response,
+            maximum,
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
     if type(raw) is not bytes or len(raw) > maximum:
         raise ValueError("official source response exceeds its sealed byte limit")
     return raw
@@ -585,11 +567,46 @@ class OfficialMacroSourceClient:
             raise ValueError("clock must return a timezone-aware native datetime")
         return value.astimezone(timezone.utc)
 
-    def federal_reserve_releases(self, limit: int = OFFICIAL_MACRO_MAX_LIMIT) -> dict:
+    def _fetch_with_control(
+        self,
+        url: str,
+        *,
+        deadline_monotonic_ms: int,
+        cancel_event: threading.Event | None,
+    ) -> bytes:
+        ensure_source_poll_active(
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
+        if self._transport_identity == OFFICIAL_MACRO_TRANSPORT_IDENTITY:
+            raw = self._fetch_bytes(
+                url,
+                deadline_monotonic_ms=deadline_monotonic_ms,
+                cancel_event=cancel_event,
+            )
+        else:
+            raw = self._fetch_bytes(url)
+        ensure_source_poll_active(
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
+        return raw
+
+    def federal_reserve_releases(
+        self,
+        limit: int = OFFICIAL_MACRO_MAX_LIMIT,
+        *,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict:
         safe_limit = _validate_limit(limit)
         try:
             now = self._now()
-            raw = self._fetch_bytes(FEDERAL_RESERVE_MONETARY_RSS_URL)
+            raw = self._fetch_with_control(
+                FEDERAL_RESERVE_MONETARY_RSS_URL,
+                deadline_monotonic_ms=deadline_monotonic_ms,
+                cancel_event=cancel_event,
+            )
             rows = self._parse_federal_reserve_rss(raw, now=now)
             if not rows:
                 raise ValueError("official monetary policy RSS contained no valid releases")
@@ -605,6 +622,8 @@ class OfficialMacroSourceClient:
                     )],
                 }
             return {"rows": rows, "source_errors": []}
+        except (SourcePollCancelled, SourcePollDeadlineExceeded):
+            raise
         except Exception as exc:
             return {
                 "rows": [],
@@ -615,7 +634,13 @@ class OfficialMacroSourceClient:
                 )],
             }
 
-    def bls_releases(self, limit: int = OFFICIAL_MACRO_MAX_LIMIT) -> dict:
+    def bls_releases(
+        self,
+        limit: int = OFFICIAL_MACRO_MAX_LIMIT,
+        *,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict:
         safe_limit = _validate_limit(limit)
         try:
             now = self._now()
@@ -631,13 +656,23 @@ class OfficialMacroSourceClient:
         rows: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
         for series_id in BLS_SERIES_IDS:
+            ensure_source_poll_active(
+                deadline_monotonic_ms=deadline_monotonic_ms,
+                cancel_event=cancel_event,
+            )
             endpoint = BLS_SERIES_URLS[series_id]
             try:
-                raw = self._fetch_bytes(endpoint)
+                raw = self._fetch_with_control(
+                    endpoint,
+                    deadline_monotonic_ms=deadline_monotonic_ms,
+                    cancel_event=cancel_event,
+                )
                 series_rows = self._parse_bls_series(raw, series_id=series_id, now=now)
                 if not series_rows:
                     raise ValueError("official BLS series contained no valid observations")
                 rows.extend(series_rows)
+            except (SourcePollCancelled, SourcePollDeadlineExceeded):
+                raise
             except Exception as exc:
                 if len(errors) < OFFICIAL_MACRO_MAX_SOURCE_ERRORS:
                     errors.append(_source_error(
@@ -664,11 +699,21 @@ class OfficialMacroSourceClient:
             return {"rows": [], "source_errors": errors}
         return {"rows": rows, "source_errors": errors}
 
-    def treasury_releases(self, limit: int = OFFICIAL_MACRO_MAX_LIMIT) -> dict:
+    def treasury_releases(
+        self,
+        limit: int = OFFICIAL_MACRO_MAX_LIMIT,
+        *,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict:
         safe_limit = _validate_limit(limit)
         try:
             now = self._now()
-            raw = self._fetch_bytes(TREASURY_DEBT_TO_PENNY_URL)
+            raw = self._fetch_with_control(
+                TREASURY_DEBT_TO_PENNY_URL,
+                deadline_monotonic_ms=deadline_monotonic_ms,
+                cancel_event=cancel_event,
+            )
             rows = self._parse_treasury_debt(raw, now=now)
             if not rows:
                 raise ValueError("official Treasury dataset contained no valid records")
@@ -684,6 +729,8 @@ class OfficialMacroSourceClient:
                     )],
                 }
             return {"rows": rows, "source_errors": []}
+        except (SourcePollCancelled, SourcePollDeadlineExceeded):
+            raise
         except Exception as exc:
             return {
                 "rows": [],
@@ -694,7 +741,13 @@ class OfficialMacroSourceClient:
                 )],
             }
 
-    def calendar_events(self, limit: int = OFFICIAL_MACRO_MAX_LIMIT) -> dict:
+    def calendar_events(
+        self,
+        limit: int = OFFICIAL_MACRO_MAX_LIMIT,
+        *,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict:
         safe_limit = _validate_limit(limit)
         try:
             now = self._now()
@@ -727,8 +780,18 @@ class OfficialMacroSourceClient:
         payloads: dict[str, bytes] = {}
         errors: list[dict[str, str]] = []
         for scope, endpoint, _parser in sources:
+            ensure_source_poll_active(
+                deadline_monotonic_ms=deadline_monotonic_ms,
+                cancel_event=cancel_event,
+            )
             try:
-                payloads[scope] = self._fetch_bytes(endpoint)
+                payloads[scope] = self._fetch_with_control(
+                    endpoint,
+                    deadline_monotonic_ms=deadline_monotonic_ms,
+                    cancel_event=cancel_event,
+                )
+            except (SourcePollCancelled, SourcePollDeadlineExceeded):
+                raise
             except Exception as exc:
                 if len(errors) < OFFICIAL_MACRO_MAX_SOURCE_ERRORS:
                     errors.append(_source_error(
@@ -741,6 +804,10 @@ class OfficialMacroSourceClient:
 
         parsed_rows: list[dict[str, Any]] = []
         for scope, _endpoint, parser in sources:
+            ensure_source_poll_active(
+                deadline_monotonic_ms=deadline_monotonic_ms,
+                cancel_event=cancel_event,
+            )
             try:
                 source_rows = parser(payloads[scope])
                 parsed_rows.extend(source_rows)

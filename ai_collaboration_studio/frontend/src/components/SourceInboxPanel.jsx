@@ -32,6 +32,9 @@ import {
   SOURCE_INBOX_STATE_LABELS,
   SOURCE_MONITORING_HEALTH_LABELS,
   sourceInboxItemPermissions,
+  sourceMonitoringCheckLabel,
+  sourceMonitoringNextStep,
+  sourceMonitoringOperationState,
 } from "../sourceInbox";
 import {
   normalizeSourceImportPreview,
@@ -516,6 +519,15 @@ function SourceInboxDetail({
   );
 }
 
+function sourceMonitoringInitializationPolicy(settings, adapter) {
+  const initialMode = adapter?.initializationMode || settings?.initialMode || "";
+  return {
+    initialMode,
+    catchUpMaxItems: initialMode === "catch_up" ? settings?.catchUpMaxItems || 0 : 0,
+    fromTime: initialMode === "from_time" ? settings?.fromTime || "" : "",
+  };
+}
+
 function SourceMonitoringOperatorControls({
   actionState,
   controlState,
@@ -554,6 +566,10 @@ function SourceMonitoringOperatorControls({
   const selected = control.adapters.find(
     (adapter) => adapter.adapterKey === actionState.adapterKey,
   ) || null;
+  const selectedPolicy = sourceMonitoringInitializationPolicy(
+    control.settings,
+    selected,
+  );
   const preview = actionState.preview;
   const previewUsable = preview?.valid === true
     && !preview.initializationBlocked
@@ -561,9 +577,9 @@ function SourceMonitoringOperatorControls({
     && preview.configVersion === selected?.configVersion
     && preview.stateVersion === selected?.stateVersion
     && preview.initialRequired === (selected?.initializationStatus === "required")
-    && preview.mode === control.settings.initialMode
-    && preview.catchUpMaxItems === control.settings.catchUpMaxItems
-    && preview.fromTime === control.settings.fromTime;
+    && preview.mode === selectedPolicy.initialMode
+    && preview.catchUpMaxItems === selectedPolicy.catchUpMaxItems
+    && preview.fromTime === selectedPolicy.fromTime;
   const enableWithoutPreview = actionState.intent === "enable"
     && selected
     && selected.initializationStatus !== "required";
@@ -602,7 +618,7 @@ function SourceMonitoringOperatorControls({
       </p>
       <p role="note">确认首次启用时，服务端会重读同一固定来源并核对预览哈希；来源证据漂移时不会保存启用状态。</p>
       {control.adapters.some((adapter) => adapter.sourceClass === "readonly_market") ? (
-        <p role="note">readonly_market 首次预览会执行有界只读行情调用；确认启用时会再次读取，实际次数显示在预览中。</p>
+        <p role="note">readonly_market 首次只预览静态政策，不读取行情；首次 Runtime 运行时才执行受控只读轮询。</p>
       ) : null}
       {!control.settings.autoStart ? (
         <p role="note">auto-start 当前关闭；保存启用状态后不会自动轮询。</p>
@@ -622,6 +638,11 @@ function SourceMonitoringOperatorControls({
               {adapter.initializationMode ? ` · ${adapter.initializationMode}` : ""}
               {adapter.activeRun ? " · 当前有运行记录" : ""}
             </small>
+            {adapter.initializationStatus === "legacy" ? (
+              <small role="note">
+                {adapter.adapterKey === "sec_filings" ? "旧 SEC 状态" : "历史状态"}无法证明完整首次基线；先核对升级方案，保留现有 checkpoint 与收件箱，不自动重置或迁移。
+              </small>
+            ) : null}
             {adapter.blockedReasonCodes.length ? (
               <small className="source-monitoring-blockers" role="note">
                 阻断：{adapter.blockedReasonCodes.join(" · ")}
@@ -667,6 +688,9 @@ function SourceMonitoringOperatorControls({
             <strong>首次读取范围预览</strong>
             <code>{shortHash(preview.previewSha256)}</code>
           </header>
+          {["sec_filings", "company_ir"].includes(preview.adapterKey) && preview.mode === "seed_only" ? (
+            <p role="note">下方数量是本批内容预览，完整基线的公告 ID 数可能更多；基线仅覆盖所选来源本次取得的完整 recent 列表或 RSS，不代表全部历史公告。</p>
+          ) : null}
           <dl>
             <div><dt>模式</dt><dd>{preview.mode}</dd></div>
             <div><dt>候选</dt><dd>{preview.candidateCount}</dd></div>
@@ -731,11 +755,12 @@ function SourceMonitoringHealth({
   onSubmitAdapterEnablement,
 }) {
   const health = healthState.health;
+  const control = operatorControlState.status === "ready" ? operatorControlState.control : null;
+  const operation = sourceMonitoringOperationState(health, control);
   const notificationSupported = notificationState?.supported === true;
   const notificationEnabled = notificationState?.enabled === true;
   const notificationPermission = String(notificationState?.permission || "unsupported");
-  const runtimeNeedsAttention = health?.valid === true
-    && ["stalled", "failed"].includes(health.runtime.status);
+  const runtimeNeedsAttention = health?.valid === true && operation.state === "degraded";
   return (
     <details className="source-inbox-health">
       <summary>
@@ -744,9 +769,7 @@ function SourceMonitoringHealth({
           {healthState.status === "loading"
             ? "读取中"
             : health?.valid
-              ? runtimeNeedsAttention
-                ? `${health.runtime.statusLabel} · ${health.adapters.length} 个 Adapter`
-                : `${health.stateLabel} · ${health.adapters.length} 个`
+              ? `${operation.label} · ${health.adapters.length} 个 Adapter`
               : healthState.status === "error"
                 ? "读取失败"
                 : "尚未读取"}
@@ -763,6 +786,22 @@ function SourceMonitoringHealth({
         ) : null}
         {health?.valid ? (
           <>
+            <p role="note">{operation.detail}</p>
+            <div className="source-inbox-health-adapters" role="group" aria-label="当前进程生效配置">
+              <article>
+                <header><strong>生效配置</strong><em>来源：当前启动进程</em></header>
+                <small>
+                  全局{health.globalEnabled ? "启用" : "关闭"} · 自动启动{health.autoStart ? "启用" : "关闭"}
+                  {health.dryRun ? " · dry-run（仅预览）" : " · 导入收件箱模式"}
+                </small>
+                <small>
+                  来源范围：{health.officialOnly ? "官方来源" : "只读行情"}
+                  {health.officialOnly && health.allowReadonlyMarket ? " + 已允许的只读行情" : ""}
+                  {` · 首次策略 ${health.initialMode}`}
+                </small>
+                <small>监控变量取自启动进程环境；写入 .env.local 不会自动生效。按启动说明设置后重启，再重读健康记录。</small>
+              </article>
+            </div>
             <div className="source-inbox-health-adapters" role="group" aria-label="Monitoring Runtime 状态">
               <article>
                 <header>
@@ -790,9 +829,25 @@ function SourceMonitoringHealth({
               {health.dryRun ? " · dry-run" : ""}。新鲜本机心跳只证明 worker 有进展，不证明来源可用、内容为事实或具备交易权限。
             </p>
             <div className="source-inbox-health-adapters" role="list" aria-label="Adapter 健康记录">
-              {health.adapters.map((adapter) => (
+              {health.adapters.map((adapter) => {
+                const sourceControl = control?.valid === true
+                  ? control.adapters.find((entry) => entry.adapterKey === adapter.adapterKey
+                    && entry.configVersion === adapter.configVersion)
+                  : null;
+                const nextStep = sourceMonitoringNextStep(adapter);
+                return (
                 <article key={adapter.adapterKey} role="listitem">
                   <header><strong>{adapter.adapterKey}</strong><em>{SOURCE_MONITORING_HEALTH_LABELS[adapter.state] || adapter.state}</em></header>
+                  <small>
+                    {adapter.officialSource ? "官方来源" : adapter.sourceClass === "readonly_market" ? "只读行情" : "来源未登记"}
+                    {` · 生效开关${adapter.enabled ? "启用" : "关闭"}`}
+                    {adapter.pollIntervalMs > 0 ? ` · 轮询周期 ${adapter.pollIntervalMs / 60_000} 分钟` : " · 轮询周期未提供"}
+                  </small>
+                  <small>
+                    基线：{sourceControl
+                      ? INITIALIZATION_STATUS_LABELS[sourceControl.initializationStatus] || "状态待核实"
+                      : "状态未读取，请查看接入设置"}
+                  </small>
                   <small>
                     {adapter.persistedStatePresent ? "有持久化状态" : "尚无持久化状态"}
                     {adapter.persistedStatePresent
@@ -802,11 +857,17 @@ function SourceMonitoringHealth({
                     {adapter.latestRunStatus ? ` · 最近运行 ${adapter.latestRunStatus}` : ""}
                   </small>
                   <small>
+                    上次检查 {formatServerTime(adapter.lastCheckedAt)} · 下次检查 {formatServerTime(adapter.nextDueAt)}
+                  </small>
+                  <small>{sourceMonitoringCheckLabel(adapter)}</small>
+                  <small>
                     最近成功 {formatServerTime(adapter.lastSuccessAt)}
                     {adapter.lastErrorCode ? ` · 错误码 ${adapter.lastErrorCode}` : ""}
                   </small>
+                  {nextStep ? <small role="note">{nextStep}</small> : null}
                 </article>
-              ))}
+                );
+              })}
             </div>
             <SourceMonitoringOperatorControls
               actionState={operatorActionState}
@@ -1060,13 +1121,15 @@ export function SourceInboxPanel({
     const controller = new AbortController();
     const sequence = previous.sequence + 1;
     operatorRequestRef.current = { sequence, controller };
+    const initializationPolicy = sourceMonitoringInitializationPolicy(
+      operatorControlState.control?.settings,
+      adapter,
+    );
     const binding = {
       adapterKey: adapter.adapterKey,
       configVersion: adapter.configVersion,
       stateVersion: adapter.stateVersion,
-      initialMode: operatorControlState.control?.settings.initialMode,
-      catchUpMaxItems: operatorControlState.control?.settings.catchUpMaxItems,
-      fromTime: operatorControlState.control?.settings.fromTime,
+      ...initializationPolicy,
     };
     setOperatorActionState({
       ...EMPTY_OPERATOR_ACTION_STATE,
@@ -1742,7 +1805,7 @@ export function SourceInboxPanel({
           <ShieldAlert aria-hidden="true" size={17} />
           <span>
             <strong>外部信息默认不可信</strong>
-            <small>打开本页及收件箱审阅、附加、草稿操作不触发 Provider、正式 round、市场读取或执行；只有你明确执行 Adapter 首次预览时，readonly_market 来源才可进行界面列明的有界只读行情调用。</small>
+            <small>打开本页及收件箱审阅、附加、草稿操作不触发 Provider、正式 round、市场读取或执行；readonly_market 首次预览仅展示静态政策，不读取行情，首次 Runtime 运行时才执行受控只读轮询。</small>
           </span>
         </div>
 

@@ -98,7 +98,7 @@ _IR_PER_SYMBOL_LIMIT = 8
 _MAX_COUNT = 1_000
 _MAX_ELAPSED_MS = 1_000_000
 _STATUSES = ("passed", "degraded", "failed")
-_PRODUCTION_TRANSPORT_IDENTITY = "guarded_sec_ir_default_https_v1"
+_PRODUCTION_TRANSPORT_IDENTITY = "guarded_sec_legacy_ir_rss_https_v2"
 _DEPENDENCY_GUARD_VERSION = "sec_ir_direct_dependency_guard_v1"
 _NETWORK_REDIRECT_LIMIT_PER_FETCH = 5
 _NETWORK_REDIRECT_REPEAT_LIMIT_PER_FETCH = 2
@@ -155,6 +155,7 @@ SEC_IR_LIVE_PREFLIGHT_SOURCE_MANIFEST_SHA256 = canonical_sha256({
         "per_symbol_limit": _SEC_PER_SYMBOL_LIMIT,
     },
     "company_ir": {
+        "format_scope": "explicit_legacy_rss_not_micron_json_metadata",
         "feeds": [
             {"symbol": symbol, "url": url, "hosts": list(hosts)}
             for symbol, url, hosts in _IR_FEED_SNAPSHOT
@@ -169,6 +170,7 @@ SEC_IR_LIVE_PREFLIGHT_TRANSPORT_IDENTITY_SHA256 = hashlib.sha256(
 SEC_IR_LIVE_PREFLIGHT_PRODUCTION_EVIDENCE_PROFILE_SHA256 = canonical_sha256({
     "version": SEC_IR_LIVE_PREFLIGHT_VERSION,
     "scope": "sec_and_company_ir_only",
+    "company_ir_format_scope": "explicit_legacy_rss_not_micron_json_metadata",
     "evidence_class": "production_path_observation",
     "transport": _PRODUCTION_TRANSPORT_IDENTITY,
     "dependency_guard": _DEPENDENCY_GUARD_VERSION,
@@ -784,6 +786,7 @@ def _run_ir(
     boundary = _IrFetchBoundary(fetch, production=production)
     try:
         inner = OfficialIrReleaseAdapter(
+            source_format="rss",
             fetch_bytes=boundary,
             clock=lambda: observed_at,
             monotonic=monotonic,

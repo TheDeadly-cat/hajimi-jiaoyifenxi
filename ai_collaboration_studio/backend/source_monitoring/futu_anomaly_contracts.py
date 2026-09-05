@@ -772,8 +772,9 @@ def project_futu_anomaly_snapshot(
     """Project one complete snapshot atomically using sealed v1 rules.
 
     All failures return no items and the byte-equivalent normalized starting
-    checkpoint.  The injected observation time is used only as a future-data
-    gate; it is never included in event identity or content semantics.
+    checkpoint. The injected observation time must be the trusted local response
+    reception time, separate from request start and SDK timestamps. It gates
+    future/stale data and never enters event identity or content semantics.
     """
 
     try:

@@ -2,10 +2,12 @@
 
 The public production entry is ``scripts/run_futu_live_preflight.py``.  It
 boots this module in an isolated watchdog child after clearing application
-credentials and disabling local-env loading.  This module never opens SQLite,
-an HTTP listener, a Provider, an account context, or a trade context.
+credentials and disabling local-env loading.  The production observation then
+uses the same ``FutuReadOnlyBroker(mode="one_shot")`` protocol as the managed
+runtime.  This module never opens SQLite, an HTTP listener, a Provider, an
+account context, or a trade context.
 
-The guarded SDK facade deliberately exposes only ``OpenQuoteContext``,
+The broker worker's guarded SDK facade deliberately exposes only ``OpenQuoteContext``,
 ``get_market_snapshot``, optional ``get_market_state``, and ``close``.  Logical
 calls at that facade are counted exactly.  Futu SDK transport activity below
 those calls is not instrumented and is never reported as an exact network
@@ -16,8 +18,6 @@ from __future__ import annotations
 
 import copy
 import hmac
-import importlib
-import importlib.metadata
 import json
 import os
 import socket
@@ -61,7 +61,15 @@ from ..market.futu_readonly import (
     STORAGE_SYMBOLS,
     validate_storage_quote_snapshot,
 )
+from ..source_poll_control import SourcePollDeadlineExceeded
 from .contracts import canonical_sha256
+from .futu_readonly_broker import (
+    FUTU_READONLY_BROKER_POLICY_SHA256,
+    FUTU_READONLY_BROKER_SDK_VERSION,
+    FUTU_READONLY_BROKER_SYMBOLS,
+    FutuReadOnlyBroker,
+    FutuReadOnlyBrokerError,
+)
 
 
 FUTU_LIVE_PREFLIGHT_VERSION = "futu_live_preflight_v1"
@@ -137,8 +145,9 @@ _VALIDATOR_TOKEN = validate_storage_quote_snapshot
 _STORAGE_SYMBOLS_TOKEN = STORAGE_SYMBOLS
 _SOCKET_MODULE_TOKEN = socket
 _CREATE_CONNECTION_TOKEN = socket.create_connection
-_IMPORT_MODULE_TOKEN = importlib.import_module
-_METADATA_VERSION_TOKEN = importlib.metadata.version
+_BROKER_CLASS_TOKEN = FutuReadOnlyBroker
+_BROKER_OBSERVE_TOKEN = FutuReadOnlyBroker.quote_batch_observation
+_BROKER_POLICY_TOKEN = FUTU_READONLY_BROKER_POLICY_SHA256
 
 
 def _native_exact_symbols(value: Any) -> bool:
@@ -163,8 +172,11 @@ def _dependency_seal_intact() -> bool:
         and _native_exact_symbols(STORAGE_SYMBOLS)
         and socket is _SOCKET_MODULE_TOKEN
         and socket.create_connection is _CREATE_CONNECTION_TOKEN
-        and importlib.import_module is _IMPORT_MODULE_TOKEN
-        and importlib.metadata.version is _METADATA_VERSION_TOKEN
+        and FutuReadOnlyBroker is _BROKER_CLASS_TOKEN
+        and FutuReadOnlyBroker.quote_batch_observation is _BROKER_OBSERVE_TOKEN
+        and FUTU_READONLY_BROKER_POLICY_SHA256 == _BROKER_POLICY_TOKEN
+        and FUTU_READONLY_BROKER_SYMBOLS == FUTU_LIVE_PREFLIGHT_SYMBOLS
+        and FUTU_READONLY_BROKER_SDK_VERSION == FUTU_LIVE_PREFLIGHT_SDK_VERSION
     )
 
 
@@ -324,11 +336,14 @@ class FutuLivePreflightDependencies:
 
 def _source_manifest() -> dict[str, Any]:
     return {
-        "version": "futu_live_preflight_source_manifest_v1",
+        "version": "futu_live_preflight_source_manifest_v2",
         "host_policy": "fixed_ipv4_loopback_literal_v1",
         "port": FUTU_LIVE_PREFLIGHT_PORT,
         "symbols": list(FUTU_LIVE_PREFLIGHT_SYMBOLS),
         "quote_batch_calls": 1,
+        "broker_mode": "one_shot",
+        "broker_protocol": "futu_readonly_broker_v1",
+        "broker_policy_sha256": FUTU_READONLY_BROKER_POLICY_SHA256,
         "sdk_profile_policy": "parent_temp_appdata_v1",
         "sdk_import_failure_policy": "closed_worker_receipt_v1",
         "sdk_python_stdio_policy": "devnull_during_import_and_calls_v1",
@@ -348,7 +363,7 @@ FUTU_LIVE_PREFLIGHT_SOURCE_MANIFEST_SHA256 = canonical_sha256(_source_manifest()
 FUTU_LIVE_PREFLIGHT_WORKER_EVIDENCE_PROFILE_SHA256 = canonical_sha256({
     "version": FUTU_LIVE_PREFLIGHT_VERSION,
     "evidence_class": "watchdog_worker_observation",
-    "transport": "guarded_loopback_futu_quote_path_v1",
+    "transport": "futu_readonly_broker_one_shot_v1",
     "sdk_distribution": FUTU_LIVE_PREFLIGHT_SDK_DISTRIBUTION,
     "sdk_version": FUTU_LIVE_PREFLIGHT_SDK_VERSION,
     "source_manifest_sha256": FUTU_LIVE_PREFLIGHT_SOURCE_MANIFEST_SHA256,
@@ -360,7 +375,7 @@ FUTU_LIVE_PREFLIGHT_WORKER_EVIDENCE_PROFILE_SHA256 = canonical_sha256({
 FUTU_LIVE_PREFLIGHT_PRODUCTION_EVIDENCE_PROFILE_SHA256 = canonical_sha256({
     "version": FUTU_LIVE_PREFLIGHT_VERSION,
     "evidence_class": "production_path_observation",
-    "transport": "guarded_loopback_futu_quote_path_v1",
+    "transport": "futu_readonly_broker_one_shot_v1",
     "sdk_distribution": FUTU_LIVE_PREFLIGHT_SDK_DISTRIBUTION,
     "sdk_version": FUTU_LIVE_PREFLIGHT_SDK_VERSION,
     "source_manifest_sha256": FUTU_LIVE_PREFLIGHT_SOURCE_MANIFEST_SHA256,
@@ -547,6 +562,74 @@ def _validate_dependencies(dependencies: FutuLivePreflightDependencies) -> None:
             raise FutuLivePreflightDependencyError("dependency callable is invalid")
 
 
+def _report_from_snapshot(
+    snapshot: Any,
+    *,
+    calls: dict[str, int],
+    sdk_version: str,
+    production: bool,
+    evidence_class: str,
+) -> dict[str, Any]:
+    if calls["quote_context_open_success_count"] and (
+        calls["close_attempt_count"] != 1 or calls["close_success_count"] != 1
+    ):
+        return _error_report(
+            "FUTU_CONTEXT_CLOSE_UNVERIFIED",
+            production=production,
+            status="indeterminate",
+            sdk_version=sdk_version,
+            calls=calls,
+        )
+    validation = validate_storage_quote_snapshot(snapshot)
+    captured_at_ms = snapshot.get("captured_at_ms") if isinstance(snapshot, dict) else None
+    if type(captured_at_ms) is not int or captured_at_ms < 0:
+        captured_at_ms = None
+    rows = snapshot.get("rows") if isinstance(snapshot, dict) else None
+    source_errors = snapshot.get("source_errors") if isinstance(snapshot, dict) else None
+    ready_symbol_count = len(validation.get("ready_symbols") or [])
+    quality_ready = bool(validation.get("snapshot_quality_ready") is True)
+    coverage_complete = bool(
+        isinstance(rows, list)
+        and len(rows) == len(FUTU_LIVE_PREFLIGHT_SYMBOLS)
+        and validation.get("market_symbols") == sorted(FUTU_LIVE_PREFLIGHT_SYMBOLS)
+    )
+    ok = bool(validation.get("ready") is True)
+    payload = {
+        "version": FUTU_LIVE_PREFLIGHT_VERSION,
+        "scope": "futu_storage_quotes_only",
+        "ok": ok,
+        "status": "passed" if ok else "failed",
+        "error_code": "" if ok else _fixed_error_code(snapshot),
+        "evidence_class": evidence_class,
+        "receipt_class": _receipt_class(evidence_class),
+        "captured_at_ms": captured_at_ms,
+        "symbols": list(FUTU_LIVE_PREFLIGHT_SYMBOLS),
+        "sdk_distribution": FUTU_LIVE_PREFLIGHT_SDK_DISTRIBUTION,
+        "sdk_version": sdk_version,
+        "source_manifest_sha256": FUTU_LIVE_PREFLIGHT_SOURCE_MANIFEST_SHA256,
+        "evidence_profile_sha256": (
+            FUTU_LIVE_PREFLIGHT_WORKER_EVIDENCE_PROFILE_SHA256 if production else ""
+        ),
+        "calls": dict(calls),
+        "result": {
+            "snapshot_state": (
+                str(snapshot.get("state") or "unavailable")
+                if isinstance(snapshot, dict)
+                else "unavailable"
+            ),
+            "coverage_complete": coverage_complete,
+            "quality_ready": quality_ready,
+            "ready_symbol_count": ready_symbol_count,
+            "source_error_count": len(source_errors) if isinstance(source_errors, list) else 1,
+        },
+        "safety": _base_safety(
+            production=production,
+            confirmation_verified=True,
+        ),
+    }
+    return _seal_report(payload)
+
+
 def _run(
     *,
     confirmation: Any,
@@ -643,91 +726,12 @@ def _run(
             sdk_version=dependencies.sdk_version,
             calls=calls,
         )
-    if calls["quote_context_open_success_count"] and (
-        calls["close_attempt_count"] != 1 or calls["close_success_count"] != 1
-    ):
-        return _error_report(
-            "FUTU_CONTEXT_CLOSE_UNVERIFIED",
-            production=production,
-            status="indeterminate",
-            sdk_version=dependencies.sdk_version,
-            calls=calls,
-        )
-
-    validation = validate_storage_quote_snapshot(snapshot)
-    captured_at_ms = snapshot.get("captured_at_ms") if isinstance(snapshot, dict) else None
-    if type(captured_at_ms) is not int or captured_at_ms < 0:
-        captured_at_ms = None
-    rows = snapshot.get("rows") if isinstance(snapshot, dict) else None
-    source_errors = snapshot.get("source_errors") if isinstance(snapshot, dict) else None
-    ready_symbol_count = len(validation.get("ready_symbols") or [])
-    quality_ready = bool(validation.get("snapshot_quality_ready") is True)
-    coverage_complete = bool(
-        isinstance(rows, list)
-        and len(rows) == len(FUTU_LIVE_PREFLIGHT_SYMBOLS)
-        and validation.get("market_symbols") == sorted(FUTU_LIVE_PREFLIGHT_SYMBOLS)
-    )
-    ok = bool(validation.get("ready") is True)
-    payload = {
-        "version": FUTU_LIVE_PREFLIGHT_VERSION,
-        "scope": "futu_storage_quotes_only",
-        "ok": ok,
-        "status": "passed" if ok else "failed",
-        "error_code": "" if ok else _fixed_error_code(snapshot),
-        "evidence_class": dependencies.evidence_class,
-        "receipt_class": _receipt_class(dependencies.evidence_class),
-        "captured_at_ms": captured_at_ms,
-        "symbols": list(FUTU_LIVE_PREFLIGHT_SYMBOLS),
-        "sdk_distribution": FUTU_LIVE_PREFLIGHT_SDK_DISTRIBUTION,
-        "sdk_version": dependencies.sdk_version,
-        "source_manifest_sha256": FUTU_LIVE_PREFLIGHT_SOURCE_MANIFEST_SHA256,
-        "evidence_profile_sha256": (
-            FUTU_LIVE_PREFLIGHT_WORKER_EVIDENCE_PROFILE_SHA256 if production else ""
-        ),
-        "calls": calls,
-        "result": {
-            "snapshot_state": (
-                str(snapshot.get("state") or "unavailable")
-                if isinstance(snapshot, dict)
-                else "unavailable"
-            ),
-            "coverage_complete": coverage_complete,
-            "quality_ready": quality_ready,
-            "ready_symbol_count": ready_symbol_count,
-            "source_error_count": len(source_errors) if isinstance(source_errors, list) else 1,
-        },
-        "safety": _base_safety(
-            production=production,
-            confirmation_verified=True,
-        ),
-    }
-    return _seal_report(payload)
-
-
-def _production_dependencies() -> FutuLivePreflightDependencies:
-    sdk_load_error_code = ""
-    try:
-        version = importlib.metadata.version(FUTU_LIVE_PREFLIGHT_SDK_DISTRIBUTION)
-    except importlib.metadata.PackageNotFoundError:
-        version = ""
-        sdk_module = None
-    else:
-        sdk_module = None
-        if version == FUTU_LIVE_PREFLIGHT_SDK_VERSION:
-            try:
-                sdk_module = importlib.import_module("futu")
-            except (Exception, SystemExit):
-                sdk_module = None
-                sdk_load_error_code = "FUTU_SDK_IMPORT_FAILED"
-    return FutuLivePreflightDependencies(
-        sdk_module=sdk_module,
-        sdk_version=version,
-        create_connection=socket.create_connection,
-        clock=lambda: datetime.now(timezone.utc),
-        monotonic=time.monotonic,
-        snapshot_id_factory=lambda: "futu_live_preflight_snapshot_v1",
-        evidence_class="watchdog_worker_observation",
-        sdk_load_error_code=sdk_load_error_code,
+    return _report_from_snapshot(
+        snapshot,
+        calls=calls,
+        sdk_version=dependencies.sdk_version,
+        production=production,
+        evidence_class=dependencies.evidence_class,
     )
 
 
@@ -742,11 +746,45 @@ def run_futu_live_preflight(*, confirmation: Any) -> dict[str, Any]:
             production=True,
             status="indeterminate",
         )
-    dependencies = _production_dependencies()
-    return _run(
-        confirmation=confirmation,
-        dependencies=dependencies,
+    broker = FutuReadOnlyBroker(mode="one_shot", timeout_ms=10_000)
+    try:
+        observation = broker.quote_batch_observation(
+            FUTU_LIVE_PREFLIGHT_SYMBOLS,
+            force=True,
+        )
+    except SourcePollDeadlineExceeded:
+        return _error_report(
+            "PREFLIGHT_WATCHDOG_TIMEOUT",
+            production=True,
+            status="indeterminate",
+        )
+    except FutuReadOnlyBrokerError as exc:
+        return _error_report(
+            exc.code,
+            production=True,
+            status="indeterminate",
+        )
+    except BaseException:
+        return _error_report(
+            "FUTU_PREFLIGHT_INTERNAL_ERROR",
+            production=True,
+            status="indeterminate",
+        )
+    finally:
+        broker.stop()
+    if observation["ok"] is not True:
+        return _error_report(
+            observation["error_code"],
+            production=True,
+            sdk_version=observation["sdk_version"],
+            calls=observation["calls"],
+        )
+    return _report_from_snapshot(
+        observation["snapshot"],
+        calls=observation["calls"],
+        sdk_version=observation["sdk_version"],
         production=True,
+        evidence_class="watchdog_worker_observation",
     )
 
 

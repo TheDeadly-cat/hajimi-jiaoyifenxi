@@ -51,7 +51,7 @@ class FakeIrFetcher:
 
 class OfficialIrReleaseAdapterTests(unittest.TestCase):
     def make_adapter(self, fetcher: FakeIrFetcher) -> OfficialIrReleaseAdapter:
-        return OfficialIrReleaseAdapter(
+        return OfficialIrReleaseAdapter(source_format="rss",
             fetch_bytes=fetcher,
             clock=lambda: FIXED_NOW,
             cache_ttl_seconds=300,
@@ -80,7 +80,7 @@ class OfficialIrReleaseAdapterTests(unittest.TestCase):
             barrier.wait(timeout=2)
             return fetcher(url, allowed_hosts)
 
-        adapter = OfficialIrReleaseAdapter(
+        adapter = OfficialIrReleaseAdapter(source_format="rss",
             fetch_bytes=concurrent_fetch,
             clock=lambda: FIXED_NOW,
         )
@@ -100,7 +100,7 @@ class OfficialIrReleaseAdapterTests(unittest.TestCase):
             self.assertTrue(release_fetch.wait(timeout=2))
             return fetcher(url, allowed_hosts)
 
-        adapter = OfficialIrReleaseAdapter(
+        adapter = OfficialIrReleaseAdapter(source_format="rss",
             fetch_bytes=blocked_fetch,
             clock=lambda: FIXED_NOW,
         )
@@ -147,7 +147,7 @@ class OfficialIrReleaseAdapterTests(unittest.TestCase):
     def test_failed_feed_negative_cache_expires_and_empty_feed_is_cached(self) -> None:
         monotonic_clock = [10.0]
         failing_fetcher = FakeIrFetcher(fail_symbol_host="investor.wdc.com")
-        failing_adapter = OfficialIrReleaseAdapter(
+        failing_adapter = OfficialIrReleaseAdapter(source_format="rss",
             fetch_bytes=failing_fetcher,
             clock=lambda: FIXED_NOW,
             monotonic=lambda: monotonic_clock[0],
@@ -162,7 +162,7 @@ class OfficialIrReleaseAdapterTests(unittest.TestCase):
         self.assertEqual(len(failing_fetcher.calls), 2)
 
         empty_calls: list[str] = []
-        empty_adapter = OfficialIrReleaseAdapter(
+        empty_adapter = OfficialIrReleaseAdapter(source_format="rss",
             fetch_bytes=lambda url, _hosts: empty_calls.append(url) or b"<rss><channel /></rss>",
             clock=lambda: FIXED_NOW,
         )

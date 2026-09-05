@@ -125,8 +125,12 @@ SERVICE_ID = "ai_collaboration_studio"
 SERVICE_NAME = "AI 共创室"
 SERVICE_VERSION = "0.1.0"
 HOST_API_CONTRACT_VERSION = "host_delivery_v1"
-HOST_READINESS_SCHEMA_VERSION = "host_readiness_v1"
+HOST_READINESS_SCHEMA_VERSION = "host_readiness_v2"
 HOST_VERSION_SCHEMA_VERSION = "host_version_v2"
+
+
+class RuntimeShutdownIncomplete(RuntimeError):
+    """Raised while retaining DB ownership after a worker misses both bounds."""
 
 
 def _is_source_inbox_path(path: str) -> bool:
@@ -418,10 +422,73 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             and database_ready
             and frontend["available"]
         )
+        runtime = getattr(
+            self.server,
+            "ai_studio_source_monitoring_runtime",
+            None,
+        )
+        runtime_settings = getattr(runtime, "settings", None)
+        monitoring_requested = bool(
+            getattr(runtime_settings, "enabled", False) is True
+            and getattr(runtime_settings, "auto_start", False) is True
+        )
+        runtime_state = "unavailable"
+        runtime_error_code = ""
+        runtime_thread_alive = False
+        runtime_liveness_verified = False
+        if runtime is not None:
+            snapshot_provider = getattr(runtime, "snapshot", None)
+            if callable(snapshot_provider):
+                try:
+                    runtime_snapshot = snapshot_provider()
+                    if type(runtime_snapshot) is dict:
+                        candidate_state = runtime_snapshot.get("status")
+                        candidate_error = runtime_snapshot.get(
+                            "last_fatal_error_code"
+                        )
+                        if type(candidate_state) is str and candidate_state:
+                            runtime_state = candidate_state[:40]
+                        if type(candidate_error) is str:
+                            runtime_error_code = candidate_error[:100]
+                        runtime_thread_alive = (
+                            runtime_snapshot.get("thread_alive") is True
+                        )
+                        runtime_liveness_verified = (
+                            runtime_snapshot.get("liveness_verified") is True
+                        )
+                except BaseException:
+                    runtime_state = "unavailable"
+                    runtime_error_code = (
+                        "SOURCE_MONITORING_RUNTIME_HEALTH_READ_FAILED"
+                    )
+        monitoring_operational = bool(
+            monitoring_requested
+            and runtime_thread_alive
+            and runtime_state in {"starting", "running", "degraded"}
+        )
+        monitoring_ready = bool(
+            not monitoring_requested or monitoring_operational
+        )
+        monitoring_degraded = bool(
+            monitoring_requested
+            and (
+                not monitoring_operational
+                or runtime_state == "degraded"
+                or not runtime_liveness_verified
+                and runtime_state != "starting"
+            )
+        )
         return {
             "ok": ready,
             "ready": ready,
-            "status": "ready" if ready else "not_ready",
+            "degraded": bool(ready and monitoring_degraded),
+            "status": (
+                "not_ready"
+                if not ready
+                else "ready_with_degradation"
+                if monitoring_degraded
+                else "ready"
+            ),
             "schema_version": HOST_READINESS_SCHEMA_VERSION,
             "service": {
                 "id": SERVICE_ID,
@@ -435,6 +502,13 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     "ready": bool(frontend["available"]),
                     "index_bytes": int(frontend["index_bytes"]),
                     "index_sha256": str(frontend["index_sha256"]),
+                },
+                "monitoring_runtime": {
+                    "requested": monitoring_requested,
+                    "ready": monitoring_ready,
+                    "operational": monitoring_operational,
+                    "state": runtime_state,
+                    "error_code": runtime_error_code,
                 },
             },
         }
@@ -5606,15 +5680,40 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 "ai_studio_source_monitoring_runtime",
                 None,
             )
-            scheduler = getattr(runtime, "scheduler", None)
-            if runtime is None or scheduler is None:
+            if runtime is None:
                 raise RuntimeError("operator runtime is unavailable")
             phase = "service"
+            registry_catalog = getattr(runtime, "registry_catalog", None)
+            if type(registry_catalog) is tuple and len(registry_catalog) > 1:
+                repository = getattr(runtime, "repository", None)
+                if repository is None:
+                    raise RuntimeError(
+                        "coordinated operator repository is unavailable"
+                    )
+                return SourceMonitoringOperatorService(
+                    store=STORE,
+                    settings=runtime.settings,
+                    registry_catalog=registry_catalog,
+                    repository=repository,
+                    cancel_event=getattr(
+                        self.server,
+                        "ai_studio_shutdown_event",
+                        None,
+                    ),
+                )
+            scheduler = getattr(runtime, "scheduler", None)
+            if scheduler is None:
+                raise RuntimeError("operator runtime scheduler is unavailable")
             return SourceMonitoringOperatorService(
                 store=STORE,
                 settings=runtime.settings,
                 registry=scheduler.registry,
                 repository=scheduler.repository,
+                cancel_event=getattr(
+                    self.server,
+                    "ai_studio_shutdown_event",
+                    None,
+                ),
             )
         except Exception as exc:
             emit_event(
@@ -5721,6 +5820,8 @@ def run_server(
     # verified owner attached for the full handler-drain/runtime lifetime.
     server.ai_studio_instance_owner = instance_owner
     server.ai_studio_source_monitoring_runtime = None
+    server.ai_studio_source_monitoring_start_result = None
+    server.ai_studio_shutdown_event = threading.Event()
     runtime = None
     started = False
     try:
@@ -5728,7 +5829,43 @@ def run_server(
         if runtime_factory is not None:
             runtime = runtime_factory(STORE)
             server.ai_studio_source_monitoring_runtime = runtime
-            runtime.start()
+            runtime_start_result = runtime.start()
+            server.ai_studio_source_monitoring_start_result = (
+                runtime_start_result
+            )
+            runtime_settings = getattr(runtime, "settings", None)
+            monitoring_requested = bool(
+                getattr(runtime_settings, "enabled", False) is True
+                and getattr(runtime_settings, "auto_start", False) is True
+            )
+            if monitoring_requested and runtime_start_result is not True:
+                snapshot_provider = getattr(runtime, "snapshot", None)
+                runtime_state = "unavailable"
+                error_code = "SOURCE_MONITORING_RUNTIME_START_FAILED"
+                if callable(snapshot_provider):
+                    try:
+                        snapshot = snapshot_provider()
+                        if type(snapshot) is dict:
+                            state_value = snapshot.get("status")
+                            error_value = snapshot.get(
+                                "last_fatal_error_code"
+                            )
+                            if type(state_value) is str and state_value:
+                                runtime_state = state_value[:40]
+                            if type(error_value) is str and error_value:
+                                error_code = error_value[:100]
+                    except BaseException:
+                        pass
+                emit_event(
+                    "source_monitoring_runtime_start_degraded",
+                    severity="error",
+                    fields={
+                        "runtime_state": runtime_state,
+                        "error_code": error_code,
+                        "execution_capability": "none",
+                        "live_trading_allowed": False,
+                    },
+                )
         server.ai_studio_startup_ready = True
         started = True
         emit_event(
@@ -5753,10 +5890,27 @@ def run_server(
             emit_event("server_interrupt_received")
     finally:
         server.ai_studio_startup_ready = False
+        server.ai_studio_shutdown_event.set()
+        if runtime is not None:
+            request_stop = getattr(runtime, "request_stop", None)
+            if callable(request_stop):
+                try:
+                    request_stop()
+                except BaseException:
+                    # Continue into handler drain and the two bounded runtime
+                    # stop attempts.  A shutdown callback must never bypass
+                    # the fail-stop owner-retention decision.
+                    pass
         try:
             server.server_close()
         finally:
-            if runtime is not None and not runtime.stop():
+            first_stop_complete = True
+            if runtime is not None:
+                try:
+                    first_stop_complete = runtime.stop() is True
+                except BaseException:
+                    first_stop_complete = False
+            if runtime is not None and not first_stop_complete:
                 emit_event(
                     "source_monitoring_runtime_stop_timeout",
                     severity="critical",
@@ -5766,5 +5920,38 @@ def run_server(
                         "live_trading_allowed": False,
                     },
                 )
-                runtime.wait_until_stopped()
+                timeout_ms = getattr(runtime, "join_timeout_ms", 30_000)
+                timeout_seconds = (
+                    timeout_ms / 1_000
+                    if type(timeout_ms) is int and timeout_ms > 0
+                    else 30.0
+                )
+                request_stop = getattr(runtime, "request_stop", None)
+                if callable(request_stop):
+                    try:
+                        request_stop()
+                    except BaseException:
+                        pass
+                wait_until_stopped = getattr(
+                    runtime,
+                    "wait_until_stopped",
+                    None,
+                )
+                try:
+                    joined = bool(
+                        callable(wait_until_stopped)
+                        and wait_until_stopped(timeout_seconds) is True
+                    )
+                except BaseException:
+                    joined = False
+                resources_stopped = False
+                if joined:
+                    try:
+                        resources_stopped = runtime.stop() is True
+                    except BaseException:
+                        resources_stopped = False
+                if not joined or not resources_stopped:
+                    raise RuntimeShutdownIncomplete(
+                        "source monitoring runtime did not stop within bounded shutdown"
+                    )
         emit_event("server_stopped", fields={"started": started})

@@ -48,11 +48,18 @@ SOURCE_MONITORING_INITIALIZATION_RECEIPT_VERSION = (
     "source_monitoring_initialization_receipt_v1"
 )
 SOURCE_MONITORING_INITIALIZATION_VERSION = "source_monitoring_initialization_v1"
+SOURCE_MONITORING_INITIALIZATION_RECEIPT_VERSION_V2 = (
+    "source_monitoring_initialization_receipt_v2"
+)
+SOURCE_MONITORING_INITIALIZATION_VERSION_V2 = "source_monitoring_initialization_v2"
 SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY = (
     "source_monitoring_pending_initialization_authorization_v1"
 )
 SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION = (
     "source_monitoring_pending_initialization_authorization_v1"
+)
+SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION_V2 = (
+    "source_monitoring_pending_initialization_authorization_v2"
 )
 
 INITIALIZATION_MODES = frozenset({"seed_only", "catch_up", "from_time"})
@@ -1037,7 +1044,7 @@ def _sha256_digest(value: Any, label: str) -> str:
 def normalize_pending_initialization_authorization(value: Any) -> dict[str, Any]:
     """Validate the exact persisted authorization projection."""
 
-    expected_fields = {
+    expected_fields_v1 = {
         "version",
         "adapter_key",
         "config_version",
@@ -1048,12 +1055,24 @@ def normalize_pending_initialization_authorization(value: Any) -> dict[str, Any]
         "preview_sha256",
         "confirmed_at_ms",
     }
-    if type(value) is not dict or set(value) != expected_fields:
+    expected_fields_v2 = expected_fields_v1 | {
+        "authorization_kind",
+        "source_policy_sha256",
+    }
+    if type(value) is not dict:
         raise SourceMonitoringStateError(
             "pending initialization authorization is not the closed v1 projection",
             code="SOURCE_MONITORING_PENDING_AUTHORIZATION_INVALID",
         )
-    if value.get("version") != SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION:
+    version = value.get("version")
+    expected_fields = (
+        expected_fields_v1
+        if version == SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION
+        else expected_fields_v2
+        if version == SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION_V2
+        else None
+    )
+    if expected_fields is None or set(value) != expected_fields:
         raise SourceMonitoringStateError(
             "pending initialization authorization version is invalid",
             code="SOURCE_MONITORING_PENDING_AUTHORIZATION_INVALID",
@@ -1091,8 +1110,8 @@ def normalize_pending_initialization_authorization(value: Any) -> dict[str, Any]
             "pending initialization authorization policy is inconsistent",
             code="SOURCE_MONITORING_PENDING_AUTHORIZATION_INVALID",
         )
-    return {
-        "version": SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION,
+    normalized = {
+        "version": version,
         "adapter_key": normalize_adapter_key(value.get("adapter_key")),
         "config_version": _clean_token(
             value.get("config_version"),
@@ -1114,6 +1133,20 @@ def normalize_pending_initialization_authorization(value: Any) -> dict[str, Any]
             "pending_authorization.confirmed_at_ms",
         ),
     }
+    if version == SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION_V2:
+        if value.get("authorization_kind") != "static_seed_policy" or mode != "seed_only":
+            raise SourceMonitoringStateError(
+                "pending static seed authorization kind is invalid",
+                code="SOURCE_MONITORING_PENDING_AUTHORIZATION_INVALID",
+            )
+        normalized.update({
+            "authorization_kind": "static_seed_policy",
+            "source_policy_sha256": _sha256_digest(
+                value.get("source_policy_sha256"),
+                "pending_authorization.source_policy_sha256",
+            ),
+        })
+    return normalized
 
 
 def _pending_authorization_projection(
@@ -1197,7 +1230,7 @@ def _canonical_initialization_time(value: Any, label: str) -> str:
 def _normalise_initialization_request(value: Any) -> dict[str, Any] | None:
     if value is None:
         return None
-    expected_fields = {
+    expected_fields_v1 = {
         "version",
         "mode",
         "config_version",
@@ -1214,12 +1247,25 @@ def _normalise_initialization_request(value: Any) -> dict[str, Any] | None:
         "next_checkpoint_sha256",
         "captured_at_ms",
     }
-    if type(value) is not dict or set(value) != expected_fields:
+    expected_fields_v2 = expected_fields_v1 | {
+        "authorization_kind",
+        "source_policy_sha256",
+        "execution_preview_sha256",
+    }
+    if type(value) is not dict:
         raise SourceMonitoringStateError(
             "initialization does not match the closed v1 projection",
             code="SOURCE_MONITORING_INITIALIZATION_INVALID",
         )
-    if value["version"] != SOURCE_MONITORING_INITIALIZATION_VERSION:
+    version = value.get("version")
+    expected_fields = (
+        expected_fields_v1
+        if version == SOURCE_MONITORING_INITIALIZATION_VERSION
+        else expected_fields_v2
+        if version == SOURCE_MONITORING_INITIALIZATION_VERSION_V2
+        else None
+    )
+    if expected_fields is None or set(value) != expected_fields:
         raise SourceMonitoringStateError(
             "initialization version is invalid",
             code="SOURCE_MONITORING_INITIALIZATION_INVALID",
@@ -1302,8 +1348,8 @@ def _normalise_initialization_request(value: Any) -> dict[str, Any] | None:
             "initialization occurrence bounds are reversed",
             code="SOURCE_MONITORING_INITIALIZATION_INVALID",
         )
-    return {
-        "version": SOURCE_MONITORING_INITIALIZATION_VERSION,
+    normalized = {
+        "version": version,
         "mode": mode,
         "config_version": _clean_token(
             value["config_version"],
@@ -1334,6 +1380,24 @@ def _normalise_initialization_request(value: Any) -> dict[str, Any] | None:
             "initialization.captured_at_ms",
         ),
     }
+    if version == SOURCE_MONITORING_INITIALIZATION_VERSION_V2:
+        if value.get("authorization_kind") != "static_seed_policy" or mode != "seed_only":
+            raise SourceMonitoringStateError(
+                "static seed initialization authority is invalid",
+                code="SOURCE_MONITORING_INITIALIZATION_INVALID",
+            )
+        normalized.update({
+            "authorization_kind": "static_seed_policy",
+            "source_policy_sha256": _sha256_digest(
+                value.get("source_policy_sha256"),
+                "initialization.source_policy_sha256",
+            ),
+            "execution_preview_sha256": _sha256_digest(
+                value.get("execution_preview_sha256"),
+                "initialization.execution_preview_sha256",
+            ),
+        })
+    return normalized
 
 
 def _load_canonical_initialization_receipt(value: Any) -> dict[str, Any]:
@@ -1388,7 +1452,11 @@ def _build_initialization_receipt(
     counts: dict[str, int],
 ) -> dict[str, Any]:
     return {
-        "version": SOURCE_MONITORING_INITIALIZATION_RECEIPT_VERSION,
+        "version": (
+            SOURCE_MONITORING_INITIALIZATION_RECEIPT_VERSION_V2
+            if request["version"] == SOURCE_MONITORING_INITIALIZATION_VERSION_V2
+            else SOURCE_MONITORING_INITIALIZATION_RECEIPT_VERSION
+        ),
         "adapter_key": run["adapter_key"],
         "run_id": run["run_id"],
         "initialization": request,
@@ -1452,7 +1520,7 @@ def _initialization_projection(
             "initialization receipt seal is invalid",
             code="SOURCE_MONITORING_INITIALIZATION_RECEIPT_CORRUPT",
         )
-    return {
+    projection = {
         "mode": request["mode"],
         "config_version": request["config_version"],
         "preview_sha256": request["preview_sha256"],
@@ -1460,6 +1528,13 @@ def _initialization_projection(
         "catch_up_max_items": request["catch_up_max_items"],
         "from_time_ms": request["from_time_ms"],
     }
+    if request["version"] == SOURCE_MONITORING_INITIALIZATION_VERSION_V2:
+        projection.update({
+            "authorization_kind": request["authorization_kind"],
+            "source_policy_sha256": request["source_policy_sha256"],
+            "execution_preview_sha256": request["execution_preview_sha256"],
+        })
+    return projection
 
 
 def _row_mapping(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -2211,10 +2286,19 @@ class SourceMonitoringStateRepository:
         *,
         config_version: Any,
         dry_run: Any = False,
+        expected_state_version: Any = None,
     ) -> dict[str, Any]:
         if type(dry_run) is not bool:
             raise SourceMonitoringStateError(
                 "dry_run must be a native boolean",
+                code="SOURCE_MONITORING_STATE_INVALID",
+            )
+        if expected_state_version is not None and (
+            type(expected_state_version) is not int
+            or not 1 <= expected_state_version <= MAX_NATIVE_INTEGER
+        ):
+            raise SourceMonitoringStateError(
+                "expected_state_version is invalid",
                 code="SOURCE_MONITORING_STATE_INVALID",
             )
         clean_key = normalize_adapter_key(adapter_key)
@@ -2244,6 +2328,14 @@ class SourceMonitoringStateRepository:
                 raise SourceMonitoringStateError(
                     "adapter is disabled",
                     code="SOURCE_MONITORING_ADAPTER_DISABLED",
+                )
+            if (
+                expected_state_version is not None
+                and state["state_version"] != expected_state_version
+            ):
+                raise SourceMonitoringStateError(
+                    "selected adapter state changed before the run started",
+                    code="SOURCE_MONITORING_STATE_CONFLICT",
                 )
             next_state_version = (
                 state["state_version"] if dry_run else state["state_version"] + 1
@@ -2467,6 +2559,11 @@ class SourceMonitoringStateRepository:
                         )
                     )
                     or (
+                        clean_initialization["version"]
+                        == SOURCE_MONITORING_INITIALIZATION_VERSION_V2
+                        and pending_authorization is None
+                    )
+                    or (
                         pending_authorization is not None
                         and (
                             pending_authorization["mode"]
@@ -2487,6 +2584,20 @@ class SourceMonitoringStateRepository:
                                 clean_initialization["mode"] == "catch_up"
                                 and pending_authorization["preview_sha256"]
                                 != clean_initialization["preview_sha256"]
+                            )
+                            or (
+                                clean_initialization["version"]
+                                == SOURCE_MONITORING_INITIALIZATION_VERSION_V2
+                                and (
+                                    pending_authorization.get("version")
+                                    != SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION_V2
+                                    or pending_authorization.get("authorization_kind")
+                                    != clean_initialization["authorization_kind"]
+                                    or pending_authorization.get("source_policy_sha256")
+                                    != clean_initialization["source_policy_sha256"]
+                                    or pending_authorization["preview_sha256"]
+                                    != clean_initialization["preview_sha256"]
+                                )
                             )
                         )
                     )
@@ -2900,10 +3011,13 @@ __all__ = [
     "SOURCE_ADAPTER_STATE_VERSION",
     "SOURCE_MONITORING_INITIALIZATION_MIGRATION_KEY",
     "SOURCE_MONITORING_INITIALIZATION_RECEIPT_VERSION",
+    "SOURCE_MONITORING_INITIALIZATION_RECEIPT_VERSION_V2",
     "SOURCE_MONITORING_INITIALIZATION_VERSION",
+    "SOURCE_MONITORING_INITIALIZATION_VERSION_V2",
     "SOURCE_MONITORING_MIGRATION_KEY",
     "SOURCE_MONITORING_PENDING_AUTHORIZATION_MIGRATION_KEY",
     "SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION",
+    "SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION_V2",
     "SourceMonitoringStateError",
     "SourceMonitoringStateRepository",
     "normalize_pending_initialization_authorization",

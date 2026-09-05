@@ -3,10 +3,12 @@ from __future__ import annotations
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 from urllib.request import Request, build_opener
 
 from backend.market.official_http import OfficialHttpsRedirectHandler
 from backend.market.sec_edgar import SEC_TICKERS_URL, _is_allowed_sec_fetch_url
+from backend.source_poll_control import SourcePollCancelled
 
 
 class _QuietHandler(BaseHTTPRequestHandler):
@@ -111,6 +113,48 @@ class OfficialHttpRedirectPolicyTests(unittest.TestCase):
             )
         self.assertEqual(rejected_response.read_calls, 0)
         self.assertEqual(rejected_response.close_calls, 1)
+
+    def test_each_redirect_reclips_timeout_and_observes_cancellation(self) -> None:
+        cancel = threading.Event()
+        policy = OfficialHttpsRedirectHandler(
+            {"official.example"},
+            deadline_monotonic_ms=5_000,
+            cancel_event=cancel,
+        )
+        parent = self._FakeParent()
+        policy.parent = parent
+        request = Request("https://official.example/start")
+        request.timeout = 3
+        response = self._FakeRedirectResponse()
+
+        with patch(
+            "backend.market.official_http.time.monotonic",
+            return_value=4.75,
+        ):
+            result = policy.http_error_302(
+                request,
+                response,
+                302,
+                "Found",
+                {"location": "/next"},
+            )
+
+        self.assertEqual(result, "redirected")
+        self.assertEqual(response.close_calls, 1)
+        self.assertAlmostEqual(parent.requests[0][1], 0.25, places=3)
+
+        cancelled_response = self._FakeRedirectResponse()
+        cancel.set()
+        with self.assertRaises(SourcePollCancelled):
+            policy.http_error_302(
+                request,
+                cancelled_response,
+                302,
+                "Found",
+                {"location": "/cancelled"},
+            )
+        self.assertEqual(cancelled_response.close_calls, 1)
+        self.assertEqual(len(parent.requests), 1)
 
     def test_sec_endpoint_policy_binds_host_and_path(self) -> None:
         self.assertTrue(_is_allowed_sec_fetch_url(SEC_TICKERS_URL))

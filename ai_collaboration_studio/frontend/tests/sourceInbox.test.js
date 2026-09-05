@@ -10,6 +10,9 @@ import {
   normalizeSourceMonitoringHealth,
   replaceSourceInboxItem,
   sourceInboxItemPermissions,
+  sourceMonitoringCheckLabel,
+  sourceMonitoringNextStep,
+  sourceMonitoringOperationState,
 } from "../src/sourceInbox.js";
 import {
   normalizeSourceImportPreview,
@@ -368,6 +371,36 @@ test("source inbox normalization preserves the external-unverified boundary", ()
   assert.equal(item.sourceTierLabel, "外部人工导入");
 });
 
+test("Micron Q4 v2 neutral sidecar remains valid no-match without inheriting RSS impact rules", () => {
+  const sidecar = impactProjection({ status: "NO_MATCH", hypothesis_count: 0 });
+  Object.assign(sidecar.projection, { evaluation: "no_match", matched_rule_ids: [], hypotheses: [] });
+  sidecar.projection.source_binding.adapter_id = "company_ir";
+  // Same semantic binding fields as TradingImpactRulesV1's Q4 producer.
+  sidecar.projection.source_item_binding.source_semantic_binding = {
+    version: "trading_impact_source_semantics_v2", source_format: "micron_q4_public_json_v1",
+    adapter_id: "company_ir", rule_id: "", source_index: 1, symbol: "US.MU", form: "",
+    event_type: "earnings_schedule", revision_state: "original", authority: "", family: "",
+    subject_phase: "", event_state: "", occurrence_basis: "", upstream_rule_id: "", session_date: "",
+    anchor_at: "2026-08-28T12:55:00Z", anchor_semantics: "source_publication_time", precision: "timestamp",
+  };
+  const record = sourceRecord({
+    source_channel: "official_source_monitor", source_key: "company_ir", source_tier: "official_source",
+    impact_rule_projections: [sidecar],
+  });
+  record.item.item_type = "company_ir_release";
+  record.item.extensions = { company_ir_v2: { source_format: "micron_q4_public_json_v1" } };
+  record.item.impact_hypotheses = [];
+  const normalized = normalizeSourceInboxItem(record);
+  assert.equal(normalized.valid, true);
+  assert.equal(normalized.impactEvaluationState, "no_match");
+  assert.equal(normalized.impactRuleProjections[0].valid, true);
+  assert.equal(normalized.impactRuleProjections[0].adapterId, "company_ir");
+  assert.deepEqual(normalized.impactRuleProjections[0].matchedRuleIds, []);
+  assert.deepEqual(normalized.impactRuleProjections[0].hypotheses, []);
+  assert.deepEqual(normalized.impactRuleProjections[0].sectorImpacts, []);
+  assert.deepEqual(normalized.impactRuleProjections[0].securityImpacts, []);
+});
+
 test("sealed channels determine provenance tier without changing verification", () => {
   const official = normalizeSourceInboxItem(sourceRecord({
     source_channel: "official_source_monitor",
@@ -621,10 +654,80 @@ test("list normalization and replacement keep bounded current records", () => {
   assert.equal(replaced[0].acknowledged, true);
 });
 
+test("monitoring operation state requires baseline and recent source success beyond a live thread", () => {
+  const adapter = {
+    adapterKey: "sec_filings", enabled: true, configVersion: "sec_v3", configStatus: "current",
+    state: "healthy", consecutiveFailures: 0, lastErrorCode: "", lastSuccessAt: 1000,
+    pollIntervalMs: 300000,
+    latestRun: { status: "SUCCEEDED", dryRun: false, observedCount: 0, acceptedCount: 0,
+      duplicateCount: 0, rejectedCount: 0, completedAt: 1000 },
+  };
+  const health = {
+    valid: true, globalEnabled: true, autoStart: true, dryRun: false, capturedAt: 2000,
+    runtime: { status: "running", statusLabel: "运行中", livenessVerified: true, stallAfterMs: 120000 },
+    adapters: [adapter],
+  };
+  const control = {
+    valid: true, settings: { globalEnabled: true, autoStart: true, dryRun: false },
+    adapters: [{ adapterKey: "sec_filings", configVersion: "sec_v3", effectiveEnabled: true,
+      initializationStatus: "complete", initializationCompletedAt: 1000 }],
+  };
+  assert.equal(sourceMonitoringOperationState(health).label, "基线状态未读取");
+  assert.equal(sourceMonitoringOperationState(health, control).state, "operational");
+  for (const initializationStatus of ["required", "authorized", "legacy"]) {
+    const incomplete = structuredClone(control);
+    incomplete.adapters[0].initializationStatus = initializationStatus;
+    assert.equal(sourceMonitoringOperationState(health, incomplete).state, "baseline_pending");
+  }
+  const staleControl = structuredClone(control);
+  staleControl.adapters[0].configVersion = "sec_old";
+  assert.equal(sourceMonitoringOperationState(health, staleControl).state, "baseline_pending");
+  for (const lastSuccessAt of [0, 3000]) {
+    const missing = structuredClone(health);
+    missing.adapters[0].lastSuccessAt = lastSuccessAt;
+    assert.equal(sourceMonitoringOperationState(missing, control).state, "degraded");
+  }
+  const stale = structuredClone(health);
+  stale.capturedAt = 422000;
+  assert.equal(sourceMonitoringOperationState(stale, control).state, "degraded");
+  assert.equal(sourceMonitoringOperationState({ ...health, dryRun: true }, control).state, "dry_run");
+  assert.equal(sourceMonitoringOperationState({ ...health, globalEnabled: false }, control).state, "disabled");
+  const failed = structuredClone(health);
+  failed.adapters[0].latestRun.status = "FAILED";
+  assert.equal(sourceMonitoringOperationState(failed, control).state, "degraded");
+  const disabledFailure = structuredClone(health);
+  disabledFailure.adapters.push({ ...adapter, adapterKey: "disabled_source", enabled: false, persistedEnabled: false,
+    consecutiveFailures: 2, lastErrorCode: "OLD_ERROR" });
+  assert.equal(sourceMonitoringOperationState(disabledFailure, control).state, "operational");
+  assert.match(sourceMonitoringCheckLabel(failed.adapters[0]), /检查失败/);
+  assert.match(sourceMonitoringCheckLabel({ ...adapter, latestRun: { ...adapter.latestRun, dryRun: true } }), /未导入收件箱/);
+  assert.doesNotMatch(sourceMonitoringCheckLabel({ ...adapter, latestRun: null }), /无新增/);
+  assert.match(sourceMonitoringNextStep({ ...adapter, configStatus: "migration_required" }), /旧 SEC 状态.*明确升级方案/);
+});
+
+test("company IR errors distinguish legacy upgrade, bounded identity capacity, and incomplete baseline", () => {
+  const adapter = { adapterKey: "company_ir", configStatus: "current" };
+  const upgrade = sourceMonitoringNextStep({ ...adapter, lastErrorCode: "COMPANY_IR_BASELINE_UPGRADE_REQUIRED" });
+  const capacity = sourceMonitoringNextStep({ ...adapter, lastErrorCode: "COMPANY_IR_CHECKPOINT_CAPACITY_EXCEEDED" });
+  const incomplete = sourceMonitoringNextStep({ ...adapter, lastErrorCode: "COMPANY_IR_BASELINE_SCOPE_INCOMPLETE" });
+  assert.match(upgrade, /旧公司 IR checkpoint 无法证明完整首次基线/);
+  assert.match(upgrade, /先停用来源并明确升级方案/);
+  assert.match(upgrade, /保留原 checkpoint、收件箱、房间及材料，不自动重置或迁移/);
+  assert.match(capacity, /已见标识容量上限/);
+  assert.match(capacity, /保留全部已见标识和收件箱，不自动淘汰、重置或迁移/);
+  assert.doesNotMatch(capacity, /旧公司 IR checkpoint/);
+  assert.match(incomplete, /当前已配置来源的完整元数据范围（RSS 或 Q4 JSON.*缺失响应、解析错误及被过滤记录/);
+  assert.match(incomplete, /不代表全部历史公告/);
+  assert.match(incomplete, /当前基线不视为完成.*不自动重置或迁移/);
+  assert.doesNotMatch(incomplete, /超过已见标识容量/);
+  assert.equal(sourceMonitoringNextStep({ ...adapter, lastErrorCode: "" }), "");
+  assert.doesNotMatch(sourceMonitoringNextStep({ ...adapter, lastErrorCode: "COMPANY_IR_BASELINE_UPGRADE_REQUIRED_EXTRA" }), /旧公司 IR checkpoint/);
+});
+
 test("monitoring health remains textual, default-off, and nonexecuting", () => {
   const healthPayload = {
     source_monitoring_health: {
-      version: "source_monitoring_health_service_v2",
+      version: "source_monitoring_health_service_v3",
       health_projection_version: "source_monitoring_health_v1",
       runtime_liveness_verified: false,
       settings: {
@@ -639,6 +742,7 @@ test("monitoring health remains textual, default-off, and nonexecuting", () => {
         catch_up_max_items: 0,
         initial_preview_sha256: "",
         from_time: "",
+        continuous_event_cutoff: "",
       },
       runtime: {
         version: "source_monitoring_runtime_health_v1",
@@ -719,12 +823,42 @@ test("monitoring health remains textual, default-off, and nonexecuting", () => {
   assert.equal(normalized.runtime.status, "disabled");
   assert.equal(normalized.runtime.statusLabel, "已停用");
   assert.equal(normalized.initialMode, "seed_only");
+  assert.equal(normalized.continuousEventCutoff, "");
+  assert.equal(normalized.officialOnly, true);
+  assert.equal(normalized.allowReadonlyMarket, false);
+  assert.equal(normalized.adapters[0].pollIntervalMs, 900000);
+  assert.equal(sourceMonitoringOperationState(normalized).state, "disabled");
+
+  const completedCheck = structuredClone(healthPayload);
+  completedCheck.source_monitoring_health.adapters[0].latest_run = {
+    version: "source_adapter_run_v1", status: "SUCCEEDED", dry_run: false,
+    observed_count: 0, accepted_count: 0, duplicate_count: 0, rejected_count: 0,
+    completed_at_ms: 1_777_777_776_900,
+  };
+  const completedHealth = normalizeSourceMonitoringHealth(completedCheck);
+  assert.equal(completedHealth.valid, true);
+  assert.equal(sourceMonitoringCheckLabel(completedHealth.adapters[0]), "检查成功、无新增");
+  for (const invalidCount of [null, "0", true, -1, 0.5]) {
+    const malformed = structuredClone(completedCheck);
+    malformed.source_monitoring_health.adapters[0].latest_run.observed_count = invalidCount;
+    assert.equal(normalizeSourceMonitoringHealth(malformed).valid, false);
+  }
+  const invalidInterval = structuredClone(healthPayload);
+  invalidInterval.source_monitoring_health.adapters[0].metadata.poll_interval_ms = 0;
+  assert.equal(normalizeSourceMonitoringHealth(invalidInterval).valid, false);
 
   const legacyServicePayload = structuredClone(healthPayload);
   legacyServicePayload.source_monitoring_health.version = "source_monitoring_health_service_v1";
   const legacyService = normalizeSourceMonitoringHealth(legacyServicePayload);
   assert.equal(legacyService.valid, false);
   assert.ok(legacyService.issues.includes("health_view_version_invalid"));
+
+  const previousServicePayload = structuredClone(healthPayload);
+  previousServicePayload.source_monitoring_health.version =
+    "source_monitoring_health_service_v2";
+  const previousService = normalizeSourceMonitoringHealth(previousServicePayload);
+  assert.equal(previousService.valid, false);
+  assert.ok(previousService.issues.includes("health_view_version_invalid"));
 
   const catchUpPayload = structuredClone(healthPayload);
   Object.assign(catchUpPayload.source_monitoring_health.settings, {
@@ -740,6 +874,15 @@ test("monitoring health remains textual, default-off, and nonexecuting", () => {
     from_time: "2026-08-28T12:55:00.123Z",
   });
   assert.equal(normalizeSourceMonitoringHealth(fromTimePayload).valid, true);
+
+  const continuousCutoffPayload = structuredClone(healthPayload);
+  continuousCutoffPayload.source_monitoring_health.settings.continuous_event_cutoff =
+    "2026-08-28T12:55:00.123Z";
+  assert.equal(normalizeSourceMonitoringHealth(continuousCutoffPayload).valid, true);
+  assert.equal(
+    normalizeSourceMonitoringHealth(continuousCutoffPayload).continuousEventCutoff,
+    "2026-08-28T12:55:00.123Z",
+  );
 
   const noncanonicalFromTimePayload = structuredClone(fromTimePayload);
   noncanonicalFromTimePayload.source_monitoring_health.settings.from_time = "2026-08-28T12:55:00.000Z";
@@ -761,7 +904,7 @@ test("monitoring health remains textual, default-off, and nonexecuting", () => {
 
   const unsafe = normalizeSourceMonitoringHealth({
     source_monitoring_health: {
-      version: "source_monitoring_health_service_v2",
+      version: "source_monitoring_health_service_v3",
       health_projection_version: "source_monitoring_health_v1",
       runtime_liveness_verified: true,
       settings: {},
@@ -774,7 +917,7 @@ test("monitoring health remains textual, default-off, and nonexecuting", () => {
 
   const incomplete = normalizeSourceMonitoringHealth({
     source_monitoring_health: {
-      version: "source_monitoring_health_service_v2",
+      version: "source_monitoring_health_service_v3",
       health_projection_version: "source_monitoring_health_v1",
       runtime_liveness_verified: false,
       state: "healthy",

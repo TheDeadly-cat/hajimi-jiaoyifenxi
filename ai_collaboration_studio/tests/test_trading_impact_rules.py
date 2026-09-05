@@ -192,6 +192,45 @@ def _ir(
     return _normalized(raw, adapter_id="company_ir", source_channel="official_source_monitor")
 
 
+def _json_ir_raw() -> dict[str, object]:
+    identity = canonical_sha256({"version": "company_ir_identity_v2", "symbol": "US.MU",
+                                 "kind": "press_release_id", "value": "4945"})
+    detail = "https://investors.micron.com/news/press-release/2026/fixture/default.aspx"
+    endpoint = ("https://investors.micron.com/feed/PressRelease.svc/GetPressReleaseList"
+                "?LanguageId=1&pageSize=30&pageNumber=0&tagList=&includeTags=true&year=-1"
+                "&excludeSelection=1&bodyType=0&pressReleaseDateFilter=1"
+                "&categoryId=00000000-0000-0000-0000-000000000000")
+    extension = {
+        "source_format": "micron_q4_public_json_v1", "event_type": "earnings_schedule",
+        "fiscal_period": "", "press_release_id": 4945, "revision_number": 55457,
+        "identity_kind": "press_release_id", "identity_value": "4945", "identity_sha256": identity,
+        "is_revision": False, "previous_projection_sha256": "", "projection_sha256": "1" * 64,
+        "projection_version": "company_ir_json_projection_v1",
+        "projection_hash_semantics": "normalized_q4_item_and_newsarticle_metadata_not_article_body",
+        "published_time_basis": "official_newsarticle_datePublished_v1",
+        "source_declared_time_raw": "08/30/2026 14:30:00", "metadata_date_modified": OCCURRED_AT,
+        "time_metadata_sha256": "2" * 64,
+        "time_metadata_hash_semantics": "normalized_newsarticle_head_metadata_not_html_body",
+    }
+    raw = _item(external_item_id=f"ir-{identity}", item_type="company_ir_release",
+                entities=[{"kind": "security", "id": "US.MU", "label": "MU"}],
+                sources=[_source(detail, "Micron Technology Investor Relations", "company_ir_time_metadata", content_sha256="2" * 64),
+                         _source(endpoint, "Micron Technology Investor Relations", "company_ir_json_projection", content_sha256="1" * 64)],
+                extensions={"company_ir_v2": extension})
+    time_hash = canonical_sha256({"version": "micron_newsarticle_time_metadata_v1", "url": detail,
+                                 "headline": raw["headline"], "datePublished": OCCURRED_AT, "dateModified": OCCURRED_AT})
+    extension["time_metadata_sha256"] = time_hash
+    raw["sources"][0]["content_sha256"] = time_hash
+    extension["projection_sha256"] = canonical_sha256({
+        "version": extension["projection_version"], "symbol": "US.MU", "press_release_id": 4945,
+        "revision_number": 55457, "official_url": detail, "title": raw["headline"],
+        "summary": raw["summary"], "published_at": OCCURRED_AT, "metadata_date_modified": OCCURRED_AT,
+        "source_declared_time_raw": extension["source_declared_time_raw"], "time_metadata_sha256": time_hash,
+    })
+    raw["sources"][1]["content_sha256"] = extension["projection_sha256"]
+    return raw
+
+
 def _macro(
     adapter_id: str,
     *,
@@ -346,6 +385,31 @@ def _rehash_projection(projection: dict[str, object]) -> dict[str, object]:
 
 
 class TradingImpactRulesV1Tests(unittest.TestCase):
+    def test_json_ir_metadata_has_neutral_mapping_without_claiming_rss_rules(self) -> None:
+        item, item_hash = _normalized(_json_ir_raw(), adapter_id="company_ir", source_channel="official_source_monitor")
+        projection = _project(item, item_hash, adapter_id="company_ir").to_dict()
+        self.assertEqual(projection["evaluation"], "no_match")
+        self.assertEqual(projection["matched_rule_ids"], [])
+        self.assertEqual(projection["hypotheses"], [])
+        self.assertEqual(projection["accounting"]["provider_calls_performed"], 0)
+
+    def test_json_ir_metadata_rejects_changed_identity_time_and_source_format(self) -> None:
+        mutations = (
+            lambda raw: raw["extensions"]["company_ir_v2"].update(identity_value="4946"),
+            lambda raw: raw["extensions"]["company_ir_v2"].update(press_release_id=True),
+            lambda raw: raw["extensions"]["company_ir_v2"].update(projection_sha256="4" * 64),
+            lambda raw: raw["sources"][0].update(source_type="company_ir"),
+            lambda raw: raw["sources"][0].update(published_at=CHECKED_AT),
+            lambda raw: raw["sources"][0].update(url="https://example.com/announcement"),
+            lambda raw: raw["sources"][1].update(url="https://investors.micron.com/rss/news-releases.xml?items=30"),
+        )
+        for mutate in mutations:
+            raw = _json_ir_raw()
+            mutate(raw)
+            item, item_hash = _normalized(raw, adapter_id="company_ir", source_channel="official_source_monitor")
+            with self.assertRaises(TradingImpactRulesError):
+                _project(item, item_hash, adapter_id="company_ir")
+
     maxDiff = None
 
     def test_manifest_is_complete_golden_and_defensively_copied(self) -> None:

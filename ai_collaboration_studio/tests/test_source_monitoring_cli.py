@@ -21,8 +21,11 @@ from backend.source_monitoring.adapters.base import (  # noqa: E402
     SOURCE_ADAPTER_CONTRACT_VERSION,
 )
 from backend.source_monitoring.contracts import (  # noqa: E402
+    FUTU_ANOMALY_SOURCE_CHANNEL,
+    READONLY_MARKET_SOURCE_CLASS,
     AdapterPollResult,
     SourcePollError,
+    canonical_sha256,
 )
 from backend.source_monitoring.registry import SourceAdapterRegistry  # noqa: E402
 from backend.source_monitoring.settings import SourceMonitoringSettings  # noqa: E402
@@ -30,6 +33,7 @@ from backend.source_monitoring.state_repository import (  # noqa: E402
     SourceMonitoringStateRepository,
 )
 from backend.source_monitoring_cli import (  # noqa: E402
+    SOURCE_MONITORING_CLI_POLL_TIMEOUT_MS,
     SOURCE_MONITORING_INSTANCE_ACTIVE,
     SourceMonitoringCliDependencies,
     main,
@@ -107,16 +111,20 @@ class FakeAdapter:
     def __init__(self, *, mode: str = "normal") -> None:
         self.mode = mode
         self.poll_count = 0
+        self.poll_controls: list[tuple[int, object]] = []
 
     def poll(
         self,
         checkpoint: dict[str, object],
         *,
         observed_at_ms: int,
+        deadline_monotonic_ms: int = 0,
+        cancel_event=None,
         etag: str = "",
         last_modified: str = "",
         max_items: int = 50,
     ) -> AdapterPollResult:
+        self.poll_controls.append((deadline_monotonic_ms, cancel_event))
         self.poll_count += 1
         if self.mode == "secret_exception":
             raise RuntimeError("SECRET_TOKEN=operator-preview-secret")
@@ -148,6 +156,30 @@ class FakeAdapter:
         )
 
 
+class FakeMarketSeedAdapter(FakeAdapter):
+    adapter_key = "fixture_market"
+    config_version = "fixture_market_config_v1"
+    official_source = False
+    source_class = READONLY_MARKET_SOURCE_CLASS
+    source_channel = FUTU_ANOMALY_SOURCE_CHANNEL
+    max_market_calls_per_poll = 1
+
+    def initial_seed_policy(self) -> dict[str, object]:
+        manifest: dict[str, object] = {
+            "version": "source_monitoring_initial_seed_policy_v1",
+            "initial_mode": "seed_only",
+            "symbol_allowlist": ["US.MU", "US.SNDK", "US.WDC", "US.STX"],
+            "execution_capability": "none",
+            "live_trading_allowed": False,
+            "adapter_key": self.adapter_key,
+            "config_version": self.config_version,
+            "adapter_config_sha256": "a" * 64,
+            "broker_policy_sha256": "b" * 64,
+        }
+        manifest["source_policy_sha256"] = canonical_sha256(manifest)
+        return manifest
+
+
 class FakeHealth:
     def __init__(self, snapshot: dict[str, object]) -> None:
         self._snapshot = snapshot
@@ -160,9 +192,17 @@ class FakeSupervisor:
     def __init__(self, result: dict[str, object] | BaseException) -> None:
         self.result = result
         self.call_count = 0
+        self.poll_controls: list[tuple[int, object]] = []
 
-    def run_once(self, _adapter_key: str) -> dict[str, object]:
+    def run_once(
+        self,
+        _adapter_key: str,
+        *,
+        deadline_monotonic_ms: int = 0,
+        cancel_event=None,
+    ) -> dict[str, object]:
         self.call_count += 1
+        self.poll_controls.append((deadline_monotonic_ms, cancel_event))
         if isinstance(self.result, BaseException):
             raise self.result
         return self.result
@@ -585,6 +625,22 @@ class SourceMonitoringCliTests(unittest.TestCase):
                 self.assertEqual(payload["error_code"], expected_code)
                 self.assertEqual(adapter.poll_count, 1)
 
+    def test_preview_passes_fixed_absolute_monotonic_deadline(self) -> None:
+        with mock.patch(
+            "backend.source_monitoring_cli.time.monotonic",
+            return_value=100.0,
+        ):
+            exit_code, _text, payload = self.invoke(
+                ["preview", self.adapter.adapter_key]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            self.adapter.poll_controls,
+            [(100_000 + SOURCE_MONITORING_CLI_POLL_TIMEOUT_MS, None)],
+        )
+
     def test_secret_exception_is_reduced_to_generic_code(self) -> None:
         secret_adapter = FakeAdapter(mode="secret_exception")
         secret_registry = SourceAdapterRegistry((secret_adapter,))
@@ -598,6 +654,106 @@ class SourceMonitoringCliTests(unittest.TestCase):
         self.assertEqual(payload["error_code"], "SOURCE_MONITORING_CLI_UNEXPECTED")
         self.assertNotIn("SECRET", text)
         self.assertNotIn("operator-preview-secret", text)
+
+    def test_market_initial_preview_is_static_and_performs_zero_quote_calls(self) -> None:
+        adapter = FakeMarketSeedAdapter()
+        registry = SourceAdapterRegistry((adapter,), official_only=False)
+        settings = SourceMonitoringSettings(
+            enabled=True,
+            official_only=False,
+            allow_readonly_market=True,
+            dry_run=True,
+        )
+        self.repository.set_enabled(
+            adapter.adapter_key,
+            config_version=adapter.config_version,
+            enabled=True,
+        )
+        dependencies = self.dependencies(
+            settings_loader=lambda: settings,
+            registry_builder=lambda _settings: registry,
+        )
+
+        exit_code, _text, payload = self.invoke(
+            ["preview", adapter.adapter_key],
+            dependencies=dependencies,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["preview_kind"], "static_seed_policy")
+        self.assertEqual(
+            payload["candidate_evidence"],
+            "deferred_to_first_runtime_poll",
+        )
+        self.assertEqual(payload["candidate_count"], 0)
+        self.assertEqual(payload["safety"]["market_calls_performed"], 0)
+        self.assertEqual(payload["safety"]["network_requests_performed"], 0)
+        self.assertEqual(adapter.poll_count, 0)
+
+    def test_combined_run_once_selects_market_registry_with_derived_pipeline_settings(self) -> None:
+        market_adapter = FakeMarketSeedAdapter()
+        market_registry = SourceAdapterRegistry(
+            (market_adapter,),
+            official_only=False,
+        )
+        settings = SourceMonitoringSettings(
+            enabled=True,
+            official_only=True,
+            allow_readonly_market=True,
+            dry_run=True,
+            initial_mode="catch_up",
+            catch_up_max_items=1,
+        )
+        self.repository.set_enabled(
+            market_adapter.adapter_key,
+            config_version=market_adapter.config_version,
+            enabled=True,
+        )
+        captured: dict[str, object] = {}
+
+        def supervisor_builder(_store, pipeline_settings, selected_registry, _repository):
+            captured["settings"] = pipeline_settings
+            captured["registry"] = selected_registry
+            return FakeSupervisor({
+                "status": "DRY_RUN",
+                "run": {
+                    "observed_count": 1,
+                    "accepted_count": 0,
+                    "duplicate_count": 0,
+                    "rejected_count": 0,
+                },
+                "initialization": {
+                    "mode": "seed_only",
+                    "outcome": "would_seed",
+                },
+                "import": None,
+                "source_inbox_writes_performed": False,
+                "safety": {"market_calls_performed": 1},
+            })
+
+        exit_code, _text, payload = self.invoke(
+            ["run-once", market_adapter.adapter_key, "--confirm", "RUN_ONCE"],
+            dependencies=self.dependencies(
+                settings_loader=lambda: settings,
+                registry_builder=lambda _settings: (self.registry, market_registry),
+                supervisor_builder=supervisor_builder,
+            ),
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["import_mode"], "seed_only")
+        self.assertIs(captured["registry"], market_registry)
+        pipeline_settings = captured["settings"]
+        self.assertFalse(pipeline_settings.official_only)
+        self.assertTrue(pipeline_settings.allow_readonly_market)
+        self.assertEqual(pipeline_settings.initial_mode, "catch_up")
+        self.assertEqual(
+            pipeline_settings.initialization_policy_for(
+                official_source=False,
+            ).mode,
+            "seed_only",
+        )
 
     def test_preview_degraded_is_bounded_and_non_success(self) -> None:
         degraded = FakeAdapter(mode="degraded")
@@ -689,6 +845,42 @@ class SourceMonitoringCliTests(unittest.TestCase):
                 self.assertEqual(store_calls, [0])
         self.assertEqual(supervisor.call_count, 0)
         self.assertEqual(self.adapter.poll_count, 0)
+
+    def test_run_once_passes_fixed_absolute_monotonic_deadline(self) -> None:
+        supervisor = FakeSupervisor({
+            "status": "DRY_RUN",
+            "run": {
+                "observed_count": 1,
+                "accepted_count": 0,
+                "duplicate_count": 0,
+                "rejected_count": 0,
+            },
+            "initialization": {
+                "mode": "from_time",
+                "outcome": "would_import",
+            },
+            "import": None,
+            "source_inbox_writes_performed": False,
+            "safety": {"market_calls_performed": 0},
+        })
+        with mock.patch(
+            "backend.source_monitoring_cli.time.monotonic",
+            return_value=200.0,
+        ):
+            exit_code, _text, payload = self.invoke(
+                ["run-once", self.adapter.adapter_key, "--confirm", "RUN_ONCE"],
+                dependencies=self.dependencies(
+                    supervisor_builder=lambda *_args: supervisor,
+                ),
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            supervisor.poll_controls,
+            [(200_000 + SOURCE_MONITORING_CLI_POLL_TIMEOUT_MS, None)],
+        )
+        self.assertEqual(supervisor.call_count, 1)
 
     def test_enable_and_disable_confirmation_precede_preflight_and_store(self) -> None:
         for command in ("enable", "disable"):

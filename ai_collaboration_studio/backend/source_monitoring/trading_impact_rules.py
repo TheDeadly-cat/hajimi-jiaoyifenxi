@@ -18,6 +18,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from ..source_inbox_contracts import (
     EXTERNAL_UNVERIFIED,
@@ -35,6 +36,7 @@ TRADING_IMPACT_PROJECTION_KEY_VERSION = "trading_impact_projection_key_v1"
 TRADING_IMPACT_PROJECTION_VERSION = "trading_impact_projection_v1"
 TRADING_IMPACT_HYPOTHESIS_VERSION = "trading_impact_hypothesis_v1"
 TRADING_IMPACT_SOURCE_SEMANTICS_VERSION = "trading_impact_source_semantics_v1"
+TRADING_IMPACT_JSON_SOURCE_SEMANTICS_VERSION = "trading_impact_source_semantics_v2"
 
 MAX_TRADING_IMPACT_MANIFEST_BYTES = 32 * 1024
 MAX_TRADING_IMPACT_PROJECTION_BYTES = 16 * 1024
@@ -716,6 +718,12 @@ _IR_EXTENSION_FIELDS = frozenset({
     "rss_projection_sha256",
     "rss_projection_version",
 })
+_IR_JSON_EXTENSION_FIELDS = frozenset({
+    "source_format", "event_type", "fiscal_period", "press_release_id", "revision_number",
+    "identity_kind", "identity_value", "identity_sha256", "is_revision", "previous_projection_sha256",
+    "projection_sha256", "projection_version", "projection_hash_semantics", "published_time_basis",
+    "source_declared_time_raw", "metadata_date_modified", "time_metadata_sha256", "time_metadata_hash_semantics",
+})
 _MACRO_EXTENSION_FIELDS = frozenset({
     "authority",
     "data",
@@ -841,7 +849,80 @@ def _sec_context(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _ir_json_context(item: dict[str, Any]) -> dict[str, Any]:
+    """Validate the new metadata format without reusing RSS-specific v1 rules."""
+    extension = _extension(item, "company_ir_v2", _IR_JSON_EXTENSION_FIELDS)
+    symbol = _security_entity(item, allowed=("US.MU",))
+    required_literals = {
+        "source_format": "micron_q4_public_json_v1",
+        "identity_kind": "press_release_id",
+        "projection_version": "company_ir_json_projection_v1",
+        "projection_hash_semantics": "normalized_q4_item_and_newsarticle_metadata_not_article_body",
+        "published_time_basis": "official_newsarticle_datePublished_v1",
+        "time_metadata_hash_semantics": "normalized_newsarticle_head_metadata_not_html_body",
+    }
+    if any(type(extension[field]) is not str or extension[field] != expected for field, expected in required_literals.items()):
+        raise _error("TRADING_IMPACT_IR_INVALID", "IR JSON metadata semantics are invalid")
+    release_id = _native_int(extension["press_release_id"], field="company_ir_v2.press_release_id", minimum=1, maximum=(1 << 53) - 1)
+    revision_number = _native_int(extension["revision_number"], field="company_ir_v2.revision_number", maximum=(1 << 53) - 1)
+    identity = canonical_sha256({"version": "company_ir_identity_v2", "symbol": symbol,
+                                 "kind": "press_release_id", "value": str(release_id)})
+    if extension["identity_value"] != str(release_id) or extension["identity_sha256"] != identity or item["external_item_id"] != f"ir-{identity}":
+        raise _error("TRADING_IMPACT_IR_INVALID", "IR JSON identity binding is invalid")
+    event_type = extension["event_type"]
+    if type(event_type) is not str or event_type not in _IR_EVENT_TYPES:
+        raise _error("TRADING_IMPACT_IR_INVALID", "IR JSON event type is invalid")
+    _text(extension["fiscal_period"], field="company_ir_v2.fiscal_period", maximum=1_000, allow_empty=True)
+    previous = extension["previous_projection_sha256"]
+    if previous != "":
+        _hash(previous, field="company_ir_v2.previous_projection_sha256")
+    if type(extension["is_revision"]) is not bool or extension["is_revision"] != bool(previous):
+        raise _error("TRADING_IMPACT_IR_INVALID", "IR JSON revision binding is invalid")
+    raw_time = _text(extension["source_declared_time_raw"], field="company_ir_v2.source_declared_time_raw", maximum=19)
+    if re.fullmatch(r"[0-9]{2}/[0-9]{2}/[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}", raw_time) is None:
+        raise _error("TRADING_IMPACT_IR_INVALID", "IR JSON source time text is invalid")
+    try:
+        datetime.strptime(raw_time, "%m/%d/%Y %H:%M:%S")
+    except ValueError as exc:
+        raise _error("TRADING_IMPACT_IR_INVALID", "IR JSON source time text is invalid") from exc
+    published = _rfc3339(item["published_at"], field="item.published_at")
+    modified = _rfc3339(extension["metadata_date_modified"], field="company_ir_v2.metadata_date_modified", allow_empty=True)
+    if published != item["occurred_at"] or len(item["sources"]) != 2:
+        raise _error("TRADING_IMPACT_IR_INVALID", "IR JSON occurrence or source cardinality is invalid")
+    metadata_source, list_source = item["sources"]
+    detail_url = metadata_source["url"]
+    detail = urlsplit(detail_url)
+    listing = urlsplit(list_source["url"])
+    expected_query = {"LanguageId": "1", "pageSize": "30", "pageNumber": "0", "tagList": "",
+                      "includeTags": "true", "year": "-1", "excludeSelection": "1", "bodyType": "0",
+                      "pressReleaseDateFilter": "1", "categoryId": "00000000-0000-0000-0000-000000000000"}
+    query = parse_qsl(listing.query, keep_blank_values=True)
+    if (detail.scheme != "https" or detail.netloc != "investors.micron.com" or detail.query or detail.fragment
+        or re.fullmatch(r"/news/press-release/[0-9]{4}/[A-Za-z0-9_-]+/default\.aspx", detail.path) is None
+        or listing.scheme != "https" or listing.netloc != "investors.micron.com" or listing.fragment
+        or listing.path != "/feed/PressRelease.svc/GetPressReleaseList"
+        or len(query) != len(expected_query) or dict(query) != expected_query):
+        raise _error("TRADING_IMPACT_IR_INVALID", "IR JSON endpoint provenance is invalid")
+    time_hash = canonical_sha256({"version": "micron_newsarticle_time_metadata_v1", "url": detail_url,
+                                 "headline": item["headline"], "datePublished": published, "dateModified": modified})
+    projection_hash = canonical_sha256({
+        "version": "company_ir_json_projection_v1", "symbol": symbol, "press_release_id": release_id,
+        "revision_number": revision_number, "official_url": detail_url, "title": item["headline"],
+        "summary": item["summary"], "published_at": published, "metadata_date_modified": modified,
+        "source_declared_time_raw": raw_time, "time_metadata_sha256": time_hash,
+    })
+    if (extension["time_metadata_sha256"] != time_hash or extension["projection_sha256"] != projection_hash
+        or metadata_source["source_type"] != "company_ir_time_metadata" or metadata_source["content_sha256"] != time_hash
+        or list_source["source_type"] != "company_ir_json_projection" or list_source["content_sha256"] != projection_hash
+        or any(source["published_at"] != published for source in item["sources"])):
+        raise _error("TRADING_IMPACT_IR_INVALID", "IR JSON source time or projection binding is invalid")
+    return {"rule_id": None, "symbol": symbol, "event_type": event_type, "source_format": "micron_q4_public_json_v1",
+            "is_revision": extension["is_revision"], "source_index": 1}
+
+
 def _ir_context(item: dict[str, Any]) -> dict[str, Any]:
+    if "company_ir_v2" in item["extensions"]:
+        return _ir_json_context(item)
     extension = _extension(item, "company_ir_v1", _IR_EXTENSION_FIELDS)
     symbol = _security_entity(item, allowed=_STORAGE_SECURITY_IDS)
     event_type = extension.get("event_type")
@@ -1062,7 +1143,9 @@ def _source_semantic_binding(
     else:
         time_semantics, time_precision = "source_publication_time", "timestamp"
     return {
-        "version": TRADING_IMPACT_SOURCE_SEMANTICS_VERSION,
+        "version": (TRADING_IMPACT_JSON_SOURCE_SEMANTICS_VERSION
+                    if context.get("source_format") else TRADING_IMPACT_SOURCE_SEMANTICS_VERSION),
+        **({"source_format": context["source_format"]} if context.get("source_format") else {}),
         "adapter_id": adapter_id,
         "rule_id": rule_id,
         "source_index": context["source_index"],
@@ -1228,6 +1311,9 @@ def _semantic_expected_rule(
     adapter_id: str,
     semantic: dict[str, Any],
 ) -> str:
+    if semantic.get("version") == TRADING_IMPACT_JSON_SOURCE_SEMANTICS_VERSION:
+        # Q4 metadata has no RSS-v1 business-rule assignment.
+        return ""
     if adapter_id == "sec_filings":
         form = semantic["form"]
         if form in _SEC_PERIODIC_FORMS:
@@ -1280,16 +1366,22 @@ def _validate_source_semantic_binding(
     *,
     adapter_id: str,
 ) -> dict[str, Any]:
+    json_semantic = type(value) is dict and value.get("version") == TRADING_IMPACT_JSON_SOURCE_SEMANTICS_VERSION
     semantic = _exact_dict(
         value,
-        _SOURCE_SEMANTIC_BINDING_FIELDS,
+        (_SOURCE_SEMANTIC_BINDING_FIELDS | {"source_format"}) if json_semantic else _SOURCE_SEMANTIC_BINDING_FIELDS,
         field="projection.source_item_binding.source_semantic_binding",
     )
     if (
-        semantic.get("version") != TRADING_IMPACT_SOURCE_SEMANTICS_VERSION
+        semantic.get("version") != (TRADING_IMPACT_JSON_SOURCE_SEMANTICS_VERSION if json_semantic else TRADING_IMPACT_SOURCE_SEMANTICS_VERSION)
         or semantic.get("adapter_id") != adapter_id
     ):
         raise _error("TRADING_IMPACT_SEMANTIC_BINDING_INVALID", "source semantic version/adapter binding is invalid")
+    if json_semantic and (
+        adapter_id != "company_ir" or semantic.get("source_format") != "micron_q4_public_json_v1"
+        or semantic.get("symbol") != "US.MU" or semantic.get("event_type") not in _IR_EVENT_TYPES
+    ):
+        raise _error("TRADING_IMPACT_SEMANTIC_BINDING_INVALID", "JSON metadata semantics cross source boundaries")
     for field in (
         "rule_id",
         "symbol",
