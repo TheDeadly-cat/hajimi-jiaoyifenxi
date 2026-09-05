@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from ...market.official_macro import OfficialMacroSourceClient
+from ...source_poll_control import (
+    SourcePollCancelled,
+    SourcePollDeadlineExceeded,
+    ensure_source_poll_active,
+    validate_source_poll_control,
+)
 from ..contracts import (
     AdapterPollResult,
     SourceMonitoringContractError,
@@ -52,13 +59,37 @@ OFFICIAL_MACRO_CALENDAR_CANDIDATE_LIMIT = 50
 
 
 class _OfficialMacroBatchClient(Protocol):
-    def federal_reserve_releases(self, *, limit: int) -> dict[str, Any]: ...
+    def federal_reserve_releases(
+        self,
+        *,
+        limit: int,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]: ...
 
-    def bls_releases(self, *, limit: int) -> dict[str, Any]: ...
+    def bls_releases(
+        self,
+        *,
+        limit: int,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]: ...
 
-    def treasury_releases(self, *, limit: int) -> dict[str, Any]: ...
+    def treasury_releases(
+        self,
+        *,
+        limit: int,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]: ...
 
-    def calendar_events(self, *, limit: int) -> dict[str, Any]: ...
+    def calendar_events(
+        self,
+        *,
+        limit: int,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]: ...
 
 
 def _native_observed_at(value: Any) -> tuple[int, datetime]:
@@ -250,11 +281,17 @@ class _OfficialMacroSourceAdapter:
         checkpoint: Any,
         *,
         observed_at_ms: Any,
+        deadline_monotonic_ms: Any = 0,
+        cancel_event: threading.Event | None = None,
         etag: Any = "",
         last_modified: Any = "",
         max_items: Any = 50,
     ) -> AdapterPollResult:
         self._assert_config_seal()
+        deadline, event = validate_source_poll_control(
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
         clean_etag, clean_last_modified, safe_max_items = validate_poll_context(
             etag=etag,
             last_modified=last_modified,
@@ -277,9 +314,26 @@ class _OfficialMacroSourceAdapter:
             )
         )
         try:
-            payload = self._sealed_batch_callable(
-                limit=self.max_candidates_per_poll
+            ensure_source_poll_active(
+                deadline_monotonic_ms=deadline,
+                cancel_event=event,
             )
+            if type(self._client) is OfficialMacroSourceClient:
+                payload = self._sealed_batch_callable(
+                    limit=self.max_candidates_per_poll,
+                    deadline_monotonic_ms=deadline,
+                    cancel_event=event,
+                )
+            else:
+                payload = self._sealed_batch_callable(
+                    limit=self.max_candidates_per_poll
+                )
+            ensure_source_poll_active(
+                deadline_monotonic_ms=deadline,
+                cancel_event=event,
+            )
+        except (SourcePollCancelled, SourcePollDeadlineExceeded):
+            raise
         except Exception as exc:
             return AdapterPollResult.build(
                 adapter_key=self.adapter_key,

@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
+
+from ..source_poll_control import (
+    SourcePollCancelled,
+    SourcePollDeadlineExceeded,
+    validate_source_poll_control,
+)
 
 from .contracts import (
     MAX_NATIVE_INTEGER,
@@ -22,7 +29,7 @@ from .health_service import (
     SourceMonitoringHealthServiceError,
     source_monitoring_read_only_snapshot,
 )
-from .initialization import plan_initial_poll
+from .initialization import build_static_seed_preview, plan_initial_poll, poll_for_initialization
 from .registry import SourceAdapterRegistry
 from .settings import (
     SourceMonitoringSettings,
@@ -30,17 +37,22 @@ from .settings import (
 )
 from .state_repository import (
     SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION,
+    SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION_V2,
     SourceMonitoringStateError,
     SourceMonitoringStateRepository,
 )
 
 
-SOURCE_MONITORING_OPERATOR_CONTROL_VERSION = "source_monitoring_operator_control_v1"
+SOURCE_MONITORING_OPERATOR_CONTROL_VERSION = "source_monitoring_operator_control_v2"
 SOURCE_MONITORING_ADAPTER_CONTROL_VERSION = "source_monitoring_adapter_control_v1"
 SOURCE_MONITORING_OPERATOR_PREVIEW_VERSION = "source_monitoring_operator_preview_v1"
+SOURCE_MONITORING_STATIC_SEED_OPERATOR_PREVIEW_VERSION = (
+    "source_monitoring_operator_static_seed_preview_v2"
+)
 SOURCE_MONITORING_ENABLEMENT_RESULT_VERSION = "source_monitoring_enablement_result_v1"
 ENABLE_SOURCE_MONITORING_ADAPTER = "ENABLE_SOURCE_MONITORING_ADAPTER"
 DISABLE_SOURCE_MONITORING_ADAPTER = "DISABLE_SOURCE_MONITORING_ADAPTER"
+SOURCE_MONITORING_OPERATOR_PREVIEW_TIMEOUT_MS = 120_000
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -79,8 +91,10 @@ class SourceMonitoringOperatorService:
         store: Any,
         settings: SourceMonitoringSettings | None = None,
         registry: SourceAdapterRegistry | None = None,
+        registry_catalog: tuple[SourceAdapterRegistry, ...] | None = None,
         repository: SourceMonitoringStateRepository | None = None,
         clock_ms: Callable[[], Any] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         resolved_settings = settings or load_source_monitoring_settings()
         if type(resolved_settings) is not SourceMonitoringSettings:
@@ -89,23 +103,69 @@ class SourceMonitoringOperatorService:
                 "operator settings must be SourceMonitoringSettings",
                 status=400,
             )
-        resolved_registry = registry or (
-            build_official_source_registry()
-            if resolved_settings.official_only
-            else build_futu_anomaly_registry()
-        )
-        if type(resolved_registry) is not SourceAdapterRegistry:
+        if registry is not None and registry_catalog is not None:
             raise _operator_error(
                 "SOURCE_MONITORING_OPERATOR_REGISTRY_INVALID",
-                "operator registry must be SourceAdapterRegistry",
+                "provide registry or registry_catalog, not both",
                 status=400,
             )
-        if resolved_registry.official_only is not resolved_settings.official_only:
+        if registry_catalog is None:
+            if registry is not None:
+                resolved_catalog = (registry,)
+            else:
+                resolved_catalog = tuple(
+                    candidate
+                    for enabled, candidate in (
+                        (
+                            resolved_settings.official_only,
+                            build_official_source_registry()
+                            if resolved_settings.official_only
+                            else None,
+                        ),
+                        (
+                            resolved_settings.allow_readonly_market,
+                            build_futu_anomaly_registry()
+                            if resolved_settings.allow_readonly_market
+                            else None,
+                        ),
+                    )
+                    if enabled and candidate is not None
+                )
+        else:
+            resolved_catalog = registry_catalog
+        if (
+            type(resolved_catalog) is not tuple
+            or not resolved_catalog
+            or any(type(item) is not SourceAdapterRegistry for item in resolved_catalog)
+        ):
             raise _operator_error(
-                "SOURCE_MONITORING_SOURCE_MODE_MISMATCH",
-                "operator registry and settings source modes differ",
+                "SOURCE_MONITORING_OPERATOR_REGISTRY_INVALID",
+                "operator registry catalog must contain exact registries",
                 status=400,
             )
+        all_keys = [
+            adapter_key
+            for item in resolved_catalog
+            for adapter_key in item.adapter_keys
+        ]
+        if len(all_keys) != len(set(all_keys)):
+            raise _operator_error(
+                "SOURCE_MONITORING_OPERATOR_REGISTRY_INVALID",
+                "operator registry catalog contains duplicate adapter keys",
+                status=400,
+            )
+        for item in resolved_catalog:
+            if (
+                item.official_only and not resolved_settings.official_only
+            ) or (
+                not item.official_only
+                and not resolved_settings.allow_readonly_market
+            ):
+                raise _operator_error(
+                    "SOURCE_MONITORING_SOURCE_MODE_MISMATCH",
+                    "operator registry is disabled by monitoring settings",
+                    status=400,
+                )
         resolved_repository = repository or SourceMonitoringStateRepository(store)
         if type(resolved_repository) is not SourceMonitoringStateRepository:
             raise _operator_error(
@@ -125,11 +185,24 @@ class SourceMonitoringOperatorService:
                 "operator clock must be callable",
                 status=400,
             )
+        try:
+            _deadline, resolved_cancel_event = validate_source_poll_control(
+                deadline_monotonic_ms=0,
+                cancel_event=cancel_event,
+            )
+        except ValueError as exc:
+            raise _operator_error(
+                "SOURCE_MONITORING_OPERATOR_CANCEL_EVENT_INVALID",
+                "operator cancel event is invalid",
+                status=400,
+            ) from exc
         self.store = store
         self.settings = resolved_settings
-        self.registry = resolved_registry
+        self.registry_catalog = resolved_catalog
+        self.registry = resolved_catalog[0] if len(resolved_catalog) == 1 else None
         self.repository = resolved_repository
         self._clock_ms = clock_ms or (lambda: int(time.time() * 1_000))
+        self._cancel_event = resolved_cancel_event
 
     def _now_ms(self) -> int:
         value = self._clock_ms()
@@ -142,11 +215,47 @@ class SourceMonitoringOperatorService:
         return value
 
     def _metadata(self, adapter_key: Any) -> tuple[Any, Any]:
+        last_error: SourceMonitoringContractError | None = None
+        for registry in self.registry_catalog:
+            try:
+                adapter = registry.require(adapter_key)
+                return adapter, registry.metadata_for(adapter.adapter_key)
+            except SourceMonitoringContractError as exc:
+                last_error = exc
+        raise _operator_error(
+            getattr(last_error, "code", "SOURCE_MONITORING_ADAPTER_NOT_FOUND"),
+            "adapter is not registered",
+            status=400,
+        ) from last_error
+
+    @staticmethod
+    def _initial_seed_policy(adapter: Any) -> dict[str, Any]:
+        policy_factory = getattr(adapter, "initial_seed_policy", None)
+        if not callable(policy_factory):
+            raise _operator_error(
+                "SOURCE_MONITORING_INITIAL_SEED_POLICY_MISSING",
+                "read-only market adapter lacks a static seed policy",
+            )
         try:
-            adapter = self.registry.require(adapter_key)
-            return adapter, self.registry.metadata_for(adapter.adapter_key)
+            policy = policy_factory()
         except SourceMonitoringContractError as exc:
-            raise _operator_error(exc.code, "adapter is not registered", status=400) from exc
+            raise _operator_error(
+                exc.code,
+                "read-only market seed policy is invalid",
+            ) from exc
+        except (KeyboardInterrupt, GeneratorExit):
+            raise
+        except BaseException as exc:
+            raise _operator_error(
+                "SOURCE_MONITORING_INITIAL_SEED_POLICY_INVALID",
+                "read-only market seed policy is unavailable",
+            ) from exc
+        if type(policy) is not dict:
+            raise _operator_error(
+                "SOURCE_MONITORING_INITIAL_SEED_POLICY_INVALID",
+                "read-only market seed policy is invalid",
+            )
+        return policy
 
     def _evidence(self, adapter_key: str, config_version: str) -> dict[str, Any]:
         path = Path(self.store.path)
@@ -275,36 +384,54 @@ class SourceMonitoringOperatorService:
     def _initialization_policy_mismatch(
         self,
         initialization: dict[str, Any] | None,
+        *,
+        official_source: bool,
     ) -> bool:
+        policy = self.settings.initialization_policy_for(
+            official_source=official_source,
+        )
         return bool(
             initialization is not None
             and (
-                initialization["mode"] != self.settings.initial_mode
+                initialization["mode"] != policy.mode
                 or initialization["catch_up_max_items"]
-                != self.settings.catch_up_max_items
-                or initialization["from_time_ms"] != self.settings.from_time_ms
+                != policy.catch_up_max_items
+                or initialization["from_time_ms"] != policy.initial_from_time_ms
             )
         )
 
     def _pending_authorization_mismatch(
         self,
         pending: dict[str, Any] | None,
+        *,
+        official_source: bool,
     ) -> bool:
+        policy = self.settings.initialization_policy_for(
+            official_source=official_source,
+        )
         return bool(
             pending is not None
             and (
-                pending["mode"] != self.settings.initial_mode
+                pending["mode"] != policy.mode
                 or pending["catch_up_max_items"]
-                != self.settings.catch_up_max_items
-                or pending["from_time_ms"] != self.settings.from_time_ms
+                != policy.catch_up_max_items
+                or pending["from_time_ms"] != policy.initial_from_time_ms
             )
         )
 
     def control_snapshot(self) -> dict[str, Any]:
         captured_at_ms = self._now_ms()
         adapters = []
-        for adapter_key in self.registry.adapter_keys:
-            metadata = self.registry.metadata_for(adapter_key)
+        catalog = [
+            (registry, adapter_key)
+            for registry in self.registry_catalog
+            for adapter_key in registry.adapter_keys
+        ]
+        for registry, adapter_key in sorted(catalog, key=lambda item: item[1]):
+            metadata = registry.metadata_for(adapter_key)
+            policy = self.settings.initialization_policy_for(
+                official_source=metadata.official_source,
+            )
             evidence = self._evidence(adapter_key, metadata.config_version)
             state = evidence["state"]
             initialization = evidence["initialization"]
@@ -317,8 +444,14 @@ class SourceMonitoringOperatorService:
             persisted_enabled = bool(state is not None and state["enabled"])
             active_run = evidence["active_run"]
             status = self._initialization_status(evidence)
-            policy_mismatch = self._initialization_policy_mismatch(initialization)
-            pending_mismatch = self._pending_authorization_mismatch(pending)
+            policy_mismatch = self._initialization_policy_mismatch(
+                initialization,
+                official_source=metadata.official_source,
+            )
+            pending_mismatch = self._pending_authorization_mismatch(
+                pending,
+                official_source=metadata.official_source,
+            )
             blocked = []
             if not self.settings.enabled:
                 blocked.append("SOURCE_MONITORING_DISABLED")
@@ -341,7 +474,7 @@ class SourceMonitoringOperatorService:
                 initialization_mode = pending["mode"]
                 preview_sha256 = pending["preview_sha256"]
             elif status == "required":
-                initialization_mode = self.settings.initial_mode
+                initialization_mode = policy.mode
             adapters.append({
                 "version": SOURCE_MONITORING_ADAPTER_CONTROL_VERSION,
                 "adapter_key": adapter_key,
@@ -395,6 +528,7 @@ class SourceMonitoringOperatorService:
                 "initial_mode": self.settings.initial_mode,
                 "catch_up_max_items": self.settings.catch_up_max_items,
                 "from_time": self.settings.from_time,
+                "continuous_event_cutoff": self.settings.continuous_event_cutoff,
             },
             "adapters": adapters,
             "safety": _read_safety(),
@@ -434,6 +568,9 @@ class SourceMonitoringOperatorService:
             and (state["checkpoint"] != {} or state["last_success_at_ms"] > 0)
         )
         initial_required = initialization is None and not legacy_initialized
+        policy = self.settings.initialization_policy_for(
+            official_source=metadata.official_source,
+        )
         if not initial_required:
             raise _operator_error(
                 "SOURCE_MONITORING_INITIALIZATION_ALREADY_COMPLETE",
@@ -441,14 +578,76 @@ class SourceMonitoringOperatorService:
             )
         checkpoint = {} if state is None else state["checkpoint"]
         observed_at_ms = self._now_ms()
+        if metadata.official_source is False:
+            try:
+                static_preview = build_static_seed_preview(
+                    metadata=metadata,
+                    initialization_policy=policy,
+                    initial_seed_policy=self._initial_seed_policy(adapter),
+                    starting_checkpoint=checkpoint,
+                )
+            except SourceMonitoringContractError as exc:
+                raise _operator_error(
+                    exc.code,
+                    "static seed preview failed its bounded contract",
+                ) from exc
+            return {
+                "version": SOURCE_MONITORING_STATIC_SEED_OPERATOR_PREVIEW_VERSION,
+                "preview_kind": "static_seed_policy",
+                "candidate_evidence": "deferred_to_first_runtime_poll",
+                "adapter_key": metadata.adapter_key,
+                "config_version": metadata.config_version,
+                "state_version": 0 if state is None else state["state_version"],
+                "mode": policy.mode,
+                "initial_required": True,
+                "initialization_blocked": False,
+                "catch_up_max_items": policy.catch_up_max_items,
+                "from_time": policy.initial_from_time,
+                "candidate_count": 0,
+                "selected_count": 0,
+                "skipped_count": 0,
+                "adapter_duplicate_count": 0,
+                "source_error_count": 0,
+                "rejected_count": 0,
+                "earliest_occurred_at": "",
+                "latest_occurred_at": "",
+                "preview_sha256": static_preview["preview_sha256"],
+                "source_policy_sha256": static_preview["source_policy_sha256"],
+                "symbol_allowlist": static_preview["symbol_allowlist"],
+                "starting_checkpoint_sha256": static_preview[
+                    "starting_checkpoint_sha256"
+                ],
+                "next_checkpoint_sha256": static_preview[
+                    "starting_checkpoint_sha256"
+                ],
+                "captured_at_ms": observed_at_ms,
+                "safety": {
+                    **_read_safety(),
+                    "network_requests_accounting": "exact",
+                },
+            }
         try:
-            result = adapter.poll(
+            preview_deadline_monotonic_ms = (
+                int(time.monotonic() * 1_000)
+                + SOURCE_MONITORING_OPERATOR_PREVIEW_TIMEOUT_MS
+            )
+            result = poll_for_initialization(
+                adapter,
                 checkpoint,
+                initial_required=initial_required,
+                initialization_policy=policy,
                 observed_at_ms=observed_at_ms,
+                deadline_monotonic_ms=preview_deadline_monotonic_ms,
+                cancel_event=self._cancel_event,
                 etag="" if state is None else state["etag"],
                 last_modified="" if state is None else state["last_modified"],
                 max_items=self.settings.max_items_per_run,
             )
+        except (SourcePollCancelled, SourcePollDeadlineExceeded) as exc:
+            raise _operator_error(
+                exc.code,
+                "adapter preview was cancelled or exceeded its deadline",
+            ) from exc
         except SourceMonitoringContractError as exc:
             raise _operator_error(
                 exc.code,
@@ -485,7 +684,7 @@ class SourceMonitoringOperatorService:
             plan = plan_initial_poll(
                 result,
                 metadata=metadata,
-                settings=self.settings,
+                initialization_policy=policy,
                 initial_required=initial_required,
                 received_at_ms=max(self._now_ms(), result.captured_at_ms),
             )
@@ -576,12 +775,18 @@ class SourceMonitoringOperatorService:
             and (state["checkpoint"] != {} or state["last_success_at_ms"] > 0)
         )
         initial_required = initialization is None and not legacy_initialized
+        policy = self.settings.initialization_policy_for(
+            official_source=metadata.official_source,
+        )
         initialization_authorized = False
         confirmed_preview = ""
         market_calls_performed = 0
         network_requests_performed: int | None = 0
         if enabled:
-            if self._initialization_policy_mismatch(initialization):
+            if self._initialization_policy_mismatch(
+                initialization,
+                official_source=metadata.official_source,
+            ):
                 raise _operator_error(
                     "SOURCE_MONITORING_INITIAL_POLICY_MISMATCH",
                     "configured initial policy differs from the sealed adapter receipt",
@@ -619,27 +824,39 @@ class SourceMonitoringOperatorService:
                         "source evidence changed after operator preview",
                     )
                 if (
-                    self.settings.initial_mode == "catch_up"
-                    and self.settings.initial_preview_sha256
-                    and self.settings.initial_preview_sha256 != preview_sha256
+                    policy.mode == "catch_up"
+                    and policy.initial_preview_sha256
+                    and policy.initial_preview_sha256 != preview_sha256
                 ):
                     raise _operator_error(
                         "SOURCE_MONITORING_INITIAL_AUTHORITY_CONFLICT",
                         "environment and UI catch-up authorities conflict",
                     )
+                static_seed = verified_preview.get("preview_kind") == "static_seed_policy"
                 authorization = {
-                    "version": SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION,
+                    "version": (
+                        SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION_V2
+                        if static_seed
+                        else SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION
+                    ),
                     "adapter_key": metadata.adapter_key,
                     "config_version": metadata.config_version,
-                    "mode": self.settings.initial_mode,
-                    "catch_up_max_items": self.settings.catch_up_max_items,
-                    "from_time_ms": self.settings.from_time_ms,
+                    "mode": policy.mode,
+                    "catch_up_max_items": policy.catch_up_max_items,
+                    "from_time_ms": policy.initial_from_time_ms,
                     "starting_checkpoint_sha256": verified_preview[
                         "starting_checkpoint_sha256"
                     ],
                     "preview_sha256": preview_sha256,
                     "confirmed_at_ms": self._now_ms(),
                 }
+                if static_seed:
+                    authorization.update({
+                        "authorization_kind": "static_seed_policy",
+                        "source_policy_sha256": verified_preview[
+                            "source_policy_sha256"
+                        ],
+                    })
                 try:
                     updated = self.repository.authorize_initialization_and_enable(
                         metadata.adapter_key,
@@ -664,7 +881,9 @@ class SourceMonitoringOperatorService:
                 market_calls_performed = verified_preview["safety"][
                     "market_calls_performed"
                 ]
-                network_requests_performed = None
+                network_requests_performed = verified_preview["safety"][
+                    "network_requests_performed"
+                ]
             else:
                 if preview_sha256 != "":
                     raise _operator_error(
@@ -765,6 +984,8 @@ __all__ = [
     "SOURCE_MONITORING_ENABLEMENT_RESULT_VERSION",
     "SOURCE_MONITORING_OPERATOR_CONTROL_VERSION",
     "SOURCE_MONITORING_OPERATOR_PREVIEW_VERSION",
+    "SOURCE_MONITORING_OPERATOR_PREVIEW_TIMEOUT_MS",
+    "SOURCE_MONITORING_STATIC_SEED_OPERATOR_PREVIEW_VERSION",
     "SourceMonitoringOperatorError",
     "SourceMonitoringOperatorService",
 ]

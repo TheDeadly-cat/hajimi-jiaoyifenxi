@@ -53,7 +53,7 @@ function adapter(overrides = {}) {
 function control(overrides = {}) {
   return {
     source_monitoring_operator_control: {
-      version: "source_monitoring_operator_control_v1",
+      version: "source_monitoring_operator_control_v2",
       captured_at_ms: 1_777_777_777_000,
       settings: {
         global_enabled: true,
@@ -62,6 +62,7 @@ function control(overrides = {}) {
         initial_mode: "seed_only",
         catch_up_max_items: 0,
         from_time: "",
+        continuous_event_cutoff: "",
       },
       adapters: [adapter()],
       safety: safety(),
@@ -100,6 +101,28 @@ function preview(overrides = {}) {
   };
 }
 
+function staticSeedPreview(overrides = {}) {
+  const payload = preview({
+    version: "source_monitoring_operator_static_seed_preview_v2",
+    preview_kind: "static_seed_policy",
+    candidate_evidence: "deferred_to_first_runtime_poll",
+    adapter_key: "futu_anomaly_signals",
+    config_version: "futu_anomaly_config_v2_0123456789abcdef",
+    candidate_count: 0,
+    selected_count: 0,
+    skipped_count: 0,
+    earliest_occurred_at: "",
+    latest_occurred_at: "",
+    source_policy_sha256: "d".repeat(64),
+    symbol_allowlist: ["US.MU", "US.SNDK", "US.WDC", "US.STX"],
+    next_checkpoint_sha256: "b".repeat(64),
+    ...overrides,
+  });
+  payload.source_monitoring_operator_preview.safety.network_requests_performed = 0;
+  payload.source_monitoring_operator_preview.safety.network_requests_accounting = "exact";
+  return payload;
+}
+
 test("operator control accepts exact neutral state and preserves legacy unknown mode", () => {
   const normalized = normalizeSourceMonitoringOperatorControl(control());
   assert.equal(normalized.valid, true, normalized.issues.join(","));
@@ -120,6 +143,11 @@ test("operator control accepts exact neutral state and preserves legacy unknown 
 });
 
 test("control fails closed on extra fields, invented legacy mode, or execution capability", () => {
+  const oldVersion = control();
+  oldVersion.source_monitoring_operator_control.version =
+    "source_monitoring_operator_control_v1";
+  assert.equal(normalizeSourceMonitoringOperatorControl(oldVersion).valid, false);
+
   const extra = control();
   extra.source_monitoring_operator_control.pid = 42;
   assert.equal(normalizeSourceMonitoringOperatorControl(extra).valid, false);
@@ -162,6 +190,29 @@ test("initial preview seals mode-specific counts and never treats errors as conf
 
   const forged = preview({ initialization_blocked: false, source_error_count: 1 });
   assert.equal(normalizeSourceMonitoringOperatorPreview(forged).valid, false);
+});
+
+test("static market seed preview is explicit deferred evidence with zero live calls", () => {
+  const normalized = normalizeSourceMonitoringOperatorPreview(staticSeedPreview());
+  assert.equal(normalized.valid, true, normalized.issues.join(","));
+  assert.equal(normalized.previewKind, "static_seed_policy");
+  assert.equal(normalized.candidateEvidence, "deferred_to_first_runtime_poll");
+  assert.deepEqual(normalized.symbolAllowlist, ["US.MU", "US.SNDK", "US.WDC", "US.STX"]);
+  assert.match(sourceMonitoringConfirmationText(normalized), /当前未读取行情/);
+
+  const forged = staticSeedPreview({ candidate_count: 1 });
+  assert.equal(normalizeSourceMonitoringOperatorPreview(forged).valid, false);
+
+  const missingSymbols = staticSeedPreview();
+  delete missingSymbols.source_monitoring_operator_preview.symbol_allowlist;
+  const missingSymbolsView = normalizeSourceMonitoringOperatorPreview(missingSymbols);
+  assert.equal(missingSymbolsView.valid, false);
+  assert.deepEqual(missingSymbolsView.symbolAllowlist, []);
+
+  const nonArraySymbols = staticSeedPreview({ symbol_allowlist: "US.MU" });
+  const nonArraySymbolsView = normalizeSourceMonitoringOperatorPreview(nonArraySymbols);
+  assert.equal(nonArraySymbolsView.valid, false);
+  assert.deepEqual(nonArraySymbolsView.symbolAllowlist, []);
 });
 
 test("enablement result is exact, bounded, and cannot grant execution", () => {

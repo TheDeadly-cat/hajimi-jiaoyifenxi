@@ -9,7 +9,7 @@ const CONTROL_FIELDS = Object.freeze([
 ]);
 const SETTINGS_FIELDS = Object.freeze([
   "global_enabled", "auto_start", "dry_run", "initial_mode",
-  "catch_up_max_items", "from_time",
+  "catch_up_max_items", "from_time", "continuous_event_cutoff",
 ]);
 const ADAPTER_FIELDS = Object.freeze([
   "version", "adapter_key", "config_version", "state_version",
@@ -28,6 +28,10 @@ const PREVIEW_FIELDS = Object.freeze([
   "earliest_occurred_at", "latest_occurred_at", "preview_sha256",
   "starting_checkpoint_sha256", "next_checkpoint_sha256", "captured_at_ms",
   "safety",
+]);
+const STATIC_SEED_PREVIEW_FIELDS = Object.freeze([
+  ...PREVIEW_FIELDS,
+  "preview_kind", "candidate_evidence", "source_policy_sha256", "symbol_allowlist",
 ]);
 const RESULT_FIELDS = Object.freeze([
   "version", "adapter_key", "config_version", "state_version",
@@ -142,7 +146,10 @@ function normalizedSettings(rawSettings) {
       settings.initial_mode,
       settings.catch_up_max_items,
       settings.from_time,
-    );
+    )
+    && typeof settings.continuous_event_cutoff === "string"
+    && (settings.continuous_event_cutoff === ""
+      || canonicalFromTime(settings.continuous_event_cutoff));
   return {
     valid,
     globalEnabled: settings.global_enabled === true,
@@ -153,6 +160,7 @@ function normalizedSettings(rawSettings) {
       ? settings.catch_up_max_items
       : 0,
     fromTime: String(settings.from_time || ""),
+    continuousEventCutoff: String(settings.continuous_event_cutoff || ""),
   };
 }
 
@@ -238,7 +246,7 @@ export function normalizeSourceMonitoringOperatorControl(payload) {
   const safety = normalizeSafety(view.safety, { profile: "control" });
   const issues = [];
   if (!hasExactFields(view, CONTROL_FIELDS)
-    || view.version !== "source_monitoring_operator_control_v1") {
+    || view.version !== "source_monitoring_operator_control_v2") {
     issues.push("operator_control_contract_invalid");
   }
   if (!safeInteger(view.captured_at_ms) || !settings.valid) {
@@ -273,8 +281,10 @@ export function normalizeSourceMonitoringOperatorPreview(payload) {
     "preview_sha256", "starting_checkpoint_sha256", "next_checkpoint_sha256",
   ];
   const issues = [];
-  if (!hasExactFields(view, PREVIEW_FIELDS)
-    || view.version !== "source_monitoring_operator_preview_v1") {
+  const staticSeed = view.version === "source_monitoring_operator_static_seed_preview_v2";
+  const expectedFields = staticSeed ? STATIC_SEED_PREVIEW_FIELDS : PREVIEW_FIELDS;
+  if (!hasExactFields(view, expectedFields)
+    || (!staticSeed && view.version !== "source_monitoring_operator_preview_v1")) {
     issues.push("operator_preview_contract_invalid");
   }
   if (!ADAPTER_KEY_RE.test(String(view.adapter_key || ""))
@@ -295,6 +305,25 @@ export function normalizeSourceMonitoringOperatorPreview(payload) {
     issues.push("operator_preview_evidence_invalid");
   }
   if (!safety.valid) issues.push("operator_preview_safety_invalid");
+  if (staticSeed && (
+    view.preview_kind !== "static_seed_policy"
+    || view.candidate_evidence !== "deferred_to_first_runtime_poll"
+    || view.mode !== "seed_only"
+    || view.initialization_blocked !== false
+    || countFields.some((field) => view[field] !== 0)
+    || view.earliest_occurred_at !== ""
+    || view.latest_occurred_at !== ""
+    || view.next_checkpoint_sha256 !== view.starting_checkpoint_sha256
+    || !SHA256_RE.test(String(view.source_policy_sha256 || ""))
+    || !Array.isArray(view.symbol_allowlist)
+    || view.symbol_allowlist.length < 1
+    || view.symbol_allowlist.length > 50
+    || view.symbol_allowlist.some((symbol) => typeof symbol !== "string" || !symbol)
+    || new Set(view.symbol_allowlist).size !== view.symbol_allowlist.length
+    || safety.marketCallsPerformed !== 0
+    || safety.networkRequestsPerformed !== 0
+    || safety.networkRequestsAccounting !== "exact"
+  )) issues.push("operator_static_seed_preview_invalid");
   return {
     valid: issues.length === 0,
     issues,
@@ -321,6 +350,14 @@ export function normalizeSourceMonitoringOperatorPreview(payload) {
     nextCheckpointSha256: String(view.next_checkpoint_sha256 || ""),
     capturedAt: safeInteger(view.captured_at_ms) ? view.captured_at_ms : 0,
     marketCallsPerformed: safety.marketCallsPerformed ?? 0,
+    previewKind: staticSeed ? "static_seed_policy" : "exact_content",
+    candidateEvidence: staticSeed
+      ? "deferred_to_first_runtime_poll"
+      : "observed",
+    sourcePolicySha256: staticSeed ? String(view.source_policy_sha256 || "") : "",
+    symbolAllowlist: staticSeed && Array.isArray(view.symbol_allowlist)
+      ? view.symbol_allowlist.map(String)
+      : [],
   };
 }
 
@@ -370,6 +407,9 @@ export function normalizeSourceMonitoringEnablementResult(payload) {
 export function sourceMonitoringConfirmationText(preview) {
   if (!preview?.valid) return "";
   if (preview.mode === "seed_only") {
+    if (preview.previewKind === "static_seed_policy") {
+      return "我确认静态只读行情 Seed 政策；当前未读取行情，首次 Runtime 成功轮询将验证完整快照、零历史导入并原子建立 checkpoint。";
+    }
     return `我确认首次成功运行将以当时全部候选建立基线；本次预览当前有 ${preview.skippedCount} 条，来源变化可能改变数量。`;
   }
   if (preview.mode === "catch_up") {

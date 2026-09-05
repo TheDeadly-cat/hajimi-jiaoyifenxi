@@ -10,6 +10,10 @@ from typing import Any, Callable
 
 from ..source_inbox_contracts import accept_source_import, canonical_sha256
 from ..source_inbox_service import SourceInboxService
+from ..source_poll_control import (
+    ensure_source_poll_active,
+    validate_source_poll_control,
+)
 from ..structured_logging import emit_event
 from .contracts import (
     MAX_NATIVE_INTEGER,
@@ -19,22 +23,26 @@ from .contracts import (
 )
 from .initialization import (
     SourceMonitoringInitialPlan,
+    build_static_seed_preview,
     plan_initial_poll,
     require_catch_up_confirmation_before_poll,
     require_initial_preview_match,
+    poll_for_initialization,
 )
 from .packet_builder import (
     canonical_source_import_payload,
 )
 from .registry import SourceAdapterRegistry
-from .scheduler import BackoffPolicy
+from .scheduler import BackoffPolicy, SourceMonitoringSelectionChanged
 from .settings import SourceMonitoringSettings
 from .state_repository import (
     RUN_STATUS_DEGRADED,
     RUN_STATUS_DRY_RUN,
     RUN_STATUS_FAILED,
     RUN_STATUS_SUCCEEDED,
+    SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION_V2,
     SourceMonitoringStateRepository,
+    SourceMonitoringStateError,
 )
 from .trading_impact_rules import TradingImpactProjection, TradingImpactRulesV1
 
@@ -67,12 +75,17 @@ def _initialization_result(
     *,
     dry_run: bool,
     committed: bool,
+    continuous_filter_applied: bool = False,
 ) -> dict[str, Any]:
     preview = plan.preview
     if plan.initialization_blocked:
         outcome = "blocked"
     elif not plan.initial_required:
-        outcome = "continuous_filter" if preview["mode"] == "from_time" else "not_required"
+        outcome = (
+            "continuous_filter"
+            if continuous_filter_applied
+            else "not_required"
+        )
     elif committed:
         outcome = "seeded" if preview["mode"] == "seed_only" else "initialized"
     elif dry_run:
@@ -511,7 +524,32 @@ class SourceMonitoringSupervisor:
             },
         }
 
-    def run_once(self, adapter_key: Any) -> dict[str, Any]:
+    def run_once(
+        self,
+        adapter_key: Any,
+        *,
+        expected_config_version: Any = None,
+        expected_state_version: Any = None,
+        deadline_monotonic_ms: Any = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        bound_selection = (
+            expected_config_version is not None or expected_state_version is not None
+        )
+        if bound_selection and (
+            type(expected_config_version) is not str
+            or not expected_config_version
+            or type(expected_state_version) is not int
+            or not 1 <= expected_state_version <= MAX_NATIVE_INTEGER
+        ):
+            raise SourceMonitoringSupervisorError(
+                "SOURCE_MONITORING_SELECTION_INVALID",
+                "selected config and state versions must be supplied together",
+            )
+        deadline, event = validate_source_poll_control(
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
         if self.settings.enabled is not True:
             raise SourceMonitoringSupervisorError(
                 "SOURCE_MONITORING_DISABLED",
@@ -520,7 +558,20 @@ class SourceMonitoringSupervisor:
         self.initialize()
         adapter = self.registry.require(adapter_key)
         metadata = self.registry.metadata_for(adapter.adapter_key)
+        initialization_policy = self.settings.initialization_policy_for(
+            official_source=metadata.official_source,
+        )
         state = self.repository.get_state(metadata.adapter_key)
+        if bound_selection and (
+            state is None
+            or state["enabled"] is not True
+            or state["config_version"] != expected_config_version
+            or state["state_version"] != expected_state_version
+        ):
+            raise SourceMonitoringSelectionChanged(
+                "SOURCE_MONITORING_SELECTION_CHANGED",
+                "adapter selection changed before the run started",
+            )
         if state is None or state["enabled"] is not True:
             raise SourceMonitoringSupervisorError(
                 "SOURCE_MONITORING_ADAPTER_DISABLED",
@@ -539,11 +590,11 @@ class SourceMonitoringSupervisor:
             "pending_initialization_authorization"
         )
         if initialization_evidence is not None and (
-            initialization_evidence["mode"] != self.settings.initial_mode
+            initialization_evidence["mode"] != initialization_policy.mode
             or initialization_evidence["catch_up_max_items"]
-            != self.settings.catch_up_max_items
+            != initialization_policy.catch_up_max_items
             or initialization_evidence["from_time_ms"]
-            != self.settings.from_time_ms
+            != initialization_policy.initial_from_time_ms
         ):
             raise SourceMonitoringSupervisorError(
                 "SOURCE_MONITORING_INITIAL_POLICY_MISMATCH",
@@ -563,10 +614,11 @@ class SourceMonitoringSupervisor:
         if pending_authorization is not None and (
             pending_authorization["adapter_key"] != metadata.adapter_key
             or pending_authorization["config_version"] != metadata.config_version
-            or pending_authorization["mode"] != self.settings.initial_mode
+            or pending_authorization["mode"] != initialization_policy.mode
             or pending_authorization["catch_up_max_items"]
-            != self.settings.catch_up_max_items
-            or pending_authorization["from_time_ms"] != self.settings.from_time_ms
+            != initialization_policy.catch_up_max_items
+            or pending_authorization["from_time_ms"]
+            != initialization_policy.initial_from_time_ms
             or pending_authorization["starting_checkpoint_sha256"]
             != state["checkpoint_sha256"]
         ):
@@ -577,11 +629,11 @@ class SourceMonitoringSupervisor:
         if not self.settings.dry_run:
             if (
                 initial_required
-                and self.settings.initial_mode == "catch_up"
+                and initialization_policy.mode == "catch_up"
                 and pending_authorization is not None
-                and self.settings.initial_preview_sha256
+                and initialization_policy.initial_preview_sha256
                 and pending_authorization["preview_sha256"]
-                != self.settings.initial_preview_sha256
+                != initialization_policy.initial_preview_sha256
             ):
                 raise SourceMonitoringSupervisorError(
                     "SOURCE_MONITORING_INITIAL_AUTHORITY_CONFLICT",
@@ -589,14 +641,63 @@ class SourceMonitoringSupervisor:
                 )
             if pending_authorization is None:
                 require_catch_up_confirmation_before_poll(
-                    self.settings,
+                    initialization_policy,
                     initial_required=initial_required,
                 )
-        started = self.repository.start_run(
-            metadata.adapter_key,
-            config_version=metadata.config_version,
-            dry_run=self.settings.dry_run,
-        )
+        initial_seed_policy = None
+        if initial_required and metadata.official_source is False:
+            seed_policy_provider = getattr(adapter, "initial_seed_policy", None)
+            if not callable(seed_policy_provider):
+                raise SourceMonitoringSupervisorError(
+                    "SOURCE_MONITORING_INITIAL_SEED_POLICY_INVALID",
+                    "read-only market adapter lacks a static seed policy",
+                )
+            initial_seed_policy = seed_policy_provider()
+            static_preview = build_static_seed_preview(
+                metadata=metadata,
+                initialization_policy=initialization_policy,
+                initial_seed_policy=initial_seed_policy,
+                starting_checkpoint=state["checkpoint"],
+            )
+            if not self.settings.dry_run:
+                if pending_authorization is None:
+                    raise SourceMonitoringSupervisorError(
+                        "SOURCE_MONITORING_INITIAL_AUTHORIZATION_REQUIRED",
+                        "read-only market seed requires static policy authorization",
+                    )
+                if (
+                    pending_authorization.get("version")
+                    != SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION_V2
+                    or pending_authorization.get("authorization_kind")
+                    != "static_seed_policy"
+                    or pending_authorization.get("source_policy_sha256")
+                    != static_preview["source_policy_sha256"]
+                    or pending_authorization.get("preview_sha256")
+                    != static_preview["preview_sha256"]
+                ):
+                    raise SourceMonitoringSupervisorError(
+                        "SOURCE_MONITORING_PENDING_AUTHORIZATION_MISMATCH",
+                        "static market seed authorization differs from sealed policy",
+                    )
+        try:
+            started = self.repository.start_run(
+                metadata.adapter_key,
+                config_version=metadata.config_version,
+                dry_run=self.settings.dry_run,
+                expected_state_version=expected_state_version,
+            )
+        except SourceMonitoringStateError as exc:
+            if bound_selection and exc.code in {
+                "SOURCE_MONITORING_ADAPTER_DISABLED",
+                "SOURCE_MONITORING_CONFIG_CONFLICT",
+                "SOURCE_MONITORING_STATE_CONFLICT",
+                "SOURCE_MONITORING_RUN_ACTIVE",
+            }:
+                raise SourceMonitoringSelectionChanged(
+                    "SOURCE_MONITORING_SELECTION_CHANGED",
+                    "adapter selection changed before the run transaction",
+                ) from exc
+            raise
         run_id = started["run"]["run_id"]
         self._emit(
             "source_monitoring_run_started",
@@ -610,10 +711,19 @@ class SourceMonitoringSupervisor:
         import_summary: dict[str, Any] | None = None
         source_inbox_writes_performed: bool | None = False
         try:
+            ensure_source_poll_active(
+                deadline_monotonic_ms=deadline,
+                cancel_event=event,
+            )
             observed_at_ms = self._now_ms()
-            candidate = adapter.poll(
+            candidate = poll_for_initialization(
+                adapter,
                 started["run"]["started_checkpoint"],
+                initial_required=initial_required,
+                initialization_policy=initialization_policy,
                 observed_at_ms=observed_at_ms,
+                deadline_monotonic_ms=deadline,
+                cancel_event=event,
                 etag=started["state"]["etag"],
                 last_modified=started["state"]["last_modified"],
                 max_items=self.settings.max_items_per_run,
@@ -645,18 +755,23 @@ class SourceMonitoringSupervisor:
                     "SOURCE_MONITORING_CHECKPOINT_START_MISMATCH",
                     "poll result is not bound to the persisted starting checkpoint",
                 )
+            ensure_source_poll_active(
+                deadline_monotonic_ms=deadline,
+                cancel_event=event,
+            )
             validation_time_ms = max(self._now_ms(), candidate.captured_at_ms)
             initial_plan = plan_initial_poll(
                 candidate,
                 metadata=metadata,
-                settings=self.settings,
+                initialization_policy=initialization_policy,
+                initial_seed_policy=initial_seed_policy,
                 initial_required=initial_required,
                 received_at_ms=validation_time_ms,
             )
             if not self.settings.dry_run:
                 if (
                     initial_required
-                    and self.settings.initial_mode == "catch_up"
+                    and initialization_policy.mode == "catch_up"
                     and pending_authorization is not None
                 ):
                     if (
@@ -668,7 +783,10 @@ class SourceMonitoringSupervisor:
                             "catch-up source evidence changed after UI confirmation",
                         )
                 else:
-                    require_initial_preview_match(initial_plan, self.settings)
+                    require_initial_preview_match(
+                        initial_plan,
+                        initialization_policy,
+                    )
             packet = initial_plan.selected_packet(
                 candidate,
                 external_run_id=run_id,
@@ -731,6 +849,10 @@ class SourceMonitoringSupervisor:
                         initial_plan,
                         dry_run=True,
                         committed=False,
+                        continuous_filter_applied=bool(
+                            not initial_plan.initial_required
+                            and initialization_policy.continuous_event_cutoff_ms
+                        ),
                     ),
                 })
                 if impact_accounting is not None:
@@ -754,6 +876,10 @@ class SourceMonitoringSupervisor:
                 else None
             )
             if packet["items"]:
+                ensure_source_poll_active(
+                    deadline_monotonic_ms=deadline,
+                    cancel_event=event,
+                )
                 # Once the call begins, a raised transport/storage boundary
                 # cannot truthfully prove whether its transaction committed.
                 source_inbox_writes_performed = None
@@ -870,6 +996,10 @@ class SourceMonitoringSupervisor:
                     committed=(
                         terminal_status == RUN_STATUS_SUCCEEDED
                         and initial_plan.initial_required
+                    ),
+                    continuous_filter_applied=bool(
+                        not initial_plan.initial_required
+                        and initialization_policy.continuous_event_cutoff_ms
                     ),
                 ),
             })

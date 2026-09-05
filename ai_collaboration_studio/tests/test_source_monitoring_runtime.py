@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
 
@@ -92,11 +93,13 @@ class FakeAdapter:
         checkpoint: dict[str, Any],
         *,
         observed_at_ms: int,
+        deadline_monotonic_ms: int = 0,
+        cancel_event=None,
         etag: str = "",
         last_modified: str = "",
         max_items: int = 50,
     ) -> AdapterPollResult:
-        del etag, last_modified, max_items
+        del deadline_monotonic_ms, cancel_event, etag, last_modified, max_items
         with self._lock:
             self.poll_count += 1
             self.started_checkpoints.append(dict(checkpoint))
@@ -114,6 +117,50 @@ class FakeAdapter:
             observed_items=(),
             captured_at_ms=observed_at_ms,
         )
+
+
+class LockBlockedStopAdapter(FakeAdapter):
+    """Hold the poll resource lock while ignoring cooperative cancellation."""
+
+    def __init__(self, adapter_key: str) -> None:
+        self.poll_entered = threading.Event()
+        self.poll_release = threading.Event()
+        self.stop_attempted = threading.Event()
+        self.stop_calls = 0
+        self._resource_lock = threading.Lock()
+        super().__init__(
+            adapter_key,
+            entered=self.poll_entered,
+            release=self.poll_release,
+        )
+
+    def poll(
+        self,
+        checkpoint: dict[str, Any],
+        *,
+        observed_at_ms: int,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
+        etag: str = "",
+        last_modified: str = "",
+        max_items: int = 50,
+    ) -> AdapterPollResult:
+        with self._resource_lock:
+            return super().poll(
+                checkpoint,
+                observed_at_ms=observed_at_ms,
+                deadline_monotonic_ms=deadline_monotonic_ms,
+                cancel_event=cancel_event,
+                etag=etag,
+                last_modified=last_modified,
+                max_items=max_items,
+            )
+
+    def stop(self) -> bool:
+        self.stop_attempted.set()
+        with self._resource_lock:
+            self.stop_calls += 1
+        return True
 
 
 def wait_until(
@@ -168,6 +215,8 @@ class SourceMonitoringRuntimeTests(unittest.TestCase):
         enable: tuple[str, ...] = (),
         heartbeat_interval_ms: int = 1,
         join_timeout_ms: int = 2_000,
+        poll_timeout_ms: int | None = None,
+        monotonic_ms: Callable[[], Any] | None = None,
         cycle_observer: Callable[[dict[str, Any]], Any] | None = None,
         start_gate: Callable[[], Any] | None = None,
     ) -> tuple[
@@ -216,7 +265,9 @@ class SourceMonitoringRuntimeTests(unittest.TestCase):
             settings=resolved_settings,
             heartbeat_interval_ms=heartbeat_interval_ms,
             join_timeout_ms=join_timeout_ms,
+            poll_timeout_ms=poll_timeout_ms,
             clock_ms=self.clock,
+            monotonic_ms=monotonic_ms,
             cycle_observer=cycle_observer,
             start_gate=start_gate,
         )
@@ -247,6 +298,135 @@ class SourceMonitoringRuntimeTests(unittest.TestCase):
         self.assertTrue(runtime.stop())
 
         self.assertEqual(adapter.started_checkpoints[:2], [{}, {"cursor": 1}])
+
+    def test_new_alphabetic_peer_becomes_due_after_selection(self) -> None:
+        first = FakeAdapter("a_later_due")
+        selected = FakeAdapter("b_selected_due")
+        runtime, _repository, scheduler = self.build_runtime(
+            (first, selected), enable=(first.adapter_key, selected.adapter_key),
+        )
+        with self.store._lock, closing(self.store._connect()) as connection, connection:
+            connection.execute(
+                "UPDATE source_adapter_states SET next_due_at_ms=? WHERE adapter_key=?",
+                (self.clock() + 1, first.adapter_key),
+            )
+        original = scheduler.run_one_due
+        cycles: list[dict[str, Any]] = []
+
+        def advance_after_selection(adapter_key, **kwargs):
+            self.clock.advance(1)
+            cycle = original(adapter_key, **kwargs)
+            cycles.append(cycle)
+            return cycle
+
+        scheduler.run_one_due = advance_after_selection
+        self.assertTrue(runtime.start())
+        self.assertTrue(wait_until(lambda: len(cycles) >= 2))
+        self.assertTrue(runtime.stop())
+        self.assertEqual(cycles[0]["results"][0]["adapter_key"], selected.adapter_key)
+        self.assertEqual(cycles[1]["results"][0]["adapter_key"], first.adapter_key)
+        self.assertEqual(runtime.snapshot()["last_fatal_error_code"], "")
+
+    def test_state_version_changes_after_selection_are_skipped_then_reselected(self) -> None:
+        adapter = FakeAdapter("selected_state_change")
+        runtime, repository, scheduler = self.build_runtime(
+            (adapter,), enable=(adapter.adapter_key,),
+        )
+        original = scheduler.run_one_due
+        cycles: list[dict[str, Any]] = []
+
+        def change_after_selection(adapter_key, **kwargs):
+            if not cycles:
+                repository.set_enabled(
+                    adapter_key, config_version=adapter.config_version, enabled=False,
+                )
+                repository.set_enabled(
+                    adapter_key, config_version=adapter.config_version, enabled=True,
+                )
+            cycle = original(adapter_key, **kwargs)
+            cycles.append(cycle)
+            return cycle
+
+        scheduler.run_one_due = change_after_selection
+        self.assertTrue(runtime.start())
+        self.assertTrue(wait_until(lambda: bool(cycles)))
+        self.assertTrue(wait_until(lambda: adapter.count() == 1))
+        self.assertTrue(runtime.stop())
+        self.assertEqual(cycles[0]["run_count"], 0)
+        self.assertEqual(len(repository.list_runs(adapter_key=adapter.adapter_key)), 1)
+        self.assertEqual(runtime.snapshot()["last_fatal_error_code"], "")
+
+    def test_selection_is_checked_atomically_before_starting_a_request(self) -> None:
+        for race in ("disable", "state_version", "config_version"):
+            with self.subTest(race=race):
+                selected = FakeAdapter(f"a_transaction_{race}")
+                peer = FakeAdapter(f"b_transaction_{race}")
+                runtime, repository, scheduler = self.build_runtime(
+                    (selected, peer), enable=(selected.adapter_key, peer.adapter_key),
+                )
+                original = repository.start_run
+                raced = False
+                cycles: list[dict[str, Any]] = []
+                original_execute = scheduler.run_one_due
+
+                def change_before_transaction(adapter_key, **kwargs):
+                    nonlocal raced
+                    if adapter_key == selected.adapter_key and not raced:
+                        raced = True
+                        disabled = repository.set_enabled(
+                            adapter_key, config_version=selected.config_version, enabled=False,
+                        )
+                        if race == "state_version":
+                            repository.set_enabled(
+                                adapter_key, config_version=selected.config_version, enabled=True,
+                            )
+                        elif race == "config_version":
+                            repository.migrate_config(
+                                adapter_key,
+                                expected_config_version=selected.config_version,
+                                new_config_version=f"{adapter_key}_config_v2",
+                                expected_state_version=disabled["state_version"],
+                                next_checkpoint={},
+                            )
+                    return original(adapter_key, **kwargs)
+
+                def record_cycle(adapter_key, **kwargs):
+                    cycle = original_execute(adapter_key, **kwargs)
+                    cycles.append(cycle)
+                    return cycle
+
+                repository.start_run = change_before_transaction
+                scheduler.run_one_due = record_cycle
+                self.assertTrue(runtime.start())
+                self.assertTrue(wait_until(lambda: bool(cycles)))
+                self.assertTrue(wait_until(lambda: peer.count() == 1))
+                self.assertTrue(runtime.stop())
+                self.assertEqual(cycles[0]["run_count"], 0)
+                self.assertEqual(runtime.snapshot()["last_fatal_error_code"], "")
+                if race != "state_version":
+                    self.assertEqual(selected.count(), 0)
+                    self.assertEqual(repository.list_runs(adapter_key=selected.adapter_key), [])
+
+    def test_corrupt_scheduler_result_identity_remains_fatal(self) -> None:
+        adapter = FakeAdapter("selected_identity")
+        runtime, _repository, scheduler = self.build_runtime(
+            (adapter,), enable=(adapter.adapter_key,),
+        )
+
+        def corrupt_identity(adapter_key, **kwargs):
+            return {
+                "run_count": 1,
+                "results": [{"adapter_key": "unselected_identity", "status": "SUCCEEDED"}],
+            }
+
+        scheduler.run_one_due = corrupt_identity
+        self.assertTrue(runtime.start())
+        self.assertTrue(wait_until(lambda: runtime.snapshot()["status"] == "failed"))
+        self.assertEqual(adapter.count(), 0)
+        self.assertEqual(
+            runtime.snapshot()["last_fatal_error_code"],
+            SOURCE_MONITORING_RUNTIME_FATAL,
+        )
 
     def test_disabled_or_not_auto_started_creates_no_thread_and_never_polls(self) -> None:
         cases = (
@@ -332,7 +512,7 @@ class SourceMonitoringRuntimeTests(unittest.TestCase):
         def fail_due_selection() -> tuple[str, ...]:
             raise RuntimeError("secret fatal detail")
 
-        scheduler.due_adapter_keys = fail_due_selection  # type: ignore[method-assign]
+        scheduler.due_run_selections = fail_due_selection  # type: ignore[method-assign]
         self.assertTrue(runtime.start())
         self.assertTrue(
             wait_until(
@@ -538,6 +718,67 @@ class SourceMonitoringRuntimeTests(unittest.TestCase):
         self.assertLess(elapsed, 1)
         self.assertFalse(runtime.snapshot()["thread_alive"])
         self.assertEqual(runtime.snapshot()["status"], "stopped")
+
+    def test_request_stop_never_waits_for_an_adapter_resource_lock(self) -> None:
+        adapter = LockBlockedStopAdapter("runtime_locked_resource")
+        runtime, _repository, _scheduler = self.build_runtime(
+            (adapter,),
+            enable=(adapter.adapter_key,),
+            join_timeout_ms=500,
+            poll_timeout_ms=500,
+        )
+        requester = threading.Thread(target=runtime.request_stop, daemon=False)
+        try:
+            self.assertTrue(runtime.start())
+            self.assertTrue(adapter.poll_entered.wait(2))
+
+            requester.start()
+            requester.join(0.25)
+            self.assertFalse(requester.is_alive())
+            self.assertFalse(adapter.stop_attempted.is_set())
+
+            self.assertFalse(runtime.stop())
+            self.assertFalse(adapter.stop_attempted.is_set())
+        finally:
+            adapter.poll_release.set()
+            if requester.ident is not None:
+                requester.join(2)
+
+        self.assertTrue(runtime.wait_until_stopped(2))
+        self.assertTrue(runtime.stop())
+        self.assertTrue(adapter.stop_attempted.is_set())
+        self.assertEqual(adapter.stop_calls, 1)
+
+    def test_resource_stop_failure_is_retried_after_worker_join(self) -> None:
+        adapter = FakeAdapter("runtime_resource_retry")
+        attempts: list[int] = []
+
+        def stop_resource() -> bool:
+            attempts.append(len(attempts) + 1)
+            return len(attempts) > 1
+
+        adapter.stop = stop_resource  # type: ignore[attr-defined]
+        runtime, _repository, _scheduler = self.build_runtime((adapter,))
+
+        self.assertFalse(runtime.stop())
+        self.assertTrue(runtime.stop())
+        self.assertEqual(attempts, [1, 2])
+
+    def test_poll_deadline_uses_platform_clock_not_injected_liveness_clock(self) -> None:
+        liveness_clock = MutableClock(1)
+        runtime, _repository, _scheduler = self.build_runtime(
+            (),
+            poll_timeout_ms=1_000,
+            monotonic_ms=liveness_clock,
+        )
+
+        before_ms = int(time.monotonic() * 1_000)
+        deadline_ms = runtime._poll_deadline_monotonic_ms()
+        after_ms = int(time.monotonic() * 1_000)
+
+        self.assertGreaterEqual(deadline_ms, before_ms + 1_000)
+        self.assertLessEqual(deadline_ms, after_ms + 1_000)
+        self.assertNotEqual(deadline_ms, liveness_clock() + 1_000)
 
     def test_stall_boundary_is_strictly_greater_than_threshold(self) -> None:
         epoch = MutableClock()

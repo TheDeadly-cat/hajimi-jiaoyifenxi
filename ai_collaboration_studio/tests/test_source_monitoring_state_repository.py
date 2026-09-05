@@ -15,12 +15,16 @@ os.environ["AI_STUDIO_SKIP_LOCAL_ENV"] = "1"
 from backend.source_monitoring.contracts import (  # noqa: E402
     FUTU_ANOMALY_SOURCE_CHANNEL,
     OFFICIAL_SOURCE_CHANNEL,
+    SourceMonitoringContractError,
     canonical_sha256,
 )
 from backend.market.sec_edgar import SecEdgarAdapter  # noqa: E402
 from backend.source_monitoring.adapters.sec_filings import (  # noqa: E402
     SecFilingsSourceAdapter,
 )
+from backend.source_monitoring.registry import SourceAdapterRegistry  # noqa: E402
+from backend.source_monitoring.settings import SourceMonitoringSettings  # noqa: E402
+from backend.source_monitoring.supervisor import SourceMonitoringSupervisor  # noqa: E402
 
 from backend.source_monitoring.state_repository import (  # noqa: E402
     RUN_STATUS_ABANDONED,
@@ -40,7 +44,7 @@ from tests.test_source_inbox_contracts import _packet  # noqa: E402
 from tests.test_source_monitoring_official_adapters import (  # noqa: E402
     FIXED_NOW,
     FIXED_NOW_MS,
-    SecFixtureFetcher,
+    ManySecFixtureFetcher,
 )
 from tests.test_trading_impact_rules import _sec  # noqa: E402
 
@@ -661,7 +665,10 @@ class SourceMonitoringStateRepositoryTests(unittest.TestCase):
             ).fetchall()
         self.assertEqual(after, before)
 
-        fetcher = SecFixtureFetcher()
+        self.assert_sec_legacy_migration_rebaselines_without_replay(migrated)
+
+    def assert_sec_legacy_migration_rebaselines_without_replay(self, migrated: dict) -> None:
+        fetcher = ManySecFixtureFetcher(count=1)
         monitor = SecFilingsSourceAdapter(
             adapter=SecEdgarAdapter(
                 user_agent="AI Studio monitor@example.com",
@@ -672,14 +679,38 @@ class SourceMonitoringStateRepositoryTests(unittest.TestCase):
             allowed_symbols=["US.NVDA"],
             allowed_forms=["8-K"],
         )
-        replay = monitor.poll(
-            migrated["checkpoint"],
-            observed_at_ms=FIXED_NOW_MS,
-            max_items=50,
+        with self.assertRaises(SourceMonitoringContractError) as required:
+            monitor.poll(migrated["checkpoint"], observed_at_ms=FIXED_NOW_MS)
+        self.assertEqual(required.exception.code, "SEC_BASELINE_UPGRADE_REQUIRED")
+        self.assertEqual(fetcher.calls, [])
+        reset = self.repository.migrate_config(
+            "sec_filings",
+            expected_config_version=migrated["config_version"],
+            new_config_version=monitor.config_version,
+            expected_state_version=migrated["state_version"],
+            next_checkpoint={},
         )
+        self.assertEqual(reset["checkpoint"], {})
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            before_seed = connection.execute("SELECT item_json,item_sha256 FROM source_inbox_items ORDER BY id").fetchall()
+        self.repository.set_enabled("sec_filings", config_version=monitor.config_version, enabled=True)
+        supervisor = SourceMonitoringSupervisor(
+            registry=SourceAdapterRegistry((monitor,)), repository=self.repository,
+            source_inbox=SourceInboxService(self.store, clock=lambda: self.clock[0] / 1_000),
+            settings=SourceMonitoringSettings(enabled=True, dry_run=False),
+            clock_ms=lambda: self.clock[0], event_sink=lambda *_args, **_kwargs: None,
+        )
+        seeded = supervisor.run_once("sec_filings")
+        self.assertEqual(seeded["initialization"]["outcome"], "seeded")
+        checkpoint = seeded["state"]["checkpoint"]
+        self.assertEqual(checkpoint["seen_accessions"], migrated["checkpoint"]["seen_accessions"])
+        replay = monitor.poll(checkpoint, observed_at_ms=FIXED_NOW_MS, max_items=50)
         self.assertEqual(replay.observed_items, ())
         self.assertEqual(replay.duplicate_count, 1)
-        self.assertEqual(replay.next_checkpoint, migrated["checkpoint"])
+        self.assertEqual(replay.next_checkpoint, checkpoint)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            after_seed = connection.execute("SELECT item_json,item_sha256 FROM source_inbox_items ORDER BY id").fetchall()
+        self.assertEqual(after_seed, before_seed)
 
     def test_sec_v1_to_v2_migration_accepts_a_verified_duplicate_observation(self) -> None:
         old_config = "sec_filings_config_v1_fixture"
@@ -762,25 +793,7 @@ class SourceMonitoringStateRepositoryTests(unittest.TestCase):
             expected_state_version=state["state_version"],
             next_checkpoint=preview["next_checkpoint"],
         )
-        fetcher = SecFixtureFetcher()
-        monitor = SecFilingsSourceAdapter(
-            adapter=SecEdgarAdapter(
-                user_agent="AI Studio monitor@example.com",
-                fetch_json=fetcher,
-                clock=lambda: FIXED_NOW,
-                allowed_symbols=["US.NVDA"],
-            ),
-            allowed_symbols=["US.NVDA"],
-            allowed_forms=["8-K"],
-        )
-        replay = monitor.poll(
-            migrated["checkpoint"],
-            observed_at_ms=FIXED_NOW_MS,
-            max_items=50,
-        )
-        self.assertEqual(replay.observed_items, ())
-        self.assertEqual(replay.duplicate_count, 1)
-        self.assertEqual(replay.next_checkpoint, migrated["checkpoint"])
+        self.assert_sec_legacy_migration_rebaselines_without_replay(migrated)
 
     def test_sec_v1_to_v2_migration_prefers_an_exact_receipt_over_wall_clock_order(self) -> None:
         old_config = "sec_filings_config_v1_fixture"

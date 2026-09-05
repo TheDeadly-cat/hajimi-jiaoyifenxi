@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, build_opener
@@ -82,7 +83,7 @@ class HostDeliveryEndpointTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["ready"])
         self.assertEqual(payload["status"], "ready")
-        self.assertEqual(payload["schema_version"], "host_readiness_v1")
+        self.assertEqual(payload["schema_version"], "host_readiness_v2")
         self.assertEqual(payload["service"]["id"], "ai_collaboration_studio")
         self.assertTrue(payload["checks"]["startup_gate"]["ready"])
         self.assertTrue(payload["checks"]["database"]["ready"])
@@ -113,6 +114,58 @@ class HostDeliveryEndpointTests(unittest.TestCase):
         self.assertTrue(payload["checks"]["database"]["ready"])
         self.assertFalse(payload["checks"]["frontend_build"]["ready"])
 
+    def test_requested_monitoring_failure_is_explicit_host_degradation(self) -> None:
+        self.server.ai_studio_source_monitoring_runtime = SimpleNamespace(
+            settings=SimpleNamespace(enabled=True, auto_start=True),
+            snapshot=lambda: {
+                "status": "failed",
+                "thread_alive": False,
+                "liveness_verified": False,
+                "last_fatal_error_code": (
+                    "SOURCE_MONITORING_RUNTIME_INITIALIZE_FAILED"
+                ),
+            },
+        )
+
+        status, _, payload = self.get_json("/api/readiness")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ready"])
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["degraded"])
+        self.assertEqual(payload["status"], "ready_with_degradation")
+        monitoring = payload["checks"]["monitoring_runtime"]
+        self.assertTrue(monitoring["requested"])
+        self.assertFalse(monitoring["ready"])
+        self.assertFalse(monitoring["operational"])
+        self.assertEqual(monitoring["state"], "failed")
+        self.assertEqual(
+            monitoring["error_code"],
+            "SOURCE_MONITORING_RUNTIME_INITIALIZE_FAILED",
+        )
+
+    def test_live_degraded_monitoring_keeps_host_ready_but_not_fully_clear(self) -> None:
+        self.server.ai_studio_source_monitoring_runtime = SimpleNamespace(
+            settings=SimpleNamespace(enabled=True, auto_start=True),
+            snapshot=lambda: {
+                "status": "degraded",
+                "thread_alive": True,
+                "liveness_verified": True,
+                "last_fatal_error_code": "",
+            },
+        )
+
+        status, _, payload = self.get_json("/api/readiness")
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ready"])
+        self.assertTrue(payload["degraded"])
+        self.assertEqual(payload["status"], "ready_with_degradation")
+        monitoring = payload["checks"]["monitoring_runtime"]
+        self.assertTrue(monitoring["ready"])
+        self.assertTrue(monitoring["operational"])
+        self.assertEqual(monitoring["state"], "degraded")
+
     def test_version_matches_package_and_identifies_frontend_build(self) -> None:
         with patch.object(
             http_server.PROVIDERS,
@@ -137,7 +190,7 @@ class HostDeliveryEndpointTests(unittest.TestCase):
             payload["api"],
             {
                 "contract_version": "host_delivery_v1",
-                "readiness_schema_version": "host_readiness_v1",
+                "readiness_schema_version": "host_readiness_v2",
                 "version_schema_version": "host_version_v2",
             },
         )
@@ -676,7 +729,7 @@ class LauncherDeliveryContractTests(unittest.TestCase):
         self.assertIn("/api/readiness", launcher)
         self.assertIn("/api/version", launcher)
         self.assertIn("/api/integration/manifest", launcher)
-        self.assertIn('"host_readiness_v1"', launcher)
+        self.assertIn('"host_readiness_v2"', launcher)
         self.assertIn('"host_version_v1"', launcher)
         self.assertIn('"host_version_v2"', launcher)
         self.assertIn('"studio_integration_manifest_v2"', launcher)

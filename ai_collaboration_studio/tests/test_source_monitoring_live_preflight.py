@@ -351,8 +351,13 @@ class OfficialSourceLivePreflightTests(unittest.TestCase):
                 _checkpoint: dict,
                 *,
                 observed_at_ms: int,
-                max_items: int,
+                deadline_monotonic_ms: int = 0,
+                cancel_event=None,
+                etag: str = "",
+                last_modified: str = "",
+                max_items: int = 50,
             ) -> AdapterPollResult:
+                del deadline_monotonic_ms, cancel_event, etag, last_modified
                 payload = self.client.federal_reserve_releases(limit=max_items)
                 if payload["source_errors"]:
                     raise AssertionError("fixture parse unexpectedly failed")

@@ -25,6 +25,7 @@ from backend.source_monitoring.contracts import (  # noqa: E402
 )
 from backend.source_monitoring.initialization import (  # noqa: E402
     SourceMonitoringInitializationError,
+    build_static_seed_preview,
     plan_initial_poll,
     require_catch_up_confirmation_before_poll,
     require_initial_preview_match,
@@ -37,6 +38,7 @@ from backend.source_monitoring.supervisor import SourceMonitoringSupervisor  # n
 from backend.source_monitoring.supervisor import SourceMonitoringSupervisorError  # noqa: E402
 from backend.source_monitoring.settings import (  # noqa: E402
     SOURCE_MONITOR_CATCH_UP_MAX_ITEMS_ENV,
+    SOURCE_MONITOR_CONTINUOUS_EVENT_CUTOFF_ENV,
     SOURCE_MONITOR_FROM_TIME_ENV,
     SOURCE_MONITOR_INITIAL_MODE_ENV,
     SOURCE_MONITOR_INITIAL_PREVIEW_SHA256_ENV,
@@ -166,6 +168,40 @@ class SourceMonitoringInitialSettingsTests(unittest.TestCase):
             ):
                 SourceMonitoringSettings.from_environment(extra)
 
+    def test_dual_source_mode_uses_configured_official_and_forced_market_seed(self) -> None:
+        settings = SourceMonitoringSettings(
+            official_only=True,
+            allow_readonly_market=True,
+            initial_mode="catch_up",
+            catch_up_max_items=3,
+            continuous_event_cutoff="2026-08-31T04:00:00Z",
+        )
+
+        official = settings.initialization_policy_for(official_source=True)
+        market = settings.initialization_policy_for(official_source=False)
+
+        self.assertEqual(official.mode, "catch_up")
+        self.assertEqual(official.catch_up_max_items, 3)
+        self.assertEqual(market.mode, "seed_only")
+        self.assertEqual(market.catch_up_max_items, 0)
+        self.assertEqual(market.initial_from_time, "")
+        self.assertEqual(
+            market.continuous_event_cutoff,
+            "2026-08-31T04:00:00Z",
+        )
+        with self.assertRaises(SourceMonitoringSettingsError):
+            SourceMonitoringSettings(official_only=False, allow_readonly_market=False)
+
+    def test_continuous_event_cutoff_environment_is_explicit_and_canonical(self) -> None:
+        settings = SourceMonitoringSettings.from_environment({
+            SOURCE_MONITOR_CONTINUOUS_EVENT_CUTOFF_ENV:
+                "2026-09-01T12:00:00.123000+08:00",
+        })
+        self.assertEqual(
+            settings.continuous_event_cutoff,
+            "2026-09-01T04:00:00.123Z",
+        )
+
 
 class SourceMonitoringInitialPlannerTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -255,7 +291,7 @@ class SourceMonitoringInitialPlannerTests(unittest.TestCase):
             plan.preview["preview_sha256"],
         )
 
-    def test_from_time_is_inclusive_and_remains_a_continuous_filter(self) -> None:
+    def test_from_time_is_initial_only_and_continuous_cutoff_is_explicit(self) -> None:
         settings = SourceMonitoringSettings(
             initial_mode="from_time",
             from_time="2026-08-31T04:00:00Z",
@@ -263,11 +299,94 @@ class SourceMonitoringInitialPlannerTests(unittest.TestCase):
         initial = self.plan(settings)
         later = self.plan(settings, initial_required=False)
 
-        for plan in (initial, later):
-            self.assertEqual(
-                [item["external_item_id"] for item in plan.selected_items],
-                ["initial-2", "initial-3"],
-            )
+        self.assertEqual(
+            [item["external_item_id"] for item in initial.selected_items],
+            ["initial-2", "initial-3"],
+        )
+        self.assertEqual(
+            [item["external_item_id"] for item in later.selected_items],
+            ["initial-1", "initial-2", "initial-3"],
+        )
+
+        continuous = self.plan(
+            SourceMonitoringSettings(
+                initial_mode="from_time",
+                from_time="2026-08-31T04:00:00Z",
+                continuous_event_cutoff="2026-08-31T04:00:00Z",
+            ),
+            initial_required=False,
+        )
+        self.assertEqual(
+            [item["external_item_id"] for item in continuous.selected_items],
+            ["initial-2", "initial-3"],
+        )
+
+    def test_revision_uses_poll_observation_for_initial_and_continuous_cutoffs(self) -> None:
+        revision = _item(1, "2026-08-31T03:00:00Z")
+        revision["extensions"] = {
+            "macro_official_v1": {"event_state": "revised"},
+        }
+        settings = SourceMonitoringSettings(
+            initial_mode="from_time",
+            from_time="2026-08-31T04:00:00Z",
+            continuous_event_cutoff="2026-08-31T04:00:00Z",
+        )
+
+        initial = self.plan(settings, result=_result([revision]))
+        continuous = self.plan(
+            settings,
+            result=_result([revision]),
+            initial_required=False,
+        )
+
+        self.assertEqual(len(initial.selected_items), 1)
+        self.assertEqual(len(continuous.selected_items), 1)
+        self.assertEqual(
+            initial.selected_items[0]["occurred_at"],
+            "2026-08-31T03:00:00Z",
+        )
+
+    def test_json_ir_revision_uses_observation_cutoff_without_changing_published_time(self) -> None:
+        revision = _item(1, "2026-08-31T03:00:00Z")
+        revision["extensions"] = {"company_ir_v2": {"is_revision": True}}
+        settings = SourceMonitoringSettings(initial_mode="from_time", from_time="2026-08-31T04:00:00Z",
+                                            continuous_event_cutoff="2026-08-31T04:00:00Z")
+        for initial_required in (True, False):
+            plan = self.plan(settings, result=_result([revision]), initial_required=initial_required)
+            self.assertEqual(len(plan.selected_items), 1)
+            self.assertEqual(plan.selected_items[0]["occurred_at"], "2026-08-31T03:00:00Z")
+
+    def test_static_market_seed_preview_contains_no_snapshot_or_next_checkpoint(self) -> None:
+        metadata = _metadata(official=False)
+        policy = SourceMonitoringSettings(
+            official_only=True,
+            allow_readonly_market=True,
+        ).initialization_policy_for(official_source=False)
+        seed_policy = {
+            "version": "source_monitoring_initial_seed_policy_v1",
+            "initial_mode": "seed_only",
+            "symbol_allowlist": ["US.MU", "US.SNDK", "US.WDC", "US.STX"],
+            "execution_capability": "none",
+            "live_trading_allowed": False,
+            "adapter_key": metadata.adapter_key,
+            "config_version": metadata.config_version,
+            "adapter_config_sha256": "a" * 64,
+            "broker_policy_sha256": "b" * 64,
+        }
+        from backend.source_monitoring.contracts import canonical_sha256
+
+        seed_policy["source_policy_sha256"] = canonical_sha256(seed_policy)
+        preview = build_static_seed_preview(
+            metadata=metadata,
+            initialization_policy=policy,
+            initial_seed_policy=seed_policy,
+            starting_checkpoint={},
+        )
+
+        self.assertEqual(preview["preview_kind"], "static_seed_policy")
+        self.assertEqual(preview["source_policy_sha256"], seed_policy["source_policy_sha256"])
+        self.assertNotIn("captured_at_ms", preview)
+        self.assertNotIn("next_checkpoint_sha256", preview)
 
     def test_partial_or_rejected_first_poll_cannot_initialize_or_import(self) -> None:
         result = _result(
@@ -327,10 +446,13 @@ class _InitialModeAdapter:
         checkpoint: dict[str, object],
         *,
         observed_at_ms: int,
+        deadline_monotonic_ms: int = 0,
+        cancel_event=None,
         etag: str = "",
         last_modified: str = "",
         max_items: int = 50,
     ) -> AdapterPollResult:
+        del deadline_monotonic_ms, cancel_event
         self.poll_count += 1
         cursor = checkpoint.get("cursor", 0)
         return AdapterPollResult.build(

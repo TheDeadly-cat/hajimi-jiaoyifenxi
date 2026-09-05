@@ -31,6 +31,9 @@ SOURCE_MONITOR_INITIAL_PREVIEW_SHA256_ENV = (
     "AI_STUDIO_SOURCE_MONITOR_INITIAL_PREVIEW_SHA256"
 )
 SOURCE_MONITOR_FROM_TIME_ENV = "AI_STUDIO_SOURCE_MONITOR_FROM_TIME"
+SOURCE_MONITOR_CONTINUOUS_EVENT_CUTOFF_ENV = (
+    "AI_STUDIO_SOURCE_MONITOR_CONTINUOUS_EVENT_CUTOFF"
+)
 
 SOURCE_MONITOR_INITIAL_MODES = ("seed_only", "catch_up", "from_time")
 
@@ -195,6 +198,108 @@ def _normalize_from_time(value: Any, *, required: bool) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceMonitoringInitializationPolicy:
+    """One source class' effective, side-effect-free initialization policy."""
+
+    mode: str
+    catch_up_max_items: int
+    initial_preview_sha256: str
+    initial_from_time: str
+    continuous_event_cutoff: str
+    max_items_per_run: int
+
+    def __post_init__(self) -> None:
+        if type(self.mode) is not str or self.mode not in SOURCE_MONITOR_INITIAL_MODES:
+            raise SourceMonitoringSettingsError(
+                "SOURCE_MONITORING_INITIAL_MODE_INVALID",
+                "initialization policy mode is invalid",
+            )
+        if (
+            type(self.catch_up_max_items) is not int
+            or not 0 <= self.catch_up_max_items <= MAX_OBSERVED_ITEMS_PER_POLL
+        ):
+            raise SourceMonitoringSettingsError(
+                "SOURCE_MONITORING_INITIAL_LIMIT_INVALID",
+                "initialization policy catch-up limit is invalid",
+            )
+        if (
+            type(self.max_items_per_run) is not int
+            or not 1 <= self.max_items_per_run <= MAX_OBSERVED_ITEMS_PER_POLL
+        ):
+            raise SourceMonitoringSettingsError(
+                "SOURCE_MONITORING_MAX_ITEMS_INVALID",
+                "initialization policy max item limit is invalid",
+            )
+        if (
+            type(self.initial_preview_sha256) is not str
+            or (
+                self.initial_preview_sha256
+                and _SHA256_RE.fullmatch(self.initial_preview_sha256) is None
+            )
+        ):
+            raise SourceMonitoringSettingsError(
+                "SOURCE_MONITORING_INITIAL_PREVIEW_INVALID",
+                "initialization policy preview digest is invalid",
+            )
+        clean_initial_from_time = _normalize_from_time(
+            self.initial_from_time,
+            required=self.mode == "from_time",
+        )
+        clean_continuous_cutoff = _normalize_from_time(
+            self.continuous_event_cutoff,
+            required=False,
+        )
+        object.__setattr__(self, "initial_from_time", clean_initial_from_time)
+        object.__setattr__(
+            self,
+            "continuous_event_cutoff",
+            clean_continuous_cutoff,
+        )
+        if self.mode == "seed_only" and (
+            self.catch_up_max_items != 0
+            or self.initial_preview_sha256
+            or self.initial_from_time
+        ):
+            raise SourceMonitoringSettingsError(
+                "SOURCE_MONITORING_INITIAL_SETTING_CONFLICT",
+                "seed-only initialization policy contains incompatible fields",
+            )
+        if self.mode == "catch_up" and (
+            not 1 <= self.catch_up_max_items <= self.max_items_per_run
+            or self.initial_from_time
+        ):
+            raise SourceMonitoringSettingsError(
+                "SOURCE_MONITORING_INITIAL_SETTING_CONFLICT",
+                "catch-up initialization policy contains incompatible fields",
+            )
+        if self.mode == "from_time" and (
+            self.catch_up_max_items != 0 or self.initial_preview_sha256
+        ):
+            raise SourceMonitoringSettingsError(
+                "SOURCE_MONITORING_INITIAL_SETTING_CONFLICT",
+                "from-time initialization policy contains incompatible fields",
+            )
+
+    @property
+    def initial_from_time_ms(self) -> int:
+        if not self.initial_from_time:
+            return 0
+        parsed = datetime.fromisoformat(
+            self.initial_from_time.replace("Z", "+00:00")
+        )
+        return int(parsed.timestamp() * 1_000)
+
+    @property
+    def continuous_event_cutoff_ms(self) -> int:
+        if not self.continuous_event_cutoff:
+            return 0
+        parsed = datetime.fromisoformat(
+            self.continuous_event_cutoff.replace("Z", "+00:00")
+        )
+        return int(parsed.timestamp() * 1_000)
+
+
+@dataclass(frozen=True, slots=True)
 class SourceMonitoringSettings:
     enabled: bool = False
     auto_start: bool = False
@@ -207,6 +312,7 @@ class SourceMonitoringSettings:
     catch_up_max_items: int = 0
     initial_preview_sha256: str = ""
     from_time: str = ""
+    continuous_event_cutoff: str = ""
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -232,11 +338,11 @@ class SourceMonitoringSettings:
                 "SOURCE_MONITORING_MAX_ITEMS_INVALID",
                 "max_items_per_run must be a native integer between 1 and 50",
             )
-        if self.official_only is self.allow_readonly_market:
+        if not (self.official_only or self.allow_readonly_market):
             raise SourceMonitoringSettingsError(
                 "SOURCE_MONITORING_SOURCE_MODE_INVALID",
                 (
-                    "exactly one of official_only or allow_readonly_market "
+                    "at least one of official_only or allow_readonly_market "
                     "must be true"
                 ),
             )
@@ -276,6 +382,15 @@ class SourceMonitoringSettings:
             required=self.initial_mode == "from_time",
         )
         object.__setattr__(self, "from_time", clean_from_time)
+        clean_continuous_event_cutoff = _normalize_from_time(
+            self.continuous_event_cutoff,
+            required=False,
+        )
+        object.__setattr__(
+            self,
+            "continuous_event_cutoff",
+            clean_continuous_event_cutoff,
+        )
         if self.initial_mode == "seed_only" and (
             self.catch_up_max_items != 0
             or self.initial_preview_sha256
@@ -314,6 +429,55 @@ class SourceMonitoringSettings:
         parsed = datetime.fromisoformat(self.from_time.replace("Z", "+00:00"))
         return int(parsed.timestamp() * 1_000)
 
+    @property
+    def initial_from_time(self) -> str:
+        """Compatibility-preserving name for the now-initial-only cutoff."""
+
+        return self.from_time
+
+    @property
+    def initial_from_time_ms(self) -> int:
+        return self.from_time_ms
+
+    @property
+    def continuous_event_cutoff_ms(self) -> int:
+        if not self.continuous_event_cutoff:
+            return 0
+        parsed = datetime.fromisoformat(
+            self.continuous_event_cutoff.replace("Z", "+00:00")
+        )
+        return int(parsed.timestamp() * 1_000)
+
+    def initialization_policy_for(
+        self,
+        *,
+        official_source: bool,
+    ) -> SourceMonitoringInitializationPolicy:
+        """Resolve configured official policy or the forced market seed policy."""
+
+        if type(official_source) is not bool:
+            raise SourceMonitoringSettingsError(
+                "SOURCE_MONITORING_SETTING_TYPE_INVALID",
+                "official_source must be a native boolean",
+            )
+        if official_source:
+            return SourceMonitoringInitializationPolicy(
+                mode=self.initial_mode,
+                catch_up_max_items=self.catch_up_max_items,
+                initial_preview_sha256=self.initial_preview_sha256,
+                initial_from_time=self.from_time,
+                continuous_event_cutoff=self.continuous_event_cutoff,
+                max_items_per_run=self.max_items_per_run,
+            )
+        return SourceMonitoringInitializationPolicy(
+            mode="seed_only",
+            catch_up_max_items=0,
+            initial_preview_sha256="",
+            initial_from_time="",
+            continuous_event_cutoff=self.continuous_event_cutoff,
+            max_items_per_run=self.max_items_per_run,
+        )
+
     @classmethod
     def from_environment(
         cls,
@@ -335,6 +499,10 @@ class SourceMonitoringSettings:
             SOURCE_MONITOR_INITIAL_PREVIEW_SHA256_ENV,
         )
         raw_from_time = _environment_value(source, SOURCE_MONITOR_FROM_TIME_ENV)
+        raw_continuous_event_cutoff = _environment_value(
+            source,
+            SOURCE_MONITOR_CONTINUOUS_EVENT_CUTOFF_ENV,
+        )
         return cls(
             enabled=_strict_boolean(
                 source,
@@ -371,6 +539,11 @@ class SourceMonitoringSettings:
             catch_up_max_items=catch_up_max_items,
             initial_preview_sha256=initial_preview_sha256,
             from_time=("" if raw_from_time is None else raw_from_time),
+            continuous_event_cutoff=(
+                ""
+                if raw_continuous_event_cutoff is None
+                else raw_continuous_event_cutoff
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -386,6 +559,7 @@ class SourceMonitoringSettings:
             "catch_up_max_items": self.catch_up_max_items,
             "initial_preview_sha256": self.initial_preview_sha256,
             "from_time": self.from_time,
+            "continuous_event_cutoff": self.continuous_event_cutoff,
         }
 
 
@@ -399,6 +573,7 @@ __all__ = [
     "SOURCE_MONITOR_AUTO_START_ENV",
     "SOURCE_MONITOR_ALLOW_READONLY_MARKET_ENV",
     "SOURCE_MONITOR_CATCH_UP_MAX_ITEMS_ENV",
+    "SOURCE_MONITOR_CONTINUOUS_EVENT_CUTOFF_ENV",
     "SOURCE_MONITOR_DRY_RUN_ENV",
     "SOURCE_MONITOR_ENABLED_ENV",
     "SOURCE_MONITOR_FROM_TIME_ENV",
@@ -410,5 +585,6 @@ __all__ = [
     "SOURCE_MONITOR_TRADING_IMPACT_RULES_ENABLED_ENV",
     "SourceMonitoringSettings",
     "SourceMonitoringSettingsError",
+    "SourceMonitoringInitializationPolicy",
     "load_source_monitoring_settings",
 ]

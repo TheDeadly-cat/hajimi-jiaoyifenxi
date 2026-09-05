@@ -22,6 +22,7 @@ from unittest import mock
 os.environ["AI_STUDIO_SKIP_LOCAL_ENV"] = "1"
 
 from backend.source_monitoring import futu_live_preflight as preflight_module  # noqa: E402
+from backend.source_monitoring import futu_readonly_broker as broker_module  # noqa: E402
 from backend.source_monitoring.futu_live_preflight import (  # noqa: E402
     FUTU_LIVE_PREFLIGHT_CONFIRMATION,
     FUTU_LIVE_PREFLIGHT_MAX_OUTPUT_BYTES,
@@ -259,29 +260,72 @@ class FutuLivePreflightTests(unittest.TestCase):
             with (
                 self.subTest(failure=type(failure).__name__),
                 mock.patch.object(
-                    preflight_module.importlib.metadata,
+                    broker_module.importlib.metadata,
                     "version",
                     return_value=FUTU_LIVE_PREFLIGHT_SDK_VERSION,
                 ),
                 mock.patch.object(
-                    preflight_module.importlib,
+                    broker_module.importlib,
                     "import_module",
                     side_effect=failure,
                 ),
             ):
-                loaded = preflight_module._production_dependencies()
-                self.assertEqual(
-                    loaded.sdk_load_error_code,
-                    "FUTU_SDK_IMPORT_FAILED",
-                )
+                sdk, version, error_code = broker_module._load_worker_sdk()
+                self.assertIsNone(sdk)
+                self.assertEqual(version, FUTU_LIVE_PREFLIGHT_SDK_VERSION)
+                self.assertEqual(error_code, "FUTU_SDK_IMPORT_FAILED")
                 report = _run_futu_live_preflight_injected(
                     confirmation=FUTU_LIVE_PREFLIGHT_CONFIRMATION,
-                    dependencies=loaded,
+                    dependencies=dependencies(
+                        FakeQuoteContext(rows=quote_rows()),
+                        sdk_load_error_code=error_code,
+                    ),
                 )
                 self.assertEqual(report["error_code"], "FUTU_SDK_IMPORT_FAILED")
                 self.assertTrue(all(count == 0 for count in report["calls"].values()))
                 self.assertNotIn("SECRET", json.dumps(report, ensure_ascii=True))
                 validate_futu_live_preflight_report(report)
+
+    def test_production_runner_obtains_snapshot_through_one_shot_broker(self) -> None:
+        self.assertEqual(
+            cli_module._FIXED_BROKER_POLICY_SHA256,
+            broker_module.FUTU_READONLY_BROKER_POLICY_SHA256,
+        )
+        events: list[object] = []
+
+        class FakeBroker:
+            def __init__(self, *, mode: str, timeout_ms: int) -> None:
+                events.append(("init", mode, timeout_ms))
+
+            def quote_batch_observation(self, symbols, *, force):
+                events.append(("quote", tuple(symbols), force))
+                return {
+                    "ok": False,
+                    "error_code": "FUTU_SDK_UNAVAILABLE",
+                    "sdk_version": "",
+                    "calls": preflight_module._blank_calls(),
+                    "snapshot": None,
+                }
+
+            def stop(self) -> bool:
+                events.append("stop")
+                return True
+
+        with (
+            mock.patch.object(preflight_module, "_ISOLATED_CLI_IMPORT_GUARD_ATTESTED", True),
+            mock.patch.object(preflight_module, "_dependency_seal_intact", return_value=True),
+            mock.patch.object(preflight_module, "FutuReadOnlyBroker", FakeBroker),
+        ):
+            report = preflight_module.run_futu_live_preflight(
+                confirmation=FUTU_LIVE_PREFLIGHT_CONFIRMATION
+            )
+
+        self.assertEqual(report["error_code"], "FUTU_SDK_UNAVAILABLE")
+        self.assertEqual(events, [
+            ("init", "one_shot", 10_000),
+            ("quote", tuple(FUTU_LIVE_PREFLIGHT_SYMBOLS), True),
+            "stop",
+        ])
 
     def test_guarded_sdk_rejects_noncanonical_host_port_and_symbols(self) -> None:
         context = FakeQuoteContext(rows=quote_rows())

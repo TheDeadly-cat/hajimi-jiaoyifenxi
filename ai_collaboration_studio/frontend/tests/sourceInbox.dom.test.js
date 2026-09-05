@@ -208,7 +208,7 @@ function monitoringHealth() {
   return {
     ok: true,
     source_monitoring_health: {
-      version: "source_monitoring_health_service_v2",
+      version: "source_monitoring_health_service_v3",
       health_projection_version: "source_monitoring_health_v1",
       captured_at_ms: 1_777_777_777_000,
       state: "disabled",
@@ -227,6 +227,7 @@ function monitoringHealth() {
         catch_up_max_items: 0,
         initial_preview_sha256: "",
         from_time: "",
+        continuous_event_cutoff: "",
       },
       persistence_available: true,
       runtime_liveness_verified: false,
@@ -395,7 +396,7 @@ function operatorControl(adapterOverrides = {}) {
   return {
     ok: true,
     source_monitoring_operator_control: {
-      version: "source_monitoring_operator_control_v1",
+      version: "source_monitoring_operator_control_v2",
       captured_at_ms: 1_777_777_777_000,
       settings: {
         global_enabled: true,
@@ -404,6 +405,7 @@ function operatorControl(adapterOverrides = {}) {
         initial_mode: "seed_only",
         catch_up_max_items: 0,
         from_time: "",
+        continuous_event_cutoff: "",
       },
       adapters: [operatorAdapter(adapterOverrides)],
       safety: operatorSafety(),
@@ -443,7 +445,10 @@ function operatorPreview(overrides = {}) {
 }
 
 function enablementResult({
+  adapterKey = "sec_filings",
+  configVersion = "sec_filings_config_v2",
   enabled,
+  network = undefined,
   stateVersion,
   initializationAuthorized = enabled,
   previewSha256 = enabled ? "a".repeat(64) : "",
@@ -452,14 +457,14 @@ function enablementResult({
     ok: true,
     source_monitoring_enablement_result: {
       version: "source_monitoring_enablement_result_v1",
-      adapter_key: "sec_filings",
-      config_version: "sec_filings_config_v2",
+      adapter_key: adapterKey,
+      config_version: configVersion,
       state_version: stateVersion,
       persisted_enabled: enabled,
       initialization_authorized: initializationAuthorized,
       preview_sha256: previewSha256,
       safety: operatorSafety({
-        network: initializationAuthorized ? null : 0,
+        network: network ?? (initializationAuthorized ? null : 0),
         preview: true,
         writeFlags: true,
         writes: 1,
@@ -982,6 +987,57 @@ test("deep-linked events, source filters, sector mappings, health, and notificat
   assert.equal(requests.some((request) => request.options.method === "POST"), false);
 });
 
+test("Micron Q4 metadata with neutral v2 sidecar renders no match without a mapping error or RSS hypotheses", async () => {
+  const requests = [];
+  const sidecar = sectorImpactProjection();
+  Object.assign(sidecar, { status: "NO_MATCH", hypothesis_count: 0 });
+  Object.assign(sidecar.projection, { evaluation: "no_match", matched_rule_ids: [], hypotheses: [] });
+  sidecar.projection.source_binding.adapter_id = "company_ir";
+  // Fields mirror the backend Q4 neutral projection; RSS rule IDs stay empty.
+  sidecar.projection.source_item_binding.source_semantic_binding = {
+    version: "trading_impact_source_semantics_v2", source_format: "micron_q4_public_json_v1",
+    adapter_id: "company_ir", rule_id: "", source_index: 1, symbol: "US.MU", form: "",
+    event_type: "earnings_schedule", revision_state: "original", authority: "", family: "",
+    subject_phase: "", event_state: "", occurrence_basis: "", upstream_rule_id: "", session_date: "",
+    anchor_at: "2026-08-28T12:55:00Z", anchor_semantics: "source_publication_time", precision: "timestamp",
+  };
+  const item = sourceRecord({
+    id: "source_item_q4", headline: "Micron Q4 metadata fixture",
+    sourceChannel: "official_source_monitor", sourceKey: "company_ir", sourceTier: "official_source",
+    impactRuleProjections: [sidecar],
+  });
+  Object.assign(item.item, {
+    item_type: "company_ir_release", severity: "info", impact_hypotheses: [],
+    summary: "Fixed Q4 metadata fixture; no announcement body was ingested.",
+    extensions: { company_ir_v2: { source_format: "micron_q4_public_json_v1" } },
+    sources: [
+      { url: "https://investors.micron.com/news/press-release/2026/fixture/default.aspx",
+        publisher: "Micron Technology Investor Relations", source_type: "company_ir_time_metadata",
+        published_at: "2026-08-28T12:55:00Z", content_sha256: "c".repeat(64) },
+      { url: "https://investors.micron.com/feed/PressRelease.svc/GetPressReleaseList",
+        publisher: "Micron Technology Investor Relations", source_type: "company_ir_json_projection",
+        published_at: "2026-08-28T12:55:00Z", content_sha256: "d".repeat(64) },
+    ],
+  });
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) return response({ ok: true, source_inbox: sourceInboxList([item]) });
+    if (path === "/api/monitoring/events/source_item_q4") return response({ ok: true, source_item: item });
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+  const host = await mountPanel({ requestedItemId: "source_item_q4" });
+  assert.match(host.textContent, /Micron Q4 metadata fixture/);
+  const impact = host.querySelector(".source-inbox-impact-rules");
+  assert.ok(impact);
+  assert.match(impact.textContent, /已执行固定规则，但没有匹配映射/);
+  assert.match(impact.textContent, /不等于“没有影响”/);
+  assert.doesNotMatch(impact.textContent, /影响映射完整性校验失败|行业 ·|DRAM/);
+  assert.equal(impact.querySelector(".source-inbox-impact-list"), null);
+  assert.ok(requests.every(({ options }) => !options.method || options.method === "GET"));
+  assert.equal(requests.some(({ path }) => /providers|market|rounds\/stream/.test(path)), false);
+});
+
 test("runtime health renders fresh progress neutrally and stalled state accessibly", async () => {
   let healthPayload = activeMonitoringHealth();
   globalThis.fetch = async (path) => {
@@ -1018,7 +1074,7 @@ test("runtime health renders fresh progress neutrally and stalled state accessib
   const failedSummary = failedHost.querySelector(".source-inbox-health summary");
   assert.doesNotMatch(failedSummary.textContent, /最近检查成功/);
   assert.match(failedSummary.textContent, /运行失败/);
-  assert.equal(failedSummary.querySelector('[role="alert"]')?.textContent, "运行失败 · 1 个 Adapter");
+  assert.equal(failedSummary.querySelector('[role="alert"]')?.textContent, "监控降级 · 运行失败 · 1 个 Adapter");
 
   healthPayload = activeMonitoringHealth();
   healthPayload.source_monitoring_health.runtime.thread_alive = false;
@@ -1026,6 +1082,101 @@ test("runtime health renders fresh progress neutrally and stalled state accessib
   const forgedWarning = forgedHost.querySelector('.source-inbox-health [role="alert"]');
   assert.ok(forgedWarning);
   assert.match(forgedWarning.textContent, /未满足零执行与 Runtime 在线性边界/);
+});
+
+test("monitoring shows effective settings and requires loaded complete baseline before normal status", async () => {
+  const requests = [];
+  const healthPayload = activeMonitoringHealth();
+  const view = healthPayload.source_monitoring_health;
+  view.settings.dry_run = false;
+  view.runtime.dry_run = false;
+  view.runtime.active_adapter = "";
+  view.state = "healthy";
+  view.counts.running = 0;
+  view.counts.healthy = 1;
+  Object.assign(view.adapters[0], {
+    state: "healthy", running: false,
+    latest_run: {
+      version: "source_adapter_run_v1", status: "SUCCEEDED", dry_run: false,
+      observed_count: 0, accepted_count: 0, duplicate_count: 0, rejected_count: 0,
+      completed_at_ms: 1_777_777_776_900,
+    },
+  });
+  const controlPayload = operatorControl({
+    config_version: "sec_filings_config_v1", state_version: 1,
+    persisted_state: true, persisted_enabled: true, effective_enabled: true,
+    initialization_status: "complete", initialization_preview_sha256: "a".repeat(64),
+    initialization_completed_at_ms: 1_777_777_776_900,
+    can_preview: false, can_disable: true,
+  });
+  Object.assign(controlPayload.source_monitoring_operator_control.settings, { auto_start: true, dry_run: false });
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(healthPayload);
+    if (path === "/api/monitoring/adapters/control") return response(controlPayload);
+    if (path.startsWith("/api/monitoring/inbox?")) return response({ ok: true, source_inbox: sourceInboxList([]) });
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+  const host = await mountPanel();
+  const summary = host.querySelector(".source-inbox-health summary");
+  assert.match(summary.textContent, /基线状态未读取/);
+  assert.doesNotMatch(summary.textContent, /监控正常/);
+  assert.match(host.textContent, /来源：当前启动进程/);
+  assert.match(host.textContent, /写入 .env.local 不会自动生效/);
+  assert.match(host.textContent, /轮询周期 15 分钟/);
+  assert.match(host.textContent, /上次检查.*下次检查/);
+  assert.match(host.textContent, /检查成功、无新增/);
+  assert.match(host.textContent, /最近成功/);
+  assert.equal(requests.some(({ path }) => path === "/api/monitoring/adapters/control"), false);
+
+  await click(summary);
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  assert.match(summary.textContent, /监控正常/);
+
+  Object.assign(controlPayload.source_monitoring_operator_control.adapters[0], {
+    initialization_status: "legacy", initialization_mode: "",
+    initialization_preview_sha256: "", initialization_completed_at_ms: 0,
+  });
+  await click(buttonWithText(host, "重读设置"));
+  assert.match(summary.textContent, /基线未完成或待核实/);
+  assert.doesNotMatch(summary.textContent, /监控正常/);
+  assert.match(host.textContent, /旧 SEC 状态无法证明完整首次基线/);
+  assert.match(host.textContent, /不自动重置或迁移/);
+  assert.ok(requests.every(({ options }) => !options.method || options.method === "GET"));
+});
+
+test("monitoring dry-run and failed or migration-blocked checks do not render successful empty results", async () => {
+  let healthPayload = activeMonitoringHealth();
+  healthPayload.source_monitoring_health.adapters[0].latest_run = {
+    version: "source_adapter_run_v1", status: "DRY_RUN", dry_run: true,
+    observed_count: 0, accepted_count: 0, duplicate_count: 0, rejected_count: 0,
+    completed_at_ms: 1_777_777_776_900,
+  };
+  globalThis.fetch = async (path) => {
+    if (path === "/api/monitoring/health") return response(healthPayload);
+    if (path.startsWith("/api/monitoring/inbox?")) return response({ ok: true, source_inbox: sourceInboxList([]) });
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+  const trialHost = await mountPanel();
+  assert.match(trialHost.querySelector(".source-inbox-health summary").textContent, /监控试运行/);
+  assert.match(trialHost.textContent, /观察到 0 条；未导入收件箱/);
+  assert.doesNotMatch(trialHost.textContent, /检查成功、无新增/);
+
+  healthPayload = activeMonitoringHealth({ failed: true });
+  const adapter = healthPayload.source_monitoring_health.adapters[0];
+  Object.assign(adapter, {
+    config_status: "migration_required", enabled: false, last_error_code: "SEC_BASELINE_UPGRADE_REQUIRED",
+    latest_run: {
+      version: "source_adapter_run_v1", status: "FAILED", dry_run: false,
+      observed_count: 0, accepted_count: 0, duplicate_count: 0, rejected_count: 0,
+      completed_at_ms: 1_777_777_776_900,
+    },
+  });
+  const failedHost = await mountPanel();
+  assert.match(failedHost.querySelector(".source-inbox-health summary").textContent, /监控降级/);
+  assert.match(failedHost.textContent, /最近检查失败/);
+  assert.match(failedHost.textContent, /旧 SEC 状态需先核对完整基线并明确升级方案/);
+  assert.doesNotMatch(failedHost.textContent, /检查成功、无新增/);
 });
 
 test("initial health read waits for the inbox database read to finish", async () => {
@@ -1128,10 +1279,25 @@ test("adapter enablement stays lazy and requires a sealed preview plus explicit 
   assert.equal(requests.some((request) => /providers|market|rounds\/stream/.test(request.path)), false);
 });
 
-test("readonly market initialization preview discloses its bounded market read", async () => {
+test("readonly market initialization preview stays static and performs no market read", async () => {
   const requests = [];
   const marketPreview = operatorPreview();
-  marketPreview.source_monitoring_operator_preview.safety.market_calls_performed = 1;
+  Object.assign(marketPreview.source_monitoring_operator_preview, {
+    version: "source_monitoring_operator_static_seed_preview_v2",
+    preview_kind: "static_seed_policy",
+    candidate_evidence: "deferred_to_first_runtime_poll",
+    candidate_count: 0,
+    selected_count: 0,
+    skipped_count: 0,
+    earliest_occurred_at: "",
+    latest_occurred_at: "",
+    source_policy_sha256: "d".repeat(64),
+    symbol_allowlist: ["US.MU", "US.SNDK", "US.WDC", "US.STX"],
+    next_checkpoint_sha256: "b".repeat(64),
+  });
+  marketPreview.source_monitoring_operator_preview.safety.market_calls_performed = 0;
+  marketPreview.source_monitoring_operator_preview.safety.network_requests_performed = 0;
+  marketPreview.source_monitoring_operator_preview.safety.network_requests_accounting = "exact";
   globalThis.fetch = async (path, options = {}) => {
     requests.push({ path, options });
     if (path === "/api/monitoring/health") return response(operatorHealth());
@@ -1150,13 +1316,125 @@ test("readonly market initialization preview discloses its bounded market read",
   };
 
   const host = await mountPanel();
+  assert.match(host.textContent, /readonly_market 首次预览仅展示静态政策，不读取行情/);
   await click(host.querySelector(".source-inbox-health summary"));
   await click(buttonWithText(host, "查看 Adapter 接入设置"));
-  assert.match(host.textContent, /readonly_market 首次预览会执行有界只读行情调用/);
+  assert.match(host.textContent, /readonly_market 首次只预览静态政策，不读取行情/);
   await click(buttonWithText(host, "预览首次读取范围"));
-  assert.match(host.textContent, /只读市场调用1/);
+  assert.match(host.textContent, /只读市场调用0/);
+  assert.match(host.textContent, /当前未读取行情，首次 Runtime 成功轮询/);
   assert.equal(requests.filter((request) => request.path.endsWith("/initialization-preview")).length, 1);
   assert.equal(requests.some((request) => /providers|rounds\/stream/.test(request.path)), false);
+});
+
+test("dual source control binds market enablement to its effective seed policy", async () => {
+  const requests = [];
+  let marketEnabled = false;
+  const marketKey = "futu_anomaly_signals";
+  const marketConfig = "futu_anomaly_config_v2_0123456789abcdef";
+
+  const dualControl = () => {
+    const payload = operatorControl();
+    Object.assign(payload.source_monitoring_operator_control.settings, {
+      initial_mode: "catch_up",
+      catch_up_max_items: 2,
+    });
+    payload.source_monitoring_operator_control.adapters = [
+      operatorAdapter({
+        initialization_mode: "catch_up",
+      }),
+      operatorAdapter({
+        adapter_key: marketKey,
+        config_version: marketConfig,
+        source_class: "readonly_market",
+        source_channel: "futu_anomaly_monitor",
+        official_source: false,
+        initialization_mode: "seed_only",
+        ...(marketEnabled ? {
+          state_version: 1,
+          persisted_state: true,
+          persisted_enabled: true,
+          effective_enabled: true,
+          initialization_status: "authorized",
+          initialization_preview_sha256: "a".repeat(64),
+          pending_authorization: true,
+          can_preview: false,
+          can_disable: true,
+        } : {}),
+      }),
+    ];
+    return payload;
+  };
+
+  const marketPreview = operatorPreview({
+    version: "source_monitoring_operator_static_seed_preview_v2",
+    preview_kind: "static_seed_policy",
+    candidate_evidence: "deferred_to_first_runtime_poll",
+    adapter_key: marketKey,
+    config_version: marketConfig,
+    mode: "seed_only",
+    catch_up_max_items: 0,
+    from_time: "",
+    candidate_count: 0,
+    selected_count: 0,
+    skipped_count: 0,
+    earliest_occurred_at: "",
+    latest_occurred_at: "",
+    source_policy_sha256: "d".repeat(64),
+    symbol_allowlist: ["US.MU", "US.SNDK", "US.WDC", "US.STX"],
+    next_checkpoint_sha256: "b".repeat(64),
+  });
+  Object.assign(marketPreview.source_monitoring_operator_preview.safety, {
+    market_calls_performed: 0,
+    network_requests_performed: 0,
+    network_requests_accounting: "exact",
+  });
+
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") return response(dualControl());
+    if (path.endsWith("/initialization-preview")) return response(marketPreview);
+    if (path.endsWith("/enablement")) {
+      marketEnabled = true;
+      return response(enablementResult({
+        adapterKey: marketKey,
+        configVersion: marketConfig,
+        enabled: true,
+        network: 0,
+        stateVersion: 1,
+      }));
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  const marketCard = [...host.querySelectorAll(".source-monitoring-control-list article")]
+    .find((card) => card.textContent.includes(marketKey));
+  assert.ok(marketCard);
+  await click(buttonWithText(marketCard, "预览首次读取范围"));
+  assert.match(host.textContent, /当前未读取行情，首次 Runtime 成功轮询/);
+  const enableButton = buttonWithText(host, "确认保存 Adapter 启用状态");
+  assert.equal(enableButton.disabled, true);
+  await click(host.querySelector('.source-monitoring-confirmation input[type="checkbox"]'));
+  assert.equal(enableButton.disabled, false);
+  await click(enableButton);
+
+  const enableRequest = requests.find((request) => request.path.endsWith("/enablement"));
+  assert.deepEqual(JSON.parse(enableRequest.options.body), {
+    expected_state_version: 0,
+    expected_config_version: marketConfig,
+    enabled: true,
+    preview_sha256: "a".repeat(64),
+    confirmation: "ENABLE_SOURCE_MONITORING_ADAPTER",
+  });
+  assert.equal(marketEnabled, true);
+  assert.match(host.textContent, /Runtime 在线状态请以上方健康记录为准/);
 });
 
 test("first enable rejects a valid-looking receipt not bound to its preview", async () => {

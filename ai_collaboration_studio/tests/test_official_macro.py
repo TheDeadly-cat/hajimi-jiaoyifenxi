@@ -32,6 +32,7 @@ from backend.source_monitoring.default_registry import build_official_source_reg
 from backend.source_monitoring.adapters.macro_official import (
     OfficialMacroCalendarSourceAdapter,
 )
+from backend.source_poll_control import SourcePollCancelled
 
 
 FIXED_NOW = datetime(2026, 8, 31, 12, 0, tzinfo=timezone.utc)
@@ -364,6 +365,27 @@ class OfficialMacroParserTests(unittest.TestCase):
             response.read_limit,
             OFFICIAL_MACRO_MAX_RESPONSE_BYTES[FEDERAL_RESERVE_MONETARY_RSS_URL] + 1,
         )
+        self.assertEqual(response.socket.shutdown_calls, 1)
+        self.assertEqual(response.socket.real_close_calls, 1)
+
+    def test_default_transport_cancellation_interrupts_blocking_body(self) -> None:
+        response = BlockingResponse(b"never returned", "application/rss+xml")
+        cancel_event = threading.Event()
+        trigger = threading.Timer(0.02, cancel_event.set)
+        trigger.start()
+        try:
+            with self.assertRaises(SourcePollCancelled):
+                _read_official_response_body(
+                    response,
+                    OFFICIAL_MACRO_MAX_RESPONSE_BYTES[
+                        FEDERAL_RESERVE_MONETARY_RSS_URL
+                    ],
+                    deadline_seconds=5,
+                    cancel_event=cancel_event,
+                )
+        finally:
+            trigger.cancel()
+            trigger.join(timeout=0.2)
         self.assertEqual(response.socket.shutdown_calls, 1)
         self.assertEqual(response.socket.real_close_calls, 1)
 

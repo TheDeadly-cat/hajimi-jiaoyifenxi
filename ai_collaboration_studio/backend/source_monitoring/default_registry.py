@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import ipaddress
-
 from ..market.official_macro import (
     OFFICIAL_MACRO_TRANSPORT_IDENTITY,
     OfficialMacroSourceClient,
 )
-from ..market.futu_readonly import FutuUsMarketAdapter
 from .adapters.company_ir import CompanyIrSourceAdapter
 from .adapters.macro_official import (
     BlsReleaseSourceAdapter,
@@ -16,8 +13,14 @@ from .adapters.macro_official import (
     OfficialMacroCalendarSourceAdapter,
     TreasuryReleaseSourceAdapter,
 )
-from .adapters.sec_filings import SecFilingsSourceAdapter
 from .adapters.futu_anomaly import FutuAnomalySourceAdapter
+from .adapters.sec_filings import SecFilingsSourceAdapter
+from .futu_readonly_broker import (
+    FUTU_READONLY_BROKER_HOST,
+    FUTU_READONLY_BROKER_POLICY_SHA256,
+    FUTU_READONLY_BROKER_PORT,
+    FutuReadOnlyBroker,
+)
 from .registry import SourceAdapterRegistry
 
 
@@ -32,7 +35,7 @@ def build_official_source_registry() -> SourceAdapterRegistry:
     macro_calendar = OfficialMacroCalendarSourceAdapter()
     if sec._inner_transport_mode != "sec_default_https_v1":
         raise RuntimeError("production SEC registry requires the default HTTPS transport")
-    if ir._inner_transport_mode != "company_ir_default_https_v1":
+    if ir._inner_transport_mode != "company_ir_q4_json_and_rss_default_https_v1":
         raise RuntimeError("production IR registry requires the default HTTPS transport")
     macro_adapters = (federal_reserve, bls, treasury, macro_calendar)
     for adapter in macro_adapters:
@@ -54,29 +57,24 @@ def build_official_source_registry() -> SourceAdapterRegistry:
 def build_futu_anomaly_registry() -> SourceAdapterRegistry:
     """Return the separate, default-disabled local Futu anomaly registry.
 
-    Construction imports no SDK, probes no socket, and reads no quote.  The
-    production binding accepts only a literal loopback OpenD host and the exact
-    existing read-only quote client.
+    Construction imports no SDK, starts no subprocess, probes no socket, and
+    reads no quote.  The production binding accepts only the exact managed
+    isolated broker with its fixed loopback target and sealed policy.
     """
 
     adapter = FutuAnomalySourceAdapter()
     client = adapter._market_adapter
-    try:
-        address = ipaddress.ip_address(client.host)
-    except (AttributeError, ValueError) as exc:
-        raise RuntimeError(
-            "production Futu anomaly registry requires a literal loopback host"
-        ) from exc
     quote_batch = getattr(client, "quote_batch", None)
     quote_token = getattr(quote_batch, "__func__", quote_batch)
     if (
-        type(client) is not FutuUsMarketAdapter
+        type(client) is not FutuReadOnlyBroker
         or type(client.host) is not str
-        or client.host != str(address)
-        or address.is_loopback is not True
+        or client.host != FUTU_READONLY_BROKER_HOST
         or type(client.port) is not int
-        or not 1 <= client.port <= 65_535
-        or quote_token is not FutuUsMarketAdapter.quote_batch
+        or client.port != FUTU_READONLY_BROKER_PORT
+        or client.mode != "managed"
+        or client.policy_sha256 != FUTU_READONLY_BROKER_POLICY_SHA256
+        or quote_token is not FutuReadOnlyBroker.quote_batch
     ):
         raise RuntimeError(
             "production Futu anomaly registry requires the sealed local read-only quote client"

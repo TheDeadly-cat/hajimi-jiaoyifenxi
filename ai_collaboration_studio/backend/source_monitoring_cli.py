@@ -13,13 +13,14 @@ import json
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Sequence, TextIO
 
 
 SOURCE_MONITORING_CLI_VERSION = "source_monitoring_operator_cli_v1"
 SOURCE_MONITORING_INSTANCE_ACTIVE = "SOURCE_MONITORING_INSTANCE_ACTIVE"
+SOURCE_MONITORING_CLI_POLL_TIMEOUT_MS = 120_000
 _CONFIRM_RUN_ONCE = "RUN_ONCE"
 _ERROR_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,79}\Z")
 _SUCCESS_STATUSES = frozenset({"SUCCEEDED", "DRY_RUN"})
@@ -218,11 +219,50 @@ def _registry(settings: Any, dependencies: SourceMonitoringCliDependencies) -> A
         build_official_source_registry,
     )
 
-    return (
-        build_official_source_registry()
-        if settings.official_only
-        else build_futu_anomaly_registry()
+    registries = tuple(
+        registry
+        for enabled, registry in (
+            (
+                settings.official_only,
+                build_official_source_registry() if settings.official_only else None,
+            ),
+            (
+                settings.allow_readonly_market,
+                build_futu_anomaly_registry()
+                if settings.allow_readonly_market
+                else None,
+            ),
+        )
+        if enabled and registry is not None
     )
+    return registries[0] if len(registries) == 1 else registries
+
+
+def _registry_for_adapter(registry: Any, adapter_key: str) -> Any:
+    candidates = registry if type(registry) is tuple else (registry,)
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            candidate.require(adapter_key)
+            return candidate
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise _CliContractError("SOURCE_MONITORING_ADAPTER_NOT_FOUND")
+
+
+def _settings_for_registry(settings: Any, registry: Any) -> Any:
+    if (
+        getattr(settings, "official_only", None) is True
+        and getattr(settings, "allow_readonly_market", None) is True
+    ):
+        return replace(
+            settings,
+            official_only=registry.official_only,
+            allow_readonly_market=not registry.official_only,
+        )
+    return settings
 
 
 def _repository(store: Any, dependencies: SourceMonitoringCliDependencies) -> Any:
@@ -279,13 +319,17 @@ def _operator(
         return dependencies.operator_builder(store, settings, registry, repository)
     from .source_monitoring.operator_service import SourceMonitoringOperatorService
 
-    return SourceMonitoringOperatorService(
-        store=store,
-        settings=settings,
-        registry=registry,
-        repository=repository,
-        clock_ms=dependencies.clock_ms,
-    )
+    arguments = {
+        "store": store,
+        "settings": settings,
+        "repository": repository,
+        "clock_ms": dependencies.clock_ms,
+    }
+    if type(registry) is tuple:
+        arguments["registry_catalog"] = registry
+    else:
+        arguments["registry"] = registry
+    return SourceMonitoringOperatorService(**arguments)
 
 
 def _expected_state_version(value: Any) -> int:
@@ -306,6 +350,14 @@ def _now_ms(dependencies: SourceMonitoringCliDependencies) -> int:
     if type(value) is not int or value < 0:
         raise RuntimeError("invalid clock")
     return value
+
+
+def _poll_deadline_monotonic_ms() -> int:
+    observed = int(time.monotonic() * 1_000)
+    maximum = (1 << 63) - 1
+    if observed < 0 or observed > maximum - SOURCE_MONITORING_CLI_POLL_TIMEOUT_MS:
+        raise RuntimeError("invalid monotonic clock")
+    return observed + SOURCE_MONITORING_CLI_POLL_TIMEOUT_MS
 
 
 def _require_enabled_current(
@@ -333,8 +385,9 @@ def _require_registered_adapter(
 ) -> tuple[Any, Any]:
     if getattr(settings, "enabled", None) is not True:
         raise _CliContractError("SOURCE_MONITORING_DISABLED")
-    adapter = registry.require(adapter_key)
-    return adapter, registry.metadata_for(adapter.adapter_key)
+    selected_registry = _registry_for_adapter(registry, adapter_key)
+    adapter = selected_registry.require(adapter_key)
+    return adapter, selected_registry.metadata_for(adapter.adapter_key)
 
 
 def _require_enabled_state(state: Any, *, metadata: Any) -> None:
@@ -417,7 +470,10 @@ def _preview(
     dependencies: SourceMonitoringCliDependencies,
 ) -> tuple[int, dict[str, Any]]:
     from .source_monitoring.contracts import AdapterPollResult
-    from .source_monitoring.initialization import plan_initial_poll
+    from .source_monitoring.initialization import (
+        build_static_seed_preview,
+        plan_initial_poll,
+    )
 
     settings = _settings(dependencies)
     registry = _registry(settings, dependencies)
@@ -440,19 +496,67 @@ def _preview(
     state = evidence["state"]
     _require_enabled_state(state, metadata=metadata)
     initialization = evidence["initialization"]
+    policy = settings.initialization_policy_for(
+        official_source=metadata.official_source,
+    )
     if initialization is not None and (
-        initialization.get("mode") != settings.initial_mode
-        or initialization.get("catch_up_max_items") != settings.catch_up_max_items
-        or initialization.get("from_time_ms") != settings.from_time_ms
+        initialization.get("mode") != policy.mode
+        or initialization.get("catch_up_max_items") != policy.catch_up_max_items
+        or initialization.get("from_time_ms") != policy.initial_from_time_ms
     ):
         raise _CliContractError("SOURCE_MONITORING_INITIAL_POLICY_MISMATCH")
     initial_required = initialization is None and not bool(
         state.get("checkpoint") != {} or state.get("last_success_at_ms", 0) > 0
     )
+    if initial_required and metadata.official_source is False:
+        seed_policy_provider = getattr(adapter, "initial_seed_policy", None)
+        if not callable(seed_policy_provider):
+            raise _CliContractError("SOURCE_MONITORING_INITIAL_SEED_POLICY_INVALID")
+        static_preview = build_static_seed_preview(
+            metadata=metadata,
+            initialization_policy=policy,
+            initial_seed_policy=seed_policy_provider(),
+            starting_checkpoint=state["checkpoint"],
+        )
+        return 0, {
+            "version": SOURCE_MONITORING_CLI_VERSION,
+            "command": "preview",
+            "ok": True,
+            "adapter_key": metadata.adapter_key,
+            "mode": policy.mode,
+            "initial_required": True,
+            "initialization_blocked": False,
+            "preview_kind": "static_seed_policy",
+            "candidate_evidence": "deferred_to_first_runtime_poll",
+            "candidate_count": 0,
+            "selected_count": 0,
+            "skipped_count": 0,
+            "adapter_duplicate_count": 0,
+            "rejected_count": 0,
+            "earliest_occurred_at": "",
+            "latest_occurred_at": "",
+            "preview_sha256": static_preview["preview_sha256"],
+            "source_policy_sha256": static_preview["source_policy_sha256"],
+            "symbol_allowlist": static_preview["symbol_allowlist"],
+            "starting_checkpoint_sha256": static_preview[
+                "starting_checkpoint_sha256"
+            ],
+            "next_checkpoint_sha256": static_preview[
+                "starting_checkpoint_sha256"
+            ],
+            "error_codes": [],
+            "safety": {
+                **_zero_side_effect_safety(),
+                "market_calls_performed": 0,
+                "network_requests_accounting": "exact",
+            },
+        }
     observed_at_ms = _now_ms(dependencies)
     result = adapter.poll(
         state["checkpoint"],
         observed_at_ms=observed_at_ms,
+        deadline_monotonic_ms=_poll_deadline_monotonic_ms(),
+        cancel_event=None,
         etag=state["etag"],
         last_modified=state["last_modified"],
         max_items=settings.max_items_per_run,
@@ -470,7 +574,12 @@ def _preview(
     plan = plan_initial_poll(
         result,
         metadata=metadata,
-        settings=settings,
+        initialization_policy=policy,
+        initial_seed_policy=(
+            adapter.initial_seed_policy()
+            if initial_required and metadata.official_source is False
+            else None
+        ),
         initial_required=initial_required,
         received_at_ms=max(_now_ms(dependencies), result.captured_at_ms),
     )
@@ -529,14 +638,20 @@ def _run_once(
         registry=registry,
         repository=repository,
     )
+    execution_registry = _registry_for_adapter(registry, adapter_key)
+    execution_settings = _settings_for_registry(settings, execution_registry)
     try:
         result = _supervisor(
             store,
-            settings,
-            registry,
+            execution_settings,
+            execution_registry,
             repository,
             dependencies,
-        ).run_once(adapter_key)
+        ).run_once(
+            adapter_key,
+            deadline_monotonic_ms=_poll_deadline_monotonic_ms(),
+            cancel_event=None,
+        )
     except BaseException:
         raise _CliRunBoundaryError() from None
     if type(result) is not dict:
@@ -832,6 +947,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "SOURCE_MONITORING_CLI_VERSION",
+    "SOURCE_MONITORING_CLI_POLL_TIMEOUT_MS",
     "SOURCE_MONITORING_INSTANCE_ACTIVE",
     "SourceMonitoringCliDependencies",
     "main",

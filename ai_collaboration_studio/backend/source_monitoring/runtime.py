@@ -13,9 +13,14 @@ import math
 import threading
 import time
 import uuid
+from dataclasses import replace
 from typing import Any, Callable
 
 from ..source_inbox_service import SourceInboxService
+from ..source_poll_control import (
+    MAX_MONOTONIC_MILLISECONDS,
+    SourcePollCancelled,
+)
 from ..store import StudioStore
 from .contracts import MAX_NATIVE_INTEGER, SourceMonitoringContractError
 from .default_registry import (
@@ -26,7 +31,7 @@ from .runtime_state import (
     DEFAULT_RUNTIME_STALL_AFTER_MS,
     SourceMonitoringRuntimeState,
 )
-from .scheduler import SourceMonitoringScheduler
+from .scheduler import SourceMonitoringRunSelection, SourceMonitoringScheduler
 from .settings import SourceMonitoringSettings, load_source_monitoring_settings
 from .state_repository import SourceMonitoringStateRepository
 from .supervisor import SourceMonitoringSupervisor
@@ -35,6 +40,7 @@ from .trading_impact_rules import TradingImpactRulesV1
 
 DEFAULT_RUNTIME_HEARTBEAT_INTERVAL_MS = 5_000
 DEFAULT_RUNTIME_JOIN_TIMEOUT_MS = 30_000
+DEFAULT_RUNTIME_POLL_TIMEOUT_MS = 20_000
 
 SOURCE_MONITORING_RUNTIME_FATAL = "SOURCE_MONITORING_RUNTIME_FATAL"
 SOURCE_MONITORING_RUNTIME_INITIALIZE_FAILED = (
@@ -102,11 +108,13 @@ class SourceMonitoringRuntime:
         settings: SourceMonitoringSettings,
         heartbeat_interval_ms: Any = DEFAULT_RUNTIME_HEARTBEAT_INTERVAL_MS,
         join_timeout_ms: Any = DEFAULT_RUNTIME_JOIN_TIMEOUT_MS,
+        poll_timeout_ms: Any = None,
         clock_ms: Callable[[], Any] | None = None,
         monotonic_ms: Callable[[], Any] | None = None,
         stall_after_ms: Any = DEFAULT_RUNTIME_STALL_AFTER_MS,
         cycle_observer: Callable[[dict[str, Any]], Any] | None = None,
         start_gate: Callable[[], Any] | None = None,
+        pipeline_schedulers: Any = None,
     ) -> None:
         if type(scheduler) is not SourceMonitoringScheduler:
             raise SourceMonitoringRuntimeError(
@@ -118,11 +126,79 @@ class SourceMonitoringRuntime:
                 "SOURCE_MONITORING_RUNTIME_SETTINGS_INVALID",
                 "settings must be SourceMonitoringSettings",
             )
-        if scheduler.supervisor.settings != settings:
-            raise SourceMonitoringRuntimeError(
-                "SOURCE_MONITORING_RUNTIME_SETTINGS_MISMATCH",
-                "runtime and scheduler settings must match",
-            )
+        if pipeline_schedulers is None:
+            if scheduler.supervisor.settings != settings:
+                raise SourceMonitoringRuntimeError(
+                    "SOURCE_MONITORING_RUNTIME_SETTINGS_MISMATCH",
+                    "runtime and scheduler settings must match",
+                )
+            resolved_pipelines = (("single", scheduler),)
+        else:
+            if type(pipeline_schedulers) is not tuple or len(pipeline_schedulers) < 2:
+                raise SourceMonitoringRuntimeError(
+                    "SOURCE_MONITORING_RUNTIME_PIPELINES_INVALID",
+                    "coordinated runtime requires at least two exact pipeline rows",
+                )
+            resolved_rows: list[tuple[str, SourceMonitoringScheduler]] = []
+            seen_names: set[str] = set()
+            seen_adapter_keys: set[str] = set()
+            shared_repository = scheduler.repository
+            shared_inbox = scheduler.supervisor.source_inbox
+            for row in pipeline_schedulers:
+                if (
+                    type(row) is not tuple
+                    or len(row) != 2
+                    or type(row[0]) is not str
+                    or not row[0]
+                    or type(row[1]) is not SourceMonitoringScheduler
+                ):
+                    raise SourceMonitoringRuntimeError(
+                        "SOURCE_MONITORING_RUNTIME_PIPELINES_INVALID",
+                        "each pipeline row must be an exact (name, scheduler) tuple",
+                    )
+                name, pipeline_scheduler = row
+                if name in seen_names:
+                    raise SourceMonitoringRuntimeError(
+                        "SOURCE_MONITORING_RUNTIME_PIPELINES_INVALID",
+                        "pipeline names must be unique",
+                    )
+                if (
+                    pipeline_scheduler.repository is not shared_repository
+                    or pipeline_scheduler.supervisor.repository is not shared_repository
+                    or pipeline_scheduler.supervisor.source_inbox is not shared_inbox
+                ):
+                    raise SourceMonitoringRuntimeError(
+                        "SOURCE_MONITORING_RUNTIME_PIPELINE_OWNERSHIP_MISMATCH",
+                        "coordinated pipelines must share one repository and Source Inbox",
+                    )
+                pipeline_settings = pipeline_scheduler.supervisor.settings
+                if (
+                    pipeline_settings.enabled is not settings.enabled
+                    or pipeline_settings.auto_start is not settings.auto_start
+                    or pipeline_settings.dry_run is not settings.dry_run
+                    or pipeline_settings.max_items_per_run != settings.max_items_per_run
+                    or pipeline_settings.trading_impact_rules_enabled
+                    is not settings.trading_impact_rules_enabled
+                ):
+                    raise SourceMonitoringRuntimeError(
+                        "SOURCE_MONITORING_RUNTIME_SETTINGS_MISMATCH",
+                        "pipeline and coordinator operational settings must match",
+                    )
+                adapter_keys = set(pipeline_scheduler.registry.adapter_keys)
+                if seen_adapter_keys.intersection(adapter_keys):
+                    raise SourceMonitoringRuntimeError(
+                        "SOURCE_MONITORING_RUNTIME_PIPELINES_INVALID",
+                        "adapter keys must be globally unique across pipelines",
+                    )
+                seen_names.add(name)
+                seen_adapter_keys.update(adapter_keys)
+                resolved_rows.append((name, pipeline_scheduler))
+            if scheduler not in tuple(row[1] for row in resolved_rows):
+                raise SourceMonitoringRuntimeError(
+                    "SOURCE_MONITORING_RUNTIME_PIPELINES_INVALID",
+                    "compatibility scheduler must belong to the coordinated pipelines",
+                )
+            resolved_pipelines = tuple(resolved_rows)
         if clock_ms is not None and not callable(clock_ms):
             raise SourceMonitoringRuntimeError(
                 "SOURCE_MONITORING_RUNTIME_CLOCK_INVALID",
@@ -145,6 +221,12 @@ class SourceMonitoringRuntime:
             )
 
         self.scheduler = scheduler
+        self.pipeline_schedulers = resolved_pipelines
+        self.registry_catalog = tuple(
+            pipeline_scheduler.registry
+            for _name, pipeline_scheduler in resolved_pipelines
+        )
+        self.repository = scheduler.repository
         self.settings = settings
         self.heartbeat_interval_ms = _positive_milliseconds(
             heartbeat_interval_ms,
@@ -154,6 +236,20 @@ class SourceMonitoringRuntime:
             join_timeout_ms,
             field="join_timeout_ms",
         )
+        resolved_poll_timeout_ms = (
+            min(DEFAULT_RUNTIME_POLL_TIMEOUT_MS, self.join_timeout_ms)
+            if poll_timeout_ms is None
+            else _positive_milliseconds(
+                poll_timeout_ms,
+                field="poll_timeout_ms",
+            )
+        )
+        if resolved_poll_timeout_ms > self.join_timeout_ms:
+            raise SourceMonitoringRuntimeError(
+                "SOURCE_MONITORING_RUNTIME_POLL_TIMEOUT_INVALID",
+                "poll_timeout_ms must not exceed join_timeout_ms",
+            )
+        self.poll_timeout_ms = resolved_poll_timeout_ms
         self._clock_ms = clock_ms or scheduler._clock_ms
         self.state = SourceMonitoringRuntimeState(
             settings,
@@ -165,6 +261,7 @@ class SourceMonitoringRuntime:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._degraded_adapter_keys: set[str] = set()
+        self._resource_stop_failed = False
         self._cycle_observer = cycle_observer
         self._start_gate = start_gate
 
@@ -177,12 +274,69 @@ class SourceMonitoringRuntime:
             )
         return value
 
+    def _poll_deadline_monotonic_ms(self) -> int:
+        # Poll-control deadlines must share the platform monotonic clock used
+        # by downstream HTTP/broker implementations.  ``monotonic_ms`` is an
+        # injectable runtime-state liveness clock only; using it here can make
+        # an otherwise valid absolute deadline immediately expired (or
+        # effectively unbounded) when tests or embedders use a synthetic clock.
+        value = int(time.monotonic() * 1_000)
+        if type(value) is not int or not 0 <= value <= MAX_MONOTONIC_MILLISECONDS:
+            raise SourceMonitoringRuntimeError(
+                "SOURCE_MONITORING_RUNTIME_CLOCK_INVALID",
+                "platform monotonic clock must return a non-negative native integer",
+            )
+        return min(
+            MAX_MONOTONIC_MILLISECONDS,
+            value + self.poll_timeout_ms,
+        )
+
     def _safe_mark_failed(self, error_code: str) -> None:
         try:
             self.state.mark_failed(error_code)
         except BaseException:
             # State projection will still detect a dead formerly-live thread.
             pass
+
+    def _initialize_pipelines(self) -> None:
+        for _name, pipeline_scheduler in self.pipeline_schedulers:
+            pipeline_scheduler.supervisor.initialize()
+
+    def _next_due_adapter(
+        self,
+    ) -> tuple[SourceMonitoringScheduler, SourceMonitoringRunSelection] | None:
+        if len(self.pipeline_schedulers) == 1:
+            pipeline_scheduler = self.pipeline_schedulers[0][1]
+            selections = pipeline_scheduler.due_run_selections()
+            return (pipeline_scheduler, selections[0]) if selections else None
+        now_ms = self._now_ms()
+        candidates: list[
+            tuple[int, int, str, SourceMonitoringScheduler, SourceMonitoringRunSelection]
+        ] = []
+        for rank, (_name, pipeline_scheduler) in enumerate(
+            self.pipeline_schedulers
+        ):
+            for selection in (
+                pipeline_scheduler.due_run_selections(now_ms=now_ms)
+            ):
+                candidates.append((
+                    selection.due_at_ms, rank, selection.adapter_key,
+                    pipeline_scheduler, selection,
+                ))
+        if not candidates:
+            return None
+        _due_at_ms, _rank, _adapter_key, pipeline_scheduler, selection = min(
+            candidates,
+            key=lambda row: (row[0], row[1], row[2]),
+        )
+        return pipeline_scheduler, selection
+
+    def _effective_next_due_at_ms(self) -> int:
+        values = [
+            pipeline_scheduler.effective_next_due_at_ms()
+            for _name, pipeline_scheduler in self.pipeline_schedulers
+        ]
+        return min((value for value in values if value), default=0)
 
     def start(self) -> bool:
         """Start once when globally enabled and explicitly authorized to auto-start.
@@ -201,10 +355,11 @@ class SourceMonitoringRuntime:
 
             self._stop_event.clear()
             self._degraded_adapter_keys.clear()
+            self._resource_stop_failed = False
             runtime_id = f"source_monitor_runtime_{uuid.uuid4().hex}"
             try:
                 self.state.mark_starting(runtime_id)
-                self.scheduler.supervisor.initialize()
+                self._initialize_pipelines()
             except BaseException:
                 self._safe_mark_failed(
                     SOURCE_MONITORING_RUNTIME_INITIALIZE_FAILED
@@ -227,19 +382,50 @@ class SourceMonitoringRuntime:
                 return False
             return True
 
-    def stop(self) -> bool:
-        """Signal shutdown, wait for the configured bound, and report quiescence."""
+    def _stop_pipeline_resources(self) -> bool:
+        stopped = True
+        for registry in self.registry_catalog:
+            for adapter_key in registry.adapter_keys:
+                adapter = registry.require(adapter_key)
+                stop_resource = getattr(adapter, "stop", None)
+                if not callable(stop_resource):
+                    continue
+                try:
+                    result = stop_resource()
+                except BaseException:
+                    stopped = False
+                    continue
+                if result is not True:
+                    stopped = False
+        self._resource_stop_failed = not stopped
+        return stopped
+
+    def request_stop(self) -> None:
+        """Signal cooperative cancellation without waiting for the worker."""
 
         with self._lifecycle_lock:
             worker = self._thread
-            if worker is None or not worker.is_alive():
-                return True
-            try:
-                self.state.mark_stopping()
-            except BaseException:
-                self._safe_mark_failed(SOURCE_MONITORING_RUNTIME_FATAL)
+            if worker is not None and worker.is_alive():
+                try:
+                    self.state.mark_stopping()
+                except BaseException:
+                    self._safe_mark_failed(SOURCE_MONITORING_RUNTIME_FATAL)
             self._stop_event.set()
-        return self.join(self.join_timeout_ms / 1_000)
+
+    def stop(self) -> bool:
+        """Signal, join within the bound, then close idle adapter resources.
+
+        Resource cleanup is deliberately skipped while the worker remains
+        alive.  An in-flight adapter may hold the same request lock required by
+        its ``stop`` method, so cleanup before a successful join could turn the
+        host's bounded fail-stop path into an unbounded lock wait.  Calling
+        ``stop`` again after a resource failure retries every adapter cleanup.
+        """
+
+        self.request_stop()
+        if not self.join(self.join_timeout_ms / 1_000):
+            return False
+        return self._stop_pipeline_resources()
 
     def join(self, timeout: Any = None) -> bool:
         """Wait for the current worker; ``None`` intentionally means unbounded."""
@@ -424,11 +610,11 @@ class SourceMonitoringRuntime:
                 if self._stop_event.is_set():
                     break
 
-                due_adapter_keys = self.scheduler.due_adapter_keys()
+                due_adapter = self._next_due_adapter()
                 if self._stop_event.is_set():
                     break
                 active_adapter = (
-                    due_adapter_keys[0] if due_adapter_keys else ""
+                    due_adapter[1].adapter_key if due_adapter is not None else ""
                 )
                 ran_count = 0
                 if active_adapter:
@@ -436,7 +622,15 @@ class SourceMonitoringRuntime:
                     try:
                         if self._stop_event.is_set():
                             break
-                        cycle = self.scheduler.run_due(max_runs=1)
+                        active_scheduler = due_adapter[0]
+                        cycle = active_scheduler.run_one_due(
+                            active_adapter,
+                            selection=due_adapter[1],
+                            deadline_monotonic_ms=(
+                                self._poll_deadline_monotonic_ms()
+                            ),
+                            cancel_event=self._stop_event,
+                        )
                         ran_count = self._record_cycle_results(
                             active_adapter,
                             cycle,
@@ -447,7 +641,7 @@ class SourceMonitoringRuntime:
                 if self._stop_event.is_set():
                     break
 
-                next_due_at_ms = self.scheduler.effective_next_due_at_ms()
+                next_due_at_ms = self._effective_next_due_at_ms()
                 self.state.complete_loop(
                     degraded=bool(self._degraded_adapter_keys),
                     next_due_at=next_due_at_ms,
@@ -458,6 +652,10 @@ class SourceMonitoringRuntime:
                 )
                 if wait_ms:
                     self._stop_event.wait(wait_ms / 1_000)
+        except SourcePollCancelled:
+            if not self._stop_event.is_set():
+                self._safe_mark_failed(SOURCE_MONITORING_RUNTIME_FATAL)
+                return
         except BaseException as exc:
             fatal_code = SOURCE_MONITORING_RUNTIME_FATAL
             if isinstance(exc, SourceMonitoringRuntimeError) and exc.code in {
@@ -480,6 +678,7 @@ def build_source_monitoring_runtime(
     *,
     heartbeat_interval_ms: Any = DEFAULT_RUNTIME_HEARTBEAT_INTERVAL_MS,
     join_timeout_ms: Any = DEFAULT_RUNTIME_JOIN_TIMEOUT_MS,
+    poll_timeout_ms: Any = None,
     clock_ms: Callable[[], Any] | None = None,
     monotonic_ms: Callable[[], Any] | None = None,
     stall_after_ms: Any = DEFAULT_RUNTIME_STALL_AFTER_MS,
@@ -497,41 +696,92 @@ def build_source_monitoring_runtime(
             "settings must be SourceMonitoringSettings",
         )
 
-    registry = (
-        build_official_source_registry()
-        if resolved_settings.official_only
-        else build_futu_anomaly_registry()
-    )
     repository = SourceMonitoringStateRepository(store, clock_ms=clock_ms)
     source_inbox = (
         SourceInboxService(store)
         if clock_ms is None
         else SourceInboxService(store, clock=lambda: clock_ms() / 1_000)
     )
-    impact_rules = (
-        TradingImpactRulesV1()
-        if resolved_settings.trading_impact_rules_enabled
-        else None
+    def build_pipeline(
+        registry: Any,
+        pipeline_settings: SourceMonitoringSettings,
+    ) -> SourceMonitoringScheduler:
+        impact_rules = (
+            TradingImpactRulesV1()
+            if pipeline_settings.trading_impact_rules_enabled
+            else None
+        )
+        supervisor = SourceMonitoringSupervisor(
+            registry=registry,
+            repository=repository,
+            source_inbox=source_inbox,
+            settings=pipeline_settings,
+            clock_ms=clock_ms,
+            impact_rules=impact_rules,
+        )
+        return SourceMonitoringScheduler(
+            registry=registry,
+            repository=repository,
+            supervisor=supervisor,
+            clock_ms=clock_ms,
+        )
+
+    if (
+        resolved_settings.official_only
+        and resolved_settings.allow_readonly_market
+    ):
+        from .coordinator import (
+            OFFICIAL_PIPELINE,
+            READONLY_MARKET_PIPELINE,
+            SourceMonitoringRuntimeCoordinator,
+        )
+
+        official_settings = replace(
+            resolved_settings,
+            official_only=True,
+            allow_readonly_market=False,
+        )
+        market_settings = replace(
+            resolved_settings,
+            official_only=False,
+            allow_readonly_market=True,
+        )
+        official_scheduler = build_pipeline(
+            build_official_source_registry(),
+            official_settings,
+        )
+        market_scheduler = build_pipeline(
+            build_futu_anomaly_registry(),
+            market_settings,
+        )
+        return SourceMonitoringRuntimeCoordinator(
+            pipeline_schedulers=(
+                (OFFICIAL_PIPELINE, official_scheduler),
+                (READONLY_MARKET_PIPELINE, market_scheduler),
+            ),
+            settings=resolved_settings,
+            heartbeat_interval_ms=heartbeat_interval_ms,
+            join_timeout_ms=join_timeout_ms,
+            poll_timeout_ms=poll_timeout_ms,
+            clock_ms=clock_ms,
+            monotonic_ms=monotonic_ms,
+            stall_after_ms=stall_after_ms,
+            cycle_observer=cycle_observer,
+            start_gate=start_gate,
+        )
+
+    registry = (
+        build_official_source_registry()
+        if resolved_settings.official_only
+        else build_futu_anomaly_registry()
     )
-    supervisor = SourceMonitoringSupervisor(
-        registry=registry,
-        repository=repository,
-        source_inbox=source_inbox,
-        settings=resolved_settings,
-        clock_ms=clock_ms,
-        impact_rules=impact_rules,
-    )
-    scheduler = SourceMonitoringScheduler(
-        registry=registry,
-        repository=repository,
-        supervisor=supervisor,
-        clock_ms=clock_ms,
-    )
+    scheduler = build_pipeline(registry, resolved_settings)
     return SourceMonitoringRuntime(
         scheduler=scheduler,
         settings=resolved_settings,
         heartbeat_interval_ms=heartbeat_interval_ms,
         join_timeout_ms=join_timeout_ms,
+        poll_timeout_ms=poll_timeout_ms,
         clock_ms=clock_ms,
         monotonic_ms=monotonic_ms,
         stall_after_ms=stall_after_ms,
@@ -543,6 +793,7 @@ def build_source_monitoring_runtime(
 __all__ = [
     "DEFAULT_RUNTIME_HEARTBEAT_INTERVAL_MS",
     "DEFAULT_RUNTIME_JOIN_TIMEOUT_MS",
+    "DEFAULT_RUNTIME_POLL_TIMEOUT_MS",
     "SOURCE_MONITORING_RUNTIME_FATAL",
     "SOURCE_MONITORING_RUNTIME_INITIALIZE_FAILED",
     "SOURCE_MONITORING_RUNTIME_CYCLE_OBSERVATION_VERSION",

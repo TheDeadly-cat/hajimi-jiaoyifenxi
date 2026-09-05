@@ -100,10 +100,13 @@ class FakeOfficialAdapter:
         checkpoint: dict[str, object],
         *,
         observed_at_ms: int,
+        deadline_monotonic_ms: int = 0,
+        cancel_event=None,
         etag: str = "",
         last_modified: str = "",
         max_items: int = 50,
     ) -> AdapterPollResult:
+        del deadline_monotonic_ms, cancel_event, etag, last_modified, max_items
         return AdapterPollResult.build(
             self.adapter_key,
             checkpoint,
@@ -150,10 +153,13 @@ class CoerciblePollDefaultAdapter(FakeOfficialAdapter):
         checkpoint: dict[str, object],
         *,
         observed_at_ms: int,
+        deadline_monotonic_ms: int = 0,
+        cancel_event=None,
         etag: str = "",
         last_modified: str = "",
         max_items: float = 50.0,
     ) -> AdapterPollResult:
+        del deadline_monotonic_ms, cancel_event, etag, last_modified, max_items
         return AdapterPollResult.build(
             self.adapter_key,
             checkpoint,
@@ -220,7 +226,7 @@ class SourceAdapterFoundationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             SourceAdapterContractError,
-            "etag='', last_modified='', max_items=50",
+            "deadline_monotonic_ms=0, cancel_event=None",
         ):
             validate_source_adapter(adapter)
         with self.assertRaises(SourceAdapterContractError):
@@ -247,6 +253,7 @@ class SourceMonitoringSettingsTests(unittest.TestCase):
                 "catch_up_max_items": 0,
                 "initial_preview_sha256": "",
                 "from_time": "",
+                "continuous_event_cutoff": "",
             },
         )
 
@@ -311,11 +318,12 @@ class SourceMonitoringSettingsTests(unittest.TestCase):
         })
         self.assertFalse(readonly.official_only)
         self.assertTrue(readonly.allow_readonly_market)
-        with self.assertRaises(SourceMonitoringSettingsError):
-            SourceMonitoringSettings.from_environment({
-                SOURCE_MONITOR_OFFICIAL_ONLY_ENV: "1",
-                SOURCE_MONITOR_ALLOW_READONLY_MARKET_ENV: "1",
-            })
+        combined = SourceMonitoringSettings.from_environment({
+            SOURCE_MONITOR_OFFICIAL_ONLY_ENV: "1",
+            SOURCE_MONITOR_ALLOW_READONLY_MARKET_ENV: "1",
+        })
+        self.assertTrue(combined.official_only)
+        self.assertTrue(combined.allow_readonly_market)
         with self.assertRaises(SourceMonitoringSettingsError):
             SourceMonitoringSettings.from_environment({
                 SOURCE_MONITOR_ENABLED_ENV: "0",

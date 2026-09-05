@@ -35,6 +35,9 @@ _FIXED_HOST = "127.0.0.1"
 _FIXED_PORT = 11111
 _FIXED_SDK_DISTRIBUTION = "futu-api"
 _FIXED_SDK_VERSION = "10.10.7008"
+_FIXED_BROKER_POLICY_SHA256 = (
+    "48bb9c5b2e669eb86e947d57a76c4085ea155f52a16fbdc33228fab54ce1828e"
+)
 
 # The worker receives an allowlisted environment rather than a copy of the
 # operator's session.  These variables are sufficient for the installed
@@ -103,11 +106,14 @@ def _canonical_sha256(value: Any) -> str:
 
 
 _SOURCE_MANIFEST_SHA256 = _canonical_sha256({
-    "version": "futu_live_preflight_source_manifest_v1",
+    "version": "futu_live_preflight_source_manifest_v2",
     "host_policy": "fixed_ipv4_loopback_literal_v1",
     "port": _FIXED_PORT,
     "symbols": list(_FIXED_SYMBOLS),
     "quote_batch_calls": 1,
+    "broker_mode": "one_shot",
+    "broker_protocol": "futu_readonly_broker_v1",
+    "broker_policy_sha256": _FIXED_BROKER_POLICY_SHA256,
     "sdk_profile_policy": "parent_temp_appdata_v1",
     "sdk_import_failure_policy": "closed_worker_receipt_v1",
     "sdk_python_stdio_policy": "devnull_during_import_and_calls_v1",
@@ -124,7 +130,7 @@ _SOURCE_MANIFEST_SHA256 = _canonical_sha256({
 _WORKER_EVIDENCE_PROFILE_SHA256 = _canonical_sha256({
     "version": PREFLIGHT_VERSION,
     "evidence_class": "watchdog_worker_observation",
-    "transport": "guarded_loopback_futu_quote_path_v1",
+    "transport": "futu_readonly_broker_one_shot_v1",
     "sdk_distribution": _FIXED_SDK_DISTRIBUTION,
     "sdk_version": _FIXED_SDK_VERSION,
     "source_manifest_sha256": _SOURCE_MANIFEST_SHA256,
@@ -136,7 +142,7 @@ _WORKER_EVIDENCE_PROFILE_SHA256 = _canonical_sha256({
 _PRODUCTION_EVIDENCE_PROFILE_SHA256 = _canonical_sha256({
     "version": PREFLIGHT_VERSION,
     "evidence_class": "production_path_observation",
-    "transport": "guarded_loopback_futu_quote_path_v1",
+    "transport": "futu_readonly_broker_one_shot_v1",
     "sdk_distribution": _FIXED_SDK_DISTRIBUTION,
     "sdk_version": _FIXED_SDK_VERSION,
     "source_manifest_sha256": _SOURCE_MANIFEST_SHA256,

@@ -39,7 +39,7 @@ from .state_repository import (
 )
 
 
-SOURCE_MONITORING_HEALTH_SERVICE_VERSION = "source_monitoring_health_service_v2"
+SOURCE_MONITORING_HEALTH_SERVICE_VERSION = "source_monitoring_health_service_v3"
 
 _RUNTIME_ID_RE = re.compile(r"source_monitor_runtime_[0-9a-f]{32}\Z")
 _RUNTIME_ERROR_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,99}\Z")
@@ -616,24 +616,29 @@ class SourceMonitoringHealthService:
                 if state is not None
                 else None
             )
+            effective_initialization = self.settings.initialization_policy_for(
+                official_source=bool(
+                    metadata is not None and metadata.get("official_source") is True
+                ),
+            )
             initialization_policy_current = bool(
                 initialization is None
                 or (
-                    initialization["mode"] == self.settings.initial_mode
+                    initialization["mode"] == effective_initialization.mode
                     and initialization["catch_up_max_items"]
-                    == self.settings.catch_up_max_items
+                    == effective_initialization.catch_up_max_items
                     and initialization["from_time_ms"]
-                    == self.settings.from_time_ms
+                    == effective_initialization.initial_from_time_ms
                 )
             )
             pending_authorization_policy_current = bool(
                 pending_authorization is None
                 or (
-                    pending_authorization["mode"] == self.settings.initial_mode
+                    pending_authorization["mode"] == effective_initialization.mode
                     and pending_authorization["catch_up_max_items"]
-                    == self.settings.catch_up_max_items
+                    == effective_initialization.catch_up_max_items
                     and pending_authorization["from_time_ms"]
-                    == self.settings.from_time_ms
+                    == effective_initialization.initial_from_time_ms
                 )
             )
             effective_enabled = bool(

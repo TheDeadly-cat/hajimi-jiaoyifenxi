@@ -90,6 +90,7 @@ const SOURCE_MONITORING_SETTINGS_FIELDS = Object.freeze([
   "catch_up_max_items",
   "initial_preview_sha256",
   "from_time",
+  "continuous_event_cutoff",
 ]);
 const SOURCE_MONITORING_RUNTIME_FIELDS = Object.freeze([
   "version",
@@ -644,7 +645,7 @@ export function normalizeSourceMonitoringHealth(payload) {
   const rawAdapters = arrayOfObjects(view.adapters);
   const counts = objectValue(view.counts);
   const issues = [];
-  if (view.version !== "source_monitoring_health_service_v2") issues.push("health_view_version_invalid");
+  if (view.version !== "source_monitoring_health_service_v3") issues.push("health_view_version_invalid");
   if (view.health_projection_version !== "source_monitoring_health_v1") {
     issues.push("health_version_invalid");
   }
@@ -687,7 +688,10 @@ export function normalizeSourceMonitoringHealth(payload) {
     || typeof settings.initial_preview_sha256 !== "string"
     || (settings.initial_preview_sha256 !== "" && !SHA256_RE.test(settings.initial_preview_sha256))
     || typeof settings.from_time !== "string"
-    || settings.official_only === settings.allow_readonly_market
+    || typeof settings.continuous_event_cutoff !== "string"
+    || (settings.continuous_event_cutoff !== ""
+      && !validCanonicalFromTime(settings.continuous_event_cutoff))
+    || (!settings.official_only && !settings.allow_readonly_market)
     || (settings.auto_start && !settings.enabled)
     || (settings.initial_mode === "seed_only" && (
       settings.catch_up_max_items !== 0
@@ -811,6 +815,9 @@ export function normalizeSourceMonitoringHealth(payload) {
     if (
       (adapter.catalog_registered === true && (
         !Object.keys(metadata).length
+        || !Number.isSafeInteger(metadata.poll_interval_ms)
+        || metadata.poll_interval_ms < 60_000
+        || metadata.poll_interval_ms > 604_800_000
         || metadata.execution_capability !== "none"
         || metadata.live_trading_allowed !== false
       ))
@@ -818,6 +825,10 @@ export function normalizeSourceMonitoringHealth(payload) {
       || (adapter.latest_run !== null && (
         !Object.keys(latestRun).length
         || latestRun.version !== "source_adapter_run_v1"
+        || !["RUNNING", "SUCCEEDED", "DEGRADED", "DRY_RUN", "FAILED", "ABANDONED"].includes(latestRun.status)
+        || typeof latestRun.dry_run !== "boolean"
+        || !["observed_count", "accepted_count", "duplicate_count", "rejected_count", "completed_at_ms"]
+          .every((field) => Number.isSafeInteger(latestRun[field]) && latestRun[field] >= 0)
       ))
     ) {
       adapterIssues.push("evidence");
@@ -836,7 +847,18 @@ export function normalizeSourceMonitoringHealth(payload) {
       persistedStatePresent: adapter.persisted_state === true,
       persistedEnabled: adapter.persisted_enabled === true,
       configStatus: String(adapter.config_status || ""),
+      configVersion: String(metadata.config_version || ""),
+      pollIntervalMs: boundedNumber(metadata.poll_interval_ms),
       latestRunStatus: String(objectValue(adapter.latest_run).status || ""),
+      latestRun: latestRun === null ? null : {
+        status: String(latestRun.status || ""),
+        dryRun: latestRun.dry_run === true,
+        observedCount: boundedCount(latestRun.observed_count),
+        acceptedCount: boundedCount(latestRun.accepted_count),
+        duplicateCount: boundedCount(latestRun.duplicate_count),
+        rejectedCount: boundedCount(latestRun.rejected_count),
+        completedAt: boundedNumber(latestRun.completed_at_ms),
+      },
       lastCheckedAt: boundedNumber(adapter.last_checked_at_ms),
       lastSuccessAt: boundedNumber(adapter.last_success_at_ms),
       lastEventAt: boundedNumber(adapter.last_event_at_ms),
@@ -900,10 +922,13 @@ export function normalizeSourceMonitoringHealth(payload) {
     globalEnabled: settings.enabled === true,
     autoStart: settings.auto_start === true,
     dryRun: settings.dry_run === true,
+    officialOnly: settings.official_only === true,
+    allowReadonlyMarket: settings.allow_readonly_market === true,
     initialMode: String(settings.initial_mode || ""),
     catchUpMaxItems: boundedCount(settings.catch_up_max_items),
     initialPreviewSha256: String(settings.initial_preview_sha256 || ""),
     fromTime: String(settings.from_time || ""),
+    continuousEventCutoff: String(settings.continuous_event_cutoff || ""),
     runtime: {
       version: String(runtime.version || ""),
       status: String(runtime.status || "failed"),
@@ -930,6 +955,102 @@ export function normalizeSourceMonitoringHealth(payload) {
     executionCapability: String(safety.execution_capability || ""),
     liveTradingAllowed: safety.live_trading_allowed === true,
   };
+}
+
+export function sourceMonitoringCheckLabel(adapter) {
+  const run = adapter.latestRun;
+  if (!run) return "尚无本轮结果记录";
+  if (run.status === "RUNNING") return "本次检查进行中";
+  if (["FAILED", "DEGRADED", "ABANDONED"].includes(run.status) || run.rejectedCount > 0) {
+    return "最近检查失败或有拒绝项，请查看错误码";
+  }
+  if (run.status === "DRY_RUN" || run.dryRun) {
+    return `试运行检查完成，观察到 ${run.observedCount} 条；未导入收件箱`;
+  }
+  if (run.status !== "SUCCEEDED" || run.completedAt <= 0) return "最近检查结果待核实";
+  if (run.observedCount === 0 && run.acceptedCount === 0 && run.duplicateCount === 0) {
+    return "检查成功、无新增";
+  }
+  return `检查成功：观察 ${run.observedCount} 条，新增导入 ${run.acceptedCount} 条，重复 ${run.duplicateCount} 条`;
+}
+
+export function sourceMonitoringNextStep(adapter) {
+  if (adapter.adapterKey === "company_ir") {
+    if (adapter.lastErrorCode === "COMPANY_IR_BASELINE_UPGRADE_REQUIRED") {
+      return "旧公司 IR checkpoint 无法证明完整首次基线；先停用来源并明确升级方案，保留原 checkpoint、收件箱、房间及材料，不自动重置或迁移。";
+    }
+    if (adapter.lastErrorCode === "COMPANY_IR_CHECKPOINT_CAPACITY_EXCEEDED") {
+      return "公司 IR 当前元数据与已保留记录超过已见标识容量上限；停用来源并评估容量与升级方案，保留全部已见标识和收件箱，不自动淘汰、重置或迁移。";
+    }
+    if (adapter.lastErrorCode === "COMPANY_IR_BASELINE_SCOPE_INCOMPLETE") {
+      return "公司 IR 首次基线未覆盖当前已配置来源的完整元数据范围（RSS 或 Q4 JSON 及其绑定的时间元数据）；核查缺失响应、解析错误及被过滤记录，修复后重试检查。该范围不代表全部历史公告；当前基线不视为完成，保留原 checkpoint 和收件箱，不自动重置或迁移。";
+    }
+  }
+  if (adapter.adapterKey === "sec_filings" && (
+    adapter.configStatus === "migration_required"
+    || /SEC_.*(?:BASELINE|CHECKPOINT|UPGRADE)/.test(adapter.lastErrorCode)
+  )) {
+    return "旧 SEC 状态需先核对完整基线并明确升级方案；保留原 checkpoint 和收件箱，不自动重置或迁移。";
+  }
+  if (adapter.configStatus === "migration_required" || adapter.configStatus === "unregistered") {
+    return "核对当前来源配置与保存的版本，在接入设置中重读；不要清空旧状态。";
+  }
+  if (adapter.lastErrorCode) {
+    return "按错误码核对来源响应、网络与配置，观察下次退避检查；未成功前不会作为正常监控。";
+  }
+  return "";
+}
+
+export function sourceMonitoringOperationState(health, control = null) {
+  if (!health?.valid) return { state: "unknown", label: "监控状态待核实", detail: "重新读取有效健康记录。" };
+  if (!health.globalEnabled) return {
+    state: "disabled", label: "监控未启用", detail: "全局开关关闭，不会自动检查来源。",
+  };
+  const enabled = health.adapters.filter((adapter) => adapter.enabled);
+  const hasFailure = health.adapters.some((adapter) => (adapter.enabled || adapter.persistedEnabled) && (
+    adapter.consecutiveFailures > 0 || adapter.lastErrorCode
+    || ["migration_required", "unregistered"].includes(adapter.configStatus)
+    || ["failed", "degraded", "backing_off"].includes(adapter.state)
+    || ["FAILED", "DEGRADED", "ABANDONED"].includes(adapter.latestRun?.status)
+    || adapter.latestRun?.rejectedCount > 0
+  ));
+  if (["failed", "stalled", "degraded"].includes(health.runtime.status) || hasFailure) return {
+    state: "degraded", label: `监控降级 · ${health.runtime.statusLabel}`,
+    detail: "应用页面可用不代表监控正常；核对下方错误码、来源配置和下次检查。",
+  };
+  if (!enabled.length) return {
+    state: "disabled", label: "监控未启用 · 等待首次检查", detail: "尚无生效来源；请查看 Adapter 接入设置。",
+  };
+  if (!health.runtime.livenessVerified) return {
+    state: "stopped", label: "监控未运行", detail: "当前后台未通过存活检查；核对自动启动配置和 Runtime 状态。",
+  };
+  if (health.dryRun) return {
+    state: "dry_run", label: "监控试运行（dry-run）", detail: "检查只生成预览；不写收件箱，也不完成首次基线。",
+  };
+  const controlsMatch = control?.valid === true
+    && control.settings.globalEnabled === health.globalEnabled
+    && control.settings.autoStart === health.autoStart
+    && control.settings.dryRun === health.dryRun;
+  const baselineComplete = controlsMatch && enabled.every((adapter) => {
+    const sourceControl = control.adapters.find((entry) => entry.adapterKey === adapter.adapterKey);
+    return sourceControl?.configVersion === adapter.configVersion
+      && sourceControl.effectiveEnabled === true
+      && sourceControl.initializationStatus === "complete"
+      && sourceControl.initializationCompletedAt <= health.capturedAt;
+  });
+  if (!baselineComplete) return {
+    state: "baseline_pending",
+    label: controlsMatch ? "基线未完成或待核实" : "基线状态未读取",
+    detail: "在接入设置中读取初始化收据；已有心跳或历史 checkpoint 不能证明完整首次基线。",
+  };
+  const recentSuccess = enabled.every((adapter) => (
+    adapter.lastSuccessAt > 0
+    && adapter.lastSuccessAt <= health.capturedAt
+    && health.capturedAt - adapter.lastSuccessAt <= adapter.pollIntervalMs + health.runtime.stallAfterMs
+  ));
+  return recentSuccess
+    ? { state: "operational", label: "监控正常", detail: "生效来源均已完成基线，并在轮询周期及运行容许时间内检查成功。" }
+    : { state: "degraded", label: "监控降级 · 缺少近期成功检查", detail: "后台有心跳，但来源缺少近期成功检查；核对最近成功时间与轮询周期。" };
 }
 
 export function normalizeSourceInboxNotificationFeed(

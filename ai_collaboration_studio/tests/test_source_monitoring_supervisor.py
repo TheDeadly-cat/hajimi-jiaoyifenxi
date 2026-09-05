@@ -24,6 +24,9 @@ from backend.source_monitoring.contracts import (  # noqa: E402
     canonical_sha256,
 )
 from backend.source_monitoring.registry import SourceAdapterRegistry  # noqa: E402
+from backend.source_monitoring.initialization import (  # noqa: E402
+    build_static_seed_preview,
+)
 from backend.source_monitoring.scheduler import (  # noqa: E402
     BackoffPolicy,
     SourceMonitoringScheduler,
@@ -33,6 +36,7 @@ from backend.source_monitoring.state_repository import (  # noqa: E402
     RUN_STATUS_ABANDONED,
     RUN_STATUS_FAILED,
     SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION,
+    SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION_V2,
     SourceMonitoringStateRepository,
 )
 from backend.source_monitoring.supervisor import (  # noqa: E402
@@ -109,12 +113,16 @@ class FakeAdapter:
         checkpoint: dict[str, object],
         *,
         observed_at_ms: int,
+        deadline_monotonic_ms: int = 0,
+        cancel_event=None,
         etag: str = "",
         last_modified: str = "",
         max_items: int = 50,
     ) -> AdapterPollResult:
         self.poll_count += 1
         self.last_poll_context = {
+            "deadline_monotonic_ms": deadline_monotonic_ms,
+            "cancel_event": cancel_event,
             "etag": etag,
             "last_modified": last_modified,
             "max_items": max_items,
@@ -156,6 +164,24 @@ class FakeReadonlyMarketAdapter(FakeAdapter):
     source_channel = FUTU_ANOMALY_SOURCE_CHANNEL
     max_market_calls_per_poll = 1
     market_call_count = 1
+
+    def initial_seed_policy(self) -> dict[str, object]:
+        manifest: dict[str, object] = {
+            "version": "source_monitoring_initial_seed_policy_v1",
+            "adapter_key": self.adapter_key,
+            "config_version": self.config_version,
+            "adapter_config_sha256": canonical_sha256({
+                "adapter_key": self.adapter_key,
+                "config_version": self.config_version,
+            }),
+            "broker_policy_sha256": "",
+            "initial_mode": "seed_only",
+            "symbol_allowlist": ["US.FIXTURE"],
+            "execution_capability": "none",
+            "live_trading_allowed": False,
+        }
+        manifest["source_policy_sha256"] = canonical_sha256(manifest)
+        return manifest
 
 
 class SourceMonitoringSupervisorTests(unittest.TestCase):
@@ -656,7 +682,34 @@ class SourceMonitoringSupervisorTests(unittest.TestCase):
             backoff_policy=self.backoff,
             clock_ms=lambda: self.clock[0],
         )
-        self.enable(adapter)
+        metadata = supervisor.registry.metadata_for(adapter.adapter_key)
+        seed_policy = adapter.initial_seed_policy()
+        preview = build_static_seed_preview(
+            metadata=metadata,
+            initialization_policy=settings.initialization_policy_for(
+                official_source=False,
+            ),
+            initial_seed_policy=seed_policy,
+            starting_checkpoint={},
+        )
+        self.repository.authorize_initialization_and_enable(
+            adapter.adapter_key,
+            config_version=adapter.config_version,
+            expected_state_version=0,
+            authorization={
+                "version": SOURCE_MONITORING_PENDING_AUTHORIZATION_VERSION_V2,
+                "adapter_key": adapter.adapter_key,
+                "config_version": adapter.config_version,
+                "mode": "seed_only",
+                "catch_up_max_items": 0,
+                "from_time_ms": 0,
+                "starting_checkpoint_sha256": canonical_sha256({}),
+                "preview_sha256": preview["preview_sha256"],
+                "confirmed_at_ms": self.clock[0],
+                "authorization_kind": "static_seed_policy",
+                "source_policy_sha256": preview["source_policy_sha256"],
+            },
+        )
         provider_before = self.provider_counts()
 
         seeded = supervisor.run_once(adapter.adapter_key)

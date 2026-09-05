@@ -449,7 +449,7 @@ class SecMonitoringAdapterTests(unittest.TestCase):
             "SEC_CHECKPOINT_CAPACITY_EXCEEDED",
         )
 
-    def test_sec_full_checkpoint_drops_stale_before_adding_new_identity(self) -> None:
+    def test_sec_full_checkpoint_retains_stale_ids_and_rejects_new_identity(self) -> None:
         checkpoint = {
             "version": SEC_FILINGS_CHECKPOINT_VERSION,
             "seen_accessions": [
@@ -478,22 +478,20 @@ class SecMonitoringAdapterTests(unittest.TestCase):
             max_items=monitor.max_candidates_per_poll,
         )
 
-        self.assertEqual(len(first.observed_items), 1)
-        self.assertEqual(
-            first.observed_items[0]["external_item_id"],
-            "0001045810-26-001001",
-        )
+        self.assertEqual(first.observed_items, ())
+        self.assertEqual(first.source_errors[-1].code, "SEC_CHECKPOINT_CAPACITY_EXCEEDED")
         self.assertEqual(len(first.next_checkpoint["seen_accessions"]), 1000)
-        self.assertNotIn(
+        self.assertIn(
             "0001045810-26-000001",
             first.next_checkpoint["seen_accessions"],
         )
-        self.assertIn(
+        self.assertNotIn(
             "0001045810-26-001001",
             first.next_checkpoint["seen_accessions"],
         )
         self.assertEqual(second.observed_items, ())
-        self.assertEqual(second.duplicate_count, 1000)
+        self.assertEqual(second.source_errors[-1].code, "SEC_CHECKPOINT_CAPACITY_EXCEEDED")
+        self.assertEqual(first.next_checkpoint, checkpoint)
         self.assertEqual(second.next_checkpoint, first.next_checkpoint)
 
     def test_sec_archive_path_is_bound_but_filer_agent_accession_is_allowed(self) -> None:
@@ -625,7 +623,7 @@ class CompanyIrMonitoringAdapterTests(unittest.TestCase):
         self,
         fetcher: MutableIrFixtureFetcher,
     ) -> CompanyIrSourceAdapter:
-        adapter = OfficialIrReleaseAdapter(
+        adapter = OfficialIrReleaseAdapter(source_format="rss",
             fetch_bytes=fetcher,
             clock=lambda: FIXED_NOW,
         )
@@ -641,7 +639,7 @@ class CompanyIrMonitoringAdapterTests(unittest.TestCase):
         metadata = validate_source_adapter(monitor)
         self.assertTrue(metadata.official_source)
         self.assertEqual(metadata.poll_interval_ms, 300_000)
-        self.assertRegex(metadata.config_version, r"\Acompany_ir_config_v1_[0-9a-f]{16}\Z")
+        self.assertRegex(metadata.config_version, r"\Acompany_ir_config_v3_[0-9a-f]{16}\Z")
         self.assertEqual(tuple(IR_FEEDS), STORAGE_SYMBOLS)
 
         first = monitor.poll({}, observed_at_ms=FIXED_NOW_MS)
@@ -694,7 +692,7 @@ class CompanyIrMonitoringAdapterTests(unittest.TestCase):
 
     def test_monitoring_path_preserves_items_hidden_by_legacy_dedupe(self) -> None:
         fetcher = ConflictingGuidIrFixtureFetcher()
-        source = OfficialIrReleaseAdapter(
+        source = OfficialIrReleaseAdapter(source_format="rss",
             fetch_bytes=fetcher,
             clock=lambda: FIXED_NOW,
         )
@@ -739,7 +737,7 @@ class CompanyIrMonitoringAdapterTests(unittest.TestCase):
 
     def test_ir_unseen_ninth_release_drains_after_eight_duplicates(self) -> None:
         monitor = CompanyIrSourceAdapter(
-            adapter=OfficialIrReleaseAdapter(
+            adapter=OfficialIrReleaseAdapter(source_format="rss",
                 fetch_bytes=ManyIrFixtureFetcher(),
                 clock=lambda: FIXED_NOW,
             ),
@@ -769,7 +767,7 @@ class CompanyIrMonitoringAdapterTests(unittest.TestCase):
 
     def test_ir_capacity_excess_fails_closed_without_checkpoint_advance(self) -> None:
         monitor = CompanyIrSourceAdapter(
-            adapter=OfficialIrReleaseAdapter(
+            adapter=OfficialIrReleaseAdapter(source_format="rss",
                 fetch_bytes=ManyIrFixtureFetcher(
                     count=MAX_IR_PROJECTIONS + 1,
                 ),
@@ -797,7 +795,7 @@ class CompanyIrMonitoringAdapterTests(unittest.TestCase):
             "COMPANY_IR_CHECKPOINT_CAPACITY_EXCEEDED",
         )
 
-        source = OfficialIrReleaseAdapter(
+        source = OfficialIrReleaseAdapter(source_format="rss",
             fetch_bytes=ManyIrFixtureFetcher(count=MAX_IR_PROJECTIONS + 1),
             clock=lambda: FIXED_NOW,
         )
@@ -836,7 +834,7 @@ class CompanyIrMonitoringAdapterTests(unittest.TestCase):
 
     def test_ir_config_is_strict_versioned_and_low_capacity_fails_closed(self) -> None:
         fetcher = MutableIrFixtureFetcher(guid="")
-        source = OfficialIrReleaseAdapter(
+        source = OfficialIrReleaseAdapter(source_format="rss",
             fetch_bytes=fetcher,
             clock=lambda: FIXED_NOW,
         )
@@ -846,7 +844,7 @@ class CompanyIrMonitoringAdapterTests(unittest.TestCase):
             force=True,
         )
         equivalent = CompanyIrSourceAdapter(
-            adapter=OfficialIrReleaseAdapter(
+            adapter=OfficialIrReleaseAdapter(source_format="rss",
                 fetch_bytes=MutableIrFixtureFetcher(guid=""),
                 clock=lambda: FIXED_NOW,
             ),
@@ -933,7 +931,7 @@ class OfficialAdapterSupervisorTests(unittest.TestCase):
                 allowed_forms=["8-K"],
             )
         company_ir = adapter if adapter.adapter_key == "company_ir" else CompanyIrSourceAdapter(
-                adapter=OfficialIrReleaseAdapter(
+                adapter=OfficialIrReleaseAdapter(source_format="rss",
                     fetch_bytes=MutableIrFixtureFetcher(),
                     clock=lambda: FIXED_NOW,
                 ),
@@ -1091,7 +1089,7 @@ class OfficialAdapterSupervisorTests(unittest.TestCase):
 
     def test_ir_earnings_release_enters_inbox_without_provider_call(self) -> None:
         adapter = CompanyIrSourceAdapter(
-            adapter=OfficialIrReleaseAdapter(
+            adapter=OfficialIrReleaseAdapter(source_format="rss",
                 fetch_bytes=MutableIrFixtureFetcher(),
                 clock=lambda: FIXED_NOW,
             ),
@@ -1126,7 +1124,7 @@ class OfficialAdapterSupervisorTests(unittest.TestCase):
     def test_ir_revision_creates_a_second_explicit_revision_event(self) -> None:
         fetcher = MutableIrFixtureFetcher()
         adapter = CompanyIrSourceAdapter(
-            adapter=OfficialIrReleaseAdapter(
+            adapter=OfficialIrReleaseAdapter(source_format="rss",
                 fetch_bytes=fetcher,
                 clock=lambda: FIXED_NOW,
             ),
@@ -1166,7 +1164,7 @@ class OfficialAdapterSupervisorTests(unittest.TestCase):
     def test_conflicting_guid_degrades_and_never_advances_checkpoint(self) -> None:
         fetcher = ConflictingGuidIrFixtureFetcher()
         adapter = CompanyIrSourceAdapter(
-            adapter=OfficialIrReleaseAdapter(
+            adapter=OfficialIrReleaseAdapter(source_format="rss",
                 fetch_bytes=fetcher,
                 clock=lambda: FIXED_NOW,
             ),
@@ -1197,7 +1195,7 @@ class OfficialAdapterSupervisorTests(unittest.TestCase):
 
     def test_checkpoint_capacity_excess_degrades_without_import(self) -> None:
         adapter = CompanyIrSourceAdapter(
-            adapter=OfficialIrReleaseAdapter(
+            adapter=OfficialIrReleaseAdapter(source_format="rss",
                 fetch_bytes=ManyIrFixtureFetcher(
                     count=MAX_IR_PROJECTIONS + 1,
                 ),

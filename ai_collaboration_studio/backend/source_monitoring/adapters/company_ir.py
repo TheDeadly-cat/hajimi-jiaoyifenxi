@@ -1,19 +1,35 @@
-"""Fixed-feed company-IR projection for source monitoring.
+"""Fixed-publisher company-IR metadata projection for source monitoring.
 
-The hash in this adapter is a deterministic projection of normalized RSS item
-fields.  It is explicitly not a hash of the linked announcement web page.  The
-wrapped four-feed adapter is injectable, and this module performs no storage,
-provider, model, or trading operation.
+RSS hashes describe normalized RSS items.  Micron JSON hashes describe the
+public list item and its bound NewsArticle head metadata.  Neither represents
+the announcement body.  The wrapped reader is injectable, and this module
+performs no storage, provider, model, or trading operation.
 """
 
 from __future__ import annotations
 
 import re
+import threading
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from urllib.parse import urlsplit
 
-from ...market.ir_releases import IR_FEEDS, OfficialIrReleaseAdapter
+from ...market.ir_releases import IR_FEEDS, IR_MONITORING_FEED_SCOPE_VERSION, OfficialIrReleaseAdapter
+from ...market.micron_ir_json import (
+    MICRON_IR_JSON_URL,
+    MICRON_HEAD_MAX_WORKERS,
+    MICRON_TIME_METADATA_HASH_SEMANTICS,
+    MicronIrJsonClient,
+    is_micron_declared_wall_time,
+    is_micron_detail_url,
+    micron_time_metadata_sha256,
+)
+from ...source_poll_control import (
+    SourcePollCancelled,
+    SourcePollDeadlineExceeded,
+    ensure_source_poll_active,
+    validate_source_poll_control,
+)
 from ...source_inbox_contracts import (
     PROJECT_SOURCE_ITEM_VERSION,
     canonicalize_source_url,
@@ -36,10 +52,13 @@ from .base import (
 
 
 COMPANY_IR_ADAPTER_KEY = "company_ir"
-COMPANY_IR_CHECKPOINT_VERSION = "company_ir_checkpoint_v1"
-COMPANY_IR_CONFIG_BASIS_VERSION = "company_ir_config_basis_v1"
+COMPANY_IR_CHECKPOINT_VERSION = "company_ir_checkpoint_v2"
+COMPANY_IR_CONFIG_BASIS_VERSION = "company_ir_config_basis_v3"
 COMPANY_IR_IDENTITY_VERSION = "company_ir_identity_v1"
 COMPANY_IR_RSS_PROJECTION_VERSION = "company_ir_rss_projection_v1"
+COMPANY_IR_JSON_IDENTITY_VERSION = "company_ir_identity_v2"
+COMPANY_IR_JSON_PROJECTION_VERSION = "company_ir_json_projection_v1"
+COMPANY_IR_JSON_HASH_SEMANTICS = "normalized_q4_item_and_newsarticle_metadata_not_article_body"
 COMPANY_IR_POLL_INTERVAL_MS = 5 * 60 * 1_000
 MAX_IR_PROJECTIONS = 250
 
@@ -62,6 +81,8 @@ class _IrBatchAdapter(Protocol):
         *,
         limit: int = 8,
         force: bool = False,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -111,8 +132,13 @@ def _normalize_checkpoint(
     checkpoint = normalize_checkpoint(value)
     if checkpoint == {}:
         return checkpoint, [], {}
+    if checkpoint.get("version") == "company_ir_checkpoint_v1":
+        raise SourceMonitoringContractError(
+            "COMPANY_IR_BASELINE_UPGRADE_REQUIRED",
+            "Legacy company IR checkpoint cannot prove a complete seed baseline; disable the adapter and explicitly migrate to its new config with an empty replacement checkpoint. Retain existing inbox items, rooms and materials.",
+        )
     if set(checkpoint) != {"version", "projections"}:
-        raise _checkpoint_error("company IR checkpoint fields do not match v1")
+        raise _checkpoint_error("company IR checkpoint fields do not match v2")
     if checkpoint.get("version") != COMPANY_IR_CHECKPOINT_VERSION:
         raise _checkpoint_error("company IR checkpoint version is unsupported")
     raw_entries = checkpoint.get("projections")
@@ -289,6 +315,81 @@ def _release_item(
     }
 
 
+def _json_release_identity_and_projection(
+    *, symbol: str, release: dict[str, Any], official_url: str,
+    title: str, summary: str, published_at: str,
+) -> tuple[str, str, str]:
+    release_id = release["q4_press_release_id"]
+    identity_value = str(release_id)
+    identity_sha = canonical_sha256({
+        "version": COMPANY_IR_JSON_IDENTITY_VERSION, "symbol": symbol,
+        "kind": "press_release_id", "value": identity_value,
+    })
+    projection_sha = canonical_sha256({
+        "version": COMPANY_IR_JSON_PROJECTION_VERSION, "symbol": symbol,
+        "press_release_id": release_id, "revision_number": release["q4_revision_number"],
+        "official_url": official_url, "title": title, "summary": summary,
+        "published_at": published_at, "metadata_date_modified": release["metadata_date_modified"],
+        "source_declared_time_raw": release["source_declared_time_raw"],
+        "time_metadata_sha256": release["time_metadata_sha256"],
+    })
+    return identity_value, identity_sha, projection_sha
+
+
+def _release_json_item(
+    *, symbol: str, publisher: str, feed_url: str, release: dict[str, Any],
+    official_url: str, published_at: str, guid: str, identity_kind: str,
+    identity_value: str, identity_sha: str, projection_sha: str,
+    previous_projection_sha: str,
+) -> dict[str, Any]:
+    del guid, identity_kind
+    title, summary = release["title"], release["summary"]
+    return {
+        "version": PROJECT_SOURCE_ITEM_VERSION,
+        "external_item_id": f"ir-{identity_sha}", "item_type": "company_ir_release",
+        "severity": "info", "occurred_at": published_at, "published_at": published_at,
+        "entities": [{"kind": "security", "id": symbol, "label": symbol.removeprefix("US.")}],
+        "headline": title, "summary": summary,
+        "facts": [{
+            "claim": f"{publisher} lists the announcement '{title}'; its bound NewsArticle head metadata declares the publication time.",
+            "source_indexes": [0, 1],
+        }],
+        "sources": [
+            {"url": official_url, "publisher": publisher,
+             "source_type": "company_ir_time_metadata", "published_at": published_at,
+             "content_sha256": release["time_metadata_sha256"]},
+            {"url": feed_url, "publisher": publisher,
+             "source_type": "company_ir_json_projection", "published_at": published_at,
+             "content_sha256": projection_sha},
+        ],
+        "impact_hypotheses": [],
+        "unknowns": [
+            "Only the fixed public JSON list and bound NewsArticle head metadata were read; article body, attachments and media were not ingested.",
+            "Projection hashes describe normalized metadata and are not hashes of the announcement body or RSS.",
+            "The Q4 list wall-clock text has no declared timezone; publication time comes only from this announcement's explicit-offset NewsArticle metadata.",
+        ],
+        "confidence": 1.0, "recommended_route": "notify_only",
+        "extensions": {"company_ir_v2": {
+            "source_format": "micron_q4_public_json_v1",
+            "event_type": release["event_type"],
+            "fiscal_period": release.get("fiscal_period") or "",
+            "press_release_id": release["q4_press_release_id"],
+            "revision_number": release["q4_revision_number"],
+            "identity_kind": "press_release_id", "identity_value": identity_value,
+            "identity_sha256": identity_sha, "is_revision": bool(previous_projection_sha),
+            "previous_projection_sha256": previous_projection_sha,
+            "projection_sha256": projection_sha,
+            "projection_version": COMPANY_IR_JSON_PROJECTION_VERSION,
+            "projection_hash_semantics": COMPANY_IR_JSON_HASH_SEMANTICS,
+            "published_time_basis": "official_newsarticle_datePublished_v1",
+            "source_declared_time_raw": release["source_declared_time_raw"],
+            "time_metadata_sha256": release["time_metadata_sha256"],
+            "time_metadata_hash_semantics": MICRON_TIME_METADATA_HASH_SEMANTICS,
+            "metadata_date_modified": release["metadata_date_modified"],
+        }},
+    }
+
+
 class CompanyIrSourceAdapter:
     """Project only the four code-defined official IR feeds into inbox items."""
 
@@ -329,7 +430,8 @@ class CompanyIrSourceAdapter:
             feed_snapshot.append({
                 "symbol": symbol,
                 "publisher": config["publisher"],
-                "url": config["url"],
+                "url": self._feed_url_for(symbol),
+                "source_format": self._format_for(symbol),
                 "hosts": sorted(config["hosts"]),
                 "presentation_hub_url": config["presentation_hub_url"],
                 "technology_scope": list(config["technology_scope"]),
@@ -340,6 +442,13 @@ class CompanyIrSourceAdapter:
             "checkpoint_version": COMPANY_IR_CHECKPOINT_VERSION,
             "identity_version": COMPANY_IR_IDENTITY_VERSION,
             "rss_projection_version": COMPANY_IR_RSS_PROJECTION_VERSION,
+            "json_identity_version": COMPANY_IR_JSON_IDENTITY_VERSION,
+            "json_projection_version": COMPANY_IR_JSON_PROJECTION_VERSION,
+            "json_recent_scope_limit": 30,
+            "json_head_maximum_bytes": 128 * 1024,
+            "json_head_maximum_workers": MICRON_HEAD_MAX_WORKERS,
+            "json_head_workers": self._sealed_micron_workers,
+            "json_time_validation": "trusted_local_response_receipt_utc_v1",
             "feeds": feed_snapshot,
             "per_symbol_limit": self.per_symbol_limit,
             "max_candidates_per_poll": self.max_candidates_per_poll,
@@ -370,7 +479,27 @@ class CompanyIrSourceAdapter:
                 "COMPANY_IR_SOURCE_PROVENANCE_DRIFT",
                 "company IR transport changed after construction",
             )
-        expected = "company_ir_config_v1_" + canonical_sha256(
+        if self._receipt_clock is not self._sealed_receipt_clock or (
+            self._seal_transport_identity and (
+                self._adapter.source_format != self._sealed_source_format
+                or self._adapter._clock is not self._sealed_inner_clock
+                or self._adapter._micron_client is not self._sealed_micron_client
+                or (
+                    self._sealed_micron_client is not None and (
+                        self._sealed_micron_client.transport_identity is not self._sealed_micron_transport
+                        or self._sealed_micron_client._clock is not self._sealed_inner_clock
+                        or type(self._sealed_micron_client.max_workers) is not int
+                        or self._sealed_micron_client.max_workers != self._sealed_micron_workers
+                        or not 1 <= self._sealed_micron_client.max_workers <= MICRON_HEAD_MAX_WORKERS
+                    )
+                )
+            )
+        ):
+            raise SourceMonitoringContractError(
+                "COMPANY_IR_SOURCE_PROVENANCE_DRIFT",
+                "company IR source format, JSON transport or trusted local clock changed after construction",
+            )
+        expected = "company_ir_config_v3_" + canonical_sha256(
             self._config_basis()
         )[:16]
         if self.config_version != expected:
@@ -387,6 +516,7 @@ class CompanyIrSourceAdapter:
         per_symbol_limit: int = 8,
         force: bool = False,
         poll_interval_ms: int = COMPANY_IR_POLL_INTERVAL_MS,
+        receipt_clock: Callable[[], datetime] | None = None,
     ) -> None:
         if type(symbols) not in {list, tuple}:
             raise ValueError("company IR symbols must be a native list or tuple")
@@ -426,6 +556,10 @@ class CompanyIrSourceAdapter:
         self._per_symbol_limit = per_symbol_limit
         self._force = force
         self._poll_interval_ms = poll_interval_ms
+        if receipt_clock is not None and not callable(receipt_clock):
+            raise ValueError("receipt_clock must be callable")
+        self._receipt_clock = receipt_clock or (lambda: datetime.now(timezone.utc))
+        self._sealed_receipt_clock = self._receipt_clock
         source_adapter = adapter or OfficialIrReleaseAdapter()
         self._adapter = source_adapter
         self._sealed_inner_adapter = source_adapter
@@ -435,6 +569,13 @@ class CompanyIrSourceAdapter:
         )
         self._seal_transport_identity = type(source_adapter) is OfficialIrReleaseAdapter
         self._sealed_inner_transport = getattr(source_adapter, "_fetch_bytes", None)
+        self._sealed_source_format = source_adapter.source_format if self._seal_transport_identity else "rss"
+        self._sealed_inner_clock = getattr(source_adapter, "_clock", None)
+        self._sealed_micron_client = getattr(source_adapter, "_micron_client", None)
+        self._sealed_micron_transport = (
+            self._sealed_micron_client.transport_identity if self._sealed_micron_client is not None else None
+        )
+        self._sealed_micron_workers = self._sealed_micron_client.max_workers if self._sealed_micron_client is not None else 0
         self._inner_transport_mode = (
             "company_ir_default_https_v1"
             if (
@@ -448,20 +589,80 @@ class CompanyIrSourceAdapter:
                 else "custom_ir_batch_adapter_v1"
             )
         )
+        if self._sealed_source_format == "q4_json":
+            self._inner_transport_mode = (
+                "company_ir_q4_json_and_rss_default_https_v1"
+                if self._sealed_micron_transport is MicronIrJsonClient._default_fetch_bytes
+                and self._sealed_inner_transport is OfficialIrReleaseAdapter._default_fetch_bytes
+                else "company_ir_q4_json_and_rss_injected_transport_v1"
+            )
         self._config_version = (
-            "company_ir_config_v1_" + canonical_sha256(self._config_basis())[:16]
+            "company_ir_config_v3_" + canonical_sha256(self._config_basis())[:16]
         )
+
+    def _format_for(self, symbol: str) -> str:
+        return "q4_json" if symbol == "US.MU" and self._sealed_source_format == "q4_json" else "rss"
+
+    def _feed_url_for(self, symbol: str) -> str:
+        return MICRON_IR_JSON_URL if self._format_for(symbol) == "q4_json" else str(IR_FEEDS[symbol]["url"])
 
     def poll(
         self,
         checkpoint: Any,
         *,
         observed_at_ms: Any,
+        deadline_monotonic_ms: Any = 0,
+        cancel_event: threading.Event | None = None,
         etag: Any = "",
         last_modified: Any = "",
         max_items: Any = 50,
     ) -> AdapterPollResult:
+        return self._poll(
+            checkpoint, observed_at_ms=observed_at_ms,
+            deadline_monotonic_ms=deadline_monotonic_ms, cancel_event=cancel_event,
+            etag=etag, last_modified=last_modified, max_items=max_items,
+            seed_baseline=False,
+        )
+
+    def poll_seed_baseline(
+        self,
+        checkpoint: Any,
+        *,
+        observed_at_ms: Any,
+        deadline_monotonic_ms: Any = 0,
+        cancel_event: threading.Event | None = None,
+        etag: Any = "",
+        last_modified: Any = "",
+        max_items: Any = 50,
+    ) -> AdapterPollResult:
+        """Retain every identity and metadata projection in one complete bounded source snapshot."""
+
+        if normalize_checkpoint(checkpoint) != {}:
+            raise _checkpoint_error("company IR initial baseline requires an explicitly empty checkpoint")
+        return self._poll(
+            checkpoint, observed_at_ms=observed_at_ms,
+            deadline_monotonic_ms=deadline_monotonic_ms, cancel_event=cancel_event,
+            etag=etag, last_modified=last_modified, max_items=max_items,
+            seed_baseline=True,
+        )
+
+    def _poll(
+        self,
+        checkpoint: Any,
+        *,
+        observed_at_ms: Any,
+        deadline_monotonic_ms: Any,
+        cancel_event: threading.Event | None,
+        etag: Any,
+        last_modified: Any,
+        max_items: Any,
+        seed_baseline: bool,
+    ) -> AdapterPollResult:
         self._assert_config_seal()
+        deadline, event = validate_source_poll_control(
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
         clean_etag, clean_last_modified, safe_max_items = validate_poll_context(
             etag=etag,
             last_modified=last_modified,
@@ -478,23 +679,51 @@ class CompanyIrSourceAdapter:
         captured_at_ms, observed_at = _native_observed_at(observed_at_ms)
         started_checkpoint, old_order, projections = _normalize_checkpoint(checkpoint)
         try:
+            ensure_source_poll_active(
+                deadline_monotonic_ms=deadline,
+                cancel_event=event,
+            )
             monitoring_batch = getattr(
                 self._adapter,
                 "monitoring_releases_batch",
                 None,
             )
             if callable(monitoring_batch):
-                payload = monitoring_batch(
-                    list(self.symbols),
-                    limit=self.per_symbol_limit,
-                    force=self.force,
-                )
+                if self._seal_transport_identity:
+                    payload = monitoring_batch(
+                        list(self.symbols),
+                        limit=self.per_symbol_limit,
+                        force=self.force,
+                        deadline_monotonic_ms=deadline,
+                        cancel_event=event,
+                    )
+                else:
+                    payload = monitoring_batch(
+                        list(self.symbols),
+                        limit=self.per_symbol_limit,
+                        force=self.force,
+                    )
             else:
-                payload = self._adapter.recent_releases_batch(
-                    list(self.symbols),
-                    limit=self.per_symbol_limit,
-                    force=self.force,
-                )
+                if self._seal_transport_identity:
+                    payload = self._adapter.recent_releases_batch(
+                        list(self.symbols),
+                        limit=self.per_symbol_limit,
+                        force=self.force,
+                        deadline_monotonic_ms=deadline,
+                        cancel_event=event,
+                    )
+                else:
+                    payload = self._adapter.recent_releases_batch(
+                        list(self.symbols),
+                        limit=self.per_symbol_limit,
+                        force=self.force,
+                    )
+            ensure_source_poll_active(
+                deadline_monotonic_ms=deadline,
+                cancel_event=event,
+            )
+        except (SourcePollCancelled, SourcePollDeadlineExceeded):
+            raise
         except Exception as exc:
             return AdapterPollResult.build(
                 adapter_key=self.adapter_key,
@@ -514,8 +743,30 @@ class CompanyIrSourceAdapter:
 
         if type(payload) is not dict:
             payload = {}
+        response_received_at = None
+        json_source_enabled = "US.MU" in self.symbols and self._format_for("US.MU") == "q4_json"
+        if json_source_enabled:
+            response_received_at = self._receipt_clock()
+            if type(response_received_at) is not datetime or response_received_at.tzinfo is None or response_received_at.utcoffset() is None:
+                raise SourceMonitoringContractError("COMPANY_IR_RECEIPT_TIME_INVALID", "trusted local receipt clock must return an aware datetime")
+            response_received_at = response_received_at.astimezone(timezone.utc)
+            if response_received_at < observed_at:
+                raise SourceMonitoringContractError("COMPANY_IR_RECEIPT_TIME_INVALID", "trusted local receipt clock precedes the start of this poll")
         errors = _source_errors(payload)
         rows = payload.get("rows") if type(payload.get("rows")) is list else []
+        complete_feed_scope = (
+            payload.get("monitoring_feed_scope_version") == IR_MONITORING_FEED_SCOPE_VERSION
+            and payload.get("monitoring_feed_scope_complete") is True
+            and len(rows) == len(self.symbols)
+            and all(type(row) is dict for row in rows)
+            and [row.get("symbol") for row in rows] == list(self.symbols)
+        )
+        micron_rows = [row for row in rows if type(row) is dict and row.get("symbol") == "US.MU"]
+        json_scope_failed = json_source_enabled and (
+            len(micron_rows) != 1
+            or micron_rows[0].get("feed_scope_complete") is not True
+            or any(error.scope == "US.MU" for error in errors)
+        )
         observed_items: list[dict[str, Any]] = []
         candidate_order: list[str] = []
         candidate_groups: dict[str, list[dict[str, Any]]] = {}
@@ -531,25 +782,29 @@ class CompanyIrSourceAdapter:
                 rejected_count += 1
                 continue
             config = IR_FEEDS[symbol]
+            json_source = self._format_for(symbol) == "q4_json"
             hosts = set(config["hosts"])
-            feed_url = _official_url(config["url"], allowed_hosts=hosts)
+            feed_url = _official_url(self._feed_url_for(symbol), allowed_hosts=hosts)
             publisher = config["publisher"]
             releases = row.get("releases") if type(row.get("releases")) is list else []
             for release in releases:
                 if type(release) is not dict:
                     rejected_count += 1
+                    json_scope_failed = json_scope_failed or json_source
                     continue
                 title_value = release.get("title")
                 summary_value = release.get("summary")
                 title = title_value.strip()[:300] if type(title_value) is str else ""
                 summary = summary_value.strip()[:800] if type(summary_value) is str else ""
+                if json_source and not summary:
+                    summary = f"Official Micron press-release metadata: {title}."
                 official_url = _official_url(
                     release.get("official_url"),
                     allowed_hosts=hosts,
                 )
                 published_at = _rfc3339(
                     release.get("published_at"),
-                    observed_at=observed_at,
+                    observed_at=response_received_at if json_source else observed_at,
                 )
                 guid = _clean_guid(release.get("guid"))
                 event_type = release.get("event_type")
@@ -563,20 +818,39 @@ class CompanyIrSourceAdapter:
                     or event_type not in _IR_EVENT_TYPES
                 ):
                     rejected_count += 1
+                    json_scope_failed = json_scope_failed or json_source
                     continue
-                (
-                    identity_kind,
-                    identity_value,
-                    identity_sha,
-                    projection_sha,
-                ) = _identity_and_projection(
-                    symbol=symbol,
-                    guid=guid,
-                    official_url=official_url,
-                    title=title,
-                    summary=summary,
-                    published_at=published_at,
-                )
+                if json_source:
+                    release_id, revision = release.get("q4_press_release_id"), release.get("q4_revision_number")
+                    raw_date, modified = release.get("source_declared_time_raw"), release.get("metadata_date_modified")
+                    time_hash = release.get("time_metadata_sha256")
+                    if (
+                        release.get("source_format") != "micron_q4_public_json_v1"
+                        or type(release_id) is not int or not 1 <= release_id <= (1 << 53) - 1
+                        or type(revision) is not int or not 0 <= revision <= (1 << 53) - 1
+                        or not is_micron_declared_wall_time(raw_date)
+                        or type(modified) is not str
+                        or (modified and _rfc3339(modified, observed_at=response_received_at) != modified)
+                        or not is_micron_detail_url(official_url)
+                        or type(time_hash) is not str
+                        or time_hash != micron_time_metadata_sha256(
+                            official_url=official_url, title=title,
+                            published_at=published_at, metadata_date_modified=modified,
+                        )
+                    ):
+                        rejected_count += 1
+                        json_scope_failed = True
+                        continue
+                    identity_kind = "press_release_id"
+                    identity_value, identity_sha, projection_sha = _json_release_identity_and_projection(
+                        symbol=symbol, release=release, official_url=official_url,
+                        title=title, summary=summary, published_at=published_at,
+                    )
+                else:
+                    identity_kind, identity_value, identity_sha, projection_sha = _identity_and_projection(
+                        symbol=symbol, guid=guid, official_url=official_url,
+                        title=title, summary=summary, published_at=published_at,
+                    )
                 if identity_sha not in candidate_groups:
                     candidate_order.append(identity_sha)
                     candidate_groups[identity_sha] = []
@@ -594,13 +868,32 @@ class CompanyIrSourceAdapter:
                     "projection_sha": projection_sha,
                 })
 
-        if len(candidate_groups) > MAX_IR_PROJECTIONS:
+        if json_source_enabled:
+            json_scope_failed = json_scope_failed or any(
+                group[0]["symbol"] == "US.MU" and len({entry["projection_sha"] for entry in group}) != 1
+                for group in candidate_groups.values()
+            )
+            if json_scope_failed:
+                # A failed Micron snapshot cannot emit a partial set. Other
+                # healthy publishers retain the existing degraded-import path.
+                omitted = [identity for identity in candidate_order if candidate_groups[identity][0]["symbol"] == "US.MU"]
+                rejected_count += sum(len(candidate_groups[identity]) for identity in omitted)
+                for identity in omitted:
+                    candidate_groups.pop(identity)
+                candidate_order = [identity for identity in candidate_order if identity in candidate_groups]
+                if not any(error.scope == "US.MU" for error in errors):
+                    errors = errors[: MAX_SOURCE_ERRORS_PER_POLL - 1] + [SourcePollError.build(
+                        "COMPANY_IR_SOURCE_SCOPE_INCOMPLETE", "Micron JSON scope is incomplete; no Micron items can be delivered", "US.MU",
+                    )]
+
+        scope_and_seen_count = len(set(candidate_groups) | set(projections))
+        if scope_and_seen_count > MAX_IR_PROJECTIONS:
             errors = errors[: MAX_SOURCE_ERRORS_PER_POLL - 1]
             errors.append(SourcePollError.build(
                 "COMPANY_IR_CHECKPOINT_CAPACITY_EXCEEDED",
                 (
-                    f"company IR poll returned {len(candidate_groups)} unique "
-                    f"identities; the checkpoint capacity is {MAX_IR_PROJECTIONS}"
+                    f"company IR current feed and retained projections require {scope_and_seen_count} unique "
+                    f"identities; the checkpoint capacity is {MAX_IR_PROJECTIONS}; committed identities are never evicted"
                 ),
                 "official_company_ir",
             ))
@@ -634,22 +927,36 @@ class CompanyIrSourceAdapter:
             if previous_projection_sha == projection_sha:
                 duplicate_count += 1
                 continue
+            if seed_baseline:
+                projections[identity_sha] = projection_sha
             if emitted_group_count.get(symbol, 0) >= self.per_symbol_limit:
                 continue
             if len(observed_items) >= safe_max_items:
                 continue
-            observed_items.append(_release_item(
+            item_builder = _release_json_item if self._format_for(symbol) == "q4_json" else _release_item
+            observed_items.append(item_builder(
                 **candidate,
                 previous_projection_sha=previous_projection_sha,
             ))
             emitted_group_count[symbol] = emitted_group_count.get(symbol, 0) + 1
             projections[identity_sha] = projection_sha
 
-        next_order = [
-            identity
-            for identity in old_order
-            if identity in candidate_groups and identity in projections
-        ] + [
+        if seed_baseline and (not complete_feed_scope or errors or rejected_count):
+            errors = errors[: MAX_SOURCE_ERRORS_PER_POLL - 1]
+            errors.append(SourcePollError.build(
+                "COMPANY_IR_BASELINE_SCOPE_INCOMPLETE" if seed_baseline else "COMPANY_IR_SOURCE_SCOPE_INCOMPLETE",
+                "Company IR requires every validated item in the complete fetched source scope; missing, malformed or filtered evidence cannot advance its checkpoint",
+                "official_company_ir",
+            ))
+            return AdapterPollResult.build(
+                adapter_key=self.adapter_key, started_checkpoint=started_checkpoint,
+                next_checkpoint=started_checkpoint, observed_items=(), source_errors=errors,
+                retry_after_ms=60_000, captured_at_ms=captured_at_ms,
+                etag=clean_etag, last_modified=clean_last_modified,
+                rejected_count=rejected_count,
+            )
+
+        next_order = old_order + [
             identity
             for identity in candidate_order
             if identity in projections and identity not in old_order
@@ -664,6 +971,8 @@ class CompanyIrSourceAdapter:
                 for identity in next_order
             ],
         }
+        if errors or rejected_count:
+            next_checkpoint = started_checkpoint
         return AdapterPollResult.build(
             adapter_key=self.adapter_key,
             started_checkpoint=started_checkpoint,
