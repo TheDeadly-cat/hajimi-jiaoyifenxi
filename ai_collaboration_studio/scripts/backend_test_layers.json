@@ -44,6 +44,7 @@
         "tests.test_round_objective_validation",
         "tests.test_server_pause",
         "tests.test_server_runtime_fail_stop",
+        "tests.test_source_monitoring_initialization_cross_batch",
         "tests.test_source_monitoring_ir_baseline",
         "tests.test_source_monitoring_micron_json",
         "tests.test_source_monitoring_operations",

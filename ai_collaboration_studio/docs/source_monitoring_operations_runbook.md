@@ -50,10 +50,22 @@ serve_forever 退出
 | 模式 | 首次成功轮询 | 后续轮询 |
 | --- | --- | --- |
 | `seed_only`（默认） | 完整验证所有候选，只把 adapter 原样 `next_checkpoint` 与 sealed initialization receipt 原子提交；不导入历史项、不通知 | 正常处理 checkpoint 后的新项 |
-| `catch_up` | 还必须设置 `AI_STUDIO_SOURCE_MONITOR_CATCH_UP_MAX_ITEMS=1..50`，先 preview，再把 `AI_STUDIO_SOURCE_MONITOR_INITIAL_PREVIEW_SHA256` 设为精确预览哈希；只导入确定性排序后的最新 N 项，但提交完整 next checkpoint | 正常处理新项 |
-| `from_time` | 还必须设置带时区 RFC3339 的 `AI_STUDIO_SOURCE_MONITOR_FROM_TIME`；该值现明确是 `initial_from_time`，时间标准化到 UTC 毫秒，只控制首次历史选择 | 首次成功后不再应用该 cutoff；后续默认正常处理新观测 |
+| `catch_up` | 还必须设置 `AI_STUDIO_SOURCE_MONITOR_CATCH_UP_MAX_ITEMS=1..50`，先 preview，再把 `AI_STUDIO_SOURCE_MONITOR_INITIAL_PREVIEW_SHA256` 设为精确预览哈希；SEC/IR 从完整有界历史中选最新 N 个身份，本批仍遵守原投递额度 | 保留授权但未交付的身份供后续处理；初始历史总额不超过 N，同时正常处理新项 |
+| `from_time` | 还必须设置带时区 RFC3339 的 `AI_STUDIO_SOURCE_MONITOR_FROM_TIME`；该值是 `initial_from_time`，只控制首次历史选择；SEC/IR 在完整有界历史内记住被排除项，合格历史按原额度投递 | 合格但未交付的历史继续等待；已排除的初始旧项不再进入；不自动延续该 cutoff |
 
 `catch_up` 按 `occurred_at` UTC 降序、服务端 fingerprint 升序确定性选择；预览封印 adapter key、config version、起止 checkpoint hash、模式/上限、完整候选与选择后的 fingerprint 集。缺少确认哈希会在 worker 网络读取和 run receipt 之前失败；确认后来源证据漂移会在 Source Inbox 写入和 checkpoint 前失败。UI 授权会把精确 preview hash 与策略、起始 checkpoint 封印为 pending authorization；成功初始化在同一事务消费它，失败/degraded/dry-run 保留，disable 或 config migration 清除。环境与 UI 同时提供 catch-up hash 且不一致时失败关闭。
+
+SEC/IR 的非默认初始化通过同一个 `poll_initial_history` 完整范围入口执行，CLI preview、
+操作员预览和 Supervisor 使用同一调度函数。预览另封印整个初始范围及授权身份的摘要，
+因此尚未进入首批的授权身份变化也会使确认失效。界面的 candidate/selected 计数仍表示
+本批内容，不表示完整历史数量。初始化成功表示历史分类与本批进度已提交，不代表所有
+授权历史都已投递。失败不会消费分类 checkpoint；import 已成功但 checkpoint 未提交的
+崩溃重放由既有 Source Inbox 身份去重和同一确认摘要约束。
+
+本次不存储完整待交付正文快照。授权未交付项保持 unseen，在它仍存在于官方有界查询
+范围时由后续正常轮询读取；上游移除或改写后，不承诺恢复先前 payload 的原始版本。
+范围外历史、永久队列和正文归档不在该合同内。详细修复与验证见
+`initialization_cross_batch_2026-09-05.md`。
 
 `seed_only` 与 `from_time` 的授权绑定模式、参数和起始 checkpoint，而不是延迟启动时的候选全集；首次成功运行分别以当时完整候选建立基线，或严格按已确认 cutoff 过滤。只读市场 adapter 首次只允许 `seed_only`，即使官方 pipeline 配置为 `catch_up` 或 `from_time` 也不会继承。Futu 的初始化 preview 只封印静态 broker/adapter policy、四股 allowlist、零执行边界和起始 checkpoint，不读取实时行情；确认启用同样执行 0 次 market/network call。Runtime 首次真正轮询可以看到不同的实时 snapshot，仍只建立 checkpoint、不导入历史信号，并在同一初始化 receipt 中同时记录已授权的静态 policy hash 和实际首轮 execution preview hash。
 

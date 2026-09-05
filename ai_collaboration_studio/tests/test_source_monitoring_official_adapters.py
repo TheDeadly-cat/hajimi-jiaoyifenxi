@@ -1048,9 +1048,21 @@ class OfficialAdapterSupervisorTests(unittest.TestCase):
             transport_macro.poll({}, observed_at_ms=FIXED_NOW_MS)
 
     def test_sec_fixture_runs_twice_and_creates_one_inbox_event(self) -> None:
+        fetcher = SecFixtureFetcher()
+
+        def complete_fixture(url: str, user_agent: str) -> dict:
+            payload = fetcher(url, user_agent)
+            if url != SEC_TICKERS_URL:
+                # A successful initial history must contain no filtered bad or
+                # future rows. Keep the full shape with its one valid filing.
+                recent = payload["filings"]["recent"]
+                for field in recent:
+                    recent[field] = recent[field][:1]
+            return payload
+
         source = SecEdgarAdapter(
             user_agent="AI Studio monitor@example.com",
-            fetch_json=SecFixtureFetcher(),
+            fetch_json=complete_fixture,
             clock=lambda: FIXED_NOW,
             allowed_symbols=SEC_MONITOR_SYMBOLS,
         )
@@ -1086,6 +1098,23 @@ class OfficialAdapterSupervisorTests(unittest.TestCase):
         )
         self.assertEqual(first["safety"]["provider_calls_performed"], 0)
         self.assertEqual(first["safety"]["formal_rounds_created"], 0)
+
+    def test_sec_incomplete_initial_history_does_not_import_its_valid_subset(self) -> None:
+        source = SecEdgarAdapter(
+            user_agent="AI Studio monitor@example.com",
+            fetch_json=SecFixtureFetcher(),
+            clock=lambda: FIXED_NOW,
+            allowed_symbols=SEC_MONITOR_SYMBOLS,
+        )
+        adapter = SecFilingsSourceAdapter(
+            adapter=source, allowed_symbols=["US.NVDA"], allowed_forms=["8-K"],
+        )
+        result = self._supervisor(adapter).run_once(adapter.adapter_key)
+        self.assertEqual(result["status"], "DEGRADED")
+        self.assertEqual(result["initialization"]["outcome"], "blocked")
+        self.assertEqual(result["state"]["checkpoint"], {})
+        self.assertIsNone(result["import"])
+        self.assertEqual(self.inbox.list_items()["items"], [])
 
     def test_ir_earnings_release_enters_inbox_without_provider_call(self) -> None:
         adapter = CompanyIrSourceAdapter(

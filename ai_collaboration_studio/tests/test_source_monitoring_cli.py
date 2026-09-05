@@ -556,6 +556,81 @@ class SourceMonitoringCliTests(unittest.TestCase):
         for secret in ("SECRET_HEADLINE", "SECRET_SUMMARY", "SECRET_URL", "SECRET_ETAG"):
             self.assertNotIn(secret, text)
 
+    def test_sec_cli_preview_authorizes_the_same_complete_history_across_run_once_batches(self) -> None:
+        from backend.market.sec_edgar import SecEdgarAdapter
+        from backend.source_inbox_service import SourceInboxService
+        from backend.source_monitoring.adapters.sec_filings import SecFilingsSourceAdapter
+        from backend.source_monitoring.supervisor import SourceMonitoringSupervisor
+        from tests.test_source_monitoring_sec_baseline import MutableSecRecentFetcher, NOW, NOW_MS
+
+        fetcher = MutableSecRecentFetcher(7)
+        fetcher.records = [
+            (index, f"2026-09-04T{index:02d}:00:00Z") for index in range(1, 8)
+        ]
+        self.adapter = SecFilingsSourceAdapter(
+            adapter=SecEdgarAdapter(
+                user_agent="Offline CLI fixture fixture@example.com",
+                fetch_json=fetcher, clock=lambda: NOW, allowed_symbols=["US.NVDA"],
+            ),
+            allowed_symbols=["US.NVDA"], allowed_forms=["8-K"],
+            per_symbol_limit=2, force=True,
+        )
+        self.registry = SourceAdapterRegistry((self.adapter,))
+        self.repository = SourceMonitoringStateRepository(self.store, clock_ms=lambda: NOW_MS)
+        self.repository.set_enabled(
+            self.adapter.adapter_key, config_version=self.adapter.config_version, enabled=True,
+        )
+        self.settings = SourceMonitoringSettings(
+            enabled=True, dry_run=False, initial_mode="catch_up", catch_up_max_items=5,
+        )
+
+        def supervisor_builder(store, settings, registry, repository):
+            return SourceMonitoringSupervisor(
+                registry=registry, repository=repository,
+                source_inbox=SourceInboxService(store, clock=lambda: NOW_MS / 1_000),
+                settings=settings, clock_ms=lambda: NOW_MS,
+                event_sink=lambda *_args, **_kwargs: None,
+            )
+
+        dependencies = self.dependencies(
+            clock_ms=lambda: NOW_MS, supervisor_builder=supervisor_builder,
+        )
+        before = _logical_fingerprint(self.database_path)
+        exit_code, _text, preview = self.invoke(
+            ["preview", self.adapter.adapter_key], dependencies=dependencies,
+        )
+        self.assertEqual(exit_code, 0, preview)
+        self.assertEqual(preview["candidate_count"], 2)
+        self.assertEqual(preview["selected_count"], 2)
+        self.assertEqual(_logical_fingerprint(self.database_path), before)
+        self.assertEqual(self.repository.get_state(self.adapter.adapter_key)["checkpoint"], {})
+
+        # Reuse exactly the CLI-issued confirmation in the real Supervisor.
+        # Five authorized identities require three polls at the sealed limit.
+        self.settings = SourceMonitoringSettings(
+            enabled=True, dry_run=False, initial_mode="catch_up", catch_up_max_items=5,
+            initial_preview_sha256=preview["preview_sha256"],
+        )
+        for expected_count in (2, 2, 1, 0):
+            exit_code, _text, result = self.invoke(
+                ["run-once", self.adapter.adapter_key, "--confirm", "RUN_ONCE"],
+                dependencies=dependencies,
+            )
+            self.assertEqual(exit_code, 0, result)
+            self.assertEqual(result["status"], "SUCCEEDED", result)
+            self.assertEqual(result["counts"]["accepted_count"], expected_count)
+        receipt = self.repository.get_latest_successful_initialization(
+            self.adapter.adapter_key, config_version=self.adapter.config_version,
+        )
+        self.assertEqual(receipt["preview_sha256"], preview["preview_sha256"])
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            ids = [row[0] for row in connection.execute(
+                "SELECT external_item_id FROM source_inbox_items ORDER BY external_item_id"
+            )]
+            self.assertEqual(ids, [f"0001045810-26-{index:06d}" for index in range(3, 8)])
+            for table in ("provider_execution_runs", "provider_call_attempts", "rounds", "source_inbox_round_drafts"):
+                self.assertEqual(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0, table)
+
     def test_preview_disabled_and_config_mismatch_fail_before_poll(self) -> None:
         disabled = SourceMonitoringSettings(
             enabled=False,

@@ -44,6 +44,7 @@ from .base import (
     SOURCE_ADAPTER_CONTRACT_VERSION,
     validate_poll_context,
 )
+from ..settings import SourceMonitoringInitializationPolicy
 
 
 SEC_FILINGS_ADAPTER_KEY = "sec_filings"
@@ -569,6 +570,33 @@ class SecFilingsSourceAdapter:
             seed_baseline=True,
         )
 
+    def poll_initial_history(
+        self,
+        checkpoint: Any,
+        *,
+        initialization_policy: SourceMonitoringInitializationPolicy,
+        observed_at_ms: Any,
+        deadline_monotonic_ms: Any = 0,
+        cancel_event: threading.Event | None = None,
+        etag: Any = "",
+        last_modified: Any = "",
+        max_items: Any = 50,
+    ) -> AdapterPollResult:
+        """Classify all initial history, keeping authorized overflow unseen."""
+
+        if (
+            normalize_checkpoint(checkpoint) != {}
+            or type(initialization_policy) is not SourceMonitoringInitializationPolicy
+            or initialization_policy.mode not in {"catch_up", "from_time"}
+        ):
+            raise _checkpoint_error("SEC initial history requires an empty checkpoint and exact backfill policy")
+        return self._poll(
+            checkpoint, seed_baseline=True,
+            initialization_policy=initialization_policy, observed_at_ms=observed_at_ms,
+            deadline_monotonic_ms=deadline_monotonic_ms, cancel_event=cancel_event,
+            etag=etag, last_modified=last_modified, max_items=max_items,
+        )
+
     def _poll(
         self,
         checkpoint: Any,
@@ -580,6 +608,7 @@ class SecFilingsSourceAdapter:
         last_modified: Any,
         max_items: Any,
         seed_baseline: bool,
+        initialization_policy: SourceMonitoringInitializationPolicy | None = None,
     ) -> AdapterPollResult:
         self._assert_config_seal()
         deadline, event = validate_source_poll_control(
@@ -780,6 +809,21 @@ class SecFilingsSourceAdapter:
                 rejected_count=rejected_count + len(candidate_groups),
             )
 
+        authorized_history: set[str] | None = None
+        initial_history_sha256 = ""
+        if initialization_policy is not None:
+            authorized_history = set()
+            if complete_recent_scope and not errors and not rejected_count:
+                from ..initialization import select_initial_history
+
+                indexes, initial_history_sha256 = select_initial_history(
+                    [candidate_groups[accession][0]["item"] for accession in candidate_order],
+                    adapter_key=self.adapter_key, policy=initialization_policy,
+                    captured_at_ms=captured_at_ms,
+                    deadline_monotonic_ms=deadline, cancel_event=event,
+                )
+                authorized_history = {candidate_order[index] for index in indexes}
+
         emitted_per_symbol: dict[str, int] = {}
         for accession in candidate_order:
             group = candidate_groups[accession]
@@ -792,6 +836,12 @@ class SecFilingsSourceAdapter:
             duplicate_count += len(group) - 1
             if accession in seen:
                 duplicate_count += 1
+                continue
+            if authorized_history is not None and accession not in authorized_history:
+                # Excluded initial history must never leak into a later batch.
+                # Authorized overflow stays unseen until its delivery succeeds.
+                seen.add(accession)
+                new_accessions.append(accession)
                 continue
             symbol = group[0]["symbol"]
             if emitted_per_symbol.get(symbol, 0) >= self.per_symbol_limit:
@@ -823,7 +873,7 @@ class SecFilingsSourceAdapter:
                 rejected_count=rejected_count,
             )
 
-        next_seen = candidate_order if seed_baseline else new_accessions + [
+        next_seen = candidate_order if seed_baseline and authorized_history is None else new_accessions + [
             accession
             for accession in seen_order
             if accession not in new_accessions
@@ -844,6 +894,7 @@ class SecFilingsSourceAdapter:
             last_modified=clean_last_modified,
             duplicate_count=duplicate_count,
             rejected_count=rejected_count,
+            initial_history_sha256=initial_history_sha256,
         )
 
 

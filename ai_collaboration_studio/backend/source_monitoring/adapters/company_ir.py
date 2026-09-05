@@ -646,6 +646,35 @@ class CompanyIrSourceAdapter:
             seed_baseline=True,
         )
 
+    def poll_initial_history(
+        self,
+        checkpoint: Any,
+        *,
+        initialization_policy: Any,
+        observed_at_ms: Any,
+        deadline_monotonic_ms: Any = 0,
+        cancel_event: threading.Event | None = None,
+        etag: Any = "",
+        last_modified: Any = "",
+        max_items: Any = 50,
+    ) -> AdapterPollResult:
+        """Classify the complete initial feed without consuming eligible overflow."""
+
+        from ..settings import SourceMonitoringInitializationPolicy
+
+        if (
+            normalize_checkpoint(checkpoint) != {}
+            or type(initialization_policy) is not SourceMonitoringInitializationPolicy
+            or initialization_policy.mode not in {"catch_up", "from_time"}
+        ):
+            raise _checkpoint_error("company IR initial history requires an empty checkpoint and exact backfill policy")
+        return self._poll(
+            checkpoint, seed_baseline=True,
+            initialization_policy=initialization_policy, observed_at_ms=observed_at_ms,
+            deadline_monotonic_ms=deadline_monotonic_ms, cancel_event=cancel_event,
+            etag=etag, last_modified=last_modified, max_items=max_items,
+        )
+
     def _poll(
         self,
         checkpoint: Any,
@@ -657,6 +686,7 @@ class CompanyIrSourceAdapter:
         last_modified: Any,
         max_items: Any,
         seed_baseline: bool,
+        initialization_policy: Any = None,
     ) -> AdapterPollResult:
         self._assert_config_seal()
         deadline, event = validate_source_poll_control(
@@ -910,6 +940,25 @@ class CompanyIrSourceAdapter:
                 rejected_count=rejected_count + len(candidate_groups),
             )
 
+        authorized_history: set[str] | None = None
+        initial_history_sha256 = ""
+        if initialization_policy is not None:
+            authorized_history = set()
+            if complete_feed_scope and not errors and not rejected_count:
+                from ..initialization import select_initial_history
+
+                initial_items = []
+                for identity in candidate_order:
+                    candidate = candidate_groups[identity][0]
+                    builder = _release_json_item if self._format_for(candidate["symbol"]) == "q4_json" else _release_item
+                    initial_items.append(builder(**candidate, previous_projection_sha=""))
+                indexes, initial_history_sha256 = select_initial_history(
+                    initial_items, adapter_key=self.adapter_key, policy=initialization_policy,
+                    captured_at_ms=captured_at_ms,
+                    deadline_monotonic_ms=deadline, cancel_event=event,
+                )
+                authorized_history = {candidate_order[index] for index in indexes}
+
         emitted_group_count: dict[str, int] = {}
         for identity_sha in candidate_order:
             group = candidate_groups[identity_sha]
@@ -927,7 +976,10 @@ class CompanyIrSourceAdapter:
             if previous_projection_sha == projection_sha:
                 duplicate_count += 1
                 continue
-            if seed_baseline:
+            if authorized_history is not None and identity_sha not in authorized_history:
+                projections[identity_sha] = projection_sha
+                continue
+            if seed_baseline and authorized_history is None:
                 projections[identity_sha] = projection_sha
             if emitted_group_count.get(symbol, 0) >= self.per_symbol_limit:
                 continue
@@ -985,6 +1037,7 @@ class CompanyIrSourceAdapter:
             last_modified=clean_last_modified,
             duplicate_count=duplicate_count,
             rejected_count=rejected_count,
+            initial_history_sha256=initial_history_sha256,
         )
 
 
