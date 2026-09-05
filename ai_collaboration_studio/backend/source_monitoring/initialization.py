@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any
 
 from ..source_inbox_contracts import accept_source_import
+from ..source_poll_control import ensure_source_poll_active
 from .adapters.base import SourceAdapterMetadata
 from .contracts import AdapterPollResult, SourceMonitoringContractError, canonical_sha256
 from .packet_builder import (
@@ -61,21 +62,26 @@ def poll_for_initialization(
     last_modified: str = "",
     max_items: int = 50,
 ) -> AdapterPollResult:
-    """Choose the SEC/IR full-baseline read only for a first seed-only poll."""
+    """Classify the complete bounded SEC/IR history before any initial delivery."""
 
+    if type(initialization_policy) is not SourceMonitoringInitializationPolicy:
+        raise _error("SOURCE_MONITORING_INITIAL_POLICY_INVALID", "initial polling requires an exact effective policy")
     poll = adapter.poll
+    extra = {}
     if (
         initial_required
-        and initialization_policy.mode == "seed_only"
         and adapter.adapter_key in {"sec_filings", "company_ir"}
     ):
-        poll = getattr(adapter, "poll_seed_baseline", None)
+        seed_only = initialization_policy.mode == "seed_only"
+        poll = getattr(adapter, "poll_seed_baseline" if seed_only else "poll_initial_history", None)
         if not callable(poll):
             raise _error(
                 "SEC_BASELINE_SCOPE_INCOMPLETE" if adapter.adapter_key == "sec_filings" else "COMPANY_IR_BASELINE_SCOPE_INCOMPLETE",
-                "Official seed-only initialization requires the bounded complete-baseline capability",
+                "Official initialization requires the bounded complete-history capability",
             )
-    return poll(
+        if not seed_only:
+            extra["initialization_policy"] = initialization_policy
+    result = poll(
         checkpoint,
         observed_at_ms=observed_at_ms,
         deadline_monotonic_ms=deadline_monotonic_ms,
@@ -83,7 +89,13 @@ def poll_for_initialization(
         etag=etag,
         last_modified=last_modified,
         max_items=max_items,
+        **extra,
     )
+    if extra and type(result) is AdapterPollResult and not (
+        result.source_errors or result.rejected_count or result.initial_history_sha256
+    ):
+        raise _error("SOURCE_MONITORING_INITIAL_HISTORY_INVALID", "initial official history result is missing its complete scope seal")
+    return result
 
 
 def _timestamp_ms(value: str) -> int:
@@ -268,6 +280,74 @@ def _cutoff_time_ms(item: dict[str, Any], *, captured_at_ms: int) -> int:
     if _is_revision_item(item):
         return captured_at_ms
     return _timestamp_ms(item["occurred_at"])
+
+
+def select_initial_history(
+    items: list[dict[str, Any]],
+    *,
+    adapter_key: str,
+    policy: SourceMonitoringInitializationPolicy,
+    captured_at_ms: int,
+    deadline_monotonic_ms: int = 0,
+    cancel_event: threading.Event | None = None,
+) -> tuple[tuple[int, ...], str]:
+    """Validate one bounded history and seal its complete authorized subset.
+
+    This is classification, not a larger delivery packet. Adapters retain
+    excluded identities, emit at their ordinary limits, and leave authorized
+    but undelivered identities unseen for subsequent polls. No cutoff survives
+    initialization unless the operator separately configured a continuous one.
+    """
+
+    if (
+        type(items) is not list or len(items) > 1_000
+        or type(policy) is not SourceMonitoringInitializationPolicy
+        or policy.mode not in {"catch_up", "from_time"}
+        or adapter_key not in {"sec_filings", "company_ir"}
+    ):
+        raise _error("SOURCE_MONITORING_INITIAL_HISTORY_INVALID", "invalid bounded official history context")
+    normalized_items = []
+    # Retain the existing 50-item Inbox packet bound while validating every
+    # candidate, including identities that will be excluded or delivered later.
+    for offset in range(0, len(items), 50):
+        ensure_source_poll_active(
+            deadline_monotonic_ms=deadline_monotonic_ms, cancel_event=cancel_event,
+        )
+        packet = build_source_import_packet(
+            adapter_key=adapter_key, external_run_id=_PREVIEW_EXTERNAL_RUN_ID,
+            captured_at_ms=captured_at_ms, observed_items=items[offset:offset + 50],
+        )
+        normalized, _ = accept_source_import(
+            canonical_source_import_payload(packet, received_at_ms=captured_at_ms),
+            received_at_ms=captured_at_ms,
+        )
+        normalized_items.extend(normalized["items"])
+    if policy.mode == "catch_up":
+        selected = sorted(
+            range(len(normalized_items)),
+            key=lambda index: (
+                -_timestamp_ms(normalized_items[index]["occurred_at"]),
+                normalized_items[index]["server_fingerprint"],
+            ),
+        )[:policy.catch_up_max_items]
+    else:
+        selected = [
+            index for index, item in enumerate(normalized_items)
+            if _cutoff_time_ms(item, captured_at_ms=captured_at_ms) >= policy.initial_from_time_ms
+        ]
+    ensure_source_poll_active(
+        deadline_monotonic_ms=deadline_monotonic_ms, cancel_event=cancel_event,
+    )
+    history_sha256 = canonical_sha256({
+        "version": "source_monitoring_initial_history_v1",
+        "adapter_key": adapter_key,
+        "mode": policy.mode,
+        "catch_up_max_items": policy.catch_up_max_items,
+        "from_time_ms": policy.initial_from_time_ms,
+        "candidate_fingerprints": sorted(item["server_fingerprint"] for item in normalized_items),
+        "authorized_fingerprints": sorted(normalized_items[index]["server_fingerprint"] for index in selected),
+    })
+    return tuple(selected), history_sha256
 
 
 def _validate_context(
@@ -581,6 +661,16 @@ def plan_initial_poll(
     blocked = bool(
         initial_required and (result.source_errors or result.rejected_count > 0)
     )
+    if (
+        initial_required and not blocked
+        and metadata.adapter_key in {"sec_filings", "company_ir"}
+        and policy.mode in {"catch_up", "from_time"}
+        and not result.initial_history_sha256
+    ):
+        raise _error(
+            "SOURCE_MONITORING_INITIAL_HISTORY_INVALID",
+            "initial official backfill requires a seal over the complete history and authorization",
+        )
     if blocked or (initial_required and policy.mode == "seed_only"):
         selected = []
     elif initial_required and policy.mode == "catch_up":
@@ -641,6 +731,10 @@ def plan_initial_poll(
             "live_trading_allowed": False,
         },
     }
+    if result.initial_history_sha256:
+        if not initial_required or metadata.adapter_key not in {"sec_filings", "company_ir"}:
+            raise _error("SOURCE_MONITORING_INITIAL_HISTORY_INVALID", "history seal is only valid for an initial official poll")
+        preview_basis["initial_history_sha256"] = result.initial_history_sha256
     execution_preview_basis = {
         **preview_basis,
         "continuous_event_cutoff_ms": policy.continuous_event_cutoff_ms,
@@ -683,6 +777,7 @@ def plan_initial_poll(
 
 __all__ = [
     "poll_for_initialization",
+    "select_initial_history",
     "SOURCE_MONITORING_INITIALIZATION_VERSION",
     "SOURCE_MONITORING_INITIALIZATION_VERSION_V2",
     "SOURCE_MONITORING_INITIAL_PREVIEW_VERSION",

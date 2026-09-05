@@ -473,6 +473,7 @@ def _preview(
     from .source_monitoring.initialization import (
         build_static_seed_preview,
         plan_initial_poll,
+        poll_for_initialization,
     )
 
     settings = _settings(dependencies)
@@ -552,8 +553,11 @@ def _preview(
             },
         }
     observed_at_ms = _now_ms(dependencies)
-    result = adapter.poll(
+    result = poll_for_initialization(
+        adapter,
         state["checkpoint"],
+        initial_required=initial_required,
+        initialization_policy=policy,
         observed_at_ms=observed_at_ms,
         deadline_monotonic_ms=_poll_deadline_monotonic_ms(),
         cancel_event=None,

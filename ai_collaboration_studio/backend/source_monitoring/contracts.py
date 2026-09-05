@@ -395,8 +395,17 @@ class AdapterPollResult:
     duplicate_count: int
     rejected_count: int
     market_calls_performed: int
+    initial_history_sha256: str = ""
 
     def __post_init__(self) -> None:
+        if type(self.initial_history_sha256) is not str or (
+            self.initial_history_sha256
+            and re.fullmatch(r"[0-9a-f]{64}", self.initial_history_sha256) is None
+        ):
+            raise _contract_error(
+                "SOURCE_MONITORING_INITIAL_HISTORY_INVALID",
+                "initial history must be an empty or lowercase SHA-256 digest",
+            )
         object.__setattr__(
             self,
             "adapter_key",
@@ -474,6 +483,7 @@ class AdapterPollResult:
         duplicate_count: Any = 0,
         rejected_count: Any = 0,
         market_calls_performed: Any = 0,
+        initial_history_sha256: Any = "",
     ) -> "AdapterPollResult":
         return cls(
             adapter_key=adapter_key,
@@ -488,6 +498,7 @@ class AdapterPollResult:
             duplicate_count=duplicate_count,
             rejected_count=rejected_count,
             market_calls_performed=market_calls_performed,
+            initial_history_sha256=initial_history_sha256,
         )
 
     @property
@@ -509,6 +520,8 @@ class AdapterPollResult:
             "duplicate_count": self.duplicate_count,
             "rejected_count": self.rejected_count,
             "market_calls_performed": self.market_calls_performed,
+            **({"initial_history_sha256": self.initial_history_sha256}
+               if self.initial_history_sha256 else {}),
         }
 
 
