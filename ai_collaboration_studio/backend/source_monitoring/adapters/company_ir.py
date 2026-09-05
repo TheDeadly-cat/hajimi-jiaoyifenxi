@@ -23,6 +23,7 @@ from ...market.micron_ir_json import (
     is_micron_declared_wall_time,
     is_micron_detail_url,
     micron_time_metadata_sha256,
+    valid_micron_metadata_progress,
 )
 from ...source_poll_control import (
     SourcePollCancelled,
@@ -449,6 +450,10 @@ class CompanyIrSourceAdapter:
             "json_head_maximum_workers": MICRON_HEAD_MAX_WORKERS,
             "json_head_workers": self._sealed_micron_workers,
             "json_time_validation": "trusted_local_response_receipt_utc_v1",
+            **({"json_metadata_cache_policy": self._sealed_micron_cache_policy}
+               if self._sealed_micron_cache_policy else {}),
+            **({"json_delivery_rotation": "bounded_least_recently_offered_projection_v1"}
+               if "US.MU" in self.symbols and self._sealed_source_format == "q4_json" else {}),
             "feeds": feed_snapshot,
             "per_symbol_limit": self.per_symbol_limit,
             "max_candidates_per_poll": self.max_candidates_per_poll,
@@ -491,6 +496,9 @@ class CompanyIrSourceAdapter:
                         or type(self._sealed_micron_client.max_workers) is not int
                         or self._sealed_micron_client.max_workers != self._sealed_micron_workers
                         or not 1 <= self._sealed_micron_client.max_workers <= MICRON_HEAD_MAX_WORKERS
+                        or self._sealed_micron_client._monotonic is not self._sealed_micron_monotonic
+                        or (self._sealed_micron_cache_policy and
+                            self._sealed_micron_client.cache_policy != self._sealed_micron_cache_policy)
                     )
                 )
             )
@@ -576,6 +584,14 @@ class CompanyIrSourceAdapter:
             self._sealed_micron_client.transport_identity if self._sealed_micron_client is not None else None
         )
         self._sealed_micron_workers = self._sealed_micron_client.max_workers if self._sealed_micron_client is not None else 0
+        self._sealed_micron_monotonic = getattr(self._sealed_micron_client, "_monotonic", None)
+        self._sealed_micron_cache_policy = (
+            self._sealed_micron_client.cache_policy
+            if self._sealed_micron_client is not None and "US.MU" in self.symbols else {}
+        )
+        # Offering order is transient scheduling state, never evidence of a
+        # committed import. Retried/failed offers remain eligible through CP.
+        self._json_offered_order: list[tuple[str, str]] = []
         self._inner_transport_mode = (
             "company_ir_default_https_v1"
             if (
@@ -605,6 +621,26 @@ class CompanyIrSourceAdapter:
 
     def _feed_url_for(self, symbol: str) -> str:
         return MICRON_IR_JSON_URL if self._format_for(symbol) == "q4_json" else str(IR_FEEDS[symbol]["url"])
+
+    def _partial_micron_scope(self, row: dict[str, Any], payload: dict[str, Any]) -> bool:
+        if not self._seal_transport_identity or row.get("feed_scope_complete") is not False:
+            return False
+        progress = row.get("metadata_progress")
+        if not valid_micron_metadata_progress(progress, row.get("releases"), complete=False):
+            return False
+        raw_errors = payload.get("source_errors")
+        if type(raw_errors) is not list:
+            return False
+        micron_errors = [error for error in raw_errors if type(error) is dict and error.get("symbol") == "US.MU"]
+        failures = progress["failed"]
+        if len(micron_errors) != len(failures):
+            return False
+        for failure in failures:
+            matches = [error for error in micron_errors if error.get("press_release_id") == failure["press_release_id"]]
+            if len(matches) != 1 or any(type(matches[0].get(key)) is not type(value) or matches[0][key] != value
+                                        for key, value in failure.items()):
+                return False
+        return True
 
     def poll(
         self,
@@ -726,6 +762,7 @@ class CompanyIrSourceAdapter:
                         force=self.force,
                         deadline_monotonic_ms=deadline,
                         cancel_event=event,
+                        require_complete_metadata=seed_baseline or not old_order,
                     )
                 else:
                     payload = monitoring_batch(
@@ -792,7 +829,11 @@ class CompanyIrSourceAdapter:
             and [row.get("symbol") for row in rows] == list(self.symbols)
         )
         micron_rows = [row for row in rows if type(row) is dict and row.get("symbol") == "US.MU"]
-        json_scope_failed = json_source_enabled and (
+        admitted_partial_metadata = bool(
+            json_source_enabled and not seed_baseline and old_order and len(micron_rows) == 1
+            and self._partial_micron_scope(micron_rows[0], payload)
+        )
+        json_scope_failed = json_source_enabled and not admitted_partial_metadata and (
             len(micron_rows) != 1
             or micron_rows[0].get("feed_scope_complete") is not True
             or any(error.scope == "US.MU" for error in errors)
@@ -904,8 +945,9 @@ class CompanyIrSourceAdapter:
                 for group in candidate_groups.values()
             )
             if json_scope_failed:
-                # A failed Micron snapshot cannot emit a partial set. Other
-                # healthy publishers retain the existing degraded-import path.
+                # Only a validated per-identity metadata failure report can
+                # admit a partial normal poll. Malformed or ambiguous evidence
+                # still blocks the whole Micron scope.
                 omitted = [identity for identity in candidate_order if candidate_groups[identity][0]["symbol"] == "US.MU"]
                 rejected_count += sum(len(candidate_groups[identity]) for identity in omitted)
                 for identity in omitted:
@@ -959,6 +1001,24 @@ class CompanyIrSourceAdapter:
                 )
                 authorized_history = {candidate_order[index] for index in indexes}
 
+        rotate_json_delivery = json_source_enabled and not seed_baseline and not json_scope_failed
+        if rotate_json_delivery:
+            json_identities = [identity for identity in candidate_order
+                               if candidate_groups[identity][0]["symbol"] == "US.MU"]
+            current_pairs = {(identity, candidate_groups[identity][0]["projection_sha"])
+                             for identity in json_identities}
+            # Keep at most the current fixed recent-30 scope. New projections
+            # come first; uncommitted replays then rotate fairly even when an
+            # unrelated failed old identity prevents the whole CP advancing.
+            self._json_offered_order = [pair for pair in self._json_offered_order if pair in current_pairs]
+            offered_rank = {pair: index + 1 for index, pair in enumerate(self._json_offered_order)}
+            json_identities.sort(key=lambda identity: offered_rank.get(
+                (identity, candidate_groups[identity][0]["projection_sha"]), 0,
+            ))
+            rotated = iter(json_identities)
+            candidate_order = [next(rotated) if candidate_groups[identity][0]["symbol"] == "US.MU" else identity
+                               for identity in candidate_order]
+
         emitted_group_count: dict[str, int] = {}
         for identity_sha in candidate_order:
             group = candidate_groups[identity_sha]
@@ -990,6 +1050,11 @@ class CompanyIrSourceAdapter:
                 **candidate,
                 previous_projection_sha=previous_projection_sha,
             ))
+            if rotate_json_delivery and symbol == "US.MU":
+                offered_pair = (identity_sha, projection_sha)
+                if offered_pair in self._json_offered_order:
+                    self._json_offered_order.remove(offered_pair)
+                self._json_offered_order.append(offered_pair)
             emitted_group_count[symbol] = emitted_group_count.get(symbol, 0) + 1
             projections[identity_sha] = projection_sha
 

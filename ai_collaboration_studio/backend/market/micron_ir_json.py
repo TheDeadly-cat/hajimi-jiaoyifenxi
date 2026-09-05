@@ -1,15 +1,20 @@
 """Bounded Micron Q4 recent-30 metadata reader; no article-body ingestion.
 
-``complete`` describes every row returned by this one fixed recent-30 query.
-It does not claim the publisher's full history or infer pagination semantics.
+``complete`` means every row in this fixed recent-30 query has admitted time
+metadata. Initial reads fetch every head. Ordinary reads may reuse independently
+verified metadata for at most one hour, with four old identities revalidated per
+poll. Progress distinguishes fetched, cached and withheld identities. It does
+not claim full publisher history, continuous freshness or pagination coverage.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import threading
+import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -17,7 +22,7 @@ from html.parser import HTMLParser
 from typing import Any, Callable
 from urllib.request import Request
 
-from ..source_poll_control import ensure_source_poll_active
+from ..source_poll_control import SourcePollCancelled, SourcePollDeadlineExceeded, ensure_source_poll_active
 from .official_http import open_official_https, read_official_https_body
 
 
@@ -31,6 +36,11 @@ MICRON_TIME_METADATA_HASH_SEMANTICS = "normalized_newsarticle_head_metadata_not_
 MICRON_JSON_MAX_BYTES = 1_000_000
 MICRON_HEAD_MAX_BYTES = 128 * 1024
 MICRON_HEAD_MAX_WORKERS = 4
+MICRON_METADATA_CACHE_CAPACITY = 30
+MICRON_METADATA_REVALIDATE_PER_POLL = 4
+MICRON_METADATA_MAX_AGE_MS = 3_600_000
+MICRON_METADATA_REVALIDATION_TIMEOUT_MS = 2_000
+MICRON_METADATA_COMMIT_RESERVE_MS = 500
 _MAX_EXACT_JSON_INTEGER = (1 << 53) - 1
 _ORIGIN = "https://investors.micron.com"
 _DETAIL_PATH = re.compile(r"/news/press-release/[0-9]{4}/[A-Za-z0-9_-]+/default\.aspx\Z")
@@ -45,6 +55,76 @@ class MicronIrJsonError(ValueError):
     def __init__(self, code: str, detail: str) -> None:
         super().__init__(detail)
         self.code = code
+
+
+def _sha256(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def micron_metadata_cache_policy() -> dict[str, Any]:
+    """Fixed in-process policy; no cache data is a persisted checkpoint."""
+    return {
+        "version": "micron_metadata_cache_policy_v1",
+        "parser_version": "micron_newsarticle_head_parser_v1",
+        "time_hash_semantics": MICRON_TIME_METADATA_HASH_SEMANTICS,
+        "list_binding": "entire_normalized_q4_row_v1",
+        "capacity": MICRON_METADATA_CACHE_CAPACITY,
+        "revalidate_per_poll": MICRON_METADATA_REVALIDATE_PER_POLL,
+        "maximum_age_ms": MICRON_METADATA_MAX_AGE_MS,
+        "revalidation_timeout_ms": MICRON_METADATA_REVALIDATION_TIMEOUT_MS,
+        "commit_reserve_ms": MICRON_METADATA_COMMIT_RESERVE_MS,
+        "storage": "instance_memory_only_cold_on_restart",
+    }
+
+
+def valid_micron_metadata_progress(value: Any, releases: Any, *, complete: bool) -> bool:
+    """Check the closed per-identity admission report before partial import."""
+    if type(value) is not dict or set(value) != {
+        "version", "poll_number", "scope_ids", "requested_ids", "cache_hit_ids", "failed", "next_revalidation_ids",
+    } or value.get("version") != "micron_metadata_progress_v1":
+        return False
+    if type(value["poll_number"]) is not int or not 1 <= value["poll_number"] <= _MAX_EXACT_JSON_INTEGER:
+        return False
+    def identities(items):
+        return (type(items) is list and len(items) <= 30 and
+                all(type(item) is int and 1 <= item <= _MAX_EXACT_JSON_INTEGER for item in items) and
+                len(items) == len(set(items)))
+    for field in ("scope_ids", "requested_ids", "cache_hit_ids", "next_revalidation_ids"):
+        if not identities(value[field]):
+            return False
+    scope = set(value["scope_ids"])
+    requested, cached = set(value["requested_ids"]), set(value["cache_hit_ids"])
+    if not requested <= scope or not cached <= scope or requested & cached or not set(value["next_revalidation_ids"]) <= scope:
+        return False
+    failures = value["failed"]
+    if type(failures) is not list or len(failures) > 30 or type(releases) is not list or len(releases) > 30:
+        return False
+    failed_ids, released_ids, urls = [], [], []
+    for failure in failures:
+        if type(failure) is not dict or set(failure) != {
+            "press_release_id", "official_url", "code", "attempt_count", "retry_position",
+        }:
+            return False
+        if (type(failure["press_release_id"]) is not int or not is_micron_detail_url(failure["official_url"])
+                or type(failure["code"]) is not str or re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", failure["code"]) is None
+                or type(failure["attempt_count"]) is not int or not 0 <= failure["attempt_count"] <= _MAX_EXACT_JSON_INTEGER
+                or type(failure["retry_position"]) is not int or not 0 <= failure["retry_position"] <= 30):
+            return False
+        failed_ids.append(failure["press_release_id"])
+        urls.append(failure["official_url"])
+    for release in releases:
+        if type(release) is not dict or type(release.get("q4_press_release_id")) is not int or not is_micron_detail_url(release.get("official_url")):
+            return False
+        released_ids.append(release["q4_press_release_id"])
+        urls.append(release["official_url"])
+    return bool(
+        identities(failed_ids) and identities(released_ids)
+        and not set(failed_ids) & set(released_ids)
+        and set(failed_ids) | set(released_ids) == scope
+        and set(released_ids) <= requested | cached and not set(failed_ids) & cached
+        and len(urls) == len(set(urls)) and type(complete) is bool and complete == (not failures)
+    )
 
 
 def is_micron_detail_url(value: Any) -> bool:
@@ -322,24 +402,32 @@ def _project_metadata(raw: bytes, row: dict[str, Any], receipt: Any) -> dict[str
 
 
 class MicronIrJsonClient:
-    """Read a sealed query and at most 30 same-publisher head sections."""
+    """Read a sealed query with at most 30 heads and a disposable bounded cache."""
 
     def __init__(
         self,
         *,
         fetch_bytes: Callable[..., bytes] | None = None,
         clock: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] | None = None,
         max_workers: int = MICRON_HEAD_MAX_WORKERS,
     ) -> None:
         if fetch_bytes is not None and not callable(fetch_bytes):
             raise TypeError("fetch_bytes must be callable")
         if clock is not None and not callable(clock):
             raise TypeError("clock must be callable")
+        if monotonic is not None and not callable(monotonic):
+            raise TypeError("monotonic must be callable")
         if type(max_workers) is not int or not 1 <= max_workers <= MICRON_HEAD_MAX_WORKERS:
             raise ValueError("max_workers must be a native integer between 1 and 4")
         self._fetch_bytes = fetch_bytes if fetch_bytes is not None else self._default_fetch_bytes
         self._clock = clock if clock is not None else lambda: datetime.now(timezone.utc)
         self._max_workers = max_workers
+        self._monotonic = monotonic or time.monotonic
+        self._metadata_cache: dict[int, dict[str, Any]] = {}
+        self._attempts: dict[int, dict[str, Any]] = {}
+        self._poll_number = 0
+        self._read_lock = threading.Lock()
 
     @property
     def transport_identity(self) -> Callable[..., bytes]:
@@ -349,6 +437,62 @@ class MicronIrJsonClient:
     def max_workers(self) -> int:
         """Expose the configured concurrency for the caller's provenance seal."""
         return self._max_workers
+
+    @property
+    def cache_policy(self) -> dict[str, Any]:
+        return micron_metadata_cache_policy()
+
+    def _receipt(self) -> datetime:
+        value = self._clock()
+        if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+            raise MicronIrJsonError("MICRON_IR_TIME_METADATA_INVALID", "receipt clock must return an aware native datetime")
+        return value.astimezone(timezone.utc)
+
+    def _monotonic_ms(self) -> int:
+        value = self._monotonic()
+        if type(value) not in {int, float} or not math.isfinite(value) or not 0 <= value <= _MAX_EXACT_JSON_INTEGER / 1000:
+            raise MicronIrJsonError("MICRON_IR_CACHE_INVALID", "cache clock must be a finite non-negative local monotonic value")
+        return int(value * 1000)
+
+    def _cache_entry(self, row: dict[str, Any]) -> dict[str, Any] | None:
+        entry = self._metadata_cache.get(row["q4_press_release_id"])
+        fields = {"row_sha256", "policy_sha256", "published_at", "metadata_date_modified",
+                  "time_metadata_sha256", "verified_at_ms", "verified_monotonic_ms", "entry_sha256"}
+        if type(entry) is not dict or set(entry) != fields:
+            return None
+        try:
+            if any(type(entry[field]) is not str or re.fullmatch(r"[0-9a-f]{64}", entry[field]) is None
+                   for field in ("row_sha256", "policy_sha256", "time_metadata_sha256", "entry_sha256")):
+                return None
+            if type(entry["published_at"]) is not str or type(entry["metadata_date_modified"]) is not str:
+                return None
+            if (entry["row_sha256"] != _sha256(row) or entry["policy_sha256"] != _sha256(self.cache_policy)
+                    or entry["entry_sha256"] != _sha256({k: v for k, v in entry.items() if k != "entry_sha256"})
+                    or type(entry["verified_at_ms"]) is not int or not 0 <= entry["verified_at_ms"] <= _MAX_EXACT_JSON_INTEGER
+                    or type(entry["verified_monotonic_ms"]) is not int or not 0 <= entry["verified_monotonic_ms"] <= _MAX_EXACT_JSON_INTEGER):
+                return None
+            verified = datetime.fromtimestamp(entry["verified_at_ms"] / 1000, tz=timezone.utc)
+            published = _time(entry["published_at"], receipt=verified, field="cached datePublished")
+            modified = _time(entry["metadata_date_modified"], receipt=verified, field="cached dateModified") if entry["metadata_date_modified"] else ""
+            if (published != entry["published_at"] or modified != entry["metadata_date_modified"]
+                    or entry["time_metadata_sha256"] != micron_time_metadata_sha256(
+                        official_url=row["official_url"], title=row["title"],
+                        published_at=published, metadata_date_modified=modified,
+                    )):
+                return None
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
+        return entry
+
+    def _remember(self, row: dict[str, Any], projected: dict[str, Any], receipt: datetime) -> None:
+        entry = {
+            "row_sha256": _sha256(row), "policy_sha256": _sha256(self.cache_policy),
+            "published_at": projected["published_at"], "metadata_date_modified": projected["metadata_date_modified"],
+            "time_metadata_sha256": projected["time_metadata_sha256"],
+            "verified_at_ms": int(receipt.timestamp() * 1000), "verified_monotonic_ms": self._monotonic_ms(),
+        }
+        entry["entry_sha256"] = _sha256(entry)
+        self._metadata_cache[row["q4_press_release_id"]] = entry
 
     @staticmethod
     def _default_fetch_bytes(
@@ -387,38 +531,173 @@ class MicronIrJsonClient:
     def read_recent(
         self,
         *,
+        require_complete: bool = True,
         deadline_monotonic_ms: int = 0,
         cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
+        if type(require_complete) is not bool:
+            raise TypeError("require_complete must be a native boolean")
         controls = {"deadline_monotonic_ms": deadline_monotonic_ms, "cancel_event": cancel_event}
+        ensure_source_poll_active(**controls)
+        while not self._read_lock.acquire(timeout=0.025):
+            ensure_source_poll_active(**controls)
+        try:
+            return self._read_recent_locked(require_complete=require_complete, controls=controls)
+        finally:
+            self._read_lock.release()
+
+    def _read_recent_locked(self, *, require_complete: bool, controls: dict[str, Any]) -> dict[str, Any]:
         ensure_source_poll_active(**controls)
         raw = self._fetch_bytes(MICRON_IR_JSON_URL, max_bytes=MICRON_JSON_MAX_BYTES, head_only=False, **controls)
         ensure_source_poll_active(**controls)
         # Validate every list identity and URL before requesting any detail page.
         rows = _list_rows(raw)
+        self._poll_number = self._poll_number % _MAX_EXACT_JSON_INTEGER + 1
+        ids = {row["q4_press_release_id"] for row in rows}
+        if type(self._metadata_cache) is not dict:
+            self._metadata_cache = {}
+        self._metadata_cache = {identity: value for identity, value in self._metadata_cache.items() if type(identity) is int and identity in ids}
+        self._attempts = {identity: value for identity, value in self._attempts.items() if identity in ids}
         if not rows:
-            return {"releases": [], "complete": True}
+            if require_complete:
+                return {"releases": [], "complete": True}
+            return {"releases": [], "complete": True, "source_errors": [], "metadata_progress": {
+                "version": "micron_metadata_progress_v1", "poll_number": self._poll_number,
+                "scope_ids": [], "requested_ids": [], "cache_hit_ids": [], "failed": [], "next_revalidation_ids": [],
+            }}
 
-        def read_row(row: dict[str, Any]) -> dict[str, Any]:
-            ensure_source_poll_active(**controls)
-            document = self._fetch_bytes(row["official_url"], max_bytes=MICRON_HEAD_MAX_BYTES, head_only=True, **controls)
-            receipt = self._clock()
-            ensure_source_poll_active(**controls)
-            return _project_metadata(document, row, receipt)
+        now_ms = int(self._receipt().timestamp() * 1000)
+        monotonic_ms = self._monotonic_ms()
+        existing = {}
+        for row in rows:
+            entry = self._cache_entry(row)
+            if entry is not None and entry["verified_at_ms"] <= now_ms and entry["verified_monotonic_ms"] <= monotonic_ms:
+                existing[row["q4_press_release_id"]] = entry
+        primary = rows if require_complete else [row for row in rows if row["q4_press_release_id"] not in existing]
+        if not require_complete:
+            # Retry an already failed uncached identity after genuinely new or
+            # changed identities. Every retained old identity has a separate,
+            # bounded revalidation queue and never precedes these new reads.
+            primary.sort(key=lambda row: (bool(self._attempts.get(row["q4_press_release_id"], {}).get("code")),))
+        old_rows = [row for row in rows if row["q4_press_release_id"] in existing]
+        old_rows.sort(key=lambda row: (self._attempts.get(row["q4_press_release_id"], {}).get("poll", 0), row["q4_press_release_id"]))
+        revalidate = [] if require_complete else old_rows[:MICRON_METADATA_REVALIDATE_PER_POLL]
+        projected, errors, requested_ids = {}, {}, []
+        request_lock = threading.Lock()
+        revalidation_deadline = 0
 
-        releases = []
-        # Small batches bound concurrency and do not queue the remaining scope
-        # when any current batch fails. No cache or partial result is published.
+        def read_row(row: dict[str, Any], *, revalidation: bool):
+            ensure_source_poll_active(**controls)
+            call_controls = dict(controls)
+            if revalidation:
+                call_controls["deadline_monotonic_ms"] = revalidation_deadline
+            try:
+                ensure_source_poll_active(**call_controls)
+                with request_lock:
+                    requested_ids.append(row["q4_press_release_id"])
+                document = self._fetch_bytes(row["official_url"], max_bytes=MICRON_HEAD_MAX_BYTES, head_only=True, **call_controls)
+                receipt = self._receipt()
+                ensure_source_poll_active(**call_controls)
+            except SourcePollDeadlineExceeded as exc:
+                ensure_source_poll_active(**controls)
+                if not revalidation:
+                    raise
+                raise MicronIrJsonError("MICRON_IR_REVALIDATION_TIMEOUT", "old metadata exceeded its bounded revalidation time") from exc
+            ensure_source_poll_active(**controls)
+            return _project_metadata(document, row, receipt), receipt
+
         with ThreadPoolExecutor(max_workers=self._max_workers, thread_name_prefix="micron-ir-head") as executor:
-            for start in range(0, len(rows), self._max_workers):
-                futures = [executor.submit(read_row, row) for row in rows[start:start + self._max_workers]]
-                releases.extend(future.result() for future in futures)
+            for group, old_revalidation in ((primary, False), (revalidate, True)):
+                if old_revalidation:
+                    revalidation_deadline = int(time.monotonic() * 1000) + MICRON_METADATA_REVALIDATION_TIMEOUT_MS
+                    if controls["deadline_monotonic_ms"]:
+                        revalidation_deadline = min(revalidation_deadline, controls["deadline_monotonic_ms"] - MICRON_METADATA_COMMIT_RESERVE_MS)
+                for start in range(0, len(group), self._max_workers):
+                    ensure_source_poll_active(**controls)
+                    batch = group[start:start + self._max_workers]
+                    if old_revalidation and controls["deadline_monotonic_ms"] and (
+                        controls["deadline_monotonic_ms"] - int(time.monotonic() * 1000)
+                        <= MICRON_METADATA_COMMIT_RESERVE_MS + 25
+                    ):
+                        for row in batch:
+                            errors[row["q4_press_release_id"]] = ("MICRON_IR_REVALIDATION_DEFERRED", "old metadata revalidation deferred to retain the poll commit reserve")
+                        continue
+                    futures = []
+                    for row in batch:
+                        identity = row["q4_press_release_id"]
+                        previous_count = self._attempts.get(identity, {}).get("count", 0)
+                        self._attempts[identity] = {"count": min(_MAX_EXACT_JSON_INTEGER, previous_count + 1), "poll": self._poll_number, "code": ""}
+                        futures.append((row, executor.submit(read_row, row, revalidation=old_revalidation)))
+                    for row, future in futures:
+                        identity = row["q4_press_release_id"]
+                        try:
+                            value, receipt = future.result()
+                            self._remember(row, value, receipt)
+                            projected[identity] = value
+                        except (SourcePollCancelled, SourcePollDeadlineExceeded):
+                            raise
+                        except Exception as exc:
+                            code = exc.code if type(exc) is MicronIrJsonError else "MICRON_IR_METADATA_REQUEST_FAILED"
+                            self._attempts[identity]["code"] = code
+                            if require_complete:
+                                raise
+                            errors[identity] = (code, str(exc)[:200])
         ensure_source_poll_active(**controls)
-        return {"releases": releases, "complete": True}
+        if require_complete:
+            return {"releases": [projected[row["q4_press_release_id"]] for row in rows], "complete": True}
+
+        now_ms = int(self._receipt().timestamp() * 1000)
+        monotonic_ms = self._monotonic_ms()
+        cached_ids = []
+        for row in rows:
+            identity = row["q4_press_release_id"]
+            if identity in projected or identity in errors:
+                continue
+            entry = existing.get(identity)
+            failure_code = self._attempts.get(identity, {}).get("code")
+            if failure_code:
+                errors[identity] = (failure_code, "previously failed metadata awaits its next bounded retry")
+            elif (entry is None or entry["verified_at_ms"] > now_ms or entry["verified_monotonic_ms"] > monotonic_ms
+                  or max(now_ms - entry["verified_at_ms"], monotonic_ms - entry["verified_monotonic_ms"]) > MICRON_METADATA_MAX_AGE_MS):
+                errors[identity] = ("MICRON_IR_METADATA_CACHE_EXPIRED", "metadata is outside its bounded verification age")
+            else:
+                projected[identity] = {**row, **{key: entry[key] for key in ("published_at", "metadata_date_modified", "time_metadata_sha256")}}
+                cached_ids.append(identity)
+        retry_queue = sorted(existing, key=lambda identity: (self._attempts.get(identity, {}).get("poll", 0), identity))
+        failures, source_errors = [], []
+        for row in rows:
+            identity = row["q4_press_release_id"]
+            if identity not in errors:
+                continue
+            code, message = errors[identity]
+            attempt_count = self._attempts.get(identity, {}).get("count", 0)
+            retry_position = retry_queue.index(identity) + 1 if identity in retry_queue else 0
+            failures.append({"press_release_id": identity, "official_url": row["official_url"],
+                             "code": code, "attempt_count": attempt_count, "retry_position": retry_position})
+            source_errors.append({**failures[-1], "message": (
+                f"Micron ID {identity}: {message}; attempt_count={attempt_count}; retry_position={retry_position}"
+            )})
+        progress = {
+            "version": "micron_metadata_progress_v1", "poll_number": self._poll_number,
+            "scope_ids": [row["q4_press_release_id"] for row in rows],
+            "requested_ids": requested_ids, "cache_hit_ids": cached_ids,
+            "failed": failures, "next_revalidation_ids": retry_queue[:MICRON_METADATA_REVALIDATE_PER_POLL],
+        }
+        # A degraded poll deliberately cannot advance the durable checkpoint.
+        # Put newly validated list identities before cached replay candidates so
+        # repeated already-imported items cannot occupy every delivery slot.
+        primary_ids = {row["q4_press_release_id"] for row in primary}
+        delivery_rows = primary + [row for row in rows if row["q4_press_release_id"] not in primary_ids]
+        releases = [projected[row["q4_press_release_id"]] for row in delivery_rows if row["q4_press_release_id"] in projected]
+        if not valid_micron_metadata_progress(progress, releases, complete=not failures):
+            raise MicronIrJsonError("MICRON_IR_CACHE_INVALID", "metadata cache admission report is inconsistent")
+        return {"releases": releases, "complete": not failures,
+                "source_errors": source_errors, "metadata_progress": progress}
 
 
 __all__ = [
     "MICRON_IR_JSON_URL", "MICRON_TIME_METADATA_HASH_SEMANTICS", "MICRON_HEAD_MAX_WORKERS",
     "MicronIrJsonClient", "MicronIrJsonError", "is_micron_detail_url",
     "micron_time_metadata_sha256", "is_micron_declared_wall_time",
+    "micron_metadata_cache_policy", "valid_micron_metadata_progress",
 ]

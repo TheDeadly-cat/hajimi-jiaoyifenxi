@@ -5,12 +5,17 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import ExitStack, closing
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin
+from unittest.mock import patch
 
 from backend.market.ir_releases import OfficialIrReleaseAdapter
+from backend.providers.compatible_chat_provider import CompatibleChatProvider
+from backend.providers.deepseek_provider import DeepSeekProvider
+from backend.providers.doubao_provider import DoubaoProvider
+from backend.providers.openai_provider import OpenAIProvider
 from backend.source_inbox_service import SourceInboxService
 from backend.source_monitoring.adapters.company_ir import CompanyIrSourceAdapter
 from backend.source_monitoring.registry import SourceAdapterRegistry
@@ -71,6 +76,24 @@ class MicronJsonCompositionTests(unittest.TestCase):
         self.store = StudioStore(self.path)
         self.repository = SourceMonitoringStateRepository(self.store, clock_ms=lambda: self.clock_ms)
         self.inbox = SourceInboxService(self.store, clock=lambda: self.clock_ms / 1_000)
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.provider_spies = [self.stack.enter_context(patch.object(
+            cls, method, side_effect=AssertionError("Provider forbidden in Micron metadata polling"),
+        )) for cls, method in (
+            (CompatibleChatProvider, "generate"), (CompatibleChatProvider, "probe"),
+            (OpenAIProvider, "generate"), (OpenAIProvider, "probe"),
+            (DoubaoProvider, "generate"), (DoubaoProvider, "generate_json"),
+            (DoubaoProvider, "probe"), (DeepSeekProvider, "generate_json"),
+        )]
+        self.addCleanup(self.assert_model_free)
+
+    def assert_model_free(self):
+        for spy in self.provider_spies:
+            spy.assert_not_called()
+        with closing(sqlite3.connect(self.path)) as connection:
+            for table in ("provider_execution_runs", "provider_call_attempts", "rounds"):
+                self.assertEqual(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
 
     def clock(self):
         return datetime.fromtimestamp(self.clock_ms / 1_000, tz=timezone.utc)
@@ -96,6 +119,138 @@ class MicronJsonCompositionTests(unittest.TestCase):
     def items(self):
         with closing(sqlite3.connect(self.path)) as connection:
             return [json.loads(row[0]) for row in connection.execute("SELECT item_json FROM source_inbox_items ORDER BY id")]
+
+    def test_reused_production_adapter_reduces_duplicate_poll_from_thirty_one_to_five_requests(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        first = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(first["status"], "SUCCEEDED")
+        self.assertEqual(len(transport.calls), 31)
+        checkpoint = copy.deepcopy(first["state"]["checkpoint"])
+        for _ in range(3):
+            before = len(transport.calls)
+            repeated = supervisor.run_once(adapter.adapter_key)
+            self.assertEqual(repeated["status"], "SUCCEEDED", repeated)
+            self.assertEqual(len(transport.calls) - before, 5)
+            self.assertEqual(repeated["state"]["checkpoint"], checkpoint)
+        self.assertEqual(self.items(), [])
+
+    def test_failed_old_revalidation_does_not_block_new_release_and_checkpoint_waits_for_recovery(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        checkpoint = copy.deepcopy(baseline["state"]["checkpoint"])
+        transport.records = transport.records[:-1] + [transport.record(31)]
+        transport.missing_metadata_id = 1
+        first = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(first["status"], "DEGRADED", first)
+        self.assertEqual(first["state"]["checkpoint"], checkpoint)
+        self.assertEqual([item["extensions"]["company_ir_v2"]["press_release_id"] for item in self.items()], [31])
+        self.assertTrue(any("Micron ID 1:" in error["message"] and "attempt_count=2" in error["message"]
+                            for error in first["run"]["source_errors"]))
+        transport.records = transport.records[:-2] + [transport.record(31), transport.record(32)]
+        second = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(second["status"], "DEGRADED", second)
+        self.assertEqual(second["state"]["checkpoint"], checkpoint)
+        self.assertEqual({item["extensions"]["company_ir_v2"]["press_release_id"] for item in self.items()}, {31, 32})
+        self.assertTrue(any("retry_position=" in error["message"] for error in second["run"]["source_errors"]))
+        transport.missing_metadata_id = 0
+        recovered = None
+        for _ in range(8):
+            recovered = supervisor.run_once(adapter.adapter_key)
+            if recovered["status"] == "SUCCEEDED":
+                break
+        self.assertEqual(recovered["status"], "SUCCEEDED", recovered)
+        self.assertEqual(len(self.items()), 2)
+        self.assertNotEqual(recovered["state"]["checkpoint"], checkpoint)
+        replay = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(replay["status"], "SUCCEEDED")
+        self.assertEqual(len(self.items()), 2)
+
+    def test_partial_metadata_report_must_match_failed_identity_before_micron_delivery(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        transport.records = transport.records[:-1] + [transport.record(31)]
+        transport.missing_metadata_id = 1
+        client = adapter._adapter._micron_client
+        snapshot = client.read_recent(require_complete=False)
+        snapshot["metadata_progress"]["failed"][0]["press_release_id"] = 999
+        with patch.object(client, "read_recent", return_value=snapshot):
+            result = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(result["status"], "DEGRADED")
+        self.assertEqual(result["state"]["checkpoint"], baseline["state"]["checkpoint"])
+        self.assertEqual(self.items(), [])
+
+    def test_persistent_old_failure_cannot_fill_every_slot_with_previous_uncommitted_replays(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        transport.missing_metadata_id = 1
+        for offset in range(12):
+            new_id = 31 + offset
+            removed_old_id = 30 - offset
+            transport.records = [row for row in transport.records if row["PressReleaseId"] != removed_old_id]
+            transport.records.append(transport.record(new_id))
+            result = supervisor.run_once(adapter.adapter_key)
+            self.assertEqual(result["status"], "DEGRADED", result)
+            self.assertEqual(result["state"]["checkpoint"], baseline["state"]["checkpoint"])
+            self.assertEqual(
+                {item["extensions"]["company_ir_v2"]["press_release_id"] for item in self.items()},
+                set(range(31, new_id + 1)),
+            )
+
+    def test_burst_larger_than_delivery_limit_drains_while_old_metadata_remains_degraded(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        transport.records = transport.records[:18] + [transport.record(identity) for identity in range(31, 43)]
+        transport.missing_metadata_id = 1
+        first = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(first["status"], "DEGRADED", first)
+        self.assertEqual(first["state"]["checkpoint"], baseline["state"]["checkpoint"])
+        self.assertEqual(len(self.items()), 8)
+        second = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(second["status"], "DEGRADED", second)
+        self.assertEqual(second["state"]["checkpoint"], baseline["state"]["checkpoint"])
+        self.assertEqual({item["extensions"]["company_ir_v2"]["press_release_id"] for item in self.items()}, set(range(31, 43)))
+        rows = self.items()
+        for _ in range(3):
+            replay = supervisor.run_once(adapter.adapter_key)
+            self.assertEqual(replay["status"], "DEGRADED", replay)
+            self.assertEqual(replay["state"]["checkpoint"], baseline["state"]["checkpoint"])
+            self.assertEqual(self.items(), rows)
+
+    def test_failed_first_burst_import_does_not_consume_uncommitted_delivery_rotation(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        transport.records = transport.records[:18] + [transport.record(identity) for identity in range(31, 43)]
+        transport.missing_metadata_id = 1
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("""CREATE TRIGGER fail_first_incremental_burst AFTER INSERT ON source_inbox_items
+                BEGIN SELECT RAISE(ABORT,'injected first burst import failure'); END""")
+        failed = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(failed["status"], "FAILED", failed)
+        self.assertIn("injected first burst import failure", failed["run"]["error_message"])
+        self.assertEqual(failed["state"]["checkpoint"], baseline["state"]["checkpoint"])
+        self.assertEqual(self.items(), [])
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM source_inbox_imports").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM source_inbox_state_events").fetchone()[0], 0)
+            connection.execute("DROP TRIGGER fail_first_incremental_burst")
+        for _ in range(2):
+            retried = supervisor.run_once(adapter.adapter_key)
+            self.assertEqual(retried["status"], "DEGRADED", retried)
+            self.assertEqual(retried["state"]["checkpoint"], baseline["state"]["checkpoint"])
+        self.assertEqual({item["extensions"]["company_ir_v2"]["press_release_id"] for item in self.items()}, set(range(31, 43)))
+        self.assertEqual(len(self.items()), 12)
 
     def test_default_micron_format_is_explicit_json_and_legacy_injection_requires_rss(self):
         self.assertEqual(OfficialIrReleaseAdapter().source_format, "q4_json")
