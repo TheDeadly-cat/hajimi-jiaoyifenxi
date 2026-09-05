@@ -48,6 +48,7 @@
         "tests.test_source_monitoring_ir_baseline",
         "tests.test_source_monitoring_micron_json",
         "tests.test_source_monitoring_operations",
+        "tests.test_source_monitoring_profiles",
         "tests.test_source_monitoring_runtime",
         "tests.test_source_monitoring_runtime_coordinator",
         "tests.test_source_monitoring_sec_baseline",

@@ -309,6 +309,10 @@ class SecIrLivePreflightIndeterminateError(RuntimeError):
     """Post-action state cannot be represented with exact accounting."""
 
 
+class SecIrLivePreflightProfileError(RuntimeError):
+    code = "PREFLIGHT_PROFILE_REQUIRES_OPERATOR_PREVIEW"
+
+
 class _BoundaryError(ValueError):
     """A closed internal transport-boundary failure."""
 
@@ -995,6 +999,8 @@ def _run_boundary(
 ) -> dict[str, Any]:
     if type(confirmation) is not str or confirmation != SEC_IR_LIVE_PREFLIGHT_CONFIRMATION:
         raise SecIrLivePreflightConfirmationError()
+    if os.environ.get("AI_STUDIO_SOURCE_MONITOR_PROFILE", ""):
+        raise SecIrLivePreflightProfileError("named source profiles require the matching operator/CLI preview registry")
     if production and not _ISOLATED_CLI_IMPORT_GUARD_ATTESTED:
         raise SecIrLivePreflightEnvironmentError()
     user_agent_declared = _declared_user_agent(sec_user_agent)

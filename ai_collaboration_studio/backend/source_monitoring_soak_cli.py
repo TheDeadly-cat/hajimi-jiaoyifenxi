@@ -381,7 +381,8 @@ def _registry(settings: Any, deps: _SoakCliDependencies) -> Any:
     else:
         from .source_monitoring.default_registry import build_official_source_registry
 
-        value = build_official_source_registry()
+        profile_id = getattr(settings, "source_profile", "")
+        value = build_official_source_registry(**({"source_profile": profile_id} if profile_id else {}))
     if (
         getattr(value, "official_only", None) is not True
         or type(getattr(value, "adapter_keys", None)) is not tuple
@@ -389,6 +390,9 @@ def _registry(settings: Any, deps: _SoakCliDependencies) -> Any:
         or not callable(getattr(value, "to_dict", None))
     ):
         raise _CliFailure("SOURCE_MONITORING_SOAK_REGISTRY_UNSAFE")
+    from .source_monitoring.profiles import require_profile_registry
+
+    require_profile_registry(value, getattr(settings, "source_profile", ""))
     return value
 
 

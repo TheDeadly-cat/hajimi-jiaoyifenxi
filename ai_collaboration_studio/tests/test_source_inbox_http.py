@@ -341,6 +341,35 @@ class SourceInboxHttpTests(unittest.TestCase):
                     {"SOURCE_INBOX_REQUEST_INVALID", "SOURCE_INBOX_CURSOR_INVALID"},
                 )
 
+    def test_trial_health_and_control_follow_the_actual_runtime_settings(self) -> None:
+        from backend.source_monitoring.profiles import SEC_MICRON_TRIAL_PROFILE, source_profile_manifest
+        from backend.source_monitoring.runtime import build_source_monitoring_runtime
+        from backend.source_monitoring.settings import SourceMonitoringSettings, SOURCE_MONITOR_PROFILE_ENV
+
+        owner = self.attach_operator_runtime()
+        runtime = build_source_monitoring_runtime(self.store, SourceMonitoringSettings(
+            enabled=True, source_profile=SEC_MICRON_TRIAL_PROFILE,
+        ))
+        self.server.ai_studio_source_monitoring_runtime = runtime
+        # A later environment read must not relabel this existing Runtime as
+        # the wider default registry or a different requested enablement state.
+        with patch.dict(os.environ, {SOURCE_MONITOR_PROFILE_ENV: "", "AI_STUDIO_SOURCE_MONITOR_ENABLED": "0"}):
+            status, health = self.request("/api/monitoring/health")
+            self.assertEqual(status, 200, health)
+            view = health["source_monitoring_health"]
+            self.assertEqual(view["version"], "source_monitoring_health_service_v4")
+            self.assertEqual(view["settings"]["source_profile"], SEC_MICRON_TRIAL_PROFILE)
+            self.assertTrue(view["settings"]["enabled"])
+            status, control = self.request("/api/monitoring/adapters/control")
+            self.assertEqual(status, 200, control)
+            view = control["source_monitoring_operator_control"]
+            self.assertEqual(view["profile"], source_profile_manifest(SEC_MICRON_TRIAL_PROFILE))
+            self.assertEqual({row["adapter_key"] for row in view["adapters"]}, {"sec_filings", "company_ir"})
+        owner.assert_held_for.assert_called_with(self.store.path)
+        with closing(sqlite3.connect(self.store.path)) as connection:
+            for table in ("source_adapter_runs", "source_adapter_states", "provider_execution_runs", "provider_call_attempts", "rounds"):
+                self.assertEqual(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0, table)
+
     def test_source_monitoring_health_is_read_only_default_off_evidence(self) -> None:
         status, payload = self.request("/api/monitoring/health")
         self.assertEqual(status, 200)

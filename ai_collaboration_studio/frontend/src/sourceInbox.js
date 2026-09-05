@@ -645,7 +645,8 @@ export function normalizeSourceMonitoringHealth(payload) {
   const rawAdapters = arrayOfObjects(view.adapters);
   const counts = objectValue(view.counts);
   const issues = [];
-  if (view.version !== "source_monitoring_health_service_v3") issues.push("health_view_version_invalid");
+  const trialHealth = view.version === "source_monitoring_health_service_v4";
+  if (!trialHealth && view.version !== "source_monitoring_health_service_v3") issues.push("health_view_version_invalid");
   if (view.health_projection_version !== "source_monitoring_health_v1") {
     issues.push("health_version_invalid");
   }
@@ -671,7 +672,9 @@ export function normalizeSourceMonitoringHealth(payload) {
     issues.push("health_counts_invalid");
   }
   if (
-    !hasExactFields(settings, SOURCE_MONITORING_SETTINGS_FIELDS)
+    !hasExactFields(settings, trialHealth
+      ? [...SOURCE_MONITORING_SETTINGS_FIELDS, "source_profile"]
+      : SOURCE_MONITORING_SETTINGS_FIELDS)
     || !["seed_only", "catch_up", "from_time"].includes(settings.initial_mode)
     || typeof settings.enabled !== "boolean"
     || typeof settings.auto_start !== "boolean"
@@ -711,6 +714,14 @@ export function normalizeSourceMonitoringHealth(payload) {
   ) {
     issues.push("health_settings_invalid");
   }
+  if (trialHealth && (
+    settings.source_profile !== "sec_micron_trial_v1"
+    || settings.official_only !== true
+    || settings.allow_readonly_market !== false
+    || settings.initial_mode !== "seed_only"
+    || settings.continuous_event_cutoff !== ""
+    || settings.max_items_per_run < 8
+  )) issues.push("health_profile_invalid");
   const runtimeIntegerFields = [
     "started_at",
     "heartbeat_at",
@@ -870,6 +881,24 @@ export function normalizeSourceMonitoringHealth(payload) {
   if (new Set(adapters.map((adapter) => adapter.adapterKey)).size !== adapters.length) {
     issues.push("health_adapter_identity_invalid");
   }
+  if (trialHealth) {
+    const trialCandidates = { sec_filings: 3, company_ir: 8 };
+    const registered = rawAdapters.filter((adapter) => adapter.catalog_registered === true);
+    if (registered.length !== 2
+      || registered.some((adapter) => {
+        const metadata = objectValue(adapter.metadata);
+        return !Object.hasOwn(trialCandidates, adapter.adapter_key)
+          || metadata.source_class !== "official_source"
+          || metadata.source_channel !== "official_source_monitor"
+          || metadata.official_source !== true
+          || metadata.poll_interval_ms !== 300_000
+          || metadata.max_candidates_per_poll !== trialCandidates[adapter.adapter_key];
+      })
+      || rawAdapters.some((adapter) => adapter.catalog_registered === false
+        && (adapter.enabled !== false || adapter.running !== false))) {
+      issues.push("health_profile_adapters_invalid");
+    }
+  }
   const adapterByKey = new Map(adapters.map((adapter) => [adapter.adapterKey, adapter]));
   if (
     runtime.active_adapter !== ""
@@ -925,6 +954,7 @@ export function normalizeSourceMonitoringHealth(payload) {
     officialOnly: settings.official_only === true,
     allowReadonlyMarket: settings.allow_readonly_market === true,
     initialMode: String(settings.initial_mode || ""),
+    sourceProfile: trialHealth ? String(settings.source_profile || "") : "",
     catchUpMaxItems: boundedCount(settings.catch_up_max_items),
     initialPreviewSha256: String(settings.initial_preview_sha256 || ""),
     fromTime: String(settings.from_time || ""),

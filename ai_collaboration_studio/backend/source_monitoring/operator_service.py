@@ -118,7 +118,7 @@ class SourceMonitoringOperatorService:
                     for enabled, candidate in (
                         (
                             resolved_settings.official_only,
-                            build_official_source_registry()
+                            build_official_source_registry(**({"source_profile": resolved_settings.source_profile} if resolved_settings.source_profile else {}))
                             if resolved_settings.official_only
                             else None,
                         ),
@@ -143,6 +143,12 @@ class SourceMonitoringOperatorService:
                 "operator registry catalog must contain exact registries",
                 status=400,
             )
+        from .profiles import require_profile_registry
+
+        if resolved_settings.source_profile:
+            if len(resolved_catalog) != 1:
+                raise _operator_error("SOURCE_MONITORING_PROFILE_SCOPE_MISMATCH", "trial profile requires exactly its official registry", status=400)
+            require_profile_registry(resolved_catalog[0], resolved_settings.source_profile)
         all_keys = [
             adapter_key
             for item in resolved_catalog
@@ -420,6 +426,11 @@ class SourceMonitoringOperatorService:
         )
 
     def control_snapshot(self) -> dict[str, Any]:
+        from .profiles import require_profile_registry, source_profile_manifest
+
+        profile = source_profile_manifest(self.settings.source_profile)
+        if profile is not None:
+            require_profile_registry(self.registry_catalog[0], self.settings.source_profile)
         captured_at_ms = self._now_ms()
         adapters = []
         catalog = [
@@ -519,7 +530,8 @@ class SourceMonitoringOperatorService:
                 "blocked_reason_codes": sorted(set(blocked)),
             })
         return {
-            "version": SOURCE_MONITORING_OPERATOR_CONTROL_VERSION,
+            "version": "source_monitoring_operator_control_v3" if profile is not None else SOURCE_MONITORING_OPERATOR_CONTROL_VERSION,
+            **({"profile": profile} if profile is not None else {}),
             "captured_at_ms": captured_at_ms,
             "settings": {
                 "global_enabled": self.settings.enabled,

@@ -147,6 +147,9 @@ class SourceMonitoringSupervisor:
                 "SOURCE_MONITORING_SETTINGS_INVALID",
                 "settings must be SourceMonitoringSettings",
             )
+        from .profiles import require_profile_registry
+
+        require_profile_registry(registry, settings.source_profile)
         if settings.official_only is not registry.official_only:
             raise SourceMonitoringSupervisorError(
                 "SOURCE_MONITORING_SOURCE_MODE_MISMATCH",

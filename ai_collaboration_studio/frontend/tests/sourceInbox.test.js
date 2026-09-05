@@ -724,8 +724,8 @@ test("company IR errors distinguish legacy upgrade, bounded identity capacity, a
   assert.doesNotMatch(sourceMonitoringNextStep({ ...adapter, lastErrorCode: "COMPANY_IR_BASELINE_UPGRADE_REQUIRED_EXTRA" }), /旧公司 IR checkpoint/);
 });
 
-test("monitoring health remains textual, default-off, and nonexecuting", () => {
-  const healthPayload = {
+function monitoringHealthPayload() {
+  return {
     source_monitoring_health: {
       version: "source_monitoring_health_service_v3",
       health_projection_version: "source_monitoring_health_v1",
@@ -815,6 +815,10 @@ test("monitoring health remains textual, default-off, and nonexecuting", () => {
       },
     },
   };
+}
+
+test("monitoring health remains textual, default-off, and nonexecuting", () => {
+  const healthPayload = monitoringHealthPayload();
   const normalized = normalizeSourceMonitoringHealth(healthPayload);
   assert.equal(normalized.valid, true);
   assert.equal(normalized.stateLabel, "已停用");
@@ -824,6 +828,7 @@ test("monitoring health remains textual, default-off, and nonexecuting", () => {
   assert.equal(normalized.runtime.statusLabel, "已停用");
   assert.equal(normalized.initialMode, "seed_only");
   assert.equal(normalized.continuousEventCutoff, "");
+  assert.equal(normalized.sourceProfile, "");
   assert.equal(normalized.officialOnly, true);
   assert.equal(normalized.allowReadonlyMarket, false);
   assert.equal(normalized.adapters[0].pollIntervalMs, 900000);
@@ -1048,6 +1053,63 @@ test("monitoring health remains textual, default-off, and nonexecuting", () => {
   assert.equal(failed.valid, true);
   assert.equal(failed.runtime.status, "failed");
   assert.equal(failed.runtime.statusLabel, "运行失败");
+});
+
+test("trial health accepts only its two registered sources and inactive legacy records", () => {
+  const payload = monitoringHealthPayload();
+  const view = payload.source_monitoring_health;
+  view.version = "source_monitoring_health_service_v4";
+  view.settings.source_profile = "sec_micron_trial_v1";
+  view.settings.max_items_per_run = 8;
+  view.adapters[0].metadata.poll_interval_ms = 300_000;
+  view.adapters[0].metadata.max_candidates_per_poll = 3;
+  const ir = structuredClone(view.adapters[0]);
+  ir.adapter_key = "company_ir";
+  ir.metadata.config_version = "company_ir_config_v2";
+  ir.metadata.max_candidates_per_poll = 8;
+  view.adapters.push(ir);
+  view.adapter_count = 2;
+  view.counts.disabled = 2;
+  const normalized = normalizeSourceMonitoringHealth(payload);
+  assert.equal(normalized.valid, true, normalized.issues.join(","));
+  assert.equal(normalized.sourceProfile, "sec_micron_trial_v1");
+  assert.deepEqual(normalized.adapters.map((adapter) => adapter.pollIntervalMs), [300_000, 300_000]);
+
+  const legacyPayload = structuredClone(payload);
+  const legacy = structuredClone(ir);
+  Object.assign(legacy, {
+    adapter_key: "futu_anomaly_signals", catalog_registered: false,
+    persisted_state: true, persisted_enabled: true, metadata: null,
+    config_status: "unregistered", persisted_config_version: "old_futu_v1",
+  });
+  legacyPayload.source_monitoring_health.adapters.push(legacy);
+  legacyPayload.source_monitoring_health.adapter_count = 3;
+  legacyPayload.source_monitoring_health.counts.disabled = 3;
+  assert.equal(normalizeSourceMonitoringHealth(legacyPayload).valid, true);
+  legacy.enabled = true;
+  assert.equal(normalizeSourceMonitoringHealth(legacyPayload).valid, false);
+
+  const mutations = [
+    ["profile missing", (value) => { delete value.settings.source_profile; }],
+    ["profile unknown", (value) => { value.settings.source_profile = "other_trial"; }],
+    ["extra settings", (value) => { value.settings.url = "https://example.invalid"; }],
+    ["nonofficial mode", (value) => { value.settings.official_only = false; }],
+    ["market allowed", (value) => { value.settings.allow_readonly_market = true; }],
+    ["initial mode", (value) => { value.settings.initial_mode = "catch_up"; value.settings.catch_up_max_items = 1; }],
+    ["continuous cutoff", (value) => { value.settings.continuous_event_cutoff = "2026-09-01T00:00:00Z"; }],
+    ["insufficient capacity", (value) => { value.settings.max_items_per_run = 7; }],
+    ["expanded registry", (value) => { value.adapters[1].adapter_key = "futu_anomaly_signals"; }],
+    ["missing registry member", (value) => { value.adapters.pop(); value.adapter_count = 1; value.counts.disabled = 1; }],
+    ["market class", (value) => { value.adapters[1].metadata.source_class = "readonly_market"; }],
+    ["cadence drift", (value) => { value.adapters[0].metadata.poll_interval_ms = 60_000; }],
+    ["capacity drift", (value) => { value.adapters[1].metadata.max_candidates_per_poll = 9; }],
+    ["old service with profile", (value) => { value.version = "source_monitoring_health_service_v3"; }],
+  ];
+  for (const [name, mutate] of mutations) {
+    const malformed = structuredClone(payload);
+    mutate(malformed.source_monitoring_health);
+    assert.equal(normalizeSourceMonitoringHealth(malformed).valid, false, name);
+  }
 });
 
 test("notification feed accepts only cursor-bound unacknowledged zero-authority events", () => {
