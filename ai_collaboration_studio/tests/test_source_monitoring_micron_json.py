@@ -35,6 +35,7 @@ class MicronJsonFixtureTransport:
         self.after_head = None
         self.missing_metadata_id = 0
         self.published_at = "2026-09-04T15:01:00Z"
+        self.modified_at_by_id: dict[int, str] = {}
 
     @staticmethod
     def record(index: int) -> dict:
@@ -58,7 +59,7 @@ class MicronJsonFixtureTransport:
         metadata = {
             "@type": "NewsArticle", "mainEntityOfPage": {"@id": url},
             "headline": row["Headline"], "datePublished": self.published_at,
-            "dateModified": self.published_at,
+            "dateModified": self.modified_at_by_id.get(row["PressReleaseId"], self.published_at),
         }
         if row["PressReleaseId"] == self.missing_metadata_id:
             metadata.pop("datePublished")
@@ -251,6 +252,90 @@ class MicronJsonCompositionTests(unittest.TestCase):
             self.assertEqual(retried["state"]["checkpoint"], baseline["state"]["checkpoint"])
         self.assertEqual({item["extensions"]["company_ir_v2"]["press_release_id"] for item in self.items()}, set(range(31, 43)))
         self.assertEqual(len(self.items()), 12)
+
+    def test_degraded_burst_survives_one_cold_restart_before_remaining_delivery(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        transport.records = transport.records[:18] + [transport.record(identity) for identity in range(31, 43)]
+        transport.missing_metadata_id = 1
+        first = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(first["status"], "DEGRADED", first)
+        checkpoint = copy.deepcopy(baseline["state"]["checkpoint"])
+        self.assertEqual(first["state"]["checkpoint"], checkpoint)
+        first_items = self.items()
+        self.assertEqual(len(first_items), 8)
+
+        # Reopen the same temporary database with entirely new store, reader,
+        # adapter and supervisor instances. No checkpoint or item is cleared.
+        self.store = StudioStore(self.path)
+        self.repository = SourceMonitoringStateRepository(self.store, clock_ms=lambda: self.clock_ms)
+        self.inbox = SourceInboxService(self.store, clock=lambda: self.clock_ms / 1_000)
+        restarted_adapter = self.adapter(transport)
+        self.assertEqual(restarted_adapter._json_offered_order, [])
+        self.assertEqual(restarted_adapter._adapter._micron_client._metadata_cache, {})
+        restarted = self.supervisor(restarted_adapter)
+        before = len(transport.calls)
+        cold_replay = restarted.run_once(restarted_adapter.adapter_key)
+        self.assertEqual(cold_replay["status"], "DEGRADED", cold_replay)
+        self.assertEqual(len(transport.calls) - before, 31)
+        self.assertEqual(cold_replay["state"]["checkpoint"], checkpoint)
+        self.assertEqual(cold_replay["import"]["created_item_count"], 0)
+        self.assertEqual(self.items(), first_items)
+
+        drained = restarted.run_once(restarted_adapter.adapter_key)
+        self.assertEqual(drained["status"], "DEGRADED", drained)
+        self.assertEqual(drained["state"]["checkpoint"], checkpoint)
+        self.assertEqual(drained["import"]["created_item_count"], 4)
+        self.assertEqual({item["extensions"]["company_ir_v2"]["press_release_id"] for item in self.items()}, set(range(31, 43)))
+        stable_items = self.items()
+        self.assertEqual(len(stable_items), 12)
+        for _ in range(2):
+            replay = restarted.run_once(restarted_adapter.adapter_key)
+            self.assertEqual(replay["status"], "DEGRADED", replay)
+            self.assertEqual(replay["state"]["checkpoint"], checkpoint)
+            self.assertEqual(self.items(), stable_items)
+
+    def test_unchanged_list_and_revision_detect_head_only_revision_on_bounded_revalidation(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        seeded = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(seeded["status"], "SUCCEEDED")
+        original_list = copy.deepcopy(transport.records)
+        client = adapter._adapter._micron_client
+        previous_head_evidence = copy.deepcopy(client._metadata_cache[30])
+        transport.modified_at_by_id[30] = "2026-09-05T10:00:00Z"
+        target_url = urljoin("https://investors.micron.com", transport.records[29]["LinkToDetailPage"])
+
+        for cycle in range(1, 9):
+            self.clock_ms += 300_000
+            before = len(transport.calls)
+            result = supervisor.run_once(adapter.adapter_key)
+            self.assertEqual(result["status"], "SUCCEEDED", result)
+            self.assertEqual(transport.records, original_list)
+            self.assertEqual(len(transport.calls) - before, 5)
+            if cycle < 8:
+                self.assertNotIn((target_url, True), transport.calls[before:])
+                self.assertEqual(client._metadata_cache[30], previous_head_evidence)
+                self.assertEqual(self.items(), [])
+            else:
+                self.assertIn((target_url, True), transport.calls[before:])
+                self.assertEqual(client._metadata_cache[30]["verified_at_ms"], self.clock_ms)
+
+        self.assertEqual(len(self.items()), 1)
+        item = self.items()[0]
+        extension = item["extensions"]["company_ir_v2"]
+        self.assertEqual(extension["press_release_id"], 30)
+        self.assertEqual(extension["revision_number"], original_list[29]["RevisionNumber"])
+        self.assertTrue(extension["is_revision"])
+        self.assertEqual(extension["metadata_date_modified"], transport.modified_at_by_id[30])
+        self.assertEqual(item["published_at"], transport.published_at)
+        self.assertNotEqual(extension["time_metadata_sha256"], previous_head_evidence["time_metadata_sha256"])
+        self.assertTrue(extension["previous_projection_sha256"])
+        self.assertEqual(supervisor.run_once(adapter.adapter_key)["status"], "SUCCEEDED")
+        self.assertEqual(self.items(), [item])
 
     def test_default_micron_format_is_explicit_json_and_legacy_injection_requires_rss(self):
         self.assertEqual(OfficialIrReleaseAdapter().source_format, "q4_json")

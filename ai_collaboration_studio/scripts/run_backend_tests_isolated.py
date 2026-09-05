@@ -430,6 +430,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--pattern", default="test_*.py")
     parser.add_argument("--start-directory", default="tests")
     parser.add_argument("--verbosity", type=int, default=1)
+    parser.add_argument("--require-historical-readers", action="store_true",
+                        help="Require the real historical reader matrix without skips or missing objects")
+    parser.add_argument("--historical-reader-report", help="Write the required matrix receipt outside source")
     parser.add_argument(
         "--durations",
         type=int,
@@ -757,11 +760,60 @@ def _print_layers(manifest: dict[str, Any]) -> None:
         )
 
 
+def _suite_test_ids(suite: unittest.TestSuite) -> set[str]:
+    identities: set[str] = set()
+    for test in suite:
+        if isinstance(test, unittest.TestSuite):
+            identities.update(_suite_test_ids(test))
+        else:
+            identities.add(test.id())
+    return identities
+
+
+def required_reader_result(result: unittest.TestResult, required_ids: set[str]) -> dict[str, Any]:
+    skipped = [test.id() for test, _reason in result.skipped if test.id() in required_ids]
+    failed = [test.id() for test, _detail in (*result.failures, *result.errors, *result.expectedFailures)
+              if test.id() in required_ids]
+    failed.extend(test.id() for test in result.unexpectedSuccesses if test.id() in required_ids)
+    return {"skip_count": len(skipped), "skipped_test_ids": skipped,
+            "failed_test_ids": failed, "ok": not skipped and not failed}
+
+
+def required_reader_rows_complete(rows: list[dict[str, Any]], context: dict[str, Any]) -> bool:
+    historical = context.get("historical_reader_shas", [])
+    current = context.get("tested_commit_sha", "")
+    if len(historical) != 2 or not current:
+        return False
+    expected = {(reader, scenario) for reader in historical for scenario in ("legacy_data", "current_formats")}
+    expected.update({(current, "current_formats"), (current, "committed_wal"),
+                     (historical[0], "activation_and_rollback_rejections")})
+    if len(rows) != len(expected) or {(row.get("reader_sha"), row.get("scenario")) for row in rows} != expected:
+        return False
+    for row in rows:
+        checks = row.get("checks", [])
+        if not checks or any(check.get("status") not in {"PASS", "EXPECTED_REJECTION"} for check in checks):
+            return False
+        if row["scenario"] == "activation_and_rollback_rejections":
+            if any(row.get(key) is not True for key in ("pointer_unchanged", "receipts_unchanged", "database_family_unchanged")):
+                return False
+        elif (any(row.get("network", {}).get(key) != 0 for key in (
+                    "blocked_attempt_count", "allowed_loopback_connections", "simulated_offline_connections"))
+              or row.get("provider_attempts") != 0
+              or row.get("provider_ledger_and_rounds") != {
+                  "provider_execution_runs": 0, "provider_call_attempts": 0, "rounds": 0}):
+            return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     if args.durations < 0:
         parser.error("--durations must be zero or a positive integer")
+    if args.require_historical_readers != bool(args.historical_reader_report):
+        parser.error("--require-historical-readers and --historical-reader-report are required together")
+    if args.require_historical_readers and args.list_layers:
+        parser.error("--require-historical-readers must execute tests, not --list-layers")
     project_root = Path(__file__).resolve().parents[1]
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
@@ -780,13 +832,30 @@ def main(argv: list[str] | None = None) -> int:
     ) as temp_dir:
         runtime_path = configure_isolated_test_environment(temp_dir)
         verify_isolated_child_network_bootstrap()
+        matrix_module = None
+        matrix_context: dict[str, Any] = {}
+        matrix_error = ""
+        result = unittest.TestResult()
+        required_ids: set[str] = set()
         with isolated_backend_test_network_guard() as network_audit:
             suite = build_backend_test_suite(unittest.defaultTestLoader, selection)
             print(f"isolated_runtime={runtime_path}", flush=True)
-            result = unittest.TextTestRunner(
-                verbosity=args.verbosity,
-                durations=args.durations,
-            ).run(suite)
+            if args.require_historical_readers:
+                from tests import test_release_drill as matrix_module
+                required_ids = set(matrix_module.REQUIRED_READER_TEST_IDS)
+                try:
+                    if not required_ids.issubset(_suite_test_ids(suite)):
+                        raise AssertionError("HISTORICAL_READER_REQUIRED_TESTS_NOT_SELECTED")
+                    matrix_context = matrix_module.prepare_required_reader_matrix(project_root)
+                except (AssertionError, OSError, subprocess.SubprocessError) as exc:
+                    matrix_error = (str(exc) if isinstance(exc, AssertionError)
+                                    else "HISTORICAL_READER_PREPARATION_FAILED")
+                    print(matrix_error, file=sys.stderr, flush=True)
+            if not matrix_error:
+                result = unittest.TextTestRunner(
+                    verbosity=args.verbosity,
+                    durations=args.durations,
+                ).run(suite)
         network_report = network_audit.report()
         child_blocks = read_child_network_blocks(runtime_path)
         network_report["child_blocked_attempt_count"] = len(child_blocks)
@@ -796,8 +865,48 @@ def main(argv: list[str] | None = None) -> int:
             + json.dumps(network_report, ensure_ascii=False, sort_keys=True),
             flush=True,
         )
+        matrix_ok = not matrix_error
+        if args.require_historical_readers:
+            from scripts.run_isolated_release_drill import write_report
+            matrix_result = required_reader_result(result, required_ids)
+            matrix_ok = bool(matrix_ok and matrix_result["ok"] and result.wasSuccessful())
+            rows = list(matrix_module._READER_MATRIX_ROWS) if matrix_module is not None else []
+            for row in rows:
+                if row["reader_sha"] == "current":
+                    row["reader_sha"] = matrix_context.get("tested_commit_sha", "unavailable")
+            rows_complete = required_reader_rows_complete(rows, matrix_context)
+            requested_candidate = os.environ.get("AI_STUDIO_READER_CANDIDATE_SHA", "")
+            receipt = {
+                "version": "required_historical_reader_matrix_v1",
+                "candidate_sha": requested_candidate if re.fullmatch(r"[0-9a-f]{40}", requested_candidate) else "unavailable",
+                "tested_commit_sha": "unavailable", **matrix_context,
+                "ok": matrix_ok and network_report["blocked_attempt_count"] == 0
+                    and network_report["child_blocked_attempt_count"] == 0,
+                "required": True, "preparation_error": matrix_error,
+                "required_test_ids": sorted(required_ids),
+                **{key: value for key, value in matrix_result.items() if key != "ok"},
+                "suite_tests_run": result.testsRun, "suite_skip_count": len(result.skipped),
+                "suite_failure_count": len(result.failures), "suite_error_count": len(result.errors),
+                "matrix": rows, "matrix_complete": rows_complete, "network": network_report,
+                "formal_database_accessed": False, "synthetic_drill_substituted": False,
+            }
+            # A missing prerequisite or missing execution cannot be green even
+            # though unittest's empty default result is otherwise successful.
+            receipt["ok"] = bool(
+                matrix_ok and receipt["ok"] and rows_complete and result.testsRun
+                and matrix_context.get("source_worktree_clean") is True
+                and network_report["allowed_loopback_connections"] == 0
+                and network_report["simulated_offline_connections"] == 0
+            )
+            write_report(Path(args.historical_reader_report), receipt)
+            print("historical_reader_matrix=" + json.dumps({
+                "ok": receipt["ok"], "skip_count": receipt["skip_count"],
+                "matrix_rows": len(rows), "preparation_error": matrix_error,
+            }, sort_keys=True), flush=True)
+            matrix_ok = receipt["ok"]
         return 0 if (
             result.wasSuccessful()
+            and matrix_ok
             and network_report["blocked_attempt_count"] == 0
             and network_report["child_blocked_attempt_count"] == 0
         ) else 1

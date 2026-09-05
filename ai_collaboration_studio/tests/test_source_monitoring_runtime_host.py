@@ -619,7 +619,11 @@ class SourceMonitoringRuntimeHostTests(unittest.TestCase):
             "version": "source_monitoring_runtime_health_v1",
             "status": "running",
         }
-        runtime = SimpleNamespace(snapshot=Mock(return_value=runtime_snapshot))
+        runtime_settings = object()
+        runtime = SimpleNamespace(
+            settings=runtime_settings,
+            snapshot=Mock(return_value=runtime_snapshot),
+        )
         handler = object.__new__(http_server.StudioRequestHandler)
         handler.server = SimpleNamespace(
             ai_studio_source_monitoring_runtime=runtime,
@@ -629,8 +633,11 @@ class SourceMonitoringRuntimeHostTests(unittest.TestCase):
         captured: dict[str, object] = {}
 
         class FakeHealthService:
-            def __init__(self, store: object, *, runtime_snapshot: object) -> None:
+            def __init__(
+                self, store: object, *, settings: object, runtime_snapshot: object,
+            ) -> None:
                 captured["store"] = store
+                captured["settings"] = settings
                 captured["runtime_snapshot"] = runtime_snapshot
 
             def snapshot(self) -> dict[str, str]:
@@ -647,6 +654,8 @@ class SourceMonitoringRuntimeHostTests(unittest.TestCase):
             handler.do_GET()
 
         self.assertIs(captured["store"], http_server.STORE)
+        self.assertIs(captured["settings"], runtime.settings)
+        self.assertIs(captured["runtime_snapshot"], runtime.snapshot)
         self.assertIs(captured["runtime_value"], runtime_snapshot)
         runtime.snapshot.assert_called_once_with()
         send_json.assert_called_once_with(

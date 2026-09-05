@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import copy
 import io
 import json
 import threading
 import time
 import unittest
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from unittest.mock import patch
 
 from backend.market.micron_ir_json import (
@@ -644,6 +645,59 @@ class MicronIrIncrementalTests(unittest.TestCase):
             result = client.read_recent(require_complete=False)
         self.assertTrue(result["complete"])
         self.assertEqual(len(result["releases"]), 30)
+
+    def test_failed_head_reads_never_refresh_expired_rolled_back_or_corrupt_cache_evidence(self):
+        for condition in ("wall_expired", "monotonic_expired", "wall_rollback", "monotonic_rollback", "corrupt"):
+            with self.subTest(condition=condition):
+                fetch = self.fixture()
+                wall, elapsed, fail_heads = [NOW], [10_000.0], [False]
+
+                def controlled(url, **controls):
+                    value = fetch(url, **controls)
+                    if controls["head_only"] and fail_heads[0]:
+                        raise OSError("fixture official head unavailable")
+                    return value
+
+                client = MicronIrJsonClient(fetch_bytes=controlled, clock=lambda: wall[0], monotonic=lambda: elapsed[0])
+                client.read_recent()
+                age = client.cache_policy["maximum_age_ms"]
+                if condition == "wall_expired":
+                    wall[0] += timedelta(milliseconds=age + 1)
+                elif condition == "monotonic_expired":
+                    elapsed[0] += age / 1_000 + 1
+                elif condition == "wall_rollback":
+                    wall[0] -= timedelta(seconds=1)
+                elif condition == "monotonic_rollback":
+                    elapsed[0] -= 1
+                else:
+                    client._metadata_cache[30]["time_metadata_sha256"] = "0" * 64
+                previous_cache = copy.deepcopy(client._metadata_cache)
+                fail_heads[0] = True
+                before = len(fetch.calls)
+                result = client.read_recent(require_complete=False)
+
+                self.assertEqual(fetch.calls[before][0], EXPECTED_LIST_URL)
+                self.assertFalse(result["complete"])
+                self.assertEqual(client._metadata_cache, previous_cache)
+                progress = result["metadata_progress"]
+                failure_codes = {failure["press_release_id"]: failure["code"] for failure in progress["failed"]}
+                if condition == "corrupt":
+                    self.assertEqual(len(fetch.calls) - before, 6)
+                    self.assertEqual(set(failure_codes), {1, 2, 3, 4, 30})
+                    self.assertNotIn(30, [release["q4_press_release_id"] for release in result["releases"]])
+                    self.assertNotIn(30, progress["cache_hit_ids"])
+                else:
+                    self.assertEqual(result["releases"], [])
+                    self.assertEqual(progress["cache_hit_ids"], [])
+                    self.assertEqual(set(failure_codes), set(range(1, 31)))
+                    if condition.endswith("expired"):
+                        self.assertEqual(len(fetch.calls) - before, 5)
+                        self.assertEqual({identity for identity, code in failure_codes.items()
+                                          if code == "MICRON_IR_METADATA_CACHE_EXPIRED"}, set(range(5, 31)))
+                    else:
+                        self.assertEqual(len(fetch.calls) - before, 31)
+                self.assertTrue(all(failure_codes[identity] == "MICRON_IR_METADATA_REQUEST_FAILED"
+                                    for identity in progress["requested_ids"]))
 
     def test_parser_policy_change_invalidates_cache_and_restart_is_cold(self):
         fetch = self.fixture()

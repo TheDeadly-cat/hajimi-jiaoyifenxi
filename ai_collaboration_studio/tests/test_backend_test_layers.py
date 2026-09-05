@@ -480,6 +480,43 @@ class BackendTestLayerTests(unittest.TestCase):
         for layer_id in runner.BACKEND_TEST_LAYER_IDS:
             self.assertIn(f"{layer_id}\t", rendered)
 
+    def test_required_reader_result_rejects_a_skipped_required_matrix(self) -> None:
+        case = unittest.FunctionTestCase(lambda: None, description="required reader")
+        result = unittest.TestResult()
+        result.addSkip(case, "history deliberately unavailable")
+        evidence = runner.required_reader_result(result, {case.id()})
+        self.assertFalse(evidence["ok"])
+        self.assertEqual(evidence["skip_count"], 1)
+        self.assertEqual(evidence["skipped_test_ids"], [case.id()])
+
+    def test_required_reader_flags_cannot_silently_run_as_an_ordinary_suite(self) -> None:
+        for arguments in (["--require-historical-readers"], ["--historical-reader-report", "unused.json"],
+                          ["--list-layers", "--require-historical-readers", "--historical-reader-report", "unused.json"]):
+            with self.subTest(arguments=arguments), self.assertRaises(SystemExit) as raised:
+                runner.main(arguments)
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_required_reader_receipt_rejects_missing_scenarios_and_nonzero_activity(self) -> None:
+        context = {"historical_reader_shas": ["1" * 40, "2" * 40], "tested_commit_sha": "3" * 40}
+        rows = []
+        for reader, scenarios in (("1" * 40, ["legacy_data", "current_formats"]),
+                                  ("2" * 40, ["legacy_data", "current_formats"]),
+                                  ("3" * 40, ["current_formats", "committed_wal"])):
+            for scenario in scenarios:
+                rows.append({"reader_sha": reader, "scenario": scenario,
+                             "checks": [{"status": "PASS"}], "provider_attempts": 0,
+                             "provider_ledger_and_rounds": {"provider_execution_runs": 0, "provider_call_attempts": 0, "rounds": 0},
+                             "network": {"blocked_attempt_count": 0, "allowed_loopback_connections": 0, "simulated_offline_connections": 0}})
+        rows.append({"reader_sha": "1" * 40, "scenario": "activation_and_rollback_rejections",
+                     "checks": [{"status": "EXPECTED_REJECTION"}], "pointer_unchanged": True,
+                     "receipts_unchanged": True, "database_family_unchanged": True})
+        self.assertTrue(runner.required_reader_rows_complete(rows, context))
+        self.assertFalse(runner.required_reader_rows_complete(rows[:-1], context))
+        for field in ("provider_attempts", "network", "checks"):
+            changed = deepcopy(rows)
+            changed[0][field] = {"provider_attempts": 1, "network": {}, "checks": [{"status": "FAIL"}]}[field]
+            self.assertFalse(runner.required_reader_rows_complete(changed, context), field)
+
 
 if __name__ == "__main__":
     unittest.main()
