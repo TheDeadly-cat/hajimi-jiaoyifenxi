@@ -612,6 +612,21 @@ function SourceMonitoringOperatorControls({
         </span>
         <button className="secondary compact" type="button" onClick={onLoad}>重读设置</button>
       </header>
+      {control.profile ? (
+        <div role="note" aria-label="官方来源试用范围">
+          <strong>{control.profile.label}</strong>
+          {control.profile.sources.map((source) => (
+            <p key={source.adapterKey}>
+              {source.adapterKey === "sec_filings" ? "SEC" : "Micron 官方 IR"}
+              {` · ${source.symbols.join("、")}`}
+              {source.forms.length ? ` · ${source.forms.join("、")}` : null}
+              {source.format === "micron_q4_public_json_v1" ? ` · Q4 公开 JSON 最近 ${source.historyLimit} 条` : null}
+              {` · 每次最多 ${source.perSymbolLimit} 条 · 每 ${source.pollIntervalMs / 60_000} 分钟轮询`}
+            </p>
+          ))}
+          <p>仅建基线：首次运行不补录历史。采集/草稿不调用模型；不授予交易权限。</p>
+        </div>
+      ) : null}
       <p>
         保存 Adapter 启用状态不证明 Runtime 在线；预览只读取固定来源，不写 checkpoint 或 Source Inbox，
         不调用 Provider，也不授予交易权限。

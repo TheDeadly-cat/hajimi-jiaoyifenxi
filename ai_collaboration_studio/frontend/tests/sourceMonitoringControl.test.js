@@ -71,6 +71,31 @@ function control(overrides = {}) {
   };
 }
 
+function trialControl() {
+  return control({
+    version: "source_monitoring_operator_control_v3",
+    profile: {
+      version: "source_monitoring_profile_v1",
+      profile_id: "sec_micron_trial_v1",
+      label: "SEC + Micron 官方来源试用",
+      initial_mode: "seed_only",
+      sources: [
+        { adapter_key: "sec_filings", symbols: ["US.NVDA"], forms: ["8-K"],
+          format: "sec_submissions_recent", history_limit: 1000,
+          per_symbol_limit: 3, poll_interval_ms: 300_000 },
+        { adapter_key: "company_ir", symbols: ["US.MU"], forms: [],
+          format: "micron_q4_public_json_v1", history_limit: 30,
+          per_symbol_limit: 8, poll_interval_ms: 300_000 },
+      ],
+      model_calls_allowed: false,
+      execution_capability: "none",
+      live_trading_allowed: false,
+      scope_sha256: "e6f07d2c97d71c1280ab653352fc019cd99845be5bd06468ae6ace65899454e3",
+    },
+    adapters: [adapter(), adapter({ adapter_key: "company_ir", config_version: "company_ir_config_v2" })],
+  });
+}
+
 function preview(overrides = {}) {
   return {
     source_monitoring_operator_preview: {
@@ -128,6 +153,7 @@ test("operator control accepts exact neutral state and preserves legacy unknown 
   assert.equal(normalized.valid, true, normalized.issues.join(","));
   assert.equal(normalized.settings.autoStart, false);
   assert.equal(normalized.adapters[0].initializationStatus, "required");
+  assert.equal(normalized.profile, null);
 
   const legacyPayload = control({
     adapters: [adapter({
@@ -140,6 +166,56 @@ test("operator control accepts exact neutral state and preserves legacy unknown 
     })],
   });
   assert.equal(normalizeSourceMonitoringOperatorControl(legacyPayload).valid, true);
+});
+
+test("trial control exposes only the exact backend profile and defensive scope copies", () => {
+  const payload = trialControl();
+  const normalized = normalizeSourceMonitoringOperatorControl(payload);
+  assert.equal(normalized.valid, true, normalized.issues.join(","));
+  assert.equal(normalized.profile.label, "SEC + Micron 官方来源试用");
+  assert.equal(normalized.profile.initialMode, "seed_only");
+  assert.equal(normalized.profile.modelCallsAllowed, false);
+  assert.deepEqual(normalized.profile.sources.map((source) => source.symbols), [["US.NVDA"], ["US.MU"]]);
+  assert.deepEqual(normalized.profile.sources.map((source) => source.pollIntervalMs), [300_000, 300_000]);
+  normalized.profile.sources[0].symbols.push("US.MU");
+  assert.deepEqual(payload.source_monitoring_operator_control.profile.sources[0].symbols, ["US.NVDA"]);
+});
+
+test("trial control rejects scope expansion, authority drift, missing fields and extra adapters", () => {
+  const mutations = [
+    ["unknown control field", (view) => { view.extra = true; }],
+    ["missing profile", (view) => { delete view.profile; }],
+    ["unknown profile field", (view) => { view.profile.url = "https://example.invalid"; }],
+    ["unknown source field", (view) => { view.profile.sources[0].extra = true; }],
+    ["profile id", (view) => { view.profile.profile_id = "other_trial"; }],
+    ["scope hash", (view) => { view.profile.scope_sha256 = "a".repeat(64); }],
+    ["expanded SEC symbols", (view) => { view.profile.sources[0].symbols.push("US.MU"); }],
+    ["expanded IR symbols", (view) => { view.profile.sources[1].symbols.push("US.WDC"); }],
+    ["expanded forms", (view) => { view.profile.sources[0].forms.push("10-K"); }],
+    ["IR forms", (view) => { view.profile.sources[1].forms.push("8-K"); }],
+    ["IR format", (view) => { view.profile.sources[1].format = "rss"; }],
+    ["history limit", (view) => { view.profile.sources[1].history_limit = 31; }],
+    ["per-symbol limit", (view) => { view.profile.sources[0].per_symbol_limit = 4; }],
+    ["poll cadence", (view) => { view.profile.sources[0].poll_interval_ms = 60_000; }],
+    ["model authority", (view) => { view.profile.model_calls_allowed = true; }],
+    ["execution authority", (view) => { view.profile.execution_capability = "orders"; }],
+    ["trading authority", (view) => { view.profile.live_trading_allowed = true; }],
+    ["profile initial mode", (view) => { view.profile.initial_mode = "catch_up"; }],
+    ["settings initial mode", (view) => { view.settings.initial_mode = "catch_up"; view.settings.catch_up_max_items = 1; }],
+    ["continuous cutoff", (view) => { view.settings.continuous_event_cutoff = "2026-09-01T00:00:00Z"; }],
+    ["adapter initial mode", (view) => { view.adapters[0].initialization_mode = "catch_up"; }],
+    ["extra adapter", (view) => { view.adapters.push(adapter({ adapter_key: "federal_reserve" })); }],
+    ["missing adapter", (view) => { view.adapters.pop(); }],
+    ["replacement adapter", (view) => { view.adapters[1].adapter_key = "futu_anomaly_signals"; }],
+    ["duplicate adapter", (view) => { view.adapters[1] = { ...view.adapters[0] }; }],
+    ["market source", (view) => { view.adapters[1].source_class = "readonly_market"; view.adapters[1].official_source = false; }],
+    ["legacy v2 with profile", (view) => { view.version = "source_monitoring_operator_control_v2"; }],
+  ];
+  for (const [name, mutate] of mutations) {
+    const payload = trialControl();
+    mutate(payload.source_monitoring_operator_control);
+    assert.equal(normalizeSourceMonitoringOperatorControl(payload).valid, false, name);
+  }
 });
 
 test("control fails closed on extra fields, invented legacy mode, or execution capability", () => {

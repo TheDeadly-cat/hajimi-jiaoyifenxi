@@ -701,6 +701,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 runtime_snapshot = getattr(runtime, "snapshot", None)
                 health = SourceMonitoringHealthService(
                     STORE,
+                    settings=getattr(runtime, "settings", None),
                     runtime_snapshot=(
                         runtime_snapshot if callable(runtime_snapshot) else None
                     ),

@@ -207,16 +207,16 @@ def _validated_runtime_snapshot(
     return dict(value)
 
 
-def _catalog_metadata() -> list[dict[str, Any]]:
+def _catalog_metadata(*, source_profile: str = "") -> list[dict[str, Any]]:
     """Construct sealed adapter metadata without polling or opening transports."""
 
     rows = [
-        *build_official_source_registry().to_dict()["adapters"],
-        *build_futu_anomaly_registry().to_dict()["adapters"],
+        *build_official_source_registry(**({"source_profile": source_profile} if source_profile else {})).to_dict()["adapters"],
+        *(build_futu_anomaly_registry().to_dict()["adapters"] if not source_profile else []),
     ]
     rows.sort(key=lambda row: str(row.get("adapter_key") or ""))
     keys = [row.get("adapter_key") for row in rows]
-    if len(rows) != 7 or any(type(key) is not str or not key for key in keys):
+    if len(rows) != (2 if source_profile else 7) or any(type(key) is not str or not key for key in keys):
         raise SourceMonitoringHealthServiceError(
             "Source Monitoring adapter catalog is incomplete.",
             code="SOURCE_MONITORING_HEALTH_CATALOG_INVALID",
@@ -434,7 +434,7 @@ class SourceMonitoringHealthService:
                 code="SOURCE_MONITORING_HEALTH_CATALOG_INVALID",
             )
         try:
-            catalog_rows = _catalog_metadata() if catalog is None else catalog
+            catalog_rows = _catalog_metadata(**({"source_profile": self.settings.source_profile} if self.settings.source_profile else {})) if catalog is None else catalog
             self._catalog = [dict(row) for row in catalog_rows]
         except SourceMonitoringHealthServiceError:
             raise
@@ -735,7 +735,7 @@ class SourceMonitoringHealthService:
                 ),
             })
         return {
-            "version": SOURCE_MONITORING_HEALTH_SERVICE_VERSION,
+            "version": "source_monitoring_health_service_v4" if self.settings.source_profile else SOURCE_MONITORING_HEALTH_SERVICE_VERSION,
             "health_projection_version": projected["version"],
             "captured_at_ms": projected["captured_at_ms"],
             "state": projected["state"],

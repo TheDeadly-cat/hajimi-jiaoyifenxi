@@ -278,6 +278,14 @@ def _run_cli(
     if confirmation != PREFLIGHT_CONFIRMATION:
         _emit(stream, _error_payload("PREFLIGHT_CONFIRMATION_REQUIRED"))
         return 2
+    if os.environ.get("AI_STUDIO_SOURCE_MONITOR_PROFILE", ""):
+        # This legacy probe has a sealed RSS/all-default scope. Named profiles
+        # use the existing operator/CLI preview with their Runtime registry.
+        _emit(stream, _error_payload(
+            "PREFLIGHT_PROFILE_REQUIRES_OPERATOR_PREVIEW",
+            confirmation_verified=True, category="configuration",
+        ))
+        return 2
     if require_isolated_process and sys.flags.isolated != 1:
         _emit(
             stream,

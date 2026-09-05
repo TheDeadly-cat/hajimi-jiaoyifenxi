@@ -413,6 +413,28 @@ function operatorControl(adapterOverrides = {}) {
   };
 }
 
+function trialOperatorControl() {
+  const payload = operatorControl();
+  const view = payload.source_monitoring_operator_control;
+  view.version = "source_monitoring_operator_control_v3";
+  view.profile = {
+    version: "source_monitoring_profile_v1", profile_id: "sec_micron_trial_v1",
+    label: "SEC + Micron 官方来源试用", initial_mode: "seed_only",
+    sources: [
+      { adapter_key: "sec_filings", symbols: ["US.NVDA"], forms: ["8-K"],
+        format: "sec_submissions_recent", history_limit: 1000,
+        per_symbol_limit: 3, poll_interval_ms: 300_000 },
+      { adapter_key: "company_ir", symbols: ["US.MU"], forms: [],
+        format: "micron_q4_public_json_v1", history_limit: 30,
+        per_symbol_limit: 8, poll_interval_ms: 300_000 },
+    ],
+    model_calls_allowed: false, execution_capability: "none", live_trading_allowed: false,
+    scope_sha256: "e6f07d2c97d71c1280ab653352fc019cd99845be5bd06468ae6ace65899454e3",
+  };
+  view.adapters.push(operatorAdapter({ adapter_key: "company_ir", config_version: "company_ir_config_v2" }));
+  return payload;
+}
+
 function operatorPreview(overrides = {}) {
   return {
     ok: true,
@@ -1203,6 +1225,39 @@ test("initial health read waits for the inbox database read to finish", async ()
   assert.match(host.querySelector(".source-inbox-health summary").textContent, /等待首次检查/);
 });
 
+test("trial scope is read from the closed profile and disappears when its authority drifts", async () => {
+  const payload = trialOperatorControl();
+  const requests = [];
+  globalThis.fetch = async (path) => {
+    requests.push(path);
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") return response(payload);
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+  const host = await mountPanel();
+  assert.doesNotMatch(host.textContent, /SEC \+ Micron 官方来源试用/);
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  const scope = host.querySelector('[aria-label="官方来源试用范围"]');
+  assert.ok(scope);
+  assert.match(scope.textContent, /SEC \+ Micron 官方来源试用/);
+  assert.match(scope.textContent, /SEC · US\.NVDA · 8-K/);
+  assert.match(scope.textContent, /Micron 官方 IR · US\.MU · Q4 公开 JSON 最近 30 条/);
+  assert.equal(scope.textContent.match(/每 5 分钟轮询/g).length, 2);
+  assert.match(scope.textContent, /仅建基线.*采集\/草稿不调用模型/);
+  assert.equal(scope.querySelectorAll("input, select, textarea").length, 0);
+  assert.equal(requests.some((path) => path.endsWith("/initialization-preview") || path.endsWith("/enablement")), false);
+
+  payload.source_monitoring_operator_control.profile.model_calls_allowed = true;
+  await click(buttonWithText(host, "重读设置"));
+  assert.equal(host.querySelector('[aria-label="官方来源试用范围"]'), null);
+  assert.equal(host.querySelectorAll(".source-monitoring-control-list button").length, 0);
+  assert.ok(host.querySelector('.source-monitoring-controls [role="alert"]'));
+});
+
 test("adapter enablement stays lazy and requires a sealed preview plus explicit confirmation", async () => {
   const requests = [];
   let enabled = false;
@@ -1246,6 +1301,7 @@ test("adapter enablement stays lazy and requires a sealed preview plus explicit 
   assert.match(host.textContent, /auto-start 关闭/);
   assert.match(host.textContent, /保存 Adapter 启用状态不证明 Runtime 在线/);
   assert.match(host.textContent, /服务端会重读同一固定来源并核对预览哈希/);
+  assert.doesNotMatch(host.textContent, /SEC \+ Micron 官方来源试用/);
 
   await click(buttonWithText(host, "预览首次读取范围"));
   const previewRequest = requests.find((request) => request.path.endsWith("/initialization-preview"));

@@ -213,7 +213,11 @@ def _settings(dependencies: SourceMonitoringCliDependencies) -> Any:
 
 def _registry(settings: Any, dependencies: SourceMonitoringCliDependencies) -> Any:
     if dependencies.registry_builder is not None:
-        return dependencies.registry_builder(settings)
+        from .source_monitoring.profiles import require_profile_registry
+
+        registry = dependencies.registry_builder(settings)
+        require_profile_registry(registry, getattr(settings, "source_profile", ""))
+        return registry
     from .source_monitoring.default_registry import (
         build_futu_anomaly_registry,
         build_official_source_registry,
@@ -224,7 +228,7 @@ def _registry(settings: Any, dependencies: SourceMonitoringCliDependencies) -> A
         for enabled, registry in (
             (
                 settings.official_only,
-                build_official_source_registry() if settings.official_only else None,
+                build_official_source_registry(**({"source_profile": settings.source_profile} if settings.source_profile else {})) if settings.official_only else None,
             ),
             (
                 settings.allow_readonly_market,
@@ -622,6 +626,11 @@ def _preview(
             "network_requests_accounting": "not_instrumented",
         },
     }
+    from .source_monitoring.profiles import source_profile_manifest
+
+    profile = source_profile_manifest(getattr(settings, "source_profile", ""))
+    if profile is not None:
+        payload["profile"] = profile
     return (0 if payload["ok"] else 2), payload
 
 

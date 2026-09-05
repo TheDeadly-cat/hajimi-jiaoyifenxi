@@ -22,13 +22,34 @@ from .futu_readonly_broker import (
     FutuReadOnlyBroker,
 )
 from .registry import SourceAdapterRegistry
+from .profiles import require_profile_registry, source_profile_manifest
 
 
-def build_official_source_registry() -> SourceAdapterRegistry:
+def build_official_source_registry(*, source_profile: str = "") -> SourceAdapterRegistry:
     """Return the production official registry without injection or polling."""
 
-    sec = SecFilingsSourceAdapter()
-    ir = CompanyIrSourceAdapter()
+    profile = source_profile_manifest(source_profile)
+    if profile is not None:
+        sec_scope, ir_scope = profile["sources"]
+        sec = SecFilingsSourceAdapter(
+            allowed_symbols=sec_scope["symbols"], allowed_forms=sec_scope["forms"],
+            per_symbol_limit=sec_scope["per_symbol_limit"], poll_interval_ms=sec_scope["poll_interval_ms"],
+        )
+        ir = CompanyIrSourceAdapter(
+            symbols=ir_scope["symbols"], per_symbol_limit=ir_scope["per_symbol_limit"],
+            poll_interval_ms=ir_scope["poll_interval_ms"],
+        )
+    else:
+        sec = SecFilingsSourceAdapter()
+        ir = CompanyIrSourceAdapter()
+    if sec._inner_transport_mode != "sec_default_https_v1":
+        raise RuntimeError("production SEC registry requires the default HTTPS transport")
+    if ir._inner_transport_mode != "company_ir_q4_json_and_rss_default_https_v1":
+        raise RuntimeError("production IR registry requires the default HTTPS transport")
+    if profile is not None:
+        registry = SourceAdapterRegistry((sec, ir), official_only=True)
+        require_profile_registry(registry, source_profile)
+        return registry
     federal_reserve = FederalReserveSourceAdapter()
     bls = BlsReleaseSourceAdapter()
     treasury = TreasuryReleaseSourceAdapter()

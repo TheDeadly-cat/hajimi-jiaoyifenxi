@@ -706,6 +706,9 @@ def build_source_monitoring_runtime(
         registry: Any,
         pipeline_settings: SourceMonitoringSettings,
     ) -> SourceMonitoringScheduler:
+        from .profiles import require_profile_registry
+
+        require_profile_registry(registry, pipeline_settings.source_profile)
         impact_rules = (
             TradingImpactRulesV1()
             if pipeline_settings.trading_impact_rules_enabled
@@ -747,7 +750,7 @@ def build_source_monitoring_runtime(
             allow_readonly_market=True,
         )
         official_scheduler = build_pipeline(
-            build_official_source_registry(),
+            build_official_source_registry(**({"source_profile": official_settings.source_profile} if official_settings.source_profile else {})),
             official_settings,
         )
         market_scheduler = build_pipeline(
@@ -771,7 +774,7 @@ def build_source_monitoring_runtime(
         )
 
     registry = (
-        build_official_source_registry()
+        build_official_source_registry(**({"source_profile": resolved_settings.source_profile} if resolved_settings.source_profile else {}))
         if resolved_settings.official_only
         else build_futu_anomaly_registry()
     )

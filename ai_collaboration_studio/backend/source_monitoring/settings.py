@@ -10,9 +10,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .contracts import MAX_OBSERVED_ITEMS_PER_POLL, SourceMonitoringContractError
+from .profiles import SOURCE_PROFILE_IDS
 
 
 SOURCE_MONITOR_ENABLED_ENV = "AI_STUDIO_SOURCE_MONITOR_ENABLED"
+SOURCE_MONITOR_PROFILE_ENV = "AI_STUDIO_SOURCE_MONITOR_PROFILE"
 SOURCE_MONITOR_AUTO_START_ENV = "AI_STUDIO_SOURCE_MONITOR_AUTO_START"
 SOURCE_MONITOR_OFFICIAL_ONLY_ENV = "AI_STUDIO_SOURCE_MONITOR_OFFICIAL_ONLY"
 SOURCE_MONITOR_DRY_RUN_ENV = "AI_STUDIO_SOURCE_MONITOR_DRY_RUN"
@@ -313,8 +315,20 @@ class SourceMonitoringSettings:
     initial_preview_sha256: str = ""
     from_time: str = ""
     continuous_event_cutoff: str = ""
+    source_profile: str = ""
 
     def __post_init__(self) -> None:
+        if type(self.source_profile) is not str or self.source_profile not in SOURCE_PROFILE_IDS:
+            raise SourceMonitoringSettingsError("SOURCE_MONITORING_PROFILE_INVALID", "unknown source profile")
+        if self.source_profile and (
+            self.official_only is not True or self.allow_readonly_market is not False
+            or self.initial_mode != "seed_only" or self.continuous_event_cutoff
+            or type(self.max_items_per_run) is not int or self.max_items_per_run < 8
+        ):
+            raise SourceMonitoringSettingsError(
+                "SOURCE_MONITORING_PROFILE_SETTINGS_CONFLICT",
+                "SEC/Micron trial requires official-only seed_only, no continuous cutoff, and at least 8 delivery slots",
+            )
         for field_name in (
             "enabled",
             "auto_start",
@@ -535,6 +549,7 @@ class SourceMonitoringSettings:
                 default=True,
             ),
             max_items_per_run=_strict_max_items(source),
+            source_profile=_environment_value(source, SOURCE_MONITOR_PROFILE_ENV) or "",
             initial_mode=initial_mode,
             catch_up_max_items=catch_up_max_items,
             initial_preview_sha256=initial_preview_sha256,
@@ -560,6 +575,7 @@ class SourceMonitoringSettings:
             "initial_preview_sha256": self.initial_preview_sha256,
             "from_time": self.from_time,
             "continuous_event_cutoff": self.continuous_event_cutoff,
+            **({"source_profile": self.source_profile} if self.source_profile else {}),
         }
 
 
@@ -570,6 +586,7 @@ def load_source_monitoring_settings(
 
 
 __all__ = [
+    "SOURCE_MONITOR_PROFILE_ENV",
     "SOURCE_MONITOR_AUTO_START_ENV",
     "SOURCE_MONITOR_ALLOW_READONLY_MARKET_ENV",
     "SOURCE_MONITOR_CATCH_UP_MAX_ITEMS_ENV",

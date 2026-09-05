@@ -7,6 +7,26 @@ const RFC3339_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 const CONTROL_FIELDS = Object.freeze([
   "version", "captured_at_ms", "settings", "adapters", "safety",
 ]);
+const PROFILE_FIELDS = Object.freeze([
+  "version", "profile_id", "label", "initial_mode", "sources",
+  "model_calls_allowed", "execution_capability", "live_trading_allowed", "scope_sha256",
+]);
+const PROFILE_SOURCE_FIELDS = Object.freeze([
+  "adapter_key", "symbols", "forms", "format", "history_limit",
+  "per_symbol_limit", "poll_interval_ms",
+]);
+// Consumer boundary for backend/source_monitoring/profiles.py's closed manifest.
+const TRIAL_SCOPE_SHA256 = "e6f07d2c97d71c1280ab653352fc019cd99845be5bd06468ae6ace65899454e3";
+const TRIAL_SOURCES = Object.freeze({
+  sec_filings: Object.freeze({
+    symbol: "US.NVDA", form: "8-K", format: "sec_submissions_recent",
+    historyLimit: 1000, perSymbolLimit: 3,
+  }),
+  company_ir: Object.freeze({
+    symbol: "US.MU", form: "", format: "micron_q4_public_json_v1",
+    historyLimit: 30, perSymbolLimit: 8,
+  }),
+});
 const SETTINGS_FIELDS = Object.freeze([
   "global_enabled", "auto_start", "dry_run", "initial_mode",
   "catch_up_max_items", "from_time", "continuous_event_cutoff",
@@ -238,16 +258,77 @@ function normalizedAdapter(rawAdapter) {
   };
 }
 
+function normalizedProfile(rawProfile) {
+  const profile = objectValue(rawProfile);
+  if (!hasExactFields(profile, PROFILE_FIELDS)
+    || profile.version !== "source_monitoring_profile_v1"
+    || profile.profile_id !== "sec_micron_trial_v1"
+    || profile.label !== "SEC + Micron 官方来源试用"
+    || profile.initial_mode !== "seed_only"
+    || profile.model_calls_allowed !== false
+    || profile.execution_capability !== "none"
+    || profile.live_trading_allowed !== false
+    || profile.scope_sha256 !== TRIAL_SCOPE_SHA256
+    || !Array.isArray(profile.sources)
+    || profile.sources.length !== 2) return null;
+  const sourceKeys = Object.keys(TRIAL_SOURCES);
+  if (profile.sources.some((source, index) => {
+    const expected = TRIAL_SOURCES[sourceKeys[index]];
+    return !hasExactFields(source, PROFILE_SOURCE_FIELDS)
+      || source.adapter_key !== sourceKeys[index]
+      || !Array.isArray(source.symbols) || source.symbols.length !== 1
+      || source.symbols[0] !== expected.symbol
+      || !Array.isArray(source.forms)
+      || source.forms.length !== (expected.form ? 1 : 0)
+      || (expected.form && source.forms[0] !== expected.form)
+      || source.format !== expected.format
+      || source.history_limit !== expected.historyLimit
+      || source.per_symbol_limit !== expected.perSymbolLimit
+      || source.poll_interval_ms !== 300_000;
+  })) return null;
+  return {
+    profileId: profile.profile_id,
+    label: profile.label,
+    initialMode: profile.initial_mode,
+    modelCallsAllowed: profile.model_calls_allowed,
+    executionCapability: profile.execution_capability,
+    liveTradingAllowed: profile.live_trading_allowed,
+    scopeSha256: profile.scope_sha256,
+    sources: profile.sources.map((source) => ({
+      adapterKey: source.adapter_key,
+      symbols: [...source.symbols],
+      forms: [...source.forms],
+      format: source.format,
+      historyLimit: source.history_limit,
+      perSymbolLimit: source.per_symbol_limit,
+      pollIntervalMs: source.poll_interval_ms,
+    })),
+  };
+}
+
 export function normalizeSourceMonitoringOperatorControl(payload) {
   const view = objectValue(objectValue(payload).source_monitoring_operator_control);
   const settings = normalizedSettings(view.settings);
   const rawAdapters = Array.isArray(view.adapters) ? view.adapters : [];
   const adapters = rawAdapters.map(normalizedAdapter);
   const safety = normalizeSafety(view.safety, { profile: "control" });
+  const trialControl = view.version === "source_monitoring_operator_control_v3";
+  const profile = trialControl ? normalizedProfile(view.profile) : null;
   const issues = [];
-  if (!hasExactFields(view, CONTROL_FIELDS)
-    || view.version !== "source_monitoring_operator_control_v2") {
+  if (!hasExactFields(view, trialControl ? [...CONTROL_FIELDS, "profile"] : CONTROL_FIELDS)
+    || (!trialControl && view.version !== "source_monitoring_operator_control_v2")) {
     issues.push("operator_control_contract_invalid");
+  }
+  if (trialControl && (!profile
+    || settings.initialMode !== "seed_only"
+    || settings.continuousEventCutoff !== ""
+    || adapters.length !== 2
+    || adapters.some((adapter) => !Object.hasOwn(TRIAL_SOURCES, adapter.adapterKey)
+      || adapter.sourceClass !== "official_source"
+      || adapter.sourceChannel !== "official_source_monitor"
+      || !adapter.officialSource
+      || (adapter.initializationStatus !== "legacy" && adapter.initializationMode !== "seed_only")))) {
+    issues.push("operator_control_profile_invalid");
   }
   if (!safeInteger(view.captured_at_ms) || !settings.valid) {
     issues.push("operator_control_settings_invalid");
@@ -267,6 +348,7 @@ export function normalizeSourceMonitoringOperatorControl(payload) {
     capturedAt: safeInteger(view.captured_at_ms) ? view.captured_at_ms : 0,
     settings,
     adapters,
+    profile,
   };
 }
 
