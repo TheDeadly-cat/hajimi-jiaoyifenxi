@@ -426,15 +426,25 @@ def _database_family_state(database_path: Path) -> dict[str, dict[str, Any]]:
 
 def _temporary_database(path: Path) -> Path:
     requested = Path(path).absolute()
+    # A native 8.3 spelling can resolve to the same regular TEMP file without
+    # traversing a link. Check the raw components before canonicalizing it.
+    try:
+        source_backup._assert_existing_chain_has_no_links(requested)
+    except source_backup.SourceBackupError as exc:
+        raise ReleaseDrillError("RELEASE_READER_DATABASE_ALIAS_INVALID") from exc
     clean = requested.resolve()
     try:
         relative = clean.relative_to(Path(tempfile.gettempdir()).resolve())
     except ValueError as exc:
         raise ReleaseDrillError("RELEASE_READER_TEMP_DATABASE_REQUIRED") from exc
-    if not relative.parts or not clean.is_file() or requested != clean:
+    if not relative.parts or not clean.is_file():
         raise ReleaseDrillError("RELEASE_READER_DATABASE_REQUIRED")
     for suffix in ("", "-wal", "-shm", "-journal"):
         member = Path(str(clean) + suffix)
+        try:
+            source_backup._assert_existing_chain_has_no_links(member)
+        except source_backup.SourceBackupError as exc:
+            raise ReleaseDrillError("RELEASE_READER_DATABASE_ALIAS_INVALID") from exc
         if member.exists() or member.is_symlink():
             metadata = member.lstat()
             if (

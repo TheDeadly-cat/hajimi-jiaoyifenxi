@@ -102,6 +102,56 @@ The historical test uses local `git archive` for exact commits 67fdb4ad and
 25f61d00, with lazy fetching disabled. If either object is unavailable, it reports
 a skip and does not claim a historical matrix pass. It never downloads history.
 
+### Required CI evidence
+
+The dedicated `Required historical reader compatibility matrix` step now uses
+an explicit required mode. Checkout retains its pinned Action and sets
+`fetch-depth: 0`. The source preparation step checks both exact historical
+commit objects and their reader source, plus the triggering candidate. The
+isolated runner repeats the object checks from its own actual application
+source directory with `GIT_NO_LAZY_FETCH=1`; tests never fetch missing history.
+
+```powershell
+python -B scripts/run_backend_tests_isolated.py `
+  tests.test_release_drill.ReleaseReaderDataContractTests `
+  --require-historical-readers `
+  --historical-reader-report "$env:TEMP\historical-reader-matrix.json" `
+  --verbosity 2
+```
+
+Use a fresh report filename. Missing objects, omitted required tests, a skipped
+required test, incomplete matrix rows, unexpected rejection, network access or
+Provider evidence invalidate the required result. A source-only archive still
+supports ordinary offline tests with an explicit historical-evidence skip;
+running the required command in that archive fails and writes a failure receipt.
+
+The uploaded `required_historical_reader_matrix_v1` receipt records the candidate
+SHA separately from the actual checked-out commit and tree. A pull-request
+workflow normally tests a merge checkout, so these commit identities may differ.
+The candidate must be an ancestor of that checkout. The receipt also records
+whether tracked source is clean, fixture generator/schema identities, actual
+reader file hashes, per-check `PASS` / `EXPECTED_REJECTION` / `FAIL`, scoped
+`skip_count`, whole-suite counts, network audit and Provider/round counts.
+Dirty source can produce diagnostic test results but cannot produce a successful
+required exact-commit receipt. Required mode also rejects layer-listing without
+test execution; its network totals must be zero, including loopback/simulation.
+The exact historical identities are:
+
+- `67fdb4ad548059506302298ee4d87846abfcece9`
+- `25f61d00e3ec49e9034dfc3139033e4ff3b3487e`
+
+The required matrix has seven scenario/reader rows: both historical readers on
+legacy and current data, current reader on current data and committed WAL, and
+the old-reader activation/rollback/unrelated-database rejections. Rejected
+switches preserve pointer bytes, receipt bytes and the original TEMP data family.
+This receipt remains separate from the full backend regression, clean-source
+startup smoke and synthetic release drill; each CI step must finish successfully.
+
+Windows 8.3 TEMP spelling is canonicalized only after every requested path
+component is checked for symlinks/reparse points. Database and sidecar hard-link
+rejections remain in place; accepting a short spelling does not authorize an
+alias to another database or remove the system-TEMP restriction.
+
 For a separate reusable read-only check, provide an existing TEMP database and
 an explicit reader source tree; the command creates its own consistent copy:
 

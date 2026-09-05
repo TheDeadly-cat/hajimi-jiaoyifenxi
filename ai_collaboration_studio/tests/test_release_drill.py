@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -8,7 +9,7 @@ import unittest
 import sqlite3
 import subprocess
 import sys
-from contextlib import closing
+from contextlib import ExitStack, closing
 from unittest.mock import patch
 
 from scripts.create_versioned_source_backup import create_backup
@@ -23,6 +24,63 @@ from scripts.run_isolated_release_drill import (
     run_drill,
     _database_family_state,
 )
+
+
+HISTORICAL_READER_COMMITS = (
+    "67fdb4ad548059506302298ee4d87846abfcece9",
+    "25f61d00e3ec49e9034dfc3139033e4ff3b3487e",
+)
+REQUIRED_READER_TEST_IDS = tuple(
+    "tests.test_release_drill.ReleaseReaderDataContractTests." + name
+    for name in (
+        "test_actual_current_reader_preserves_rooms_materials_q4_neutral_and_research_draft",
+        "test_real_67_and_25_readers_distinguish_legacy_data_from_current_formats_and_block_both_switches",
+        "test_committed_wal_record_is_checked_without_changing_source_family",
+    )
+)
+_HISTORICAL_READERS_REQUIRED = False
+_READER_MATRIX_ROWS: list[dict] = []
+
+
+def _reader_git(source: Path, *arguments: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *arguments], cwd=source.parent,
+        env={**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_OPTIONAL_LOCKS": "0"},
+        capture_output=True, text=True, encoding="utf-8", check=False, timeout=20,
+    )
+
+
+def _historical_reader_available(source: Path, commit: str) -> bool:
+    return _reader_git(source, "cat-file", "-e", commit + "^{commit}").returncode == 0
+
+
+def prepare_required_reader_matrix(source: Path) -> dict:
+    """Check objects in the actual isolated runner source, without fetching."""
+    global _HISTORICAL_READERS_REQUIRED
+    _HISTORICAL_READERS_REQUIRED = True
+    _READER_MATRIX_ROWS.clear()
+    for commit in HISTORICAL_READER_COMMITS:
+        if not _historical_reader_available(source, commit):
+            raise AssertionError("HISTORICAL_READER_OBJECT_REQUIRED:" + commit)
+    head = _reader_git(source, "rev-parse", "--verify", "HEAD")
+    if head.returncode or len(head.stdout.strip()) != 40:
+        raise AssertionError("HISTORICAL_READER_CANDIDATE_REQUIRED")
+    tested_commit = head.stdout.strip()
+    candidate = os.environ.get("AI_STUDIO_READER_CANDIDATE_SHA", tested_commit)
+    if (len(candidate) != 40 or any(char not in "0123456789abcdef" for char in candidate)
+            or not _historical_reader_available(source, candidate)
+            or _reader_git(source, "merge-base", "--is-ancestor", candidate, tested_commit).returncode):
+        raise AssertionError("HISTORICAL_READER_CANDIDATE_MISMATCH")
+    return {
+        "candidate_sha": candidate,
+        "tested_commit_sha": tested_commit,
+        "tested_tree_sha": _reader_git(source, "rev-parse", "HEAD^{tree}").stdout.strip(),
+        "source_worktree_clean": _reader_git(source, "diff", "--quiet", "HEAD", "--", ".").returncode == 0,
+        "historical_reader_shas": list(HISTORICAL_READER_COMMITS),
+        "fixture_id": "release_reader_data_contract_v1",
+        "fixture_generator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "source_objects_verified_in_runner": True,
+    }
 
 
 class ReleaseLifecycleContractTests(unittest.TestCase):
@@ -194,6 +252,74 @@ class ReleaseLifecycleContractTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), before)
 
 
+    @unittest.skipUnless(os.name == "nt", "Windows native short-path normalization")
+    def test_native_windows_short_path_is_same_unaliased_temp_database(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+        from scripts.run_isolated_release_drill import _temporary_database
+        from scripts.create_versioned_source_backup import _assert_existing_chain_has_no_links
+
+        get_short_path = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+        get_short_path.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+        get_short_path.restype = wintypes.DWORD
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = get_short_path(str(self.database_path), buffer, len(buffer))
+        self.assertGreater(length, 0, "native Windows short-path lookup failed")
+        self.assertLess(length, len(buffer))
+        short = Path(buffer.value)
+        canonical = self.database_path.resolve()
+        self.assertNotEqual(short, canonical, "this Windows regression needs an actual 8.3 spelling")
+        self.assertTrue(os.path.samefile(short, canonical))
+        _assert_existing_chain_has_no_links(short)
+        print("windows_short_path_evidence=same_file_with_no_reparse_components", flush=True)
+        before = _database_family_state(canonical)
+        self.assertEqual(_temporary_database(short), canonical)
+        # Reproduce the hosted-runner TEMP spelling for the snapshot and its
+        # fresh reader process as well as the caller's database path.
+        with patch("scripts.run_isolated_release_drill.tempfile.tempdir", str(short.parent)):
+            result = check_release_reader(Path(__file__).resolve().parents[1], short)
+        self.assertTrue(result["compatible"], result)
+        archive = self.make_archive("short-path", "2026-09-06T00:00:00Z", "same data")
+        release_root = self.root / "release-root"
+        installed = install_release(archive, release_root)
+        with patch("scripts.run_isolated_release_drill.check_release_reader", return_value={"compatible": True}):
+            first = activate_release(release_root, installed["release_id"],
+                                     expected_active_release_id=None, database_path=canonical)
+            second = activate_release(release_root, installed["release_id"],
+                                      expected_active_release_id=installed["release_id"], database_path=short)
+        self.assertEqual(first["database_binding_sha256"], second["database_binding_sha256"])
+        self.assertEqual(_database_family_state(canonical), before)
+
+    @unittest.skipUnless(os.name == "nt", "Windows database family link boundaries")
+    def test_temp_database_rejects_parent_reparse_and_hardlinked_or_symlinked_family(self) -> None:
+        from scripts.run_isolated_release_drill import _temporary_database
+
+        alias_parent = self.root / "alias-parent"
+        alias_parent.symlink_to(self.root, target_is_directory=True)
+        try:
+            with self.assertRaises(ReleaseDrillError):
+                _temporary_database(alias_parent / self.database_path.name)
+        finally:
+            alias_parent.unlink()
+        hardlink = self.root / "hardlinked.sqlite3"
+        os.link(self.database_path, hardlink)
+        try:
+            with self.assertRaisesRegex(ReleaseDrillError, "RELEASE_READER_DATABASE_ALIAS_INVALID"):
+                _temporary_database(self.database_path)
+        finally:
+            hardlink.unlink()
+        target = self.root / "ordinary-sidecar-target"
+        target.write_bytes(b"sidecar fixture")
+        wal = Path(str(self.database_path) + "-wal")
+        self.assertFalse(wal.exists())
+        wal.symlink_to(target)
+        try:
+            with self.assertRaisesRegex(ReleaseDrillError, "RELEASE_READER_DATABASE_ALIAS_INVALID"):
+                _temporary_database(self.database_path)
+        finally:
+            wal.unlink()
+
+
 class ReleaseReaderDataContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="ai-studio-reader-matrix-")
@@ -201,6 +327,20 @@ class ReleaseReaderDataContractTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.database = self.root / "data.sqlite3"
         self.source = Path(__file__).resolve().parents[1]
+        self.provider_stack = ExitStack()
+        self.addCleanup(self.provider_stack.close)
+        from backend.providers.compatible_chat_provider import CompatibleChatProvider
+        from backend.providers.deepseek_provider import DeepSeekProvider
+        from backend.providers.doubao_provider import DoubaoProvider
+        from backend.providers.openai_provider import OpenAIProvider
+        self.provider_spies = [self.provider_stack.enter_context(patch.object(
+            cls, method, side_effect=AssertionError("Provider forbidden in reader matrix"),
+        )) for cls, method in (
+            (CompatibleChatProvider, "generate"), (CompatibleChatProvider, "probe"),
+            (OpenAIProvider, "generate"), (OpenAIProvider, "probe"),
+            (DoubaoProvider, "generate"), (DoubaoProvider, "generate_json"),
+            (DoubaoProvider, "probe"), (DeepSeekProvider, "generate_json"),
+        )]
         from backend.store import StudioStore
         from backend.source_inbox_service import SourceInboxService
         from tests.test_source_inbox_contracts import _packet
@@ -215,6 +355,33 @@ class ReleaseReaderDataContractTests(unittest.TestCase):
             self.room["id"], {"title": "Existing ordinary material", "content": "Read this unchanged."},
         )
         self.legacy_item = self.inbox.import_packet(json.dumps(_packet()))["items"][0]
+
+    def observe_reader(self, source: Path, reader_sha: str, scenario: str, *, rejected=None) -> dict:
+        result = check_release_reader(source, self.database)
+        expected = rejected or {}
+        with closing(sqlite3.connect(self.database)) as connection:
+            schema = connection.execute(
+                "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name"
+            ).fetchall()
+            counts = {table: connection.execute("SELECT COUNT(*) FROM " + table).fetchone()[0]
+                      for table in ("provider_execution_runs", "provider_call_attempts", "rounds")}
+        row = {
+            "scenario": scenario, "reader_sha": reader_sha,
+            "schema_sha256": hashlib.sha256(json.dumps(schema, separators=(",", ":")).encode()).hexdigest(),
+            "reader_files_sha256": result["reader_files_sha256"],
+            "checks": [{"check": key, "status": (
+                "EXPECTED_REJECTION" if not value["ok"] and expected.get(key) == value["error_code"]
+                else "PASS" if value["ok"] and key not in expected else "FAIL"
+            ), "error_code": value["error_code"]} for key, value in result["checks"].items()],
+            "network": result["network"], "provider_ledger_and_rounds": counts,
+            "provider_attempts": sum(spy.call_count for spy in self.provider_spies),
+        }
+        _READER_MATRIX_ROWS.append(row)
+        self.assertTrue(all(value == 0 for value in counts.values()))
+        self.assertEqual(row["provider_attempts"], 0)
+        self.assertTrue(all(check["status"] != "FAIL" for check in row["checks"]), row["checks"])
+        self.assertEqual(set(expected), {key for key, value in result["checks"].items() if not value["ok"]})
+        return result
 
     def seed_current_formats(self) -> None:
         from backend.market.ir_releases import OfficialIrReleaseAdapter
@@ -281,11 +448,9 @@ class ReleaseReaderDataContractTests(unittest.TestCase):
 
     def historical_source(self, commit: str) -> Path:
         environment = {**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_OPTIONAL_LOCKS": "0"}
-        exists = subprocess.run(
-            ["git", "cat-file", "-e", commit + "^{commit}"], cwd=self.source.parent,
-            env=environment, capture_output=True, check=False,
-        )
-        if exists.returncode:
+        if not _historical_reader_available(self.source, commit):
+            if _HISTORICAL_READERS_REQUIRED:
+                self.fail("HISTORICAL_READER_OBJECT_REQUIRED:" + commit)
             self.skipTest("Exact historical reader object is not present locally; no fetch is allowed")
         archive = self.root / (commit + ".zip")
         subprocess.run(
@@ -300,7 +465,7 @@ class ReleaseReaderDataContractTests(unittest.TestCase):
     def test_actual_current_reader_preserves_rooms_materials_q4_neutral_and_research_draft(self) -> None:
         self.seed_current_formats()
         before = _database_family_state(self.database)
-        result = check_release_reader(self.source, self.database)
+        result = self.observe_reader(self.source, "current", "current_formats")
         self.assertTrue(result["compatible"], result)
         for key in ("rooms", "unfiltered_inbox", "checkpoint:sec_filings", "checkpoint:company_ir",
                     "inbox_item:" + self.legacy_item["id"], "inbox_item:" + self.q4["id"],
@@ -311,8 +476,8 @@ class ReleaseReaderDataContractTests(unittest.TestCase):
     def test_real_67_and_25_readers_distinguish_legacy_data_from_current_formats_and_block_both_switches(self) -> None:
         old = self.historical_source("67fdb4ad548059506302298ee4d87846abfcece9")
         minimum = self.historical_source("25f61d00e3ec49e9034dfc3139033e4ff3b3487e")
-        self.assertTrue(check_release_reader(old, self.database)["compatible"])
-        self.assertTrue(check_release_reader(minimum, self.database)["compatible"])
+        self.assertTrue(self.observe_reader(old, HISTORICAL_READER_COMMITS[0], "legacy_data")["compatible"])
+        self.assertTrue(self.observe_reader(minimum, HISTORICAL_READER_COMMITS[1], "legacy_data")["compatible"])
         release_root = self.root / "release-root"
         receipts = []
         for index, source in enumerate((old, minimum)):
@@ -326,7 +491,12 @@ class ReleaseReaderDataContractTests(unittest.TestCase):
         # The same application's new writer produces new persisted formats.
         self.seed_current_formats()
         before = _database_family_state(self.database)
-        rejected = check_release_reader(old, self.database)
+        rejected = self.observe_reader(old, HISTORICAL_READER_COMMITS[0], "current_formats", rejected={
+            "checkpoint:sec_filings": "SEC_FILINGS_CHECKPOINT_INVALID",
+            "checkpoint:company_ir": "COMPANY_IR_CHECKPOINT_INVALID",
+            "unfiltered_inbox": "SOURCE_INBOX_RECORD_CORRUPT",
+            "inbox_item:" + self.q4["id"]: "SOURCE_INBOX_RECORD_CORRUPT",
+        })
         self.assertFalse(rejected["compatible"])
         checks = rejected["checks"]
         self.assertEqual(checks["checkpoint:sec_filings"]["error_code"], "SEC_FILINGS_CHECKPOINT_INVALID")
@@ -336,11 +506,13 @@ class ReleaseReaderDataContractTests(unittest.TestCase):
         for key in ("rooms", "material:" + self.material["id"], "inbox_item:" + self.legacy_item["id"],
                     "material:" + self.attachment["material_id"]):
             self.assertTrue(checks[key]["ok"], checks[key])
-        self.assertTrue(check_release_reader(minimum, self.database)["compatible"])
+        self.assertTrue(self.observe_reader(minimum, HISTORICAL_READER_COMMITS[1], "current_formats")["compatible"])
 
         upgraded = activate_release(release_root, receipts[1]["release_id"],
                                     expected_active_release_id=first["active_release_id"], database_path=self.database)
         receipt_files = sorted(path.name for path in (release_root / "receipts").iterdir())
+        release_files = [release_root / "current-release.json", *(release_root / "receipts").iterdir()]
+        release_bytes = {str(path.relative_to(release_root)): path.read_bytes() for path in release_files}
         with self.assertRaisesRegex(ReleaseDrillError, "RELEASE_READER_INCOMPATIBLE"):
             rollback_release(
                 release_root, failed_release_id=receipts[1]["release_id"],
@@ -364,7 +536,14 @@ class ReleaseReaderDataContractTests(unittest.TestCase):
             )
         self.assertEqual(read_activation_pointer(release_root), upgraded)
         self.assertEqual(sorted(path.name for path in (release_root / "receipts").iterdir()), receipt_files)
+        self.assertEqual({str(path.relative_to(release_root)): path.read_bytes() for path in release_files}, release_bytes)
         self.assertEqual(_database_family_state(self.database), before)
+        _READER_MATRIX_ROWS.append({
+            "scenario": "activation_and_rollback_rejections", "reader_sha": HISTORICAL_READER_COMMITS[0],
+            "checks": [{"check": check, "status": "EXPECTED_REJECTION"} for check in (
+                "incompatible_rollback", "incompatible_activate", "unrelated_empty_database")],
+            "pointer_unchanged": True, "receipts_unchanged": True, "database_family_unchanged": True,
+        })
 
     def test_committed_wal_record_is_checked_without_changing_source_family(self) -> None:
         with closing(self.store._connect()) as writer:
@@ -374,7 +553,7 @@ class ReleaseReaderDataContractTests(unittest.TestCase):
             )["room"]
             self.assertGreater(Path(str(self.database) + "-wal").stat().st_size, 0)
             before = _database_family_state(self.database)
-            result = check_release_reader(self.source, self.database)
+            result = self.observe_reader(self.source, "current", "committed_wal")
             self.assertTrue(result["compatible"], result)
             self.assertTrue(result["checks"]["room_snapshot:" + wal_room["id"]]["ok"])
             self.assertEqual(_database_family_state(self.database), before)
@@ -425,6 +604,54 @@ class ReleaseReaderDataContractTests(unittest.TestCase):
         active = check_release_reader(self.source, self.database)
         self.assertFalse(active["compatible"])
         self.assertFalse(active["checks"]["checkpoint:sec_filings"]["ok"])
+
+
+class RequiredHistoricalReaderModeTests(unittest.TestCase):
+    def test_missing_objects_are_optional_only_outside_required_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ai-studio-missing-history-") as directory:
+            root = Path(directory)
+            source = root / "ai_collaboration_studio"
+            source.mkdir()
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True, capture_output=True)
+            case = ReleaseReaderDataContractTests()
+            case.source, case.root = source, root
+            with patch(__name__ + "._HISTORICAL_READERS_REQUIRED", False):
+                with self.assertRaises(unittest.SkipTest):
+                    case.historical_source(HISTORICAL_READER_COMMITS[0])
+            with patch(__name__ + "._HISTORICAL_READERS_REQUIRED", True):
+                with self.assertRaisesRegex(AssertionError, "HISTORICAL_READER_OBJECT_REQUIRED"):
+                    case.historical_source(HISTORICAL_READER_COMMITS[0])
+
+    def test_required_cli_fails_in_real_source_only_archive_with_a_failure_receipt(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ai-studio-required-history-package-") as directory:
+            root = Path(directory)
+            archive = create_backup(
+                source_root=Path(__file__).resolve().parents[1], destination_root=root / "source-only",
+                source_root_label="required_history_negative_fixture", created_at_utc="2026-09-06T00:00:00Z",
+            )
+            from scripts.run_fresh_source_smoke import safe_extract
+            source = root / "unpacked"
+            safe_extract(archive, source)
+            report = root / "matrix.json"
+            completed = subprocess.run(
+                [sys.executable, "-B", "scripts/run_backend_tests_isolated.py",
+                 "tests.test_release_drill.ReleaseReaderDataContractTests",
+                 "--require-historical-readers", "--historical-reader-report", str(report)],
+                cwd=source, capture_output=True, text=True, encoding="utf-8", timeout=30,
+                env={**os.environ, "GIT_NO_LAZY_FETCH": "1",
+                     "AI_STUDIO_READER_CANDIDATE_SHA": "deliberately-invalid-private-value"}, check=False,
+            )
+            self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+            receipt = json.loads(report.read_text(encoding="utf-8"))
+            self.assertFalse(receipt["ok"])
+            self.assertEqual(receipt["candidate_sha"], "unavailable")
+            self.assertNotIn("deliberately-invalid-private-value", report.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["suite_tests_run"], 0)
+            self.assertEqual(receipt["skip_count"], 0)
+            self.assertTrue(receipt["preparation_error"].startswith("HISTORICAL_READER_OBJECT_REQUIRED:"))
+            self.assertEqual(receipt["matrix"], [])
+            self.assertEqual(receipt["network"]["blocked_attempt_count"], 0)
+            self.assertEqual(receipt["network"]["child_blocked_attempt_count"], 0)
 
 
 if __name__ == "__main__":

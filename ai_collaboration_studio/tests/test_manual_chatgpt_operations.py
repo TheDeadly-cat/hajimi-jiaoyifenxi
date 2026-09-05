@@ -10,7 +10,10 @@ import sys
 import tempfile
 import unittest
 from contextlib import closing
+from datetime import datetime, timedelta
+from itertools import count
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ["AI_STUDIO_SKIP_LOCAL_ENV"] = "1"
 
@@ -193,6 +196,13 @@ def write_historical_sources(
 
 class DailyOperationsSummaryTests(unittest.TestCase):
     def setUp(self) -> None:
+        # Noon + 25 hours is both age-expired and on the next Shanghai day.
+        # A wall-clock fixture created after 23:00 can skip that reporting day.
+        fixture_clock = count(int(datetime.fromisoformat(
+            "2026-08-25T12:00:00+08:00",
+        ).timestamp() * 1000))
+        for target in ("backend.store.now_ms", "backend.manual_chatgpt.now_ms"):
+            self.enterContext(patch(target, side_effect=lambda: next(fixture_clock)))
         self.temp_dir = tempfile.TemporaryDirectory(
             prefix="ai-studio-operations-",
             ignore_cleanup_errors=True,
@@ -314,6 +324,28 @@ class DailyOperationsSummaryTests(unittest.TestCase):
         self.assertEqual(report["automation_boundary"]["provider_calls_performed"], 0)
         report_hash = report.pop("report_sha256")
         self.assertEqual(report_hash, canonical_sha256(report))
+
+    def test_yesterday_usage_follows_local_calendar_not_elapsed_age(self) -> None:
+        before = hashlib.sha256(self.database_path.read_bytes()).hexdigest()
+        late_evening = datetime.fromisoformat("2026-08-25T23:30:00+08:00")
+        usage_created_at = int(self.waiting["created_at"])
+        for elapsed_hours, expected_calls in ((23, 1), (25, 0)):
+            with self.subTest(elapsed_hours=elapsed_hours):
+                as_of = late_evening + timedelta(hours=elapsed_hours)
+                report = DailyOperationsSummary(self.database_path).build(
+                    as_of_ms=int(as_of.timestamp() * 1000),
+                    waiting_expiry_hours=24,
+                    max_items=10,
+                )
+                window = report["reporting_window"]
+                in_yesterday = (
+                    window["yesterday_start_ms"] <= usage_created_at
+                    < window["today_start_ms"]
+                )
+                self.assertEqual(in_yesterday, bool(expected_calls))
+                self.assertEqual(report["yesterday_provider_usage"]["call_count"], expected_calls)
+                self.assertEqual(report["manual_chatgpt"]["operationally_age_expired"]["count"], 2)
+        self.assertEqual(hashlib.sha256(self.database_path.read_bytes()).hexdigest(), before)
 
     def test_latest_integrity_failure_does_not_fall_back_to_older_session(self) -> None:
         service = ManualChatGPTService(self.store, review_rate_card={})
