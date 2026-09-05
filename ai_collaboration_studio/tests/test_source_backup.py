@@ -171,6 +171,75 @@ class SourceBackupTests(unittest.TestCase):
             )
         self.assertTrue(verify_backup(archive_path)["ok"])
 
+    def test_database_families_are_excluded_at_every_source_depth(self) -> None:
+        included = {
+            "app.py": "VALUE = 7\n",
+            "nested/schema.sqlite3.py": "SCHEMA = 1\n",
+        }
+        for relative, content in included.items():
+            _write(self.source / relative, content)
+        baseline = self._create("without-databases")
+        for directory in ("", "nested/deeper/"):
+            for extension in (".db", ".sqlite", ".SQLITE3"):
+                for suffix in ("", "-wal", "-SHM", "-journal"):
+                    _write(
+                        self.source / f"{directory}studio{extension}{suffix}",
+                        "database-family fixture must stay out of source archives\n",
+                    )
+
+        destination = self.root / "database-preflight"
+        preflight = preflight_backup(
+            source_root=self.source,
+            destination_root=destination,
+            source_root_label="fixture_source",
+            created_at_utc=CREATED_AT_UTC,
+        )
+        self.assertFalse(destination.exists())
+        archive_path = self._create("with-databases")
+        manifest = _read_manifest(archive_path)
+        self.assertEqual([row["path"] for row in manifest["files"]], sorted(included))
+        self.assertEqual(preflight["backup_version"], manifest["backup_version"])
+        self.assertEqual(baseline.read_bytes(), archive_path.read_bytes())
+        self.assertTrue(verify_backup(archive_path)["ok"])
+
+    def test_verify_rejects_database_families_in_validly_hashed_manifests(self) -> None:
+        _write(self.source / "app.py", "VALUE = 7\n")
+        original = self._create()
+        for directory in ("", "nested/deeper/"):
+            for extension in (".db", ".sqlite", ".SQLITE3"):
+                for suffix in ("", "-wal", "-SHM", "-journal"):
+                    member_name = f"{directory}studio{extension}{suffix}"
+                    with self.subTest(member_name=member_name):
+                        manifest = _read_manifest(original)
+                        manifest["files"][0]["path"] = member_name
+                        manifest["total_sha256"] = _canonical_sha256({
+                            "version": CONTENT_HASH_VERSION,
+                            "files": manifest["files"],
+                        })
+                        manifest["backup_version"] = (
+                            f"20260812T034500Z-{manifest['total_sha256'][:12]}"
+                        )
+                        archive_path = self.root / (
+                            hashlib.sha256(member_name.encode("utf-8")).hexdigest()[:12]
+                            + ".zip"
+                        )
+                        with zipfile.ZipFile(original, "r") as source_archive:
+                            info = source_archive.getinfo("app.py")
+                            payload = source_archive.read(info)
+                            info.filename = member_name
+                            with zipfile.ZipFile(archive_path, "w") as target_archive:
+                                target_archive.writestr(info, payload)
+                                target_archive.writestr(
+                                    source_archive.getinfo(MANIFEST_NAME),
+                                    json.dumps(
+                                        manifest, ensure_ascii=False, sort_keys=True,
+                                        separators=(",", ":"), allow_nan=False,
+                                    ) + "\n",
+                                )
+                        with self.assertRaisesRegex(SourceBackupError, "database-family"):
+                            verify_backup(archive_path)
+                        self.assertFalse((self.root / member_name).exists())
+
     def test_tampered_member_is_rejected_without_restoring_files(self) -> None:
         _write(self.source / "app.py", "ORIGINAL = True\n")
         original = self._create()
