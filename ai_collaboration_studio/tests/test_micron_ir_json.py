@@ -545,5 +545,205 @@ class MicronIrJsonTests(unittest.TestCase):
                                      for thread in threading.enumerate()))
 
 
+class MicronIrIncrementalTests(unittest.TestCase):
+    @staticmethod
+    def fixture(count=30):
+        rows, heads = [], {}
+        for identity in range(1, count + 1):
+            row = record(identity)
+            row["LinkToDetailPage"] = f"/news/press-release/2026/cached-{identity}/default.aspx"
+            rows.append(row)
+            heads[HOST + row["LinkToDetailPage"]] = head(metadata(row))
+        return FixtureFetch(rows, heads)
+
+    def test_repeated_cycle_drops_from_thirty_one_to_five_requests_and_rotates_every_identity(self):
+        fetch = self.fixture()
+        client = MicronIrJsonClient(fetch_bytes=fetch, clock=lambda: NOW)
+        initial = client.read_recent()
+        self.assertEqual(len(fetch.calls), 31)
+        reviewed = set()
+        for _ in range(8):
+            before = len(fetch.calls)
+            repeated = client.read_recent(require_complete=False)
+            self.assertEqual(len(fetch.calls) - before, 5)
+            self.assertTrue(repeated["complete"])
+            self.assertEqual(repeated["releases"], initial["releases"])
+            reviewed.update(repeated["metadata_progress"]["requested_ids"])
+        self.assertEqual(reviewed, set(range(1, 31)))
+
+    def test_new_identity_is_fetched_before_failed_old_revalidation_and_remains_deliverable(self):
+        fetch = self.fixture()
+        client = MicronIrJsonClient(fetch_bytes=fetch, clock=lambda: NOW)
+        client.read_recent()
+        new_row = record(31)
+        new_row["LinkToDetailPage"] = "/news/press-release/2026/new-31/default.aspx"
+        fetch.rows = fetch.rows[:-1] + [new_row]
+        fetch.heads[HOST + new_row["LinkToDetailPage"]] = head(metadata(new_row))
+        failed_url = HOST + fetch.rows[0]["LinkToDetailPage"]
+        fetch.heads[failed_url] = head(metadata(fetch.rows[0], datePublished="invalid"))
+        before = len(fetch.calls)
+        result = client.read_recent(require_complete=False)
+        self.assertEqual(fetch.calls[before + 1][0], HOST + new_row["LinkToDetailPage"])
+        self.assertFalse(result["complete"])
+        self.assertIn(31, {row["q4_press_release_id"] for row in result["releases"]})
+        self.assertNotIn(1, {row["q4_press_release_id"] for row in result["releases"]})
+        self.assertEqual(result["metadata_progress"]["failed"][0]["press_release_id"], 1)
+        self.assertEqual(result["metadata_progress"]["failed"][0]["attempt_count"], 2)
+
+    def test_strict_initial_read_revalidates_all_cached_heads_and_keeps_failure_closed(self):
+        fetch = self.fixture()
+        client = MicronIrJsonClient(fetch_bytes=fetch, clock=lambda: NOW)
+        client.read_recent()
+        self.assertTrue(client.read_recent(require_complete=False)["complete"])
+        before = len(fetch.calls)
+        client.read_recent(require_complete=True)
+        self.assertEqual(len(fetch.calls) - before, 31)
+        row = fetch.rows[-1]
+        fetch.heads[HOST + row["LinkToDetailPage"]] = head(metadata(row, datePublished="invalid"))
+        with self.assertRaises(MicronIrJsonError):
+            client.read_recent(require_complete=True)
+
+    def test_corrupt_or_missing_cache_and_changed_list_binding_require_new_metadata(self):
+        for change in ("corrupt", "missing", "revision", "summary", "url"):
+            with self.subTest(change=change):
+                fetch = self.fixture()
+                client = MicronIrJsonClient(fetch_bytes=fetch, clock=lambda: NOW)
+                client.read_recent()
+                row = fetch.rows[10]
+                if change == "corrupt":
+                    client._metadata_cache[11]["time_metadata_sha256"] = "0" * 64
+                elif change == "missing":
+                    client._metadata_cache.pop(11)
+                elif change == "revision":
+                    row["RevisionNumber"] += 1
+                elif change == "summary":
+                    row["ShortDescription"] = "Updated official metadata."
+                else:
+                    row["LinkToDetailPage"] = "/news/press-release/2026/changed-11/default.aspx"
+                    fetch.heads[HOST + row["LinkToDetailPage"]] = head(metadata(row))
+                before = len(fetch.calls)
+                result = client.read_recent(require_complete=False)
+                self.assertEqual(fetch.calls[before + 1][0], HOST + row["LinkToDetailPage"])
+                self.assertEqual(len(fetch.calls) - before, 6)
+                self.assertTrue(result["complete"])
+
+    def test_expired_metadata_is_withheld_until_bounded_rotation_revalidates_it(self):
+        elapsed = [0.0]
+        fetch = self.fixture()
+        client = MicronIrJsonClient(fetch_bytes=fetch, clock=lambda: NOW, monotonic=lambda: elapsed[0])
+        client.read_recent()
+        elapsed[0] += client.cache_policy["maximum_age_ms"] / 1000 + 1
+        before = len(fetch.calls)
+        result = client.read_recent(require_complete=False)
+        self.assertEqual(len(fetch.calls) - before, 5)
+        self.assertFalse(result["complete"])
+        self.assertEqual(len(result["releases"]), 4)
+        self.assertEqual(len(result["metadata_progress"]["failed"]), 26)
+        self.assertEqual({error["code"] for error in result["source_errors"]}, {"MICRON_IR_METADATA_CACHE_EXPIRED"})
+        for _ in range(7):
+            result = client.read_recent(require_complete=False)
+        self.assertTrue(result["complete"])
+        self.assertEqual(len(result["releases"]), 30)
+
+    def test_parser_policy_change_invalidates_cache_and_restart_is_cold(self):
+        fetch = self.fixture()
+        client = MicronIrJsonClient(fetch_bytes=fetch, clock=lambda: NOW)
+        client.read_recent()
+        policy = client.cache_policy
+        policy["parser_version"] = "different_parser_fixture"
+        before = len(fetch.calls)
+        with patch("backend.market.micron_ir_json.micron_metadata_cache_policy", return_value=policy):
+            self.assertTrue(client.read_recent(require_complete=False)["complete"])
+        self.assertEqual(len(fetch.calls) - before, 31)
+        before = len(fetch.calls)
+        restarted = MicronIrJsonClient(fetch_bytes=fetch, clock=lambda: NOW)
+        self.assertTrue(restarted.read_recent(require_complete=False)["complete"])
+        self.assertEqual(len(fetch.calls) - before, 31)
+
+    def test_old_revalidation_timeout_closes_response_and_keeps_new_metadata_before_global_deadline(self):
+        fetch = self.fixture()
+        block_old = [False]
+        closed = threading.Event()
+
+        class BlockedHead:
+            headers = {}
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                self.close()
+            def close(self):
+                closed.set()
+            def read(self, _size):
+                if not closed.wait(1):
+                    raise AssertionError("old revalidation did not honor its short deadline")
+                raise OSError("closed by bounded metadata deadline")
+
+        old_url = HOST + fetch.rows[0]["LinkToDetailPage"]
+        dispatched = []
+        def opener(request, **_controls):
+            dispatched.append(request.full_url)
+            if block_old[0] and request.full_url == old_url:
+                return BlockedHead()
+            raw = listing(fetch.rows) if request.full_url == EXPECTED_LIST_URL else fetch.heads[request.full_url]
+            response = io.BytesIO(raw)
+            response.headers = {}
+            return response
+
+        with patch("backend.market.micron_ir_json.MICRON_METADATA_REVALIDATION_TIMEOUT_MS", 80), \
+             patch("backend.market.micron_ir_json.open_official_https", side_effect=opener):
+            client = MicronIrJsonClient(clock=lambda: NOW)
+            client.read_recent()
+            new_row = record(31)
+            new_row["LinkToDetailPage"] = "/news/press-release/2026/new-before-timeout/default.aspx"
+            fetch.rows = fetch.rows[:-1] + [new_row]
+            fetch.heads[HOST + new_row["LinkToDetailPage"]] = head(metadata(new_row))
+            block_old[0] = True
+            before = len(dispatched)
+            started = time.monotonic()
+            result = client.read_recent(require_complete=False, deadline_monotonic_ms=int(started * 1000) + 2_000)
+            self.assertLess(time.monotonic() - started, 1)
+        self.assertTrue(closed.is_set())
+        self.assertEqual(dispatched[before + 1], HOST + new_row["LinkToDetailPage"])
+        self.assertIn(31, {row["q4_press_release_id"] for row in result["releases"]})
+        self.assertFalse(result["complete"])
+        self.assertIn("MICRON_IR_REVALIDATION_TIMEOUT", {error["code"] for error in result["source_errors"]})
+        self.assertFalse(any(thread.name.startswith("micron-ir-head") or thread.name == "official-source-body-control"
+                             for thread in threading.enumerate()))
+
+    def test_old_revalidation_is_deferred_when_the_remaining_budget_belongs_to_commit(self):
+        fetch = self.fixture()
+        with patch("backend.market.micron_ir_json.MICRON_METADATA_COMMIT_RESERVE_MS", 2_000):
+            client = MicronIrJsonClient(fetch_bytes=fetch, clock=lambda: NOW)
+            client.read_recent()
+            row = record(31)
+            row["LinkToDetailPage"] = "/news/press-release/2026/new-before-reserve/default.aspx"
+            fetch.rows = fetch.rows[:-1] + [row]
+            fetch.heads[HOST + row["LinkToDetailPage"]] = head(metadata(row))
+            before = len(fetch.calls)
+            result = client.read_recent(require_complete=False,
+                                        deadline_monotonic_ms=int(time.monotonic() * 1000) + 2_000)
+        self.assertEqual(len(fetch.calls) - before, 2)
+        self.assertIn(31, {release["q4_press_release_id"] for release in result["releases"]})
+        self.assertFalse(result["complete"])
+        self.assertEqual({error["code"] for error in result["source_errors"]}, {"MICRON_IR_REVALIDATION_DEFERRED"})
+        self.assertEqual(result["metadata_progress"]["next_revalidation_ids"], [1, 2, 3, 4])
+
+    def test_cancellation_during_cached_revalidation_returns_no_partial_snapshot(self):
+        fetch = self.fixture()
+        event = threading.Event()
+        cancel_old = [False]
+        def controlled(url, **controls):
+            value = fetch(url, **controls)
+            if cancel_old[0] and controls["head_only"]:
+                event.set()
+            return value
+        client = MicronIrJsonClient(fetch_bytes=controlled, clock=lambda: NOW)
+        client.read_recent()
+        cancel_old[0] = True
+        with self.assertRaises(SourcePollCancelled):
+            client.read_recent(require_complete=False, cancel_event=event)
+        self.assertFalse(any(thread.name.startswith("micron-ir-head") for thread in threading.enumerate()))
+
+
 if __name__ == "__main__":
     unittest.main()

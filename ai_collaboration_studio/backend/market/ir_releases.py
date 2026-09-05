@@ -89,14 +89,14 @@ class OfficialIrReleaseAdapter:
         self._fetch_bytes = fetch_bytes or self._default_fetch_bytes
         self._fetch_bytes_is_default = fetch_bytes is None
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._monotonic = monotonic or time.monotonic
         self._micron_client = (
-            MicronIrJsonClient(fetch_bytes=micron_fetch_bytes, clock=self._clock)
+            MicronIrJsonClient(fetch_bytes=micron_fetch_bytes, clock=self._clock, monotonic=self._monotonic)
             if source_format == "q4_json" else None
         )
-        self._monotonic = monotonic or time.monotonic
         self.cache_ttl_seconds = max(60.0, float(cache_ttl_seconds))
-        self._cache: dict[tuple[str, int, bool], tuple[float, dict[str, Any]]] = {}
-        self._inflight: dict[tuple[str, int, bool], Future[dict[str, Any]]] = {}
+        self._cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+        self._inflight: dict[tuple[Any, ...], Future[dict[str, Any]]] = {}
         self._lock = threading.RLock()
 
     @property
@@ -163,8 +163,12 @@ class OfficialIrReleaseAdapter:
         force: bool = False,
         deadline_monotonic_ms: int = 0,
         cancel_event: threading.Event | None = None,
+        require_complete_metadata: bool = True,
     ) -> dict[str, Any]:
-        """Return every normalized feed item so monitoring can detect conflicts."""
+        """Return validated metadata, preserving incomplete identity evidence."""
+
+        if type(require_complete_metadata) is not bool:
+            raise ValueError("require_complete_metadata must be a native boolean")
 
         return self._recent_releases_batch(
             symbols,
@@ -173,6 +177,7 @@ class OfficialIrReleaseAdapter:
             monitoring_raw_items=True,
             deadline_monotonic_ms=deadline_monotonic_ms,
             cancel_event=cancel_event,
+            require_complete_metadata=require_complete_metadata,
         )
 
     def _recent_releases_batch(
@@ -184,6 +189,7 @@ class OfficialIrReleaseAdapter:
         monitoring_raw_items: bool,
         deadline_monotonic_ms: int,
         cancel_event: threading.Event | None,
+        require_complete_metadata: bool = True,
     ) -> dict[str, Any]:
         ensure_source_poll_active(
             deadline_monotonic_ms=deadline_monotonic_ms,
@@ -219,6 +225,7 @@ class OfficialIrReleaseAdapter:
                     monitoring_raw_items=monitoring_raw_items,
                     deadline_monotonic_ms=deadline_monotonic_ms,
                     cancel_event=cancel_event,
+                    require_complete_metadata=require_complete_metadata,
                 ))
         else:
             with ThreadPoolExecutor(
@@ -235,6 +242,7 @@ class OfficialIrReleaseAdapter:
                         monitoring_raw_items=monitoring_raw_items,
                         deadline_monotonic_ms=0,
                         cancel_event=None,
+                        require_complete_metadata=require_complete_metadata,
                     )
                     for symbol in requested
                 ]
@@ -264,11 +272,15 @@ class OfficialIrReleaseAdapter:
         monitoring_raw_items: bool,
         deadline_monotonic_ms: int,
         cancel_event: threading.Event | None,
+        require_complete_metadata: bool = True,
     ) -> dict[str, Any]:
-        cache_key = (symbol, safe_limit, monitoring_raw_items)
+        incremental_json = symbol == "US.MU" and self.source_format == "q4_json" and monitoring_raw_items
+        cache_key = (symbol, safe_limit, monitoring_raw_items) + ((require_complete_metadata,) if incremental_json else ())
         with self._lock:
             cached = self._cache.get(cache_key)
-            if cached and cached[0] > self._monotonic() and not force:
+            # Monitoring always reads the current Micron list. Only independently
+            # verified per-release head metadata can be reused by that client.
+            if cached and cached[0] > self._monotonic() and not force and not incremental_json:
                 return self._annotate_outcome(cached[1], cache_hit=True, singleflight_shared=False)
             future = self._inflight.get(cache_key)
             owner = future is None
@@ -296,17 +308,19 @@ class OfficialIrReleaseAdapter:
                 monitoring_raw_items=monitoring_raw_items,
                 deadline_monotonic_ms=deadline_monotonic_ms,
                 cancel_event=cancel_event,
+                require_complete_metadata=require_complete_metadata,
             )
             cache_ttl = (
                 self.cache_ttl_seconds
                 if outcome.get("row")
                 else min(self.cache_ttl_seconds, 60.0)
             )
-            with self._lock:
-                self._cache[cache_key] = (
-                    self._monotonic() + cache_ttl,
-                    copy.deepcopy(outcome),
-                )
+            if not incremental_json:
+                with self._lock:
+                    self._cache[cache_key] = (
+                        self._monotonic() + cache_ttl,
+                        copy.deepcopy(outcome),
+                    )
             future.set_result(copy.deepcopy(outcome))
             return outcome
         except BaseException as exc:
@@ -343,10 +357,12 @@ class OfficialIrReleaseAdapter:
         monitoring_raw_items: bool,
         deadline_monotonic_ms: int,
         cancel_event: threading.Event | None,
+        require_complete_metadata: bool = True,
     ) -> dict[str, Any]:
         config = IR_FEEDS[symbol]
         scope_metadata: dict[str, Any] = {}
         json_source = symbol == "US.MU" and self.source_format == "q4_json"
+        json_errors = []
         try:
             ensure_source_poll_active(
                 deadline_monotonic_ms=deadline_monotonic_ms,
@@ -354,6 +370,7 @@ class OfficialIrReleaseAdapter:
             )
             if json_source:
                 snapshot = self._micron_client.read_recent(
+                    require_complete=require_complete_metadata,
                     deadline_monotonic_ms=deadline_monotonic_ms,
                     cancel_event=cancel_event,
                 )
@@ -373,6 +390,12 @@ class OfficialIrReleaseAdapter:
                         "source_locator": "Q4 public JSON and bound NewsArticle head metadata",
                     })
                 scope_metadata["complete"] = snapshot["complete"] is True
+                if "metadata_progress" in snapshot:
+                    scope_metadata["metadata_progress"] = copy.deepcopy(snapshot["metadata_progress"])
+                json_errors = [{
+                    **error, "source": "official_company_ir", "symbol": symbol,
+                    "cache_hit": False, "singleflight_shared": False,
+                } for error in snapshot.get("source_errors", [])]
                 if not monitoring_raw_items:
                     releases = releases[:safe_limit]
             elif self._fetch_bytes_is_default:
@@ -414,7 +437,7 @@ class OfficialIrReleaseAdapter:
                     "singleflight_shared": False,
                 }],
             }
-        if not releases and not (monitoring_raw_items and scope_metadata.get("complete") is True):
+        if not releases and not (monitoring_raw_items and (scope_metadata.get("complete") is True or json_errors)):
             return {
                 "row": None,
                 "source_errors": [{
@@ -434,14 +457,15 @@ class OfficialIrReleaseAdapter:
                 "source_format": "micron_q4_public_json_v1" if json_source else "rss",
                 "presentation_hub_url": config["presentation_hub_url"],
                 "technology_scope": list(config["technology_scope"]),
-                "quality": "ready",
+                "quality": "degraded" if json_errors else "ready",
                 "cache_hit": False,
                 "singleflight_shared": False,
                 "release_count": len(releases),
                 "releases": releases,
                 **({"feed_scope_complete": scope_metadata.get("complete") is True} if monitoring_raw_items else {}),
+                **({"metadata_progress": scope_metadata["metadata_progress"]} if "metadata_progress" in scope_metadata else {}),
             },
-            "source_errors": [],
+            "source_errors": json_errors,
         }
 
     @staticmethod
