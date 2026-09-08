@@ -332,6 +332,30 @@ class SourcePollError:
         }
 
 
+MICRON_PENDING_REVALIDATION_CODES = frozenset({
+    "MICRON_IR_METADATA_RETRY_PENDING",
+    "MICRON_IR_METADATA_CACHE_EXPIRED",
+    "MICRON_IR_REVALIDATION_DEFERRED",
+})
+MICRON_PENDING_REVALIDATION_STATE_CODE = "MICRON_IR_METADATA_REVALIDATION_PENDING"
+
+
+def is_micron_pending_revalidation_only(
+    adapter_key: Any, source_errors: Any, *, rejected_count: Any,
+    started_checkpoint: Any, next_checkpoint: Any,
+) -> bool:
+    """Check the closed context of an internal, producer-validated pending hint."""
+    return (
+        type(adapter_key) is str and adapter_key == "company_ir"
+        and type(rejected_count) is int and rejected_count == 0
+        and type(started_checkpoint) is dict and bool(started_checkpoint)
+        and type(next_checkpoint) is dict and canonical_json(next_checkpoint) == canonical_json(started_checkpoint)
+        and type(source_errors) in {list, tuple} and 0 < len(source_errors) <= MAX_SOURCE_ERRORS_PER_POLL
+        and all(type(error) is SourcePollError and error.scope == "US.MU"
+                and error.code in MICRON_PENDING_REVALIDATION_CODES for error in source_errors)
+    )
+
+
 def _normalize_observed_items(value: Any) -> tuple[dict[str, Any], ...]:
     if type(value) not in {list, tuple}:
         raise _contract_error(
@@ -396,6 +420,8 @@ class AdapterPollResult:
     rejected_count: int
     market_calls_performed: int
     initial_history_sha256: str = ""
+    # Internal only: never serialize this producer-validated scheduling hint.
+    pending_revalidation_only: bool = False
 
     def __post_init__(self) -> None:
         if type(self.initial_history_sha256) is not str or (
@@ -466,6 +492,17 @@ class AdapterPollResult:
                 allow_empty=True,
             ),
         )
+        if type(self.pending_revalidation_only) is not bool or (
+            self.pending_revalidation_only and (
+                self.initial_history_sha256 or self.market_calls_performed
+                or not is_micron_pending_revalidation_only(
+                    self.adapter_key, self.source_errors, rejected_count=self.rejected_count,
+                    started_checkpoint=self.started_checkpoint, next_checkpoint=self.next_checkpoint,
+                )
+            )
+        ):
+            raise _contract_error("SOURCE_MONITORING_PENDING_REVALIDATION_INVALID",
+                                  "pending revalidation requires a validated, unchanged Micron partial poll")
 
     @classmethod
     def build(
@@ -484,6 +521,7 @@ class AdapterPollResult:
         rejected_count: Any = 0,
         market_calls_performed: Any = 0,
         initial_history_sha256: Any = "",
+        pending_revalidation_only: Any = False,
     ) -> "AdapterPollResult":
         return cls(
             adapter_key=adapter_key,
@@ -499,6 +537,7 @@ class AdapterPollResult:
             rejected_count=rejected_count,
             market_calls_performed=market_calls_performed,
             initial_history_sha256=initial_history_sha256,
+            pending_revalidation_only=pending_revalidation_only,
         )
 
     @property
@@ -547,6 +586,9 @@ __all__ = [
     "AdapterPollResult",
     "SourceMonitoringContractError",
     "SourcePollError",
+    "MICRON_PENDING_REVALIDATION_CODES",
+    "MICRON_PENDING_REVALIDATION_STATE_CODE",
+    "is_micron_pending_revalidation_only",
     "canonical_json",
     "canonical_sha256",
     "normalize_adapter_key",

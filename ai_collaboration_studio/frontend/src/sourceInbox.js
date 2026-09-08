@@ -987,10 +987,24 @@ export function normalizeSourceMonitoringHealth(payload) {
   };
 }
 
+export function sourceMonitoringHasPendingRevalidation(adapter) {
+  return adapter?.valid !== false
+    && adapter?.adapterKey === "company_ir"
+    && adapter.configStatus === "current"
+    && adapter.state === "degraded"
+    && adapter.lastErrorCode === "MICRON_IR_METADATA_REVALIDATION_PENDING"
+    && adapter.latestRun?.status === "DEGRADED"
+    && adapter.latestRun.dryRun === false
+    && adapter.latestRun.rejectedCount === 0;
+}
+
 export function sourceMonitoringCheckLabel(adapter) {
   const run = adapter.latestRun;
   if (!run) return "尚无本轮结果记录";
   if (run.status === "RUNNING") return "本次检查进行中";
+  if (sourceMonitoringHasPendingRevalidation(adapter)) {
+    return "部分公告等待重新验证，当前仍为降级状态";
+  }
   if (["FAILED", "DEGRADED", "ABANDONED"].includes(run.status) || run.rejectedCount > 0) {
     return "最近检查失败或有拒绝项，请查看错误码";
   }
@@ -1025,6 +1039,9 @@ export function sourceMonitoringNextStep(adapter) {
   if (adapter.configStatus === "migration_required" || adapter.configStatus === "unregistered") {
     return "核对当前来源配置与保存的版本，在接入设置中重读；不要清空旧状态。";
   }
+  if (sourceMonitoringHasPendingRevalidation(adapter)) {
+    return "后台运行正常时，将按正常轮询周期逐批重新验证公告。请先核对上方运行状态和下次检查时间；原进度保持不变，全部验证完成后再恢复正常状态。";
+  }
   if (adapter.lastErrorCode) {
     return "按错误码核对来源响应、网络与配置，观察下次退避检查；未成功前不会作为正常监控。";
   }
@@ -1037,13 +1054,20 @@ export function sourceMonitoringOperationState(health, control = null) {
     state: "disabled", label: "监控未启用", detail: "全局开关关闭，不会自动检查来源。",
   };
   const enabled = health.adapters.filter((adapter) => adapter.enabled);
-  const hasFailure = health.adapters.some((adapter) => (adapter.enabled || adapter.persistedEnabled) && (
+  const adaptersNeedingAttention = health.adapters.filter((adapter) => (adapter.enabled || adapter.persistedEnabled) && (
     adapter.consecutiveFailures > 0 || adapter.lastErrorCode
     || ["migration_required", "unregistered"].includes(adapter.configStatus)
     || ["failed", "degraded", "backing_off"].includes(adapter.state)
     || ["FAILED", "DEGRADED", "ABANDONED"].includes(adapter.latestRun?.status)
     || adapter.latestRun?.rejectedCount > 0
   ));
+  const hasFailure = adaptersNeedingAttention.length > 0;
+  if (hasFailure && adaptersNeedingAttention.every(sourceMonitoringHasPendingRevalidation)
+    && health.runtime.livenessVerified && ["running", "degraded"].includes(health.runtime.status)
+    && !health.runtime.lastFatalErrorCode && !health.dryRun) return {
+    state: "degraded", label: "监控降级 · 等待来源重验",
+    detail: "部分公告尚待重新验证，后台按正常周期继续检查；全部验证完成前仍保持降级状态。",
+  };
   if (["failed", "stalled", "degraded"].includes(health.runtime.status) || hasFailure) return {
     state: "degraded", label: `监控降级 · ${health.runtime.statusLabel}`,
     detail: "应用页面可用不代表监控正常；核对下方错误码、来源配置和下次检查。",

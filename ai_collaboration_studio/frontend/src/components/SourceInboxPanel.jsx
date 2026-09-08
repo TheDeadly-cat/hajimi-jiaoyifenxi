@@ -32,6 +32,7 @@ import {
   SOURCE_MONITORING_HEALTH_LABELS,
   sourceInboxItemPermissions,
   sourceMonitoringCheckLabel,
+  sourceMonitoringHasPendingRevalidation,
   sourceMonitoringNextStep,
   sourceMonitoringOperationState,
 } from "../sourceInbox";
@@ -942,9 +943,10 @@ function SourceMonitoringHealth({
                     && entry.configVersion === adapter.configVersion)
                   : null;
                 const nextStep = sourceMonitoringNextStep(adapter);
+                const pendingRevalidation = sourceMonitoringHasPendingRevalidation(adapter);
                 return (
                 <article key={adapter.adapterKey} role="listitem">
-                  <header><strong>{adapter.adapterKey}</strong><em>{SOURCE_MONITORING_HEALTH_LABELS[adapter.state] || adapter.state}</em></header>
+                  <header><strong>{adapter.adapterKey}</strong><em>{pendingRevalidation ? "等待来源重验" : SOURCE_MONITORING_HEALTH_LABELS[adapter.state] || adapter.state}</em></header>
                   <small>
                     {adapter.officialSource ? "官方来源" : adapter.sourceClass === "readonly_market" ? "只读行情" : "来源未登记"}
                     {` · 生效开关${adapter.enabled ? "启用" : "关闭"}`}
@@ -969,7 +971,7 @@ function SourceMonitoringHealth({
                   <small>{sourceMonitoringCheckLabel(adapter)}</small>
                   <small>
                     最近成功 {formatServerTime(adapter.lastSuccessAt)}
-                    {adapter.lastErrorCode ? ` · 错误码 ${adapter.lastErrorCode}` : ""}
+                    {adapter.lastErrorCode ? ` · ${pendingRevalidation ? "状态码" : "错误码"} ${adapter.lastErrorCode}` : ""}
                   </small>
                   {nextStep ? <small role="note">{nextStep}</small> : null}
                 </article>

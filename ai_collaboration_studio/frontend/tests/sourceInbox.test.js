@@ -11,6 +11,7 @@ import {
   replaceSourceInboxItem,
   sourceInboxItemPermissions,
   sourceMonitoringCheckLabel,
+  sourceMonitoringHasPendingRevalidation,
   sourceMonitoringNextStep,
   sourceMonitoringOperationState,
 } from "../src/sourceInbox.js";
@@ -709,6 +710,52 @@ test("monitoring operation state requires baseline and recent source success bey
   assert.match(sourceMonitoringCheckLabel({ ...adapter, latestRun: { ...adapter.latestRun, dryRun: true } }), /未导入收件箱/);
   assert.doesNotMatch(sourceMonitoringCheckLabel({ ...adapter, latestRun: null }), /无新增/);
   assert.match(sourceMonitoringNextStep({ ...adapter, configStatus: "migration_required" }), /旧 SEC 状态.*明确升级方案/);
+});
+
+test("Micron pending revalidation stays degraded without claiming a new failure or backoff", () => {
+  const pending = {
+    valid: true, adapterKey: "company_ir", enabled: true, persistedEnabled: true,
+    configStatus: "current", state: "degraded", consecutiveFailures: 1,
+    lastErrorCode: "MICRON_IR_METADATA_REVALIDATION_PENDING",
+    latestRun: { status: "DEGRADED", dryRun: false, rejectedCount: 0 },
+  };
+  const health = {
+    valid: true, globalEnabled: true, dryRun: false, adapters: [pending],
+    runtime: { status: "degraded", statusLabel: "运行中（有异常）", livenessVerified: true },
+  };
+  for (const consecutiveFailures of [0, 1, 5]) {
+    const adapter = { ...pending, consecutiveFailures };
+    assert.equal(sourceMonitoringHasPendingRevalidation(adapter), true);
+    assert.match(sourceMonitoringCheckLabel(adapter), /等待重新验证.*降级/);
+    assert.doesNotMatch(sourceMonitoringCheckLabel(adapter), /检查失败|检查成功/);
+    assert.match(sourceMonitoringNextStep(adapter), /后台运行正常时.*正常轮询周期.*先核对上方运行状态.*原进度保持不变/);
+    assert.doesNotMatch(sourceMonitoringNextStep(adapter), /退避/);
+    const operation = sourceMonitoringOperationState({ ...health, adapters: [adapter] });
+    assert.equal(operation.state, "degraded");
+    assert.match(operation.label, /等待来源重验/);
+  }
+  for (const adapter of [
+    { ...pending, valid: false },
+    { ...pending, adapterKey: "sec_filings" },
+    { ...pending, configStatus: "migration_required" },
+    { ...pending, lastErrorCode: "MICRON_IR_METADATA_REVALIDATION_PENDING_EXTRA" },
+    { ...pending, lastErrorCode: "MICRON_IR_METADATA_REQUEST_FAILED" },
+    { ...pending, latestRun: { ...pending.latestRun, status: "FAILED" } },
+    { ...pending, latestRun: { ...pending.latestRun, dryRun: true } },
+    { ...pending, latestRun: { ...pending.latestRun, rejectedCount: 1 } },
+  ]) {
+    assert.equal(sourceMonitoringHasPendingRevalidation(adapter), false);
+    assert.doesNotMatch(sourceMonitoringOperationState({ ...health, adapters: [adapter] }).label, /等待来源重验/);
+  }
+  const realFailure = { ...pending, adapterKey: "sec_filings", lastErrorCode: "SEC_REQUEST_FAILED" };
+  assert.doesNotMatch(sourceMonitoringOperationState({ ...health, adapters: [pending, realFailure] }).label, /等待来源重验/);
+  for (const runtime of [
+    { ...health.runtime, status: "stalled" },
+    { ...health.runtime, livenessVerified: false },
+    { ...health.runtime, lastFatalErrorCode: "RUNTIME_FAILED" },
+  ]) {
+    assert.doesNotMatch(sourceMonitoringOperationState({ ...health, runtime }).label, /等待来源重验/);
+  }
 });
 
 test("company IR errors distinguish legacy upgrade, bounded identity capacity, and incomplete baseline", () => {

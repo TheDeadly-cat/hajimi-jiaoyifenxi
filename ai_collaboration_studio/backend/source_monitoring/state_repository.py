@@ -24,12 +24,14 @@ from .contracts import (
     MAX_NATIVE_INTEGER,
     MAX_OBSERVED_ITEMS_PER_POLL,
     MAX_SOURCE_ERRORS_PER_POLL,
+    MICRON_PENDING_REVALIDATION_STATE_CODE,
     OFFICIAL_SOURCE_CHANNEL,
     SOURCE_MONITORING_SOURCE_CHANNELS,
     SourceMonitoringContractError,
     SourcePollError,
     canonical_json,
     canonical_sha256,
+    is_micron_pending_revalidation_only,
     normalize_adapter_key,
     normalize_checkpoint,
 )
@@ -2447,6 +2449,7 @@ class SourceMonitoringStateRepository:
         rejected_count: int,
         next_due_at_ms: int,
         source_errors: Any = (),
+        pending_revalidation_only: bool = False,
         receipt_id: str = "",
         initialization: Any = None,
         source_channel: str = OFFICIAL_SOURCE_CHANNEL,
@@ -2482,6 +2485,9 @@ class SourceMonitoringStateRepository:
         checkpoint_json = canonical_json(checkpoint)
         checkpoint_sha256 = canonical_sha256(checkpoint)
         normalized_errors = _normalize_source_error_records(source_errors)
+        if type(pending_revalidation_only) is not bool:
+            raise SourceMonitoringStateError("pending revalidation must be a native boolean",
+                                             code="SOURCE_MONITORING_PENDING_REVALIDATION_INVALID")
         source_errors_json = canonical_json(normalized_errors)
         clean_receipt = _clean_optional_text(receipt_id, "receipt_id", maximum=200)
         clean_initialization = _normalise_initialization_request(initialization)
@@ -2501,6 +2507,9 @@ class SourceMonitoringStateRepository:
             maximum=MAX_LAST_MODIFIED_CHARS,
         )
         clean_error_code = _clean_optional_text(error_code, "error_code", maximum=160)
+        if clean_error_code == MICRON_PENDING_REVALIDATION_STATE_CODE:
+            raise SourceMonitoringStateError("pending state code is reserved for validated completion",
+                                             code="SOURCE_MONITORING_PENDING_REVALIDATION_INVALID")
         clean_error_message = _clean_optional_text(
             error_message,
             "error_message",
@@ -2517,6 +2526,19 @@ class SourceMonitoringStateRepository:
         with self.store._lock, closing(self.store._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             run, state = self._run_for_update(connection, clean_run_id)
+            if pending_revalidation_only and (
+                status != RUN_STATUS_DEGRADED or clean_initialization is not None
+                or clean_source_channel != OFFICIAL_SOURCE_CHANNEL
+                or not is_micron_pending_revalidation_only(
+                    run["adapter_key"], tuple(SourcePollError.build(**error) for error in normalized_errors),
+                    rejected_count=counts["rejected_count"], started_checkpoint=state["checkpoint"],
+                    next_checkpoint=checkpoint,
+                )
+            ):
+                raise SourceMonitoringStateError("pending completion is outside the unchanged Micron partial poll contract",
+                                                 code="SOURCE_MONITORING_PENDING_REVALIDATION_INVALID")
+            if pending_revalidation_only:
+                clean_error_code = MICRON_PENDING_REVALIDATION_STATE_CODE
             initialization_receipt_json = ""
             initialization_receipt_sha256 = ""
             if clean_initialization is not None:
@@ -2664,7 +2686,8 @@ class SourceMonitoringStateRepository:
                 )
             checkpoint_committed = status == RUN_STATUS_SUCCEEDED
             degraded = status == RUN_STATUS_DEGRADED
-            consecutive_failures = state["consecutive_failures"] + 1 if degraded else 0
+            consecutive_failures = (state["consecutive_failures"] + (0 if pending_revalidation_only else 1)
+                                    if degraded else 0)
             state_error_code = clean_error_code if degraded else ""
             state_error_message = clean_error_message if degraded else ""
             last_event_at = (
@@ -2776,6 +2799,9 @@ class SourceMonitoringStateRepository:
     ) -> dict[str, Any]:
         clean_run_id = _clean_token(run_id, "run_id")
         clean_error_code = _clean_token(error_code, "error_code")
+        if clean_error_code == MICRON_PENDING_REVALIDATION_STATE_CODE:
+            raise SourceMonitoringStateError("pending state code is reserved for validated completion",
+                                             code="SOURCE_MONITORING_PENDING_REVALIDATION_INVALID")
         clean_error_message = _clean_optional_text(
             error_message,
             "error_message",
@@ -2859,6 +2885,9 @@ class SourceMonitoringStateRepository:
         next_due_at_ms: int | None = None,
     ) -> int:
         clean_error_code = _clean_token(error_code, "error_code")
+        if clean_error_code == MICRON_PENDING_REVALIDATION_STATE_CODE:
+            raise SourceMonitoringStateError("pending state code is reserved for validated completion",
+                                             code="SOURCE_MONITORING_PENDING_REVALIDATION_INVALID")
         completed_at = self._now_ms()
         next_due = completed_at if next_due_at_ms is None else _native_non_negative(
             next_due_at_ms,

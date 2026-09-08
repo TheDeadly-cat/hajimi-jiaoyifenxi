@@ -40,6 +40,7 @@ from backend.source_monitoring.state_repository import (  # noqa: E402
 from backend.source_inbox_service import SourceInboxService  # noqa: E402
 from backend.source_inbox_contracts import SOURCE_IMPORT_PACKET_VERSION  # noqa: E402
 from backend.store import StudioStore  # noqa: E402
+from backend.source_monitoring.contracts import MICRON_PENDING_REVALIDATION_STATE_CODE, SourcePollError
 from tests.test_source_inbox_contracts import _packet  # noqa: E402
 from tests.test_source_monitoring_official_adapters import (  # noqa: E402
     FIXED_NOW,
@@ -71,6 +72,72 @@ class SourceMonitoringStateRepositoryTests(unittest.TestCase):
             config_version=self.config_version,
             enabled=True,
         )
+
+    def test_pending_completion_preserves_failure_streak_and_last_success_until_real_success(self):
+        self.adapter_key = "company_ir"
+        self.enable()
+        checkpoint = {"cursor": 4}
+        error = SourcePollError.build("MICRON_IR_METADATA_RETRY_PENDING", "awaiting verification", "US.MU")
+        for failures in (0, 1, 5):
+            seed = self.repository.start_run(self.adapter_key, config_version=self.config_version)
+            self.repository.complete_run(seed["run"]["run_id"], next_checkpoint=checkpoint, status=RUN_STATUS_SUCCEEDED,
+                observed_count=0, accepted_count=0, duplicate_count=0, rejected_count=0, next_due_at_ms=self.clock[0])
+            for _ in range(failures):
+                failed = self.repository.start_run(self.adapter_key, config_version=self.config_version)
+                self.repository.fail_run(failed["run"]["run_id"], error_code="REAL_FAILURE", error_message="actual",
+                                         next_due_at_ms=self.clock[0] + 60_000)
+            before = self.repository.get_state(self.adapter_key)
+            self.clock[0] += 100
+            started = self.repository.start_run(self.adapter_key, config_version=self.config_version)
+            pending = self.repository.complete_run(started["run"]["run_id"], next_checkpoint=checkpoint,
+                status=RUN_STATUS_DEGRADED, observed_count=0, accepted_count=0, duplicate_count=0, rejected_count=0,
+                next_due_at_ms=self.clock[0] + 300_000, source_errors=[error], pending_revalidation_only=True)
+            self.assertEqual(pending["state"]["consecutive_failures"], failures)
+            self.assertEqual(pending["state"]["last_success_at_ms"], before["last_success_at_ms"])
+            self.assertEqual(pending["state"]["checkpoint"], before["checkpoint"])
+            self.assertEqual(pending["state"]["last_error_code"], MICRON_PENDING_REVALIDATION_STATE_CODE)
+            self.assertEqual(pending["run"]["source_errors"], [error.to_dict()])
+            self.assertNotIn("pending_revalidation_only", pending["run"])
+            failed = self.repository.start_run(self.adapter_key, config_version=self.config_version)
+            failed = self.repository.fail_run(failed["run"]["run_id"], error_code="REAL_FAILURE", error_message="actual",
+                                              next_due_at_ms=self.clock[0] + 60_000)
+            self.assertEqual(failed["state"]["consecutive_failures"], failures + 1)
+            self.assertEqual(failed["state"]["last_error_code"], "REAL_FAILURE")
+
+    def test_pending_hint_and_reserved_state_code_cannot_bypass_other_completion_paths(self):
+        self.adapter_key = "company_ir"
+        self.enable()
+        checkpoint = {"cursor": 4}
+        seed = self.repository.start_run(self.adapter_key, config_version=self.config_version)
+        self.repository.complete_run(seed["run"]["run_id"], next_checkpoint=checkpoint, status=RUN_STATUS_SUCCEEDED,
+            observed_count=0, accepted_count=0, duplicate_count=0, rejected_count=0, next_due_at_ms=self.clock[0])
+        started = self.repository.start_run(self.adapter_key, config_version=self.config_version)
+        error = SourcePollError.build("MICRON_IR_METADATA_RETRY_PENDING", "pending", "US.MU")
+        args = dict(next_checkpoint=checkpoint, status=RUN_STATUS_DEGRADED, observed_count=0, accepted_count=0,
+                    duplicate_count=0, rejected_count=0, next_due_at_ms=self.clock[0], source_errors=[error],
+                    pending_revalidation_only=True)
+        for changes in (
+            {"pending_revalidation_only": 1}, {"pending_revalidation_only": None},
+            {"status": RUN_STATUS_SUCCEEDED}, {"status": "DRY_RUN"},
+            {"next_checkpoint": {}}, {"next_checkpoint": {"cursor": 8}}, {"next_checkpoint": {"cursor": 4.0}}, {"source_errors": []},
+            {"source_errors": [error, SourcePollError.build("REAL_FAILURE", "actual", "US.MU")]},
+            {"source_errors": [SourcePollError.build(error.code, "pending", "US.OTHER")]},
+            {"observed_count": 1, "rejected_count": 1},
+            {"source_channel": "futu_anomaly_monitor"},
+            {"error_code": MICRON_PENDING_REVALIDATION_STATE_CODE},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(SourceMonitoringStateError):
+                self.repository.complete_run(started["run"]["run_id"], **{**args, **changes})
+        for operation in (
+            lambda: self.repository.complete_run(started["run"]["run_id"], **{**args, "pending_revalidation_only": False,
+                "error_code": MICRON_PENDING_REVALIDATION_STATE_CODE}),
+            lambda: self.repository.fail_run(started["run"]["run_id"], error_code=MICRON_PENDING_REVALIDATION_STATE_CODE,
+                error_message="fake", next_due_at_ms=self.clock[0]),
+            lambda: self.repository.recover_incomplete_runs(error_code=MICRON_PENDING_REVALIDATION_STATE_CODE),
+        ):
+            with self.assertRaises(SourceMonitoringStateError):
+                operation()
+        self.assertEqual(self.repository.get_run(started["run"]["run_id"])["status"], "RUNNING")
 
     def test_public_readers_lock_the_store_before_opening_sqlite(self) -> None:
         self.enable()
