@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import json
 import sqlite3
 import tempfile
@@ -9,6 +10,7 @@ from contextlib import ExitStack, closing
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin
+from urllib.error import URLError
 from unittest.mock import patch
 
 from backend.market.ir_releases import OfficialIrReleaseAdapter
@@ -22,6 +24,9 @@ from backend.source_monitoring.registry import SourceAdapterRegistry
 from backend.source_monitoring.settings import SourceMonitoringSettings
 from backend.source_monitoring.state_repository import SourceMonitoringStateRepository
 from backend.source_monitoring.supervisor import SourceMonitoringSupervisor
+from backend.source_monitoring.scheduler import BackoffPolicy, SourceMonitoringScheduler
+from backend.source_monitoring.contracts import MICRON_PENDING_REVALIDATION_STATE_CODE
+from backend.source_monitoring.health import project_adapter_health
 from backend.source_monitoring.trading_impact_rules import TradingImpactRulesV1
 from backend.store import StudioStore
 from tests.test_source_monitoring_sec_baseline import NOW_MS
@@ -99,9 +104,9 @@ class MicronJsonCompositionTests(unittest.TestCase):
     def clock(self):
         return datetime.fromtimestamp(self.clock_ms / 1_000, tz=timezone.utc)
 
-    def adapter(self, transport):
+    def adapter(self, transport, *, monotonic=None):
         return CompanyIrSourceAdapter(
-            adapter=OfficialIrReleaseAdapter(source_format="q4_json", micron_fetch_bytes=transport, clock=self.clock),
+            adapter=OfficialIrReleaseAdapter(source_format="q4_json", micron_fetch_bytes=transport, clock=self.clock, monotonic=monotonic),
             symbols=["US.MU"], per_symbol_limit=8, force=True, receipt_clock=self.clock,
         )
 
@@ -120,6 +125,150 @@ class MicronJsonCompositionTests(unittest.TestCase):
     def items(self):
         with closing(sqlite3.connect(self.path)) as connection:
             return [json.loads(row[0]) for row in connection.execute("SELECT item_json FROM source_inbox_items ORDER BY id")]
+
+    def assert_scheduler_recovers_after_one_transient_fault(self, random_sample):
+        fixture = MicronJsonFixtureTransport()
+        fail = [False]
+        calls = []
+        def transport(url, **controls):
+            calls.append((url, controls["head_only"], fail[0] and controls["head_only"]))
+            if calls[-1][2]:
+                raise URLError("fixture single transient fault")
+            return fixture(url, **controls)
+        adapter = self.adapter(transport, monotonic=lambda: 10000 + (self.clock_ms - NOW_MS) / 1000)
+        supervisor = self.supervisor(adapter)
+        supervisor.settings = replace(supervisor.settings, auto_start=True)
+        supervisor.backoff_policy = BackoffPolicy(random_source=lambda: random_sample)
+        scheduler = SourceMonitoringScheduler(registry=supervisor.registry, repository=self.repository,
+            supervisor=supervisor, clock_ms=lambda: self.clock_ms)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(baseline["status"], "SUCCEEDED")
+        self.assertEqual(len(calls), 31)
+        recovered = False
+        for cycle in range(1, 11):
+            self.clock_ms = scheduler.effective_next_due_at_ms()
+            fail[0] = cycle == 1
+            before = len(calls)
+            scheduled = scheduler.run_one_due(adapter.adapter_key)
+            self.assertEqual(scheduled["run_count"], 1)
+            result = scheduled["results"][0]
+            self.assertEqual(len(calls) - before, 5)
+            state = result["state"]
+            if result["status"] == "SUCCEEDED":
+                self.assertEqual(state["consecutive_failures"], 0)
+                recovered = True
+                break
+            self.assertEqual(result["status"], "DEGRADED")
+            self.assertEqual(state["checkpoint"], baseline["state"]["checkpoint"])
+            self.assertEqual(state["last_success_at_ms"], baseline["state"]["last_success_at_ms"])
+            self.assertEqual(state["consecutive_failures"], 1)
+            if cycle > 1:
+                self.assertEqual(state["last_error_code"], MICRON_PENDING_REVALIDATION_STATE_CODE)
+                self.assertEqual(project_adapter_health(state, now_ms=self.clock_ms)["state"], "degraded")
+                self.assertEqual(state["next_due_at_ms"] - self.clock_ms, adapter.poll_interval_ms)
+        self.assertTrue(recovered, "all-success transport must recover on the same scheduler and client")
+        self.assertEqual(sum(call[2] for call in calls), 4)
+        self.assertEqual(self.items(), [])
+
+    def test_scheduler_retry_recovers_with_minimum_jitter_and_advancing_clocks(self):
+        self.assert_scheduler_recovers_after_one_transient_fault(0.0)
+
+    def test_scheduler_retry_recovers_with_midpoint_jitter_and_advancing_clocks(self):
+        self.assert_scheduler_recovers_after_one_transient_fault(0.5)
+
+    def test_scheduler_retry_recovers_with_maximum_jitter_and_advancing_clocks(self):
+        self.assert_scheduler_recovers_after_one_transient_fault(1.0)
+
+    def test_expired_cache_pending_preserves_zero_failures_and_never_looks_healthy(self):
+        adapter = self.adapter(MicronJsonFixtureTransport(), monotonic=lambda: 10000 + (self.clock_ms - NOW_MS) / 1000)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        self.clock_ms += 3_601_000
+        pending = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(pending["status"], "DEGRADED")
+        self.assertEqual(pending["state"]["consecutive_failures"], 0)
+        self.assertEqual(pending["state"]["last_success_at_ms"], baseline["state"]["last_success_at_ms"])
+        self.assertEqual(pending["state"]["checkpoint"], baseline["state"]["checkpoint"])
+        self.assertEqual(project_adapter_health(pending["state"], now_ms=self.clock_ms)["state"], "degraded")
+
+    def pending_fixture_payload(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        transport.missing_metadata_id = 1
+        supervisor.run_once(adapter.adapter_key)
+        transport.missing_metadata_id = 0
+        payload = adapter._adapter.monitoring_releases_batch(["US.MU"], force=True, require_complete_metadata=False)
+        return adapter, supervisor, baseline, payload
+
+    def test_pending_requires_complete_raw_errors_and_unattempted_valid_progress(self):
+        adapter, _, baseline, original = self.pending_fixture_payload()
+        checkpoint = baseline["state"]["checkpoint"]
+        with patch.object(adapter._adapter, "monitoring_releases_batch", return_value=original):
+            self.assertTrue(adapter.poll(checkpoint, observed_at_ms=self.clock_ms).pending_revalidation_only)
+        for mutation in ("malformed_error", "hidden_actual_error", "unknown_error", "attempted", "bad_progress", "rejected"):
+            payload = copy.deepcopy(original)
+            if mutation == "malformed_error":
+                payload["source_errors"].append(None)
+            elif mutation == "hidden_actual_error":
+                payload["source_errors"].extend([None] * 49 + [{"code": "ACTUAL_FAILURE", "message": "failure", "symbol": "US.OTHER"}])
+            elif mutation == "unknown_error":
+                payload["source_errors"][0]["code"] = "UNKNOWN_FAILURE"
+                payload["rows"][0]["metadata_progress"]["failed"][0]["code"] = "UNKNOWN_FAILURE"
+            elif mutation == "attempted":
+                payload["rows"][0]["metadata_progress"]["requested_ids"].append(1)
+            elif mutation == "bad_progress":
+                payload["rows"][0]["metadata_progress"]["failed"][0]["press_release_id"] = 999
+            else:
+                payload["rows"].append("bad")
+            with self.subTest(mutation=mutation), patch.object(adapter._adapter, "monitoring_releases_batch", return_value=payload):
+                self.assertFalse(adapter.poll(checkpoint, observed_at_ms=self.clock_ms).pending_revalidation_only)
+
+    def test_pending_retry_after_floor_and_next_actual_failure_keep_original_streak(self):
+        adapter, supervisor, _, payload = self.pending_fixture_payload()
+        supervisor.backoff_policy = BackoffPolicy(random_source=lambda: 0.5)
+        with patch.object(adapter._adapter, "monitoring_releases_batch", return_value=payload):
+            pending = adapter.poll(self.repository.get_state(adapter.adapter_key)["checkpoint"], observed_at_ms=self.clock_ms)
+        self.assertTrue(pending.pending_revalidation_only)
+        pending = replace(pending, retry_after_ms=900_000)
+        with patch.object(adapter, "poll", autospec=True, return_value=pending):
+            result = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(result["status"], "DEGRADED")
+        self.assertEqual(result["state"]["consecutive_failures"], 1)
+        self.assertEqual(result["state"]["next_due_at_ms"] - self.clock_ms, 900_000)
+        from backend.source_monitoring.contracts import SourcePollError
+        for code, retry_after, expected_delay in (("MICRON_IR_REVALIDATION_TIMEOUT", 900_000, 900_000),
+                                                  ("UNKNOWN_FAILURE", 0, 120_000)):
+            failure = replace(pending, pending_revalidation_only=False, retry_after_ms=retry_after,
+                              source_errors=(*pending.source_errors, SourcePollError.build(code, "actual", "US.MU")))
+            before = self.repository.get_state(adapter.adapter_key)["consecutive_failures"]
+            with patch.object(adapter, "poll", autospec=True, return_value=failure):
+                result = supervisor.run_once(adapter.adapter_key)
+            self.assertEqual(result["state"]["consecutive_failures"], before + 1)
+            self.assertEqual(result["state"]["next_due_at_ms"] - self.clock_ms, expected_delay)
+            self.assertNotEqual(result["state"]["last_error_code"], MICRON_PENDING_REVALIDATION_STATE_CODE)
+
+    def test_initialization_policy_cannot_authorize_pending_hint_even_with_old_checkpoint(self):
+        adapter, _, baseline, payload = self.pending_fixture_payload()
+        policy = SourceMonitoringSettings(enabled=True, dry_run=False, initial_mode="from_time",
+            from_time="1970-01-01T00:00:00Z").initialization_policy_for(official_source=True)
+        with patch.object(adapter._adapter, "monitoring_releases_batch", return_value=payload):
+            result = adapter._poll(baseline["state"]["checkpoint"], observed_at_ms=self.clock_ms,
+                deadline_monotonic_ms=0, cancel_event=None, etag="", last_modified="", max_items=50,
+                seed_baseline=False, initialization_policy=policy)
+        self.assertTrue(result.source_errors)
+        self.assertEqual(result.initial_history_sha256, "")
+        self.assertFalse(result.pending_revalidation_only)
+
+    def test_pending_dry_run_keeps_persisted_state_unchanged(self):
+        adapter, supervisor, _, payload = self.pending_fixture_payload()
+        before = self.repository.get_state(adapter.adapter_key)
+        supervisor.settings = replace(supervisor.settings, dry_run=True)
+        with patch.object(adapter._adapter, "monitoring_releases_batch", return_value=payload):
+            result = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(result["status"], "DRY_RUN")
+        self.assertEqual(self.repository.get_state(adapter.adapter_key), before)
 
     def test_reused_production_adapter_reduces_duplicate_poll_from_thirty_one_to_five_requests(self):
         transport = MicronJsonFixtureTransport()

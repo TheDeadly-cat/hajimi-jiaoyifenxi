@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .contracts import MAX_NATIVE_INTEGER
+from .contracts import MAX_NATIVE_INTEGER, MICRON_PENDING_REVALIDATION_STATE_CODE
 
 
 SOURCE_ADAPTER_HEALTH_VERSION = "source_adapter_health_v1"
@@ -82,6 +82,9 @@ def project_adapter_health(
         health_state = "failed"
     elif projected_running:
         health_state = "running"
+    elif (state_map.get("adapter_key") == "company_ir"
+          and state_map.get("last_error_code") == MICRON_PENDING_REVALIDATION_STATE_CODE):
+        health_state = "degraded"
     elif consecutive_failures >= 5:
         health_state = "failed"
     elif consecutive_failures > 0 and next_due_at_ms > safe_now_ms:

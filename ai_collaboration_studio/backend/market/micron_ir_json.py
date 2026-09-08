@@ -656,7 +656,8 @@ class MicronIrJsonClient:
             entry = existing.get(identity)
             failure_code = self._attempts.get(identity, {}).get("code")
             if failure_code:
-                errors[identity] = (failure_code, "previously failed metadata awaits its next bounded retry")
+                errors[identity] = ("MICRON_IR_METADATA_RETRY_PENDING",
+                                    f"previously failed metadata awaits its next bounded retry; previous_code={failure_code}")
             elif (entry is None or entry["verified_at_ms"] > now_ms or entry["verified_monotonic_ms"] > monotonic_ms
                   or max(now_ms - entry["verified_at_ms"], monotonic_ms - entry["verified_monotonic_ms"]) > MICRON_METADATA_MAX_AGE_MS):
                 errors[identity] = ("MICRON_IR_METADATA_CACHE_EXPIRED", "metadata is outside its bounded verification age")

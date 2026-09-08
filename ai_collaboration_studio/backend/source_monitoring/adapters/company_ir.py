@@ -42,6 +42,7 @@ from ..contracts import (
     SourceMonitoringContractError,
     SourcePollError,
     canonical_sha256,
+    is_micron_pending_revalidation_only,
     normalize_checkpoint,
 )
 from .base import (
@@ -1090,6 +1091,22 @@ class CompanyIrSourceAdapter:
         }
         if errors or rejected_count:
             next_checkpoint = started_checkpoint
+        # Only the sealed reader's validated partial progress can authorize
+        # pending scheduling. An attempted failed identity is never pending.
+        pending_revalidation_only = bool(
+            admitted_partial_metadata and not json_scope_failed and initialization_policy is None
+            and type(payload.get("source_errors")) is list
+            and len(payload["source_errors"]) == len(errors)
+            and all(type(error) is dict and error.get("symbol") == "US.MU"
+                    for error in payload["source_errors"])
+            and is_micron_pending_revalidation_only(
+                self.adapter_key, errors, rejected_count=rejected_count,
+                started_checkpoint=started_checkpoint, next_checkpoint=next_checkpoint,
+            )
+            and not set(micron_rows[0]["metadata_progress"]["requested_ids"]).intersection(
+                failure["press_release_id"] for failure in micron_rows[0]["metadata_progress"]["failed"]
+            )
+        )
         return AdapterPollResult.build(
             adapter_key=self.adapter_key,
             started_checkpoint=started_checkpoint,
@@ -1103,6 +1120,7 @@ class CompanyIrSourceAdapter:
             duplicate_count=duplicate_count,
             rejected_count=rejected_count,
             initial_history_sha256=initial_history_sha256,
+            pending_revalidation_only=pending_revalidation_only,
         )
 
 

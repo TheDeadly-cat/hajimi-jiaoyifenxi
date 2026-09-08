@@ -27,6 +27,10 @@ Runtime 构造本身零 I/O，并且不会创建或启用 adapter state。`offic
 
 先绑定 loopback 端口、再恢复遗留任务，是现有数据库单实例合同的一部分。Coordinator 对两个 pipeline 的 effective due 做确定性全局排序；各 pipeline 的 checkpoint、持久化 due 与进程内 backoff 不合并。单个 adapter 失败只使 Runtime `degraded`，另一个 pipeline 仍可在下一串行循环运行；worker 顶层致命错误只留下有界错误码并投影为 `failed`。每次 poll 都获得绝对单调时钟 deadline 和共享 cancel event；官方默认 HTTPS 与 managed Futu Broker 都消费同一控制。
 
+Micron 已初始化后的旧页头轮转，区分本轮实际失败和仅等待复核。只有完整校验过的 Micron partial progress、全部为明确 pending 错误、没有本轮失败的请求或 rejected item 时，运行仍记为 `DEGRADED`，checkpoint 与 last_success 保持不动；已有 consecutive_failures 不增加也不清零，下一次按正常间隔且尊重 retry_after 下限执行。真实连接失败、超时、未知或混合错误继续原指数退避；完整成功才清零。旧页头仍每轮最多复核 4 个，失效或此前失败的元数据不能作为已验证结果使用。
+
+该调度提示只在进程内部传递，`source_errors` 仍是 code/message/scope 三字段，数据库 schema 不变。严格分类通过后，repository 才会在现有 last_error_code 字段生成 `MICRON_IR_METADATA_REVALIDATION_PENDING`，新版健康投影据此显示“降级／等待复核”。回退到旧 backend 仍可读取表和错误记录，但旧算法及健康投影不理解这个标记，可能把零失败计数误投影为 healthy 或继续旧退避；不能将 reader 格式兼容解释为调度与健康语义兼容。不要通过删除错误或修改 checkpoint 伪造回退后的健康结果。
+
 正常关闭顺序固定为：
 
 ```text

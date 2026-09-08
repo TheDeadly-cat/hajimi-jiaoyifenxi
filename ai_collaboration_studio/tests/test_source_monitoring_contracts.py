@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import copy
+from dataclasses import replace
 import math
 import unittest
 
@@ -12,6 +14,7 @@ from backend.source_monitoring.contracts import (
     AdapterPollResult,
     SourceMonitoringContractError,
     SourcePollError,
+    MICRON_PENDING_REVALIDATION_STATE_CODE,
     canonical_json,
     canonical_sha256,
     normalize_adapter_key,
@@ -153,6 +156,33 @@ class CheckpointContractTests(unittest.TestCase):
 
 
 class AdapterPollResultContractTests(unittest.TestCase):
+    def test_pending_hint_is_strict_internal_context_and_not_wire(self):
+        checkpoint = {"cursor": "unchanged"}
+        pending = SourcePollError.build("MICRON_IR_METADATA_RETRY_PENDING", "awaiting verification", "US.MU")
+        values = dict(adapter_key="company_ir", started_checkpoint=checkpoint, next_checkpoint=checkpoint,
+                      source_errors=[pending], observed_items=[], pending_revalidation_only=True)
+        result = _result(**values)
+        self.assertTrue(result.pending_revalidation_only)
+        self.assertTrue(copy.deepcopy(result).pending_revalidation_only)
+        self.assertTrue(replace(result, retry_after_ms=900_000).pending_revalidation_only)
+        self.assertNotIn("pending_revalidation_only", result.to_dict())
+        self.assertEqual(set(result.to_dict()["source_errors"][0]), {"code", "message", "scope"})
+        self.assertFalse(_result(**{**values, "pending_revalidation_only": False}).pending_revalidation_only)
+        for changes in (
+            {"pending_revalidation_only": 1}, {"pending_revalidation_only": "true"},
+            {"adapter_key": "sec_filings"}, {"source_errors": []},
+            {"source_errors": [SourcePollError.build(pending.code, "awaiting", "US.NVDA")]},
+            {"source_errors": [pending, SourcePollError.build("MICRON_IR_REVALIDATION_TIMEOUT", "timeout", "US.MU")]},
+            {"source_errors": [SourcePollError.build("MICRON_IR_UNKNOWN", "unknown", "US.MU")]},
+            {"rejected_count": 1}, {"market_calls_performed": 1},
+            {"started_checkpoint": {}, "next_checkpoint": {}}, {"next_checkpoint": {"cursor": "changed"}},
+            {"started_checkpoint": {"cursor": 1}, "next_checkpoint": {"cursor": True}},
+            {"started_checkpoint": {"cursor": 1}, "next_checkpoint": {"cursor": 1.0}},
+            {"initial_history_sha256": "1" * 64},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(SourceMonitoringContractError):
+                _result(**{**values, **changes})
+
     def assert_contract_code(self, expected: str, callback) -> None:
         with self.assertRaises(SourceMonitoringContractError) as captured:
             callback()
@@ -287,6 +317,18 @@ class AdapterPollResultContractTests(unittest.TestCase):
 
 
 class SourceMonitoringHealthContractTests(unittest.TestCase):
+    def test_validated_pending_health_remains_degraded_without_changing_failure_count(self):
+        for count in (0, 1, 5):
+            state = self.state("company_ir", consecutive_failures=count, last_success_at_ms=80,
+                               next_due_at_ms=200, last_error_code=MICRON_PENDING_REVALIDATION_STATE_CODE)
+            self.assertEqual(project_adapter_health(state, now_ms=100)["state"], "degraded")
+            self.assertEqual(project_adapter_health(state, now_ms=100)["consecutive_failures"], count)
+            self.assertEqual(project_adapter_health(state, now_ms=100, running=True)["state"], "running")
+            self.assertEqual(project_adapter_health({**state, "enabled": False}, now_ms=100)["state"], "disabled")
+        self.assertEqual(project_adapter_health({**state, "next_due_at_ms": "bad"}, now_ms=100)["state"], "failed")
+        self.assertEqual(project_adapter_health({**state, "adapter_key": "other"}, now_ms=100)["state"], "failed")
+        self.assertEqual(project_adapter_health({**state, "last_error_code": "MICRON_IR_METADATA_REQUEST_FAILED"}, now_ms=100)["state"], "failed")
+
     @staticmethod
     def state(adapter_key: str, **overrides) -> dict[str, object]:
         value: dict[str, object] = {

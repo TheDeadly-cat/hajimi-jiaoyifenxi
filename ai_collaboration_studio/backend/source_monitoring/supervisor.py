@@ -936,11 +936,16 @@ class SourceMonitoringSupervisor:
             degraded = bool(candidate.source_errors) or candidate.rejected_count > 0
             terminal_status = RUN_STATUS_DEGRADED if degraded else RUN_STATUS_SUCCEEDED
             if degraded:
-                next_due_at_ms = self.backoff_policy.failure_due_at_ms(
-                    self._now_ms(),
-                    started["state"]["consecutive_failures"] + 1,
-                    retry_after_ms=candidate.retry_after_ms,
-                )
+                if candidate.pending_revalidation_only:
+                    next_due_at_ms = self.backoff_policy.success_due_at_ms(
+                        self._now_ms(), max(metadata.poll_interval_ms, candidate.retry_after_ms),
+                    )
+                else:
+                    next_due_at_ms = self.backoff_policy.failure_due_at_ms(
+                        self._now_ms(),
+                        started["state"]["consecutive_failures"] + 1,
+                        retry_after_ms=candidate.retry_after_ms,
+                    )
                 if candidate.source_errors:
                     error_code = candidate.source_errors[0].code
                     error_message = candidate.source_errors[0].message
@@ -966,6 +971,7 @@ class SourceMonitoringSupervisor:
                 rejected_count=candidate.rejected_count,
                 next_due_at_ms=next_due_at_ms,
                 source_errors=list(candidate.source_errors),
+                pending_revalidation_only=candidate.pending_revalidation_only,
                 receipt_id=receipt_id,
                 source_channel=metadata.source_channel,
                 etag=candidate.etag,
