@@ -1476,7 +1476,7 @@ class FutuUsMarketAdapter:
         symbols: tuple[str, ...] | list[str] = STORAGE_SYMBOLS,
     ) -> dict[str, Any]:
         requested = self._normalize_symbols(symbols)
-        first_request_monotonic = self._monotonic_now()
+        self._monotonic_now()
         captured_at = self._clock().astimezone(timezone.utc)
         result: dict[str, Any] = {
             "ok": False,
@@ -1515,11 +1515,9 @@ class FutuUsMarketAdapter:
                     "message": "当前 Futu SDK 不提供主营构成只读接口",
                 })
                 return result
-            for index, symbol in enumerate(requested):
+            for symbol in requested:
                 try:
-                    self._reserve_revenue_request(
-                        now_monotonic=(first_request_monotonic if index == 0 else None)
-                    )
+                    self._reserve_revenue_request()
                     ret, data = getter(symbol)
                     if ret != getattr(sdk, "RET_OK", 0):
                         result["source_errors"].append({
@@ -1565,10 +1563,9 @@ class FutuUsMarketAdapter:
         result["ok"] = bool(result["rows"])
         return result
 
-    def _reserve_revenue_request(self, *, now_monotonic: float | None = None) -> None:
-        if now_monotonic is None:
-            now_monotonic = self._monotonic_now()
+    def _reserve_revenue_request(self) -> None:
         with self._lock:
+            now_monotonic = self._monotonic_now()
             self._revenue_request_times = [
                 moment for moment in self._revenue_request_times
                 if moment > now_monotonic - 30.0

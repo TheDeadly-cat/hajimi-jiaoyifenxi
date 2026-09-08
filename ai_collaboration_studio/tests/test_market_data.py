@@ -576,6 +576,40 @@ class FutuReadOnlyAdapterTests(unittest.TestCase):
         self.assertEqual(ticks["calls"], 32)
         self.assertEqual(adapter._revenue_request_times, [130.0])
 
+    def test_revenue_rate_limit_starts_when_slow_context_is_ready(self) -> None:
+        ticks = {"value": 100.0}
+
+        class SlowFirstContextSdk(FakeFutuSdk):
+            def OpenQuoteContext(self, **kwargs) -> FakeQuoteContext:
+                if self.open_calls == 0:
+                    ticks["value"] += 31.0
+                return super().OpenQuoteContext(**kwargs)
+
+        sdk = SlowFirstContextSdk()
+        adapter = FutuUsMarketAdapter(
+            sdk_module=sdk,
+            socket_probe=lambda _host, _port: True,
+            clock=lambda: FIXED_NOW,
+            monotonic_clock=lambda: ticks["value"],
+        )
+
+        for _index in range(30):
+            self.assertTrue(adapter.revenue_breakdown_batch(["US.MU"])["ok"])
+        blocked = adapter.revenue_breakdown_batch(["US.MU"])
+
+        self.assertEqual(len(sdk.revenue_breakdown_calls), 30)
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["source_errors"][0]["code"], "FUTU_REVENUE_BREAKDOWN_ERROR")
+        self.assertEqual(sdk.close_calls, sdk.open_calls)
+
+        ticks["value"] = 160.999
+        self.assertFalse(adapter.revenue_breakdown_batch(["US.MU"])["ok"])
+        self.assertEqual(len(sdk.revenue_breakdown_calls), 30)
+        ticks["value"] = 161.0
+        self.assertTrue(adapter.revenue_breakdown_batch(["US.MU"])["ok"])
+        self.assertEqual(len(sdk.revenue_breakdown_calls), 31)
+        self.assertEqual(sdk.close_calls, sdk.open_calls)
+
     def test_invalid_monotonic_values_fail_before_any_opend_call(self) -> None:
         class FloatSubclass(float):
             pass
