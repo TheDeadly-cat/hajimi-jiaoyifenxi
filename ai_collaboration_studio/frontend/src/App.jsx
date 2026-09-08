@@ -565,6 +565,8 @@ export default function App() {
 
   useEffect(() => {
     const feedState = sourceInboxNotificationFeedRef.current;
+    feedState.baselineReady = false;
+    feedState.cursor = "";
     let disposed = false;
 
     const pollSourceInbox = async () => {
