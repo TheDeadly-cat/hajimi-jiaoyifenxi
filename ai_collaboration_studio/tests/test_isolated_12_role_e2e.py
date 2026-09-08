@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.run_isolated_12_role_e2e import (
     CallLedger,
@@ -267,11 +268,18 @@ class IsolatedTwelveRoleE2ETests(unittest.TestCase):
 
     def test_dry_run_covers_all_gates_without_external_calls_or_source_writes(self) -> None:
         before = sha256(self.source_db)
+        report_file = Path(self.temp_dir.name) / "full-dry-run-report.json"
 
-        completed, report = self.run_cli("--dry-run")
+        completed, report = self.run_cli(
+            "--dry-run",
+            "--report-file",
+            str(report_file),
+        )
 
         self.assertEqual(completed.returncode, 0)
         self.assertTrue(report["ok"])
+        self.assertTrue(report_file.is_file())
+        self.assertEqual(json.loads(report_file.read_text(encoding="utf-8")), report)
         self.assertEqual(sha256(self.source_db), before)
         self.assertTrue(report["source_database"]["query_only_asserted"])
         self.assertEqual(report["source_database"]["read_connection_total_changes"], 0)
@@ -516,26 +524,37 @@ class IsolatedTwelveRoleE2ETests(unittest.TestCase):
 
     def test_report_file_is_exclusive_and_matches_stdout(self) -> None:
         report_file = Path(self.temp_dir.name) / "safe-report.json"
+        before = sha256(self.source_db)
 
+        # Successful full-run report parity is covered with the existing gate
+        # test above. Exercise output-file handling here without another round.
         completed, report = self.run_cli(
-            "--dry-run",
             "--report-file",
             str(report_file),
         )
 
-        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.returncode, 2)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["mode"], "none")
+        self.assertEqual(report["error"]["code"], "MODE_REQUIRED")
         self.assertTrue(report_file.is_file())
         self.assertEqual(json.loads(report_file.read_text(encoding="utf-8")), report)
+        self.assertEqual(sha256(self.source_db), before)
 
-        completed_again, blocked = self.run_cli(
-            "--dry-run",
-            "--report-file",
-            str(report_file),
-        )
+        missing_source = Path(self.temp_dir.name) / "must-not-be-opened.sqlite3"
+        # Existing report paths must be rejected before the source DB is read.
+        with patch.object(self, "source_db", missing_source):
+            completed_again, blocked = self.run_cli(
+                "--dry-run",
+                "--report-file",
+                str(report_file),
+            )
         self.assertEqual(completed_again.returncode, 2)
         self.assertFalse(blocked["ok"])
         self.assertEqual(blocked["error"]["code"], "REPORT_FILE_INVALID")
         self.assertEqual(json.loads(report_file.read_text(encoding="utf-8")), report)
+        self.assertEqual(sha256(self.source_db), before)
+        self.assertFalse(missing_source.exists())
 
     def test_call_ledger_blocks_the_twenty_ninth_call_before_reservation(self) -> None:
         ledger = CallLedger(mode="dry-run")

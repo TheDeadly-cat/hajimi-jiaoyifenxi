@@ -26,7 +26,7 @@ from backend.source_inbox_service import SourceInboxService
 from backend.source_monitoring.adapters.company_ir import CompanyIrSourceAdapter
 from backend.source_monitoring.adapters.sec_filings import SecFilingsSourceAdapter
 from backend.source_monitoring.registry import SourceAdapterRegistry
-from backend.source_monitoring.runtime import SourceMonitoringRuntime
+from backend.source_monitoring.runtime import DEFAULT_RUNTIME_POLL_TIMEOUT_MS, SourceMonitoringRuntime
 from backend.source_monitoring.scheduler import SourceMonitoringScheduler
 from backend.source_monitoring.settings import SourceMonitoringSettings
 from backend.source_monitoring.state_repository import SourceMonitoringStateRepository
@@ -121,19 +121,30 @@ class OfficialDeliveryCompositionTests(unittest.TestCase):
                                              supervisor=supervisor, clock_ms=lambda: self.clock)
         observations = []
         def observe(receipt):
-            observations.append(receipt)
+            stored_run = repository.get_run(receipt["run_id"])
+            self.assertIsNotNone(stored_run, receipt)
+            observations.append({
+                **receipt,
+                "error_code": stored_run["error_code"],
+                "source_errors": stored_run["source_errors"],
+                "duration_ms": stored_run["duration_ms"],
+                "poll_timeout_ms": runtime.poll_timeout_ms,
+            })
             if len(observations) == 2:
                 runtime.request_stop()
         runtime = SourceMonitoringRuntime(scheduler=scheduler, settings=settings,
                                           clock_ms=lambda: self.clock, cycle_observer=observe,
-                                          heartbeat_interval_ms=1, join_timeout_ms=2_000)
+                                          heartbeat_interval_ms=1,
+                                          join_timeout_ms=DEFAULT_RUNTIME_POLL_TIMEOUT_MS)
         return runtime, repository, observations
 
     def poll_both(self, *, enable=False, after_import_hook=None):
         runtime, repository, observations = self.build_runtime(enable=enable, after_import_hook=after_import_hook)
         try:
-            runtime.start()
-            self.assertTrue(runtime.wait_until_stopped(20), "two source cycles did not finish")
+            self.assertTrue(runtime.start(), runtime.snapshot())
+            wait_seconds = (2 * runtime.poll_timeout_ms + runtime.join_timeout_ms) / 1_000
+            self.assertTrue(runtime.wait_until_stopped(wait_seconds),
+                            f"two source cycles did not finish: {runtime.snapshot()}, {observations}")
             self.assertEqual(len(observations), 2)
             self.assertEqual({row["adapter_key"] for row in observations}, {"sec_filings", "company_ir"})
         finally:
@@ -147,6 +158,27 @@ class OfficialDeliveryCompositionTests(unittest.TestCase):
     def test_micron_json_event_restart_notification_and_user_draft_have_zero_model_calls(self) -> None:
         self.micron = MicronJsonFixtureTransport()
         self.assert_official_event_restart_notification_and_user_draft()
+
+    def test_composition_accepts_sec_fixture_delay_below_production_poll_budget(self) -> None:
+        self.micron = MicronJsonFixtureTransport()
+        original_fetcher = self.sec
+
+        def delayed_sec_fixture(url, user_agent):
+            if "submissions" in url:
+                # Exceeds this test's former accidental 2s poll deadline, while
+                # remaining well within the normal production poll budget.
+                threading.Event().wait(2.1)
+            return original_fetcher(url, user_agent)
+
+        self.sec = delayed_sec_fixture
+        before = self.counts()
+        repository, observations = self.poll_both(enable=True)
+        self.assertTrue(all(row["status"] == "SUCCEEDED" for row in observations), observations)
+        self.assertEqual(len(repository.get_state("sec_filings")["checkpoint"]["seen_accessions"]), 13)
+        self.assertEqual(len(repository.get_state("company_ir")["checkpoint"]["projections"]), 30)
+        self.assertEqual(self.counts(), before)
+        for spy in self.provider_spies:
+            spy.assert_not_called()
 
     def assert_official_event_restart_notification_and_user_draft(self) -> None:
         before = self.counts()
