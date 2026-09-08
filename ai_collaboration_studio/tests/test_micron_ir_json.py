@@ -545,6 +545,129 @@ class MicronIrJsonTests(unittest.TestCase):
                                      thread.name == "official-source-body-control"
                                      for thread in threading.enumerate()))
 
+    def test_cold_read_refills_free_workers_before_a_slow_head_finishes(self):
+        for require_complete in (True, False):
+            with self.subTest(require_complete=require_complete):
+                rows = [record(identity) for identity in range(1, 31)]
+                by_url = {}
+                for row in rows:
+                    row["LinkToDetailPage"] = f"/news/press-release/2026/rolling-{row['PressReleaseId']}/default.aspx"
+                    by_url[HOST + row["LinkToDetailPage"]] = row
+                first_four = threading.Barrier(4)
+                first_four_entered = threading.Event()
+                release_slow = threading.Event()
+                later_head_started = threading.Event()
+                cancel_event = threading.Event()
+                lock = threading.Lock()
+                calls, active, peak = [], [0], [0]
+                deadline = int(time.monotonic() * 1000) + 20_000
+
+                def fetch(url, **controls):
+                    with lock:
+                        calls.append((url, controls["deadline_monotonic_ms"]))
+                    if not controls["head_only"]:
+                        return listing(rows)
+                    row = by_url[url]
+                    identity = row["PressReleaseId"]
+                    with lock:
+                        active[0] += 1
+                        peak[0] = max(peak[0], active[0])
+                    try:
+                        if identity <= 4:
+                            first_four.wait(timeout=3)
+                            first_four_entered.set()
+                        if identity == 1:
+                            if not release_slow.wait(10):
+                                raise AssertionError("test controller did not release the slow head")
+                        elif identity == 5:
+                            later_head_started.set()
+                        return head(metadata(row))
+                    finally:
+                        with lock:
+                            active[0] -= 1
+
+                client = MicronIrJsonClient(fetch_bytes=fetch, clock=lambda: NOW)
+                results, failures = [], []
+
+                def read():
+                    try:
+                        results.append(client.read_recent(require_complete=require_complete,
+                                                          deadline_monotonic_ms=deadline,
+                                                          cancel_event=cancel_event))
+                    except BaseException as exc:
+                        failures.append(exc)
+
+                worker = threading.Thread(target=read, name="micron-cold-refill-test")
+                worker.start()
+                try:
+                    self.assertTrue(first_four_entered.wait(3))
+                    refilled_while_slow = later_head_started.wait(2)
+                finally:
+                    release_slow.set()
+                    worker.join(5)
+                    if worker.is_alive():
+                        cancel_event.set()
+                        worker.join(5)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(failures, [])
+                self.assertEqual(len(results), 1)
+                self.assertIs(results[0]["complete"], True)
+                self.assertEqual([row["q4_press_release_id"] for row in results[0]["releases"]], list(range(1, 31)))
+                self.assertEqual(len(calls), 31)
+                self.assertEqual({control for _, control in calls}, {deadline})
+                self.assertEqual(peak[0], 4)
+                self.assertEqual(active[0], 0)
+                self.assertEqual(len(client._metadata_cache), 30)
+                self.assertTrue(all(attempt["count"] == 1 for attempt in client._attempts.values()))
+                self.assertFalse(any(thread.name.startswith("micron-ir-head") for thread in threading.enumerate()))
+                self.assertTrue(refilled_while_slow, "an available worker waited for an unrelated slow head")
+
+    def test_cancellation_after_refill_stops_later_heads_and_joins_active_workers(self):
+        for require_complete in (True, False):
+            with self.subTest(require_complete=require_complete):
+                rows = [record(identity) for identity in range(1, 9)]
+                by_url = {}
+                for row in rows:
+                    row["LinkToDetailPage"] = f"/news/press-release/2026/refill-cancel-{row['PressReleaseId']}/default.aspx"
+                    by_url[HOST + row["LinkToDetailPage"]] = row
+                first_four = threading.Barrier(4)
+                cancelled = threading.Event()
+                lock = threading.Lock()
+                calls, active, peak = [], [0], [0]
+
+                def fetch(url, **controls):
+                    with lock:
+                        calls.append(url)
+                    if not controls["head_only"]:
+                        return listing(rows)
+                    row = by_url[url]
+                    identity = row["PressReleaseId"]
+                    with lock:
+                        active[0] += 1
+                        peak[0] = max(peak[0], active[0])
+                    try:
+                        if identity <= 4:
+                            first_four.wait(timeout=3)
+                        if identity == 5:
+                            cancelled.set()
+                        elif identity != 2 and not cancelled.wait(3):
+                            raise AssertionError("the free worker was not refilled before cancellation")
+                        return head(metadata(row))
+                    finally:
+                        with lock:
+                            active[0] -= 1
+
+                client = MicronIrJsonClient(fetch_bytes=fetch, clock=lambda: NOW)
+                with self.assertRaises(SourcePollCancelled):
+                    client.read_recent(require_complete=require_complete, cancel_event=cancelled,
+                                       deadline_monotonic_ms=int(time.monotonic() * 1000) + 20_000)
+                self.assertTrue(cancelled.is_set())
+                self.assertEqual(len(calls), 6)
+                self.assertEqual({by_url[url]["PressReleaseId"] for url in calls[1:]}, {1, 2, 3, 4, 5})
+                self.assertEqual(peak[0], 4)
+                self.assertEqual(active[0], 0)
+                self.assertFalse(any(thread.name.startswith("micron-ir-head") for thread in threading.enumerate()))
+
 
 class MicronIrIncrementalTests(unittest.TestCase):
     @staticmethod

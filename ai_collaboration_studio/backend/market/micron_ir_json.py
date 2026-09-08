@@ -16,7 +16,7 @@ import re
 import threading
 import time
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any, Callable
@@ -612,36 +612,54 @@ class MicronIrJsonClient:
                     revalidation_deadline = int(time.monotonic() * 1000) + MICRON_METADATA_REVALIDATION_TIMEOUT_MS
                     if controls["deadline_monotonic_ms"]:
                         revalidation_deadline = min(revalidation_deadline, controls["deadline_monotonic_ms"] - MICRON_METADATA_COMMIT_RESERVE_MS)
-                for start in range(0, len(group), self._max_workers):
-                    ensure_source_poll_active(**controls)
-                    batch = group[start:start + self._max_workers]
-                    if old_revalidation and controls["deadline_monotonic_ms"] and (
-                        controls["deadline_monotonic_ms"] - int(time.monotonic() * 1000)
-                        <= MICRON_METADATA_COMMIT_RESERVE_MS + 25
-                    ):
-                        for row in batch:
-                            errors[row["q4_press_release_id"]] = ("MICRON_IR_REVALIDATION_DEFERRED", "old metadata revalidation deferred to retain the poll commit reserve")
-                        continue
-                    futures = []
-                    for row in batch:
-                        identity = row["q4_press_release_id"]
-                        previous_count = self._attempts.get(identity, {}).get("count", 0)
-                        self._attempts[identity] = {"count": min(_MAX_EXACT_JSON_INTEGER, previous_count + 1), "poll": self._poll_number, "code": ""}
-                        futures.append((row, executor.submit(read_row, row, revalidation=old_revalidation)))
-                    for row, future in futures:
-                        identity = row["q4_press_release_id"]
-                        try:
-                            value, receipt = future.result()
-                            self._remember(row, value, receipt)
-                            projected[identity] = value
-                        except (SourcePollCancelled, SourcePollDeadlineExceeded):
-                            raise
-                        except Exception as exc:
-                            code = exc.code if type(exc) is MicronIrJsonError else "MICRON_IR_METADATA_REQUEST_FAILED"
-                            self._attempts[identity]["code"] = code
-                            if require_complete:
-                                raise
-                            errors[identity] = (code, str(exc)[:200])
+                next_index = 0
+                pending = {}
+                try:
+                    while next_index < len(group) or pending:
+                        ensure_source_poll_active(**controls)
+                        ready = [future for future in pending if future.done()]
+                        if ready:
+                            # Drain completed failures before authorizing more work.
+                            for future in sorted(ready, key=lambda item: pending[item][0]):
+                                _, row = pending.pop(future)
+                                identity = row["q4_press_release_id"]
+                                try:
+                                    value, receipt = future.result()
+                                    self._remember(row, value, receipt)
+                                    projected[identity] = value
+                                except (SourcePollCancelled, SourcePollDeadlineExceeded):
+                                    raise
+                                except Exception as exc:
+                                    code = exc.code if type(exc) is MicronIrJsonError else "MICRON_IR_METADATA_REQUEST_FAILED"
+                                    self._attempts[identity]["code"] = code
+                                    if require_complete:
+                                        raise
+                                    errors[identity] = (code, str(exc)[:200])
+                            continue
+                        while next_index < len(group) and len(pending) < self._max_workers:
+                            ensure_source_poll_active(**controls)
+                            if any(future.done() for future in pending):
+                                break
+                            if old_revalidation and controls["deadline_monotonic_ms"] and (
+                                controls["deadline_monotonic_ms"] - int(time.monotonic() * 1000)
+                                <= MICRON_METADATA_COMMIT_RESERVE_MS + 25
+                            ):
+                                for row in group[next_index:]:
+                                    errors[row["q4_press_release_id"]] = ("MICRON_IR_REVALIDATION_DEFERRED", "old metadata revalidation deferred to retain the poll commit reserve")
+                                next_index = len(group)
+                                break
+                            row = group[next_index]
+                            identity = row["q4_press_release_id"]
+                            previous_count = self._attempts.get(identity, {}).get("count", 0)
+                            self._attempts[identity] = {"count": min(_MAX_EXACT_JSON_INTEGER, previous_count + 1), "poll": self._poll_number, "code": ""}
+                            future = executor.submit(read_row, row, revalidation=old_revalidation)
+                            pending[future] = (next_index, row)
+                            next_index += 1
+                        if pending:
+                            wait(pending, timeout=0.025, return_when=FIRST_COMPLETED)
+                finally:
+                    for future in pending:
+                        future.cancel()
         ensure_source_poll_active(**controls)
         if require_complete:
             return {"releases": [projected[row["q4_press_release_id"]] for row in rows], "complete": True}
