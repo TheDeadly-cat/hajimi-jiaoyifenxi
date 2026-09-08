@@ -24,6 +24,9 @@ test("icon rail binds list identity to sections and keeps activation explicit", 
   assert.match(source, /onFocus=\{preload\}[\s\S]*onPointerDown=\{preload\}[\s\S]*onPointerEnter=\{preload\}/);
   assert.match(source, /sourceInboxUnreadCount = 0/);
   assert.match(source, /aria-label=\{accessibleLabel\}/);
+  // 标签变为可见元素后，仍由 aria-label 提供唯一可访问名称，
+  // 可见文本与 aria-label 不会重复朗读。
+  assert.match(source, /<Icon size=\{20\}[\s\S]*aria-hidden="true"[\s\S]*focusable="false" \/>/);
   assert.match(source, /className="source-inbox-unread-badge" aria-hidden="true"/);
   assert.doesNotMatch(source, /source-inbox-unread-badge[^>]*aria-live/);
 });
@@ -45,14 +48,20 @@ test("rail focus wraps across vertical and compact horizontal orientations", () 
 test("rail visual focus feedback remains restrained under reduced motion", () => {
   assert.match(styles, /\.icon-rail\s*\{[\s\S]*z-index:\s*40;[\s\S]*overflow:\s*visible;/);
   assert.match(styles, /\.icon-rail \.rail-actions::before\s*\{[\s\S]*linear-gradient/);
+  // 中文标签必须直接可见：图标只作辅助，用户不应靠悬停提示猜入口。
+  // 原先承载标签的 .rail-button::after 悬停 tooltip 已随标签可见化移除，
+  // 这里改为锁定可见标签本身，并确认 tooltip 不再回归。
+  assert.match(source, /<span className="rail-button-label">\{label\}<\/span>/);
   assert.match(
     styles,
-    /\.icon-rail \.rail-button::after\s*\{[\s\S]*z-index:\s*90;[\s\S]*pointer-events:\s*none;/,
+    /\.icon-rail \.rail-button-label\s*\{[\s\S]*font-size:\s*14px;[\s\S]*text-align:\s*center;/,
   );
   assert.match(
     styles,
-    /\.rail-actions:has\(\.rail-button:focus-visible\)[\s\S]*\.rail-button:hover:not\(:focus-visible\)::after\s*\{[\s\S]*opacity:\s*0;/,
+    /\.icon-rail \.rail-button\s*\{[\s\S]*grid-template-rows:\s*auto auto;[\s\S]*min-height:\s*58px;/,
   );
+  assert.doesNotMatch(styles, /\.rail-button::after/);
+  assert.doesNotMatch(styles, /content:\s*attr\(data-label\)/);
   assert.match(styles, /\.rail-button:focus-visible svg\s*\{\s*transform:\s*scale\(1\.06\);/);
   assert.match(styles, /\.rail-button\.active svg\s*\{\s*filter:\s*drop-shadow/);
   assert.match(

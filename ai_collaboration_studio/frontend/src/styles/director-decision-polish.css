@@ -81,16 +81,16 @@
   min-width: 0;
   overflow: hidden;
   color: var(--trace-ink);
-  font-size: 11px;
-  font-weight: 760;
-  letter-spacing: -0.01em;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .director-trace-event .director-trace-head time {
   color: #8290a0;
-  font-size: 8px;
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
 }
@@ -107,8 +107,8 @@
 
 .director-trace-event .director-trace-focus span {
   color: var(--trace-accent);
-  font-size: 8px;
-  font-weight: 780;
+  font-size: 13px;
+  font-weight: 700;
   letter-spacing: 0.1em;
   white-space: nowrap;
 }
@@ -116,8 +116,8 @@
 .director-trace-event .director-trace-focus strong {
   min-width: 0;
   color: #31475f;
-  font-size: 10px;
-  font-weight: 650;
+  font-size: 14px;
+  font-weight: 600;
   overflow-wrap: anywhere;
 }
 
@@ -136,7 +136,7 @@
   align-items: center;
   border-style: dashed;
   color: #718094;
-  font-size: 9px;
+  font-size: 13px;
 }
 
 .director-trace-event .director-moderator-head {
@@ -145,14 +145,14 @@
   align-items: center;
   min-width: 0;
   color: #566a80;
-  font-size: 8px;
+  font-size: 13px;
 }
 
 .director-trace-event .director-moderator-head strong {
   min-width: 0;
   overflow: hidden;
   color: #263d56;
-  font-size: 9px;
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -164,7 +164,7 @@
   padding: 2px 5px;
   background: rgba(var(--trace-accent-rgb), 0.055);
   color: #5e7187;
-  font-size: 7px;
+  font-size: 13px;
   font-style: normal;
   font-weight: 700;
   white-space: nowrap;
@@ -174,7 +174,7 @@
   margin: 5px 0 0;
   overflow: hidden;
   color: #6c7d90;
-  font-size: 8px;
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -186,7 +186,7 @@
   min-width: 0;
   margin-top: 5px;
   color: #748397;
-  font-size: 8px;
+  font-size: 13px;
 }
 
 .director-trace-event .director-moderator-route code {
@@ -202,7 +202,7 @@
 .director-trace-event .director-moderator-route small,
 .director-trace-event .director-moderator-notice {
   color: #78889a;
-  font-size: 7px;
+  font-size: 13px;
 }
 
 .director-trace-event .director-trace-details {
@@ -216,7 +216,7 @@
   border-radius: 6px;
   color: #50667d;
   cursor: pointer;
-  font-size: 8px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.025em;
 }
@@ -233,7 +233,7 @@
 .director-trace-event .director-trace-details p {
   margin: 8px 0 0;
   color: #4f6277;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.65;
   overflow-wrap: anywhere;
 }
@@ -251,7 +251,7 @@
   padding: 3px 6px;
   background: rgba(var(--trace-accent-rgb), 0.05);
   color: #63758a;
-  font-size: 7px;
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
 

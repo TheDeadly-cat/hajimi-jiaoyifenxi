@@ -45,7 +45,7 @@
 
 .member-dialog-heading-copy > small {
   color: #b9cfdc;
-  font: 700 9px/1.2 "IBM Plex Mono", "Cascadia Code", monospace;
+  font: 700 13px/1.2 "IBM Plex Mono", "Cascadia Code", monospace;
   letter-spacing: .11em;
 }
 
@@ -86,13 +86,13 @@
 
 .member-dialog-ledger small {
   color: #71818c;
-  font: 700 9px/1.2 "IBM Plex Mono", "Cascadia Code", monospace;
+  font: 700 13px/1.2 "IBM Plex Mono", "Cascadia Code", monospace;
   letter-spacing: .08em;
 }
 
 .member-dialog-ledger strong {
   color: #315f78;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
@@ -145,19 +145,19 @@
 
 .member-workflow-config > header small {
   color: #6f8390;
-  font: 700 9px/1.2 "IBM Plex Mono", "Cascadia Code", monospace;
+  font: 700 13px/1.2 "IBM Plex Mono", "Cascadia Code", monospace;
   letter-spacing: .09em;
 }
 
 .member-workflow-config > header h3 {
   color: var(--member-ink);
-  font: 750 13px/1.35 Bahnschrift, "Aptos Display", "Segoe UI", sans-serif;
+  font: 700 15px/1.35 Bahnschrift, "Aptos Display", "Segoe UI", sans-serif;
   margin: 0;
 }
 
 .member-workflow-config > header p {
   color: #5d7180;
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1.5;
   margin: 0;
 }
@@ -174,7 +174,7 @@
 
 .member-dialog-v2 .member-template-picker > small {
   color: #687b88;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.5;
 }
 
@@ -211,7 +211,7 @@
   border-left: 4px solid #7297ad;
   color: #506b7b;
   background: #f1f6f8;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.45;
 }
 
@@ -250,7 +250,7 @@
   border-radius: 7px;
   color: #8b443f;
   background: #fff4f2;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.5;
 }
 
@@ -289,8 +289,8 @@
 .member-save-summary.blocked { color: #8b443f; }
 .member-save-summary > svg { margin-top: 1px; }
 .member-save-summary > span { display: grid; gap: 2px; min-width: 0; }
-.member-save-summary strong { font-size: 10px; line-height: 1.35; }
-.member-save-summary small { color: #607580; font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; }
+.member-save-summary strong { font-size: 14px; line-height: 1.35; }
+.member-save-summary small { color: #607580; font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
 
 .member-dialog-v2 .member-dialog-footer button {
   display: inline-flex;

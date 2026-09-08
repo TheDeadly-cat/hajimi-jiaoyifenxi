@@ -39,13 +39,13 @@ test("extremely narrow header compresses the inspector to one touch target", () 
 });
 
 test("extremely narrow header keeps a bounded two-line room identity", () => {
-  const marker = "/* Narrow room identity: preserve two readable lines without growing the shell. */";
+  const marker = "/* Keep long names within two lines while allowing the status its own height. */";
   const block = shellStyles.slice(shellStyles.indexOf(marker));
 
   assert.notEqual(shellStyles.indexOf(marker), -1);
   assert.match(
-    block,
-    /\.conversation-header > div:first-child\s*\{[\s\S]*grid-template-rows:\s*minmax\(32px, auto\) 20px;/,
+    shellStyles,
+    /\.conversation-header > div:first-child\s*\{[^}]*grid-template-rows:\s*auto auto;/,
   );
   assert.match(
     block,

@@ -30,6 +30,12 @@ const panelStyles = readFileSync(
   new URL("../src/styles/source-inbox.css", import.meta.url),
   "utf8",
 );
+// 桌面提醒设置已从「Adapter 健康」折叠区提取为收件箱顶部独立区域，
+// 权限申请语义随之迁移到该组件，断言需要指向新位置而不是被静默删除。
+const notifySource = readFileSync(
+  new URL("../src/components/SourceInboxNotifications.jsx", import.meta.url),
+  "utf8",
+);
 
 function sourceRecord(overrides = {}) {
   return {
@@ -1312,7 +1318,16 @@ test("panel source and responsive styles preserve the zero-execution boundary", 
   assert.match(panelSource, /草稿不启动 Provider，不创建正式 round，不读取市场/);
   assert.match(panelSource, /external_unverified/);
   assert.match(panelSource, /不是方向预测、因果结论、盈利声明或执行授权/);
-  assert.match(panelSource, /只在你明确启用后申请权限/);
+  // 原语义：只有用户明确启用后才申请浏览器权限，不自动申请、不补发历史事件。
+  assert.match(notifySource, /点击启用后，在浏览器的权限提示中选择「允许」/);
+  assert.match(notifySource, /历史未读不会补发/);
+  assert.match(notifySource, /启用时也不会立即产生测试提醒/);
+  // 不得把浏览器权限与应用开关混同为系统层已送达：组件必须明确声明
+  // 无法确认 Windows 是否真的弹出提醒。
+  assert.match(notifySource, /应用无法确认系统弹窗是否出现/);
+  // 通知区必须真正接入面板，且不得再藏在健康折叠区内。
+  assert.match(panelSource, /<SourceInboxNotifications/);
+  assert.match(panelSource, /import \{ SourceInboxNotifications \} from "\.\/SourceInboxNotifications"/);
   assert.match(panelSource, /内容已更改，请重新预览/);
   assert.match(panelSource, /确认仅导入收件箱/);
   assert.match(panelSource, /本页不打开、登录或控制 ChatGPT/);

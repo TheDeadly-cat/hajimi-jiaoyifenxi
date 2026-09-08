@@ -427,15 +427,15 @@ export const RoomInspector = memo(function RoomInspector({
         <p>{room?.objective || "等待用户定义目标。"}</p>
         <div className="room-inspector-integrity-ledger" role="list" aria-label="检查面板本地投影状态">
           <span role="listitem">
-            <small>ACTIVE MEMBERS</small>
+            <small>当前成员</small>
             <strong>{listProjection.members.visibleCount} / {listProjection.members.sourceCount}</strong>
           </span>
           <span role="listitem">
-            <small>MATERIALS</small>
+            <small>共享资料</small>
             <strong>{listProjection.materials.visibleCount} / {listProjection.materials.sourceCount}</strong>
           </span>
           <span role="listitem">
-            <small>STORAGE CONTRACT</small>
+            <small>研究契约</small>
             <strong>{storageReadOnly ? "只读保留" : storageWorkspaceVisible ? "宿主可用" : "未接入"}</strong>
           </span>
         </div>

@@ -27,7 +27,7 @@
     repeating-linear-gradient(90deg, rgba(63, 112, 143, 0.065) 0 1px, transparent 1px 24px),
     linear-gradient(110deg, #edf4f7, #fbfcfd 74%);
   font-family: Bahnschrift, "Aptos Display", "Segoe UI", sans-serif;
-  font-weight: 760;
+  font-weight: 700;
   list-style: none;
 }
 
@@ -48,7 +48,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .research-analytics-v2 > summary > span svg { color: var(--analytics-blue); }
@@ -60,8 +60,8 @@
   border-radius: 999px;
   color: #65737d;
   background: #f7f9fa;
-  font-size: 9px;
-  font-weight: 750;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .research-analytics-v2 > summary > small.complete {
@@ -115,14 +115,14 @@
 
 .research-analytics-coverage small {
   color: #72818d;
-  font-size: 8px;
-  font-weight: 800;
+  font-size: 13px;
+  font-weight: 700;
   letter-spacing: .07em;
 }
 
 .research-analytics-coverage strong {
   color: #315b76;
-  font-size: 13px;
+  font-size: 15px;
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
@@ -164,12 +164,12 @@
 }
 
 .research-analytics-body > section > header strong {
-  font-size: 10px;
+  font-size: 14px;
 }
 
 .research-analytics-body > section > header small {
   color: #71818d;
-  font-size: 8px;
+  font-size: 13px;
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
@@ -194,13 +194,13 @@
 
 .research-analytics-v2 .risk-metric-strip small {
   color: #72818c;
-  font-size: 8px;
+  font-size: 13px;
   line-height: 1.35;
 }
 
 .research-analytics-v2 .risk-metric-strip strong {
   color: #2d566f;
-  font-size: 13px;
+  font-size: 15px;
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
@@ -219,7 +219,7 @@
   min-width: 460px;
   border-collapse: collapse;
   color: #3e5365;
-  font-size: 9px;
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -227,7 +227,7 @@
   padding: 7px 8px;
   color: #687a88;
   background: #f5f8fa;
-  font-size: 8px;
+  font-size: 13px;
   text-align: left;
 }
 
@@ -241,7 +241,7 @@
 .research-analytics-v2 .base-rate-table thead th {
   color: #647785;
   background: #f8fafb;
-  font-size: 8px;
+  font-size: 13px;
   letter-spacing: .04em;
 }
 
@@ -251,7 +251,7 @@
 
 .research-analytics-v2 .base-rate-table tbody th {
   color: #2d526a;
-  font-weight: 800;
+  font-weight: 700;
 }
 
 .analytics-partial-note,
@@ -267,7 +267,7 @@
   border-radius: 7px;
   color: #755928;
   background: #fcf8ee;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.5;
 }
 
@@ -298,7 +298,7 @@
   padding: 17px;
   color: #765b2d;
   background: #fcf8ee;
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1.5;
 }
 
@@ -403,8 +403,8 @@
   .research-analytics-v2 .base-rate-table td::before {
     color: #6f7f8b;
     content: attr(data-label);
-    font-size: 8px;
-    font-weight: 750;
+    font-size: 13px;
+    font-weight: 700;
     text-align: left;
   }
 }

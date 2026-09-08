@@ -27,7 +27,7 @@
 .paper-portfolio-toolbar p {
   margin: 0;
   color: #536675;
-  font-size: 12px;
+  font-size: 15px;
   line-height: 1.55;
 }
 .paper-portfolio-toolbar > button { min-height: 44px; flex: 0 0 auto; }
@@ -41,7 +41,7 @@
 }
 .paper-portfolio-toolbar-copy > svg { color: var(--paper-blue); margin-top: 3px; }
 .paper-portfolio-toolbar-copy > span { display: grid; gap: 2px; min-width: 0; }
-.paper-portfolio-toolbar-copy small { color: #6b8190; font: 700 9px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .09em; }
+.paper-portfolio-toolbar-copy small { color: #6b8190; font: 700 13px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .09em; }
 .paper-portfolio-toolbar-copy h3 { color: var(--paper-ink); font-family: "Noto Serif SC", "Songti SC", serif; font-size: 16px; line-height: 1.3; margin: 0; }
 
 .paper-portfolio-summary {
@@ -55,10 +55,10 @@
 .paper-portfolio-summary dl { display: grid; gap: 6px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; }
 .paper-portfolio-summary dl > div { border-right: 1px solid #dce5e9; display: grid; gap: 2px; min-width: 0; padding: 2px 8px; }
 .paper-portfolio-summary dl > div:last-child { border-right: 0; }
-.paper-portfolio-summary dt { color: #6a7d88; font-size: 9px; }
-.paper-portfolio-summary dd { color: #2d5369; font: 750 13px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; margin: 0; }
+.paper-portfolio-summary dt { color: #6a7d88; font-size: 13px; }
+.paper-portfolio-summary dd { color: #2d5369; font: 700 15px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; margin: 0; }
 .paper-portfolio-summary dd data { color: inherit; }
-.paper-portfolio-summary > small { color: #697a83; font-size: 9px; line-height: 1.45; }
+.paper-portfolio-summary > small { color: #697a83; font-size: 13px; line-height: 1.45; }
 
 .paper-portfolio-list { display: grid; gap: 11px; }
 
@@ -95,12 +95,12 @@
 .paper-portfolio-card > header h4 {
   color: var(--paper-ink);
   font-family: Bahnschrift, Aptos, "Segoe UI", sans-serif;
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1.3;
   margin: 0;
   overflow-wrap: anywhere;
 }
-.paper-portfolio-card > header small { color: #667784; font-size: 10px; }
+.paper-portfolio-card > header small { color: #667784; font-size: 14px; }
 
 .paper-risk-status {
   display: inline-flex;
@@ -110,7 +110,7 @@
   padding: 4px 8px;
   border: 1px solid currentColor;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: 14px;
   font-style: normal;
   font-weight: 700;
 }
@@ -131,10 +131,10 @@
 }
 .paper-lineage-source > svg { margin-top: 2px; }
 .paper-lineage-source > span { display: grid; min-width: 0; gap: 2px; }
-.paper-lineage-source strong { font-size: 11px; line-height: 1.35; }
+.paper-lineage-source strong { font-size: 14px; line-height: 1.35; }
 .paper-lineage-source small {
   color: #5f7482;
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1.45;
   overflow-wrap: anywhere;
   white-space: normal;
@@ -151,7 +151,7 @@
   color: #4c5f70;
   background: #f0f3f6;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 10px;
+  font-size: 14px;
 }
 .paper-position-chips span.long { border-color: #ebc9c4; color: #913c34; background: #fff2f0; }
 .paper-position-chips span.short { border-color: #c5dfd3; color: #246c56; background: #edf8f3; }
@@ -171,12 +171,12 @@
   border-radius: 8px;
   background: rgb(246 249 251 / 92%);
 }
-.paper-risk-metrics dt { color: #687986; font-size: 10px; }
+.paper-risk-metrics dt { color: #687986; font-size: 14px; }
 .paper-risk-metrics dd {
   margin: 0;
   color: #2f465a;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px;
+  font-size: 15px;
   font-weight: 700;
   overflow-wrap: anywhere;
 }
@@ -188,7 +188,7 @@
   border-radius: 8px;
   color: #76541d;
   background: #fff8e9;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.5;
 }
 .paper-request-status {
@@ -206,7 +206,7 @@
   padding-top: 7px;
   border-top: 1px solid #dce5eb;
 }
-.paper-portfolio-card > footer .text-action { min-height: 40px; gap: 4px; padding: 0 8px; font-size: 11px; }
+.paper-portfolio-card > footer .text-action { min-height: 40px; gap: 4px; padding: 0 8px; font-size: 14px; }
 .paper-portfolio-card > footer .confirm { color: #315f73; }
 .paper-portfolio-card > footer .text-action:focus-visible {
   outline: 3px solid rgb(59 111 145 / 24%);
@@ -226,7 +226,7 @@
   min-height: 44px;
   padding: 8px 13px;
 }
-.paper-portfolio-more small { color: #6b7d86; font-size: 9px; }
+.paper-portfolio-more small { color: #6b7d86; font-size: 13px; }
 
 .paper-portfolio-empty {
   align-items: center;
@@ -244,11 +244,11 @@
 }
 .paper-portfolio-empty > svg { color: var(--paper-blue); }
 .paper-portfolio-empty > span { display: grid; gap: 4px; min-width: 0; }
-.paper-portfolio-empty > span > small { color: #708590; font: 700 9px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .08em; }
+.paper-portfolio-empty > span > small { color: #708590; font: 700 13px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .08em; }
 .paper-portfolio-empty strong { color: var(--paper-ink); font-family: "Noto Serif SC", "Songti SC", serif; font-size: 14px; }
-.paper-portfolio-empty p { font-size: 11px; line-height: 1.55; margin: 0; }
+.paper-portfolio-empty p { font-size: 14px; line-height: 1.55; margin: 0; }
 .paper-portfolio-empty ul { display: flex; flex-wrap: wrap; gap: 6px; grid-column: 2; list-style: none; margin: 0; padding: 0; }
-.paper-portfolio-empty li { background: #fff; border: 1px solid #d2dfe4; border-radius: 999px; color: #4c6775; font-size: 9px; padding: 4px 7px; }
+.paper-portfolio-empty li { background: #fff; border: 1px solid #d2dfe4; border-radius: 999px; color: #4c6775; font-size: 13px; padding: 4px 7px; }
 
 .paper-portfolio-dialog {
   width: min(960px, calc(100vw - 32px));
@@ -258,7 +258,7 @@
 }
 .paper-portfolio-dialog > header > span { display: grid; gap: 2px; }
 .paper-portfolio-dialog > header strong { font-family: Bahnschrift, Aptos, "Segoe UI", sans-serif; }
-.paper-portfolio-dialog > header small { color: #687986; font-size: 10px; font-weight: 500; }
+.paper-portfolio-dialog > header small { color: #687986; font-size: 14px; font-weight: 500; }
 
 .paper-portfolio-dialog-body {
   display: grid;
@@ -289,7 +289,7 @@
   border-radius: 8px;
   color: #943c3c;
   background: #fff4f4;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.45;
 }
 
@@ -309,10 +309,10 @@
 .paper-dialog-heading strong {
   color: #263f54;
   font-family: Bahnschrift, Aptos, "Segoe UI", sans-serif;
-  font-size: 13px;
+  font-size: 15px;
 }
 .paper-dialog-heading small,
-.paper-dialog-heading em { color: #687986; font-size: 11px; font-style: normal; }
+.paper-dialog-heading em { color: #687986; font-size: 14px; font-style: normal; }
 
 .paper-position-editor { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px; }
 .paper-position-editor fieldset,
@@ -333,7 +333,7 @@
   padding: 0 6px;
   color: #29475f;
   font-family: Bahnschrift, Aptos, "Segoe UI", sans-serif;
-  font-size: 12px;
+  font-size: 15px;
   font-weight: 700;
 }
 .paper-position-editor label,
@@ -375,7 +375,7 @@
   border-radius: 9px;
   color: #31536c;
   background: #eef6fa;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.5;
 }
 .candidate-mapping-confirmation { min-height: 44px; align-items: flex-start; cursor: pointer; }
@@ -418,7 +418,7 @@
     align-items: stretch;
     gap: 5px;
   }
-  .paper-portfolio-card > footer .text-action { min-height: 44px; justify-content: center; font-size: 11px; }
+  .paper-portfolio-card > footer .text-action { min-height: 44px; justify-content: center; font-size: 14px; }
 }
 
 @media (max-width: 760px) {
@@ -491,12 +491,12 @@
   .paper-dialog-heading { align-items: flex-start; flex-direction: column; }
   .paper-dialog-heading > .secondary { align-self: stretch; justify-content: center; }
   .paper-lineage-source strong {
-    font-size: 11px;
+    font-size: 14px;
     line-height: 1.4;
   }
   .paper-lineage-source small {
     overflow: visible;
-    font-size: 10px;
+    font-size: 14px;
     line-height: 1.45;
     overflow-wrap: anywhere;
     text-overflow: clip;
@@ -512,7 +512,7 @@
     justify-content: center;
     min-height: 44px;
     padding: 0 8px;
-    font-size: 11px;
+    font-size: 14px;
   }
   .paper-budget-grid,
   .paper-stress-editor fieldset { grid-template-columns: 1fr; }

@@ -9,8 +9,8 @@ const source = readFileSync(
 
 test("mobile portfolio evidence keeps decision lineage readable instead of truncating it", () => {
   const mobile = source.slice(source.indexOf("@media (max-width: 620px)"));
-  assert.match(mobile, /\.paper-lineage-source strong\s*\{[\s\S]*font-size:\s*11px/);
-  assert.match(mobile, /\.paper-lineage-source small\s*\{[\s\S]*font-size:\s*10px/);
+  assert.match(mobile, /\.paper-lineage-source strong\s*\{[\s\S]*font-size:\s*14px/);
+  assert.match(mobile, /\.paper-lineage-source small\s*\{[\s\S]*font-size:\s*14px/);
   assert.match(mobile, /\.paper-lineage-source small\s*\{[\s\S]*overflow-wrap:\s*anywhere/);
   assert.match(mobile, /\.paper-lineage-source small\s*\{[\s\S]*white-space:\s*normal/);
 });
@@ -19,7 +19,7 @@ test("mobile portfolio decision actions use a wrapped two-column 44px target gri
   const mobile = source.slice(source.indexOf("@media (max-width: 620px)"));
   assert.match(mobile, /\.paper-portfolio-card > footer\s*\{[\s\S]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(mobile, /\.paper-portfolio-card > footer \.text-action\s*\{[\s\S]*min-height:\s*44px/);
-  assert.match(mobile, /\.paper-portfolio-card > footer \.text-action\s*\{[\s\S]*font-size:\s*11px/);
+  assert.match(mobile, /\.paper-portfolio-card > footer \.text-action\s*\{[\s\S]*font-size:\s*14px/);
 });
 
 test("portfolio ledger summary and empty state compact without losing their boundaries", () => {

@@ -45,8 +45,9 @@ test("room search clear control is component-owned and avoids a duplicate native
   );
   assert.match(
     styles,
-    /\.room-sidebar \.room-list\s*\{[\s\S]*flex:\s*1 1 auto;[\s\S]*min-height:\s*0;[\s\S]*overflow-y:\s*auto;/,
+    /\.room-sidebar \.room-list\s*\{[\s\S]*flex:\s*1 1 0;[\s\S]*min-height:\s*0;[\s\S]*overflow-y:\s*auto;/,
   );
+  assert.match(styles, /\.room-sidebar\s*\{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden;/);
   assert.match(source, /className="secondary room-empty-reset"[\s\S]*onSearch\(""\);[\s\S]*searchInputRef\.current\?\.focus\(\)/);
   assert.match(styles, /\.room-sidebar \.empty-note\s*\{[\s\S]*display:\s*grid;[\s\S]*justify-items:\s*center;/);
 });

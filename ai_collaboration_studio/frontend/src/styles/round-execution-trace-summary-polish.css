@@ -117,7 +117,7 @@
   overflow: hidden;
   color: #21465b;
   font-family: Bahnschrift, Aptos, "Segoe UI", sans-serif;
-  font-size: 13.5px;
+  font-size: 15px;
   letter-spacing: .01em;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -128,8 +128,8 @@
   align-items: center;
   gap: 4px;
   color: var(--trace-summary-state);
-  font-size: 9px;
-  font-weight: 760;
+  font-size: 13px;
+  font-weight: 700;
   white-space: nowrap;
 }
 .round-trace-summary-state::before {
@@ -146,19 +146,19 @@
   border-radius: 999px;
   color: #5e7380;
   background: rgb(255 255 255 / 66%);
-  font-size: 8px;
+  font-size: 13px;
   font-style: normal;
-  font-weight: 720;
+  font-weight: 700;
   letter-spacing: .025em;
 }
 .round-trace-summary-copy small {
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
 .round-trace-summary-detail {
   color: #4f6877;
-  font-weight: 560;
+  font-weight: 600;
 }
 .round-trace-summary-meta {
   display: flex;
@@ -173,7 +173,7 @@
   align-items: center;
   gap: 4px;
   color: #557265;
-  font-size: 9px;
+  font-size: 13px;
 }
 .round-trace-summary-integrity svg,
 .round-trace-summary-boundary svg {
@@ -190,8 +190,8 @@
   border-radius: 999px;
   color: #557064;
   background: rgb(255 255 255 / 56%);
-  font-size: 8px !important;
-  font-weight: 680;
+  font-size: 13px !important;
+  font-weight: 700;
   white-space: nowrap;
 }
 .round-trace-summary-action {
@@ -200,8 +200,8 @@
   align-items: center;
   gap: 2px;
   color: #527287;
-  font-size: 9px;
-  font-weight: 720;
+  font-size: 13px;
+  font-weight: 700;
   white-space: nowrap;
   transition: color 160ms ease, transform 160ms ease;
 }

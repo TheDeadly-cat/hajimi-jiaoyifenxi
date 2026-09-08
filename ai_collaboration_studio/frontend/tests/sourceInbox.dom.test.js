@@ -904,7 +904,7 @@ test("source actions require explicit read and room choices and stop at a zero-c
   });
 
   await change(host.querySelector(".source-inbox-draft-actions textarea"), "仅讨论失败断言");
-  await click(buttonWithText(host, "仅生成 round draft"));
+  await click(buttonWithText(host, "创建轮次草稿"));
   assert.deepEqual(JSON.parse(requests.filter((request) => request.options.method === "POST").at(-1).options.body), {
     room_id: "room_current",
     expected_state_version: 3,
@@ -921,6 +921,167 @@ test("source actions require explicit read and room choices and stop at a zero-c
     "/api/monitoring/events/source_item_one/round-draft",
   ]);
   assert.equal(requests.some((request) => /providers|market|rounds\/stream/.test(request.path)), false);
+});
+
+test("expired acknowledged sources explain blocked room and draft actions without inviting a click", async () => {
+  for (const attached of [false, true]) {
+    const current = sourceRecord({
+      acknowledged: true,
+      state: "EXPIRED",
+      attachments: attached ? [{
+        version: "source_inbox_attachment_v1",
+        id: "attachment_expired",
+        room_id: "room_current",
+        material_id: "material_one",
+        material_version: 1,
+        item_sha256: "b".repeat(64),
+        attachment_sha256: "d".repeat(64),
+        attached_at: 1_777_777_777_200,
+      }] : [],
+    });
+    const requests = [];
+    globalThis.fetch = async (path, options = {}) => {
+      requests.push({ path, options });
+      if (path === "/api/monitoring/health") return response(monitoringHealth());
+      if (path.startsWith("/api/monitoring/inbox?")) {
+        return response({ ok: true, source_inbox: sourceInboxList([current]) });
+      }
+      return response({ ok: true, source_item: current });
+    };
+
+    const host = await mountPanel();
+    await change(host.querySelector(".source-inbox-room-actions select"), "room_current");
+    const steps = [...host.querySelectorAll(".source-inbox-steps li")];
+    const attachStep = steps.find((step) => step.querySelector("strong")?.textContent === "附加到房间");
+    const draftStep = steps.find((step) => step.querySelector("strong")?.textContent === "创建轮次草稿");
+    assert.ok(attachStep);
+    assert.ok(draftStep);
+    assert.match(attachStep.textContent, /不能附加到房间/);
+    assert.match(draftStep.textContent, /不能创建草稿/);
+    assert.doesNotMatch(attachStep.textContent, /点击/);
+    assert.doesNotMatch(draftStep.textContent, /点击/);
+
+    const attach = host.querySelector(".source-inbox-room-actions button");
+    const draft = host.querySelector(".source-inbox-draft-actions button");
+    assert.equal(attach.disabled, true);
+    assert.equal(draft.disabled, true);
+    await click(attach);
+    await click(draft);
+    assert.equal(requests.some((request) => request.options.method === "POST"), false);
+  }
+});
+
+function mobileDetailScrollProbe(t) {
+  const originalMatchMedia = Object.getOwnPropertyDescriptor(globalThis, "matchMedia");
+  const originalScroll = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+  const calls = [];
+  Object.defineProperty(globalThis, "matchMedia", {
+    configurable: true,
+    value: (query) => ({ matches: query === "(max-width: 760px)", media: query }),
+  });
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value(options) { calls.push({ target: this, options }); },
+  });
+  t.after(() => {
+    if (originalMatchMedia) Object.defineProperty(globalThis, "matchMedia", originalMatchMedia);
+    else delete globalThis.matchMedia;
+    if (originalScroll) Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScroll);
+    else delete HTMLElement.prototype.scrollIntoView;
+  });
+  return calls;
+}
+
+async function mountMobileNavigationPanel(requestedItemId = "") {
+  const items = [
+    sourceRecord({ id: "source_item_first", headline: "第一条消息" }),
+    sourceRecord({ id: "source_item_second", headline: "第二条消息" }),
+  ];
+  const requests = [];
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList(items) });
+    }
+    const item = items.find((entry) => path === `/api/monitoring/events/${entry.id}`);
+    assert.ok(item, `unexpected request: ${path}`);
+    return response({ ok: true, source_item: item });
+  };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  mountedRoots.add(root);
+  let props = {
+    activeRoomId: "room_current",
+    open: true,
+    requestedItemId,
+    refreshToken: 0,
+    restoreFocusRef: { current: null },
+    rooms: [{ id: "room_current", title: "方案共创会" }],
+    onClose() {},
+    onRoomAttached() {},
+    onEventTargetChange(itemId) {
+      // App mirrors an explicit list selection back into requestedItemId.
+      if (itemId !== props.requestedItemId) {
+        props = { ...props, requestedItemId: itemId };
+        root.render(h(SourceInboxPanel, props));
+      }
+    },
+  };
+  await act(async () => root.render(h(SourceInboxPanel, props)));
+  await settle();
+  return {
+    host,
+    requests,
+    async refresh() {
+      props = { ...props, refreshToken: props.refreshToken + 1 };
+      await act(async () => root.render(h(SourceInboxPanel, props)));
+      await settle();
+    },
+  };
+}
+
+test("mobile inbox opening and same-item refresh do not skip the notification controls", async (t) => {
+  const scrolls = mobileDetailScrollProbe(t);
+  const panel = await mountMobileNavigationPanel();
+  assert.match(panel.host.querySelector(".source-inbox-detail-heading").textContent, /第一条消息/);
+  assert.equal(scrolls.length, 0, "automatic selection is not a request to scroll");
+  await panel.refresh();
+  assert.equal(scrolls.length, 0);
+  assert.equal(panel.requests.some((request) => request.options.method === "POST"), false);
+});
+
+test("mobile deep-link scrolling happens once and background refresh preserves the reading position", async (t) => {
+  const scrolls = mobileDetailScrollProbe(t);
+  const panel = await mountMobileNavigationPanel("source_item_second");
+  assert.match(panel.host.querySelector(".source-inbox-detail-heading").textContent, /第二条消息/);
+  assert.equal(scrolls.length, 1);
+  assert.equal(scrolls[0].target, panel.host.querySelector(".source-inbox-detail-wrap"));
+  assert.deepEqual(scrolls[0].options, { block: "start" });
+  await panel.refresh();
+  assert.equal(scrolls.length, 1, "refreshing the same detail must not consume another navigation");
+  assert.equal(panel.requests.some((request) => request.options.method === "POST"), false);
+});
+
+test("mobile explicit selection scrolls different and already-selected messages exactly once", async (t) => {
+  const scrolls = mobileDetailScrollProbe(t);
+  const panel = await mountMobileNavigationPanel();
+  const first = buttonWithText(panel.host.querySelector(".source-inbox-list"), "第一条消息");
+  await click(first);
+  assert.equal(scrolls.length, 1, "explicitly selecting the default item should reveal its detail");
+  await panel.refresh();
+  assert.equal(scrolls.length, 1, "the mirrored source_event must not leave a pending scroll behind");
+
+  await click(buttonWithText(panel.host.querySelector(".source-inbox-list"), "第二条消息"));
+  assert.match(panel.host.querySelector(".source-inbox-detail-heading").textContent, /第二条消息/);
+  assert.equal(scrolls.length, 2);
+  await click(buttonWithText(panel.host.querySelector(".source-inbox-list"), "第二条消息"));
+  assert.equal(scrolls.length, 3);
+  await panel.refresh();
+  assert.equal(scrolls.length, 3);
+  assert.equal(scrolls.every((call) => call.target === panel.host.querySelector(".source-inbox-detail-wrap")), true);
+  assert.equal(panel.requests.some((request) => request.options.method === "POST"), false);
 });
 
 test("deep-linked events, source filters, sector mappings, health, and notifications stay read-only", async () => {
@@ -1001,8 +1162,16 @@ test("deep-linked events, source filters, sector mappings, health, and notificat
   await click(buttonWithText(host, "仅看未读"));
   assert.ok(requests.some((request) => request.path.includes("unread=true")));
 
-  await click(host.querySelector(".source-inbox-health summary"));
-  await click(buttonWithText(host, "启用通知"));
+  // 通知设置已从「Adapter 健康」折叠区移到收件箱顶部：
+  // 不展开任何技术健康详情也必须能直接找到并操作开关。
+  const notifyToggle = buttonWithText(host, "启用桌面提醒");
+  assert.ok(notifyToggle, "通知开关应在不展开健康详情时可直接找到");
+  assert.equal(
+    notifyToggle.closest(".source-inbox-health"),
+    null,
+    "通知开关不得再嵌在 Adapter 健康折叠区内",
+  );
+  await click(notifyToggle);
   assert.deepEqual(notificationChoices, [true]);
   await click(buttonWithText(host, "复制此事件链接"));
   assert.deepEqual(copied, ["source_item_deep"]);
