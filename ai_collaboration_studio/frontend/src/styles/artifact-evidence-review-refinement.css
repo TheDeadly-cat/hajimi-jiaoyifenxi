@@ -41,8 +41,8 @@
 }
 
 .evidence-review-workbench .artifact-evidence-review-ledger small {
-  font-size: 0.68rem;
-  font-weight: 750;
+  font-size: 0.875rem;
+  font-weight: 700;
   letter-spacing: 0.08em;
 }
 
@@ -54,7 +54,7 @@
 
 .evidence-review-workbench .artifact-evidence-review-ledger > span:last-child strong {
   color: #76552f;
-  font-size: 0.82rem;
+  font-size: 0.9375rem;
 }
 
 .evidence-review-workbench .artifact-evidence-heading > strong {
@@ -67,7 +67,7 @@
 .evidence-review-workbench .artifact-counter-note,
 .evidence-review-workbench .artifact-source-usage,
 .evidence-review-workbench .artifact-evidence-gap-note {
-  font-size: 0.74rem;
+  font-size: 0.9375rem;
   line-height: 1.5;
 }
 
@@ -91,7 +91,7 @@
   padding: 0.5rem 0.68rem;
   border-left: 2px solid var(--review-ink);
   color: color-mix(in srgb, currentColor 74%, transparent);
-  font-size: 0.78rem;
+  font-size: 0.9375rem;
 }
 
 .evidence-review-workbench .artifact-evidence-option {

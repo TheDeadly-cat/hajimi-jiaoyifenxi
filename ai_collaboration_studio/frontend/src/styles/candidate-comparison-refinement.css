@@ -32,8 +32,8 @@
   width: 100%;
   margin: 0 0 0.55rem;
   padding: 0;
-  font-size: 0.76rem;
-  font-weight: 750;
+  font-size: 0.9375rem;
+  font-weight: 700;
   letter-spacing: 0.04em;
 }
 
@@ -51,7 +51,7 @@
 .candidate-comparison-workbench .candidate-comparison-error,
 .candidate-comparison-workbench .candidate-comparison-safety,
 .candidate-comparison-workbench .candidate-comparison-acknowledgement {
-  font-size: 0.74rem;
+  font-size: 0.9375rem;
   line-height: 1.5;
 }
 
@@ -71,8 +71,8 @@
   padding: 0.58rem 0.65rem;
   background: color-mix(in srgb, var(--panel, #f7f4ec) 96%, white);
 }
-.candidate-comparison-scope small { color: #728078; font-size: 0.65rem; letter-spacing: 0.05em; }
-.candidate-comparison-scope strong { color: #354d4b; font-size: 0.72rem; line-height: 1.4; overflow-wrap: anywhere; }
+.candidate-comparison-scope small { color: #728078; font-size: 0.875rem; letter-spacing: 0.05em; }
+.candidate-comparison-scope strong { color: #354d4b; font-size: 0.9375rem; line-height: 1.4; overflow-wrap: anywhere; }
 .candidate-comparison-scope > span:last-child strong { color: #76552f; }
 
 .candidate-comparison-readiness {
@@ -89,12 +89,12 @@
 .candidate-comparison-readiness.waiting { border-color: color-mix(in srgb, var(--comparison-warm) 28%, transparent); color: #77552d; background: #fff8eb; }
 .candidate-comparison-readiness.blocked { border-color: #d7aaa2; color: #8c4139; background: #fff1ed; }
 .candidate-comparison-readiness > span { display: grid; gap: 2px; min-width: 0; }
-.candidate-comparison-readiness strong { font-size: 0.75rem; line-height: 1.35; }
-.candidate-comparison-readiness small { color: inherit; font-size: 0.68rem; line-height: 1.45; opacity: 0.88; }
+.candidate-comparison-readiness strong { font-size: 0.9375rem; line-height: 1.35; }
+.candidate-comparison-readiness small { color: inherit; font-size: 0.875rem; line-height: 1.45; opacity: 0.88; }
 .candidate-comparison-readiness > data {
   border: 1px solid currentColor;
   border-radius: 999px;
-  font: 750 0.66rem/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+  font: 700 0.66rem/1 ui-monospace, SFMono-Regular, Consolas, monospace;
   min-width: 50px;
   padding: 0.38rem 0.48rem;
   text-align: center;
@@ -113,10 +113,10 @@
 }
 .candidate-comparison-empty > svg { color: var(--comparison-ink); margin-top: 2px; }
 .candidate-comparison-empty > span { display: grid; gap: 2px; min-width: 0; }
-.candidate-comparison-empty strong { color: #354b49; font-size: 0.75rem; line-height: 1.35; }
-.candidate-comparison-empty small { color: inherit; font-size: 0.68rem; line-height: 1.45; }
+.candidate-comparison-empty strong { color: #354b49; font-size: 0.9375rem; line-height: 1.35; }
+.candidate-comparison-empty small { color: inherit; font-size: 0.875rem; line-height: 1.45; }
 .candidate-comparison-empty ul { display: flex; flex-wrap: wrap; gap: 0.32rem; grid-column: 2; list-style: none; margin: 0; padding: 0; }
-.candidate-comparison-empty li { border: 1px solid var(--comparison-line); border-radius: 999px; font-size: 0.64rem; padding: 0.24rem 0.42rem; background: white; }
+.candidate-comparison-empty li { border: 1px solid var(--comparison-line); border-radius: 999px; font-size: 0.875rem; padding: 0.24rem 0.42rem; background: white; }
 
 .candidate-comparison-workbench .candidate-comparison-selector > label {
   contain-intrinsic-block-size: auto 82px;
@@ -135,7 +135,7 @@
   margin: 0;
   padding: 0.52rem 0.7rem;
   border-left: 2px solid var(--comparison-ink);
-  font-size: 0.78rem;
+  font-size: 0.9375rem;
 }
 
 .candidate-comparison-source-warning {
@@ -163,7 +163,7 @@
 
 .candidate-comparison-neutrality-ledger > span:nth-last-child(-n + 2) strong {
   color: #76552f;
-  font-size: 0.82rem;
+  font-size: 0.9375rem;
 }
 
 .candidate-comparison-workbench .candidate-comparison-run,
@@ -180,7 +180,7 @@
 .candidate-comparison-workbench .candidate-comparison-proof > svg,
 .candidate-comparison-workbench .candidate-comparison-proof h5 {
   color: color-mix(in srgb, var(--comparison-ink) 88%, #214d60);
-  font-size: 0.78rem;
+  font-size: 0.9375rem;
   margin: 0;
 }
 
@@ -194,7 +194,7 @@
 
 .candidate-comparison-workbench .candidate-comparison-table th,
 .candidate-comparison-workbench .candidate-comparison-table td {
-  font-size: 0.72rem;
+  font-size: 0.9375rem;
   line-height: 1.5;
 }
 
@@ -207,8 +207,8 @@
 }
 
 .candidate-comparison-neutrality-ledger small {
-  font-size: 0.68rem;
-  font-weight: 750;
+  font-size: 0.875rem;
+  font-weight: 700;
   letter-spacing: 0.07em;
 }
 

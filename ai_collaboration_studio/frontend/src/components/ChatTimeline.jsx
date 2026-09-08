@@ -289,12 +289,12 @@ export const ChatTimeline = memo(function ChatTimeline({
     <div className="chat-timeline-wrap chat-timeline-workspace">
       <header className="chat-timeline-masthead">
         <span>
-          <small>COLLABORATION LOG</small>
+          <small>研究记录</small>
           <strong>讨论时间线</strong>
           <p>消息、主持决定与证据引用按确定性时间顺序排列。</p>
         </span>
         <em className={projectionLimited ? "is-limited" : ""}>
-          <span>VISIBLE RECORDS</span>{recordCount}
+          <span>当前记录</span>{recordCount}
         </em>
       </header>
 
@@ -379,15 +379,15 @@ export const ChatTimeline = memo(function ChatTimeline({
       <div className="timeline-status-stack">
         <div className="timeline-integrity-ledger" role="list" aria-label="时间线本地投影状态">
           <span role="listitem">
-            <small>MODE</small>
+            <small>当前视图</small>
             <strong>{searchActive ? "搜索视图" : "讨论视图"}</strong>
           </span>
           <span role="listitem">
-            <small>PROJECTED / SOURCE</small>
+            <small>显示 / 原始记录</small>
             <strong>{recordCount} / {sourceRecordCount}</strong>
           </span>
           <span role="listitem">
-            <small>MEMBER INDEX</small>
+            <small>参与成员</small>
             <strong>{memberIndex.indexedCount} / {memberIndex.totalCount}</strong>
           </span>
         </div>

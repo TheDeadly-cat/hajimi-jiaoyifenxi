@@ -1,8 +1,6 @@
 import {
   Activity,
   AlertTriangle,
-  Bell,
-  BellOff,
   Check,
   ClipboardCopy,
   ExternalLink,
@@ -21,6 +19,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import dutyCatArt from "../assets/duty-cat.png";
+import { SourceInboxNotifications } from "./SourceInboxNotifications";
 import { api } from "../api";
 import {
   EXTERNAL_UNVERIFIED,
@@ -154,6 +153,26 @@ function shortHash(value) {
   return text.length > 24 ? `${text.slice(0, 12)}…${text.slice(-10)}` : text || "未提供";
 }
 
+/* 外部来源自带的发布时间是 ISO 字符串，服务端接收时间是毫秒数。
+   两者语义不同，必须分别显示，不能合并成一个模糊的「更新时间」。 */
+function formatSourceIsoTime(value) {
+  const text = String(value || "").trim();
+  if (!text) return "来源未提供发布时间";
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime())) return text;
+  try {
+    return new Intl.DateTimeFormat("zh-CN", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(date);
+  } catch {
+    return text;
+  }
+}
+
 function DetailList({ empty, items, renderItem }) {
   if (!items.length) return <p className="source-inbox-muted">{empty}</p>;
   return <ul>{items.map(renderItem)}</ul>;
@@ -172,7 +191,11 @@ function SourceInboxListItem({ active, disabled, item, onSelect }) {
       <span>
         <strong>{item.headline}</strong>
         <small>{item.sourceTierCode} · {item.sourceTierLabel} · {item.sourceKey || item.sourceChannel || "未声明来源"}</small>
-        <code>{EXTERNAL_UNVERIFIED}</code>
+        <small className="source-inbox-row-time">
+          <span>原始发布 {formatSourceIsoTime(item.publishedAt)}</span>
+          <span>本地发现 {formatServerTime(item.receivedAt)}</span>
+        </small>
+        <code title="外部声明核验状态（协议字段值）">{EXTERNAL_UNVERIFIED}</code>
       </span>
       <em>
         {item.acknowledged ? "已阅" : "未读"} · {item.valid
@@ -343,13 +366,68 @@ function SourceInboxDetail({
   const busy = actionState.status === "loading";
   const selectedRoom = rooms.find((room) => room.id === roomId) || null;
 
+  // 操作顺序指示：完成状态与禁用原因都由既有权限派生结果推导，
+  // 前端不自行放宽任何可用性条件。
+  const steps = [
+    {
+      label: "记录已阅",
+      done: item.acknowledged === true,
+      hint: !permissions.actionable
+        ? "该记录当前不可操作：完整性校验未通过，或状态不在可审阅范围。"
+        : item.acknowledged
+          ? "已记录为已阅。已阅不代表事实确认。"
+          : "先勾选下方确认框，再点击「记录已阅」。已阅不代表事实确认。",
+    },
+    {
+      label: "选择研究房间",
+      done: Boolean(roomId),
+      hint: roomId
+        ? `已选择：${selectedRoom?.title || "当前房间"}。`
+        : "在下方「附加到房间」中选择目标房间。",
+    },
+    {
+      label: "附加到房间",
+      done: Boolean(permissions.attachment),
+      hint: !permissions.actionable
+        ? "该记录已失效或校验未通过，不能附加到房间。"
+        : busy
+          ? "正在保存，请稍候。"
+          : permissions.attachment
+        ? "已附加到该房间。"
+        : !item.acknowledged
+          ? "先记录已阅。"
+          : !roomId
+            ? "请先选择房间。"
+            : "点击「附加到房间」。",
+    },
+    {
+      label: "创建轮次草稿",
+      done: Boolean(permissions.roundDraft),
+      hint: !permissions.actionable
+        ? "该记录已失效或校验未通过，不能创建草稿。"
+        : busy
+          ? "正在保存，请稍候。"
+          : permissions.roundDraft
+        ? "该房间已创建草稿，不会生成第二份。"
+        : !item.acknowledged
+          ? "先记录已阅。"
+          : !permissions.attachment
+            ? "先附加到当前房间。"
+            : "点击「创建轮次草稿」；只生成草稿，不开始正式讨论。",
+    },
+  ];
+
   return (
     <article className="source-inbox-detail">
       <header className="source-inbox-detail-heading">
         <span className="source-inbox-source-icon"><Inbox aria-hidden="true" size={20} /></span>
         <span>
           <strong>{item.headline}</strong>
-          <small>{item.sourceChannel || "未声明来源通道"} · 服务端已接收</small>
+          <small>
+            {item.sourceChannel || "未声明来源通道"}
+            {" · 原始发布 "}{formatSourceIsoTime(item.publishedAt)}
+            {" · 本地发现 "}{formatServerTime(item.receivedAt)}
+          </small>
         </span>
         <em>{SOURCE_INBOX_STATE_LABELS[item.state] || item.state || "状态未知"}</em>
       </header>
@@ -375,7 +453,8 @@ function SourceInboxDetail({
       <section className="source-inbox-section">
         <h3><Link2 aria-hidden="true" size={16} />来源与谱系</h3>
         <dl className="source-inbox-provenance">
-          <div><dt>服务端接收</dt><dd>{formatServerTime(item.receivedAt)}</dd></div>
+          <div><dt>原始发布时间</dt><dd>{formatSourceIsoTime(item.publishedAt)}（来自外部来源，未经核验）</dd></div>
+          <div><dt>本地发现时间</dt><dd>{formatServerTime(item.receivedAt)}（服务端接收）</dd></div>
           <div><dt>来源指纹</dt><dd><code title={item.serverFingerprint}>{shortHash(item.serverFingerprint)}</code></dd></div>
           <div><dt>来源键</dt><dd>{item.sourceKey || "未提供"}</dd></div>
           <div><dt>接入层级</dt><dd>{item.sourceTierCode} · {item.sourceTierLabel}（不是事实认证）</dd></div>
@@ -433,6 +512,24 @@ function SourceInboxDetail({
           items={item.unknowns}
           renderItem={(unknown, index) => <li key={`${unknown}-${index}`}>{unknown}</li>}
         />
+      </section>
+
+      <section className="source-inbox-steps" aria-label="从来源到研究草稿的操作顺序">
+        <h3><Layers3 aria-hidden="true" size={16} />操作顺序</h3>
+        <ol>
+          {steps.map((step, index) => (
+            <li key={step.label} className={step.done ? "is-done" : "is-pending"}>
+              <span className="source-inbox-step-index" aria-hidden="true">{index + 1}</span>
+              <span>
+                <strong>{step.label}</strong>
+                <small>{step.hint}</small>
+              </span>
+            </li>
+          ))}
+        </ol>
+        <p className="source-inbox-steps-note">
+          来源轮次草稿、正式讨论轮次与共创产物是不同对象，本流程只到草稿为止。
+        </p>
       </section>
 
       <section className="source-inbox-section source-inbox-acknowledgement">
@@ -508,7 +605,7 @@ function SourceInboxDetail({
           {actionState.type === "draft" && busy
             ? <LoaderCircle aria-hidden="true" className="spin" size={15} />
             : <FilePlus2 aria-hidden="true" size={15} />}
-          {permissions.roundDraft ? "该房间已有 round draft" : "仅生成 round draft"}
+          {permissions.roundDraft ? "该房间已创建草稿" : "创建轮次草稿"}
         </button>
         <p className="source-inbox-draft-boundary">
           草稿不启动 Provider，不创建正式 round，不读取市场，也不授予执行权限。
@@ -759,10 +856,8 @@ function SourceMonitoringHealth({
   operatorActionState,
   operatorControlState,
   operatorPreviewHeadingRef,
-  notificationState,
   onCancelOperatorAction,
   onLoadOperatorControl,
-  onNotificationPreferenceChange,
   onOperatorConfirmationChange,
   onPrepareAdapterDisable,
   onPrepareAdapterEnable,
@@ -772,14 +867,11 @@ function SourceMonitoringHealth({
   const health = healthState.health;
   const control = operatorControlState.status === "ready" ? operatorControlState.control : null;
   const operation = sourceMonitoringOperationState(health, control);
-  const notificationSupported = notificationState?.supported === true;
-  const notificationEnabled = notificationState?.enabled === true;
-  const notificationPermission = String(notificationState?.permission || "unsupported");
   const runtimeNeedsAttention = health?.valid === true && operation.state === "degraded";
   return (
     <details className="source-inbox-health">
       <summary>
-        <span><Activity aria-hidden="true" size={15} /><strong>Adapter 健康</strong></span>
+        <span><Activity aria-hidden="true" size={15} /><strong>来源运行状态</strong></span>
         <small role={runtimeNeedsAttention ? "alert" : undefined}>
           {healthState.status === "loading"
             ? "读取中"
@@ -843,7 +935,7 @@ function SourceMonitoringHealth({
               捕获于 {formatServerTime(health.capturedAt)}。{health.globalEnabled ? "全局监控已启用" : "全局监控默认关闭"}
               {health.dryRun ? " · dry-run" : ""}。新鲜本机心跳只证明 worker 有进展，不证明来源可用、内容为事实或具备交易权限。
             </p>
-            <div className="source-inbox-health-adapters" role="list" aria-label="Adapter 健康记录">
+            <div className="source-inbox-health-adapters" role="list" aria-label="来源运行状态记录">
               {health.adapters.map((adapter) => {
                 const sourceControl = control?.valid === true
                   ? control.adapters.find((entry) => entry.adapterKey === adapter.adapterKey
@@ -898,31 +990,6 @@ function SourceMonitoringHealth({
             />
           </>
         ) : null}
-        <div className="source-inbox-notifications">
-          <span>
-            {notificationEnabled ? <Bell aria-hidden="true" size={15} /> : <BellOff aria-hidden="true" size={15} />}
-            <span>
-              <strong>浏览器通知</strong>
-              <small>
-                {!notificationSupported
-                  ? "当前浏览器不支持。"
-                  : notificationPermission === "denied"
-                    ? "权限已被浏览器拒绝；请在浏览器设置中调整。"
-                    : notificationEnabled
-                      ? "仅页面打开时提示新未读事件；通知不含外部正文。"
-                      : "只在你明确启用后申请权限；历史事件不会补发。"}
-              </small>
-            </span>
-          </span>
-          <button
-            className="secondary compact"
-            type="button"
-            disabled={!notificationSupported || notificationPermission === "denied"}
-            onClick={() => onNotificationPreferenceChange?.(!notificationEnabled)}
-          >
-            {notificationEnabled ? "停用通知" : "启用通知"}
-          </button>
-        </div>
       </div>
     </details>
   );
@@ -944,6 +1011,8 @@ export function SourceInboxPanel({
   rooms = [],
 }) {
   const panelRef = useRef(null);
+  const detailWrapRef = useRef(null);
+  const pendingDetailScrollRef = useRef("");
   const closeButtonRef = useRef(null);
   const openRef = useRef(Boolean(open));
   const listRequestRef = useRef({ sequence: 0, controller: null });
@@ -1313,6 +1382,7 @@ export function SourceInboxPanel({
   }, [loadHealth, loadOperatorControl, operatorActionState, operatorControlState.control]);
 
   useEffect(() => {
+    pendingDetailScrollRef.current = open ? requestedItemId : "";
     if (open && requestedItemId) setSelectedItemId(requestedItemId);
   }, [open, requestedItemId]);
 
@@ -1442,11 +1512,18 @@ export function SourceInboxPanel({
 
   const selectItem = useCallback((itemId) => {
     const cleanItemId = String(itemId || "");
+    pendingDetailScrollRef.current = cleanItemId;
+    if (detailState.status === "ready" && detailState.item?.id === cleanItemId) {
+      pendingDetailScrollRef.current = "";
+      if (globalThis.matchMedia?.("(max-width: 760px)").matches) {
+        detailWrapRef.current?.scrollIntoView?.({ block: "start" });
+      }
+    }
     setSelectedItemId(cleanItemId);
     if (cleanItemId && typeof onEventTargetChange === "function") {
       onEventTargetChange(cleanItemId);
     }
-  }, [onEventTargetChange]);
+  }, [onEventTargetChange, detailState.status, detailState.item?.id]);
 
   const copyDeepLink = useCallback(async () => {
     if (!detailState.item?.id || typeof onCopyEventLink !== "function") return;
@@ -1694,7 +1771,7 @@ export function SourceInboxPanel({
       objective.trim(),
       signal,
     ),
-    "仅生成了 round draft；Provider、正式 round 与市场调用均未启动。",
+    "已创建轮次草稿；Provider、正式 round 与市场调用均未启动。",
   );
 
   const importPacket = async () => {
@@ -1769,6 +1846,16 @@ export function SourceInboxPanel({
 
   const visibleCount = listState.items.length;
   const selectedItem = detailState.item;
+
+  useEffect(() => {
+    if (open && detailState.status === "ready" && selectedItem?.id
+      && pendingDetailScrollRef.current === selectedItem.id) {
+      pendingDetailScrollRef.current = "";
+      if (globalThis.matchMedia?.("(max-width: 760px)").matches) {
+        detailWrapRef.current?.scrollIntoView?.({ block: "start" });
+      }
+    }
+  }, [open, detailState.status, selectedItem?.id]);
   const importBusy = importPreviewState.status === "loading" || importActionState.status === "loading";
   const busy = actionState.status === "loading" || importBusy;
   const canConfirmImport = (
@@ -1820,9 +1907,18 @@ export function SourceInboxPanel({
           <ShieldAlert aria-hidden="true" size={17} />
           <span>
             <strong>外部信息默认不可信</strong>
-            <small>打开本页及收件箱审阅、附加、草稿操作不触发 Provider、正式 round、市场读取或执行；readonly_market 首次预览仅展示静态政策，不读取行情，首次 Runtime 运行时才执行受控只读轮询。</small>
+            <small>阅读不等于事实确认。附加资料和创建草稿不会自动调用模型。</small>
+            <details className="source-inbox-scope">
+              <summary>查看操作边界</summary>
+              <small>打开本页及收件箱审阅、附加、草稿操作不触发 Provider、正式 round、市场读取或执行；readonly_market 首次预览仅展示静态政策，不读取行情，首次 Runtime 运行时才执行受控只读轮询。</small>
+            </details>
           </span>
         </div>
+
+        <SourceInboxNotifications
+          notificationState={notificationState}
+          onNotificationPreferenceChange={onNotificationPreferenceChange}
+        />
 
         <div className="source-inbox-toolbar">
           <form onSubmit={(event) => {
@@ -1958,10 +2054,8 @@ export function SourceInboxPanel({
           operatorActionState={operatorActionState}
           operatorControlState={operatorControlState}
           operatorPreviewHeadingRef={operatorPreviewHeadingRef}
-          notificationState={notificationState}
           onCancelOperatorAction={() => setOperatorActionState(EMPTY_OPERATOR_ACTION_STATE)}
           onLoadOperatorControl={() => void loadOperatorControl()}
-          onNotificationPreferenceChange={onNotificationPreferenceChange}
           onOperatorConfirmationChange={(confirmed) => setOperatorActionState(
             (current) => ({ ...current, confirmed }),
           )}
@@ -2038,7 +2132,8 @@ export function SourceInboxPanel({
             ) : null}
             {listState.status === "ready" && !listState.items.length ? (
               <div className="source-inbox-empty">
-                <img src={dutyCatArt} alt="值班喵守着空的来源收件箱" />
+                {/* 装饰插图：下方已有「暂时没有匹配来源」文字，图形不再重复播报 */}
+                <img src={dutyCatArt} alt="" />
                 <strong>暂时没有匹配来源</strong>
                 <small>可调整筛选，或手动导入 ChatGPT 来源包 JSON。</small>
               </div>
@@ -2057,7 +2152,7 @@ export function SourceInboxPanel({
             </ul>
           </aside>
 
-          <div className="source-inbox-detail-wrap">
+          <div className="source-inbox-detail-wrap" ref={detailWrapRef}>
             {detailState.status === "loading" ? (
               <p className="source-inbox-loading" role="status"><LoaderCircle aria-hidden="true" className="spin" size={16} />正在读取来源详情…</p>
             ) : null}

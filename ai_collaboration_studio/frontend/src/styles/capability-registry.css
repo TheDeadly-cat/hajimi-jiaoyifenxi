@@ -83,8 +83,8 @@
   margin: 3px 0 4px;
 }
 
-.plugin-registry-title p { color: rgba(239, 246, 243, 0.76); font-size: 0.76rem; line-height: 1.55; margin: 0; }
-.plugin-registry-trust { align-items: center; background: rgba(136, 199, 194, 0.11); border: 1px solid rgba(136, 199, 194, 0.25); border-radius: 999px; color: #d1e4e5; display: flex; font-size: 0.68rem; gap: 6px; padding: 6px 9px; white-space: nowrap; }
+.plugin-registry-title p { color: rgba(239, 246, 243, 0.76); font-size: 0.9375rem; line-height: 1.55; margin: 0; }
+.plugin-registry-trust { align-items: center; background: rgba(136, 199, 194, 0.11); border: 1px solid rgba(136, 199, 194, 0.25); border-radius: 999px; color: #d1e4e5; display: flex; font-size: 0.875rem; gap: 6px; padding: 6px 9px; white-space: nowrap; }
 .plugin-registry-trust i { background: #76b5c5; border-radius: 50%; box-shadow: 0 0 0 3px rgba(118, 181, 197, 0.14); height: 7px; width: 7px; }
 .plugin-registry-snapshot[data-trust-state="sealed-frozen-only"] .plugin-registry-trust { border-color: rgba(230, 180, 91, 0.28); color: #ead29c; }
 .plugin-registry-snapshot[data-trust-state="sealed-frozen-only"] .plugin-registry-trust i { background: #dda64f; }
@@ -94,13 +94,13 @@
 .plugin-registry-seal > span:first-child { border-radius: 0 0 0 8px; }
 .plugin-registry-seal > span:last-child { border-radius: 0 0 8px 0; }
 .plugin-registry-seal small,
-.plugin-registry-stats dt { color: var(--registry-muted); font-size: 0.65rem; }
-.plugin-registry-seal strong { font: 650 0.72rem/1.4 "IBM Plex Mono", "Cascadia Code", monospace; overflow-wrap: anywhere; }
+.plugin-registry-stats dt { color: var(--registry-muted); font-size: 0.875rem; }
+.plugin-registry-seal strong { font: 600 0.72rem/1.4 "IBM Plex Mono", "Cascadia Code", monospace; overflow-wrap: anywhere; }
 
 .plugin-registry-stats { border-bottom: 1px solid var(--registry-line); border-top: 1px solid var(--registry-line); display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; }
 .plugin-registry-stats > div { border-right: 1px solid var(--registry-line); display: grid; gap: 2px; padding: 9px 11px; }
 .plugin-registry-stats > div:last-child { border-right: 0; }
-.plugin-registry-stats dd { font: 750 0.94rem/1 "IBM Plex Mono", "Cascadia Code", monospace; margin: 0; }
+.plugin-registry-stats dd { font: 700 0.94rem/1 "IBM Plex Mono", "Cascadia Code", monospace; margin: 0; }
 
 .plugin-registry-next-note,
 .plugin-registry-lifecycle-warning,
@@ -110,7 +110,7 @@
   border-left: 3px solid var(--registry-blue);
   border-radius: 3px 8px 8px 3px;
   display: flex;
-  font-size: 0.74rem;
+  font-size: 0.9375rem;
   gap: 6px;
   line-height: 1.5;
   margin: 0;
@@ -126,10 +126,10 @@
 
 .plugin-registry-pack-section { display: grid; gap: 9px; }
 .plugin-registry-pack-section > header { align-items: center; display: flex; gap: 9px; }
-.plugin-registry-pack-section > header > span { color: rgba(36, 95, 141, 0.28); font: 800 1.28rem/1 "IBM Plex Mono", "Cascadia Code", monospace; }
+.plugin-registry-pack-section > header > span { color: rgba(36, 95, 141, 0.28); font: 700 1.28rem/1 "IBM Plex Mono", "Cascadia Code", monospace; }
 .plugin-registry-pack-section > header > div { display: grid; gap: 1px; }
 .plugin-registry-pack-section > header strong,
-.plugin-registry-binding-group > header strong { font-family: "Noto Serif SC", "Songti SC", serif; font-size: 0.8rem; }
+.plugin-registry-binding-group > header strong { font-family: "Noto Serif SC", "Songti SC", serif; font-size: 0.9375rem; }
 .plugin-registry-pack-list { display: grid; gap: 7px; }
 
 .plugin-registry-pack-list article {
@@ -153,34 +153,34 @@
 .plugin-registry-pack-list article.quarantined,
 .plugin-registry-pack-list article.tombstoned,
 .plugin-registry-pack-list article.lifecycle_integrity_failed { --row-state: var(--registry-red); }
-.plugin-registry-row-index { color: rgba(36, 95, 141, 0.3); font: 750 0.67rem/1.4 "IBM Plex Mono", "Cascadia Code", monospace; }
+.plugin-registry-row-index { color: rgba(36, 95, 141, 0.3); font: 700 0.67rem/1.4 "IBM Plex Mono", "Cascadia Code", monospace; }
 .plugin-registry-pack-copy { display: grid; gap: 2px; min-width: 0; }
-.plugin-registry-pack-copy strong { font-size: 0.82rem; }
+.plugin-registry-pack-copy strong { font-size: 0.9375rem; }
 .plugin-registry-pack-copy small,
 .plugin-registry-binding-group article small { color: var(--registry-muted); font: 500 0.66rem/1.4 "IBM Plex Mono", "Cascadia Code", monospace; overflow-wrap: anywhere; }
-.plugin-registry-pack-copy p { color: #526373; font-size: 0.72rem; line-height: 1.5; margin: 3px 0 0; }
-.plugin-registry-pack-list em { background: color-mix(in srgb, var(--row-state) 10%, white); border: 1px solid color-mix(in srgb, var(--row-state) 26%, transparent); border-radius: 999px; color: var(--row-state); font-size: 0.66rem; font-style: normal; font-weight: 700; padding: 4px 7px; white-space: nowrap; }
+.plugin-registry-pack-copy p { color: #526373; font-size: 0.9375rem; line-height: 1.5; margin: 3px 0 0; }
+.plugin-registry-pack-list em { background: color-mix(in srgb, var(--row-state) 10%, white); border: 1px solid color-mix(in srgb, var(--row-state) 26%, transparent); border-radius: 999px; color: var(--row-state); font-size: 0.875rem; font-style: normal; font-weight: 700; padding: 4px 7px; white-space: nowrap; }
 
 .plugin-registry-bindings { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .plugin-registry-binding-group { background: rgba(245, 249, 250, 0.82); border: 1px solid var(--registry-line); border-radius: 10px; display: grid; gap: 8px; padding: 11px; }
 .plugin-registry-binding-group > header span { display: grid; gap: 2px; }
 .plugin-registry-binding-group > div { display: grid; gap: 7px; }
 .plugin-registry-binding-group article { background: rgba(255, 255, 252, 0.86); border-left: 2px solid rgba(43, 130, 145, 0.48); border-radius: 4px; display: grid; gap: 3px; padding: 8px 9px; }
-.plugin-registry-binding-group article strong { font-size: 0.74rem; overflow-wrap: anywhere; }
-.plugin-registry-binding-group article > span { color: #315f80; font: 650 0.66rem/1.4 "IBM Plex Mono", "Cascadia Code", monospace; overflow-wrap: anywhere; }
-.plugin-registry-binding-group details { color: var(--registry-muted); font-size: 0.68rem; }
+.plugin-registry-binding-group article strong { font-size: 0.9375rem; overflow-wrap: anywhere; }
+.plugin-registry-binding-group article > span { color: #315f80; font: 600 0.66rem/1.4 "IBM Plex Mono", "Cascadia Code", monospace; overflow-wrap: anywhere; }
+.plugin-registry-binding-group details { color: var(--registry-muted); font-size: 0.875rem; }
 .plugin-registry-binding-group summary { align-items: center; cursor: pointer; display: flex; min-height: 44px; touch-action: manipulation; }
 .plugin-registry-binding-group summary:focus-visible { outline: 3px solid rgba(36, 95, 141, 0.24); outline-offset: 2px; }
 .plugin-registry-binding-group ul { display: grid; gap: 3px; margin: 6px 0 0; padding-left: 16px; }
-.plugin-registry-empty-binding { color: var(--registry-muted); font-size: 0.7rem; margin: 0; }
+.plugin-registry-empty-binding { color: var(--registry-muted); font-size: 0.875rem; margin: 0; }
 .plugin-registry-safety { background: #e8f2fa; border-color: var(--registry-blue); color: #315f80; }
 
 .plugin-registry-snapshot.integrity-failed { background: #fff7f7; border-color: #efc0c0; box-shadow: none; }
 .plugin-registry-snapshot.integrity-failed > header { align-items: center; display: flex; gap: 10px; justify-content: space-between; }
-.plugin-registry-snapshot.integrity-failed > header span { align-items: center; color: #9f3030; display: inline-flex; gap: 6px; font-size: 0.72rem; }
-.plugin-registry-snapshot.integrity-failed > header small { color: #82575a; font-size: 0.62rem; }
+.plugin-registry-snapshot.integrity-failed > header span { align-items: center; color: #9f3030; display: inline-flex; gap: 6px; font-size: 0.9375rem; }
+.plugin-registry-snapshot.integrity-failed > header small { color: #82575a; font-size: 0.875rem; }
 .plugin-registry-snapshot.integrity-failed > p,
-.plugin-registry-snapshot.integrity-failed li { color: #873f43; font-size: 0.66rem; line-height: 1.5; }
+.plugin-registry-snapshot.integrity-failed li { color: #873f43; font-size: 0.875rem; line-height: 1.5; }
 .plugin-registry-snapshot.integrity-failed > p { margin: 0; }
 .plugin-registry-snapshot.integrity-failed ul { display: grid; gap: 3px; margin: 0; padding-left: 18px; }
 

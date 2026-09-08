@@ -14,10 +14,10 @@
 
 .storage-data-readiness-workbench[data-readiness-state="blocked"] { border-left-color: #a8783d; }
 .storage-data-readiness-workbench > header { padding-bottom: 7px; border-bottom: 1px solid rgb(65 118 140 / 20%); }
-.storage-data-readiness-workbench > header span { color: var(--readiness-ink); font-size: 11px; }
+.storage-data-readiness-workbench > header span { color: var(--readiness-ink); font-size: 14px; }
 .storage-data-readiness-workbench > header strong,
-.storage-data-readiness-workbench.ready > header strong { color: #315f74; font-size: 10px; }
-.storage-data-readiness-workbench > p { font-size: 10px; line-height: 1.55; }
+.storage-data-readiness-workbench.ready > header strong { color: #315f74; font-size: 14px; }
+.storage-data-readiness-workbench > p { font-size: 14px; line-height: 1.55; }
 
 .storage-data-readiness-workbench .storage-readiness-source {
   gap: 7px;
@@ -31,17 +31,17 @@
 }
 .storage-data-readiness-workbench .storage-readiness-source strong {
   overflow: visible;
-  font-size: 11px;
+  font-size: 14px;
   text-overflow: clip;
   white-space: normal;
   overflow-wrap: anywhere;
 }
 .storage-data-readiness-workbench .storage-readiness-source small {
   flex: 1 1 auto;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.45;
 }
-.storage-data-readiness-workbench .storage-readiness-source b { font-size: 9px; }
+.storage-data-readiness-workbench .storage-readiness-source b { font-size: 13px; }
 
 .storage-data-readiness-workbench .storage-readiness-actions summary {
   display: flex;
@@ -51,7 +51,7 @@
   gap: 8px;
   padding: 9px;
   cursor: pointer;
-  font-size: 10px;
+  font-size: 14px;
   list-style: none;
 }
 .storage-data-readiness-workbench .storage-readiness-actions summary::-webkit-details-marker {
@@ -78,21 +78,21 @@
   outline: 3px solid rgb(65 118 140 / 32%);
   outline-offset: 2px;
 }
-.storage-data-readiness-workbench .storage-readiness-actions li { font-size: 9px; line-height: 1.5; }
-.storage-data-readiness-workbench .official-supplement-candidates article b { font-size: 10px; }
+.storage-data-readiness-workbench .storage-readiness-actions li { font-size: 13px; line-height: 1.5; }
+.storage-data-readiness-workbench .official-supplement-candidates article b { font-size: 14px; }
 .storage-data-readiness-workbench .official-supplement-candidates article small {
   overflow: visible;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.45;
   text-overflow: clip;
   white-space: normal;
   overflow-wrap: anywhere;
 }
 .storage-data-readiness-workbench .official-supplement-actions a,
-.storage-data-readiness-workbench .official-supplement-actions button { min-height: 38px; font-size: 9px; }
-.storage-data-readiness-workbench .official-supplement-candidates > p { font-size: 9px; line-height: 1.5; }
-.storage-data-readiness-workbench .storage-readiness-refresh { min-height: 40px; font-size: 10px; }
-.storage-data-readiness-workbench .storage-readiness-boundary { font-size: 9px; line-height: 1.55; }
+.storage-data-readiness-workbench .official-supplement-actions button { min-height: 38px; font-size: 13px; }
+.storage-data-readiness-workbench .official-supplement-candidates > p { font-size: 13px; line-height: 1.5; }
+.storage-data-readiness-workbench .storage-readiness-refresh { min-height: 40px; font-size: 14px; }
+.storage-data-readiness-workbench .storage-readiness-boundary { font-size: 13px; line-height: 1.55; }
 
 @container storage-readiness (max-width: 380px) {
   .storage-data-readiness-workbench > header { align-items: flex-start; flex-direction: column; gap: 3px; }

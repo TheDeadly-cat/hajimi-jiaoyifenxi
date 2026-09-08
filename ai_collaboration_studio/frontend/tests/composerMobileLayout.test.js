@@ -7,62 +7,40 @@ const styles = readFileSync(
   "utf8",
 );
 
-function mediaBlock(startMarker, endMarker) {
-  const start = styles.indexOf(startMarker);
-  const end = styles.indexOf(endMarker, start + startMarker.length);
-  assert.notEqual(start, -1, `${startMarker} should exist`);
-  assert.ok(end > start, `${startMarker} should end before ${endMarker}`);
-  return styles.slice(start, end);
+function rule(selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = styles.match(new RegExp(`${escaped}\\s*\\{([^}]*)\\}`));
+  assert.ok(match, `${selector} should exist`);
+  return match[1];
 }
 
-test("desktop Composer reserves one explicit grid area for every toolbar surface", () => {
-  const desktop = mediaBlock(
-    "@media (min-width: 1181px)",
-    "@media (max-width: 760px)",
-  );
-
-  assert.match(
-    desktop,
-    /grid-template-columns:\s*auto minmax\(0, 1fr\) auto auto;/,
-  );
-  assert.match(
-    desktop,
-    /grid-template-areas:\s*"mention keyboard status actions";/,
-  );
-  assert.match(desktop, /\.composer-keyboard-hint\s*\{[\s\S]*?grid-area:\s*keyboard;/);
-  assert.match(desktop, /\.composer \.composer-actions\s*\{[\s\S]*?grid-area:\s*actions;/);
+test("Composer reflows toolbar controls when an inspector narrows a desktop conversation", () => {
+  const toolbar = rule(".composer .composer-toolbar");
+  assert.match(toolbar, /display:\s*flex;/);
+  assert.match(toolbar, /flex-wrap:\s*wrap;/);
+  assert.doesNotMatch(styles, /grid-template-areas:|@media \(min-width:\s*1181px\)/);
 });
 
-test("mobile Composer assigns each toolbar surface to an explicit grid area", () => {
-  const mobile = mediaBlock(
-    "@media (max-width: 760px)",
-    "@media (max-width: 430px)",
-  );
-
-  assert.match(mobile, /\.composer \.mention-control\s*\{\s*grid-area:\s*mention;\s*\}/);
-  assert.match(mobile, /\.composer \.composer-provider-summary\s*\{[\s\S]*?grid-area:\s*status;/);
-  assert.match(mobile, /\.composer \.composer-actions\s*\{[\s\S]*?grid-area:\s*actions;/);
+test("optional keyboard hints follow the Composer width rather than the whole viewport", () => {
+  assert.match(rule(".composer"), /container-name:\s*message-composer;/);
+  assert.match(rule(".composer"), /container-type:\s*inline-size;/);
+  assert.match(rule(".composer-keyboard-hint"), /display:\s*none;/);
+  assert.match(styles, /@container message-composer \(min-width:\s*880px\)\s*\{\s*\.composer-keyboard-hint\s*\{\s*display:\s*inline-flex;/);
 });
 
-test("narrow Composer gives provider status its own row without overlap hacks", () => {
-  const narrow = mediaBlock(
-    "@media (max-width: 430px)",
-    "@media (min-width: 431px) and (max-width: 760px)",
-  );
-
-  assert.match(narrow, /grid-template-columns:\s*44px minmax\(0, 1fr\);/);
-  assert.match(narrow, /grid-template-areas:[\s\S]*?"status status"[\s\S]*?"mention actions";/);
-  assert.match(narrow, /\.composer \.composer-provider-summary\s*\{[\s\S]*?max-width:\s*100%;/);
-  assert.doesNotMatch(narrow, /position:\s*absolute|margin-(?:left|right):\s*-/);
+test("launch prerequisites remain readable without ellipsis or absolute positioning", () => {
+  const status = rule(".composer .composer-provider-summary");
+  assert.match(status, /max-width:\s*100%;/);
+  assert.match(status, /white-space:\s*normal;/);
+  assert.match(status, /overflow-wrap:\s*anywhere;/);
+  assert.match(status, /overflow:\s*visible;/);
+  assert.doesNotMatch(status, /position:\s*absolute|text-overflow:\s*ellipsis/);
 });
 
-test("mid-width Composer keeps mention, status, and actions in one row", () => {
-  const midWidth = mediaBlock(
-    "@media (min-width: 431px) and (max-width: 760px)",
-    "@media (prefers-reduced-motion: reduce)",
-  );
-
-  assert.match(midWidth, /grid-template-columns:\s*44px minmax\(0, 1fr\) auto;/);
-  assert.match(midWidth, /grid-template-areas:\s*"mention status actions";/);
-  assert.match(midWidth, /max-width:\s*130px;/);
+test("action buttons can wrap within the available Composer width", () => {
+  const actions = rule(".composer .composer-actions");
+  assert.match(actions, /flex-wrap:\s*wrap;/);
+  assert.match(actions, /min-width:\s*0;/);
+  assert.match(actions, /max-width:\s*100%;/);
+  assert.doesNotMatch(actions, /overflow:\s*hidden|position:\s*absolute/);
 });

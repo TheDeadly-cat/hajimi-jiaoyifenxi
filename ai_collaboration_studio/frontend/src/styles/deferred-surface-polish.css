@@ -99,16 +99,16 @@
 
 .deferred-surface-copy small {
   color: var(--deferred-accent);
-  font-size: 8px;
-  font-weight: 780;
+  font-size: 13px;
+  font-weight: 700;
   letter-spacing: 0.13em;
 }
 
 .deferred-surface-copy strong {
   overflow: hidden;
   color: var(--deferred-ink);
-  font-size: 12px;
-  font-weight: 720;
+  font-size: 15px;
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

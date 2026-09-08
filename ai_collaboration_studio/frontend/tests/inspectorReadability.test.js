@@ -24,21 +24,22 @@ test("CSS rule lookup is stable across Windows checkout line endings", () => {
 });
 
 test("provider identity and preflight evidence remain readable without ellipsis-only disclosure", () => {
-  assert.match(rule(".provider-count-chip > span > small"), /font-size:\s*10px/);
+  // 本轮把关键说明文字从 10px/11px 提到 14px（--fs-caption 地板）。
+  assert.match(rule(".provider-count-chip > span > small"), /font-size:\s*14px/);
   assert.match(rule(".provider-count-chip > span > small"), /overflow-wrap:\s*anywhere/);
   assert.doesNotMatch(rule(".provider-count-chip > span > small"), /text-overflow|white-space:\s*nowrap/);
-  assert.match(rule(".provider-catalog-copy small"), /font-size:\s*10px/);
-  assert.match(rule(".provider-config-state"), /font-size:\s*10px/);
-  assert.match(rule(".provider-preflight-route small"), /font-size:\s*10px/);
+  assert.match(rule(".provider-catalog-copy small"), /font-size:\s*14px/);
+  assert.match(rule(".provider-config-state"), /font-size:\s*14px/);
+  assert.match(rule(".provider-preflight-route small"), /font-size:\s*14px/);
   assert.match(rule(".provider-preflight-route small"), /white-space:\s*normal/);
 });
 
 test("launch readiness and governance boundary text use an evidence-readable scale", () => {
-  assert.match(rule(".meeting-readiness-row"), /font-size:\s*11px/);
-  assert.match(rule(".meeting-readiness-row strong"), /font-size:\s*11px/);
-  assert.match(rule(".meeting-readiness-reason"), /font-size:\s*10px/);
-  assert.match(rule(".convergence-gate small"), /font-size:\s*10px/);
-  assert.match(rule(".convergence-next,\n.convergence-boundary"), /font-size:\s*10px/);
+  assert.match(rule(".meeting-readiness-row"), /font-size:\s*14px/);
+  assert.match(rule(".meeting-readiness-row strong"), /font-size:\s*14px/);
+  assert.match(rule(".meeting-readiness-reason"), /font-size:\s*14px/);
+  assert.match(rule(".convergence-gate small"), /font-size:\s*14px/);
+  assert.match(rule(".convergence-next,\n.convergence-boundary"), /font-size:\s*14px/);
   assert.match(rule(".workflow-summary-facts dd"), /overflow-wrap:\s*anywhere/);
   assert.doesNotMatch(rule(".workflow-summary-facts dd"), /text-overflow|white-space:\s*nowrap/);
 });

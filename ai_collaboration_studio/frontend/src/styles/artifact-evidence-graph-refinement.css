@@ -54,7 +54,7 @@
 .evidence-ledger .artifact-evidence-graph-heading > span > small,
 .evidence-ledger .artifact-evidence-graph-state,
 .evidence-ledger .artifact-evidence-graph-boundary {
-  font-size: 0.74rem;
+  font-size: 0.9375rem;
   line-height: 1.5;
 }
 
@@ -123,13 +123,13 @@
 
 .evidence-ledger .artifact-evidence-filter-status span {
   color: var(--ledger-warm);
-  font-size: 0.72rem;
-  font-weight: 800;
+  font-size: 0.9375rem;
+  font-weight: 700;
   letter-spacing: 0.08em;
 }
 
 .evidence-ledger .artifact-evidence-filter-status strong {
-  font-size: 0.82rem;
+  font-size: 0.9375rem;
 }
 
 .evidence-ledger .artifact-evidence-filter-status small {
@@ -150,16 +150,16 @@
 }
 
 .evidence-ledger .artifact-evidence-path small {
-  font-size: 0.66rem;
+  font-size: 0.875rem;
 }
 
 .evidence-ledger .artifact-evidence-path strong {
-  font-size: 0.74rem;
+  font-size: 0.9375rem;
   line-height: 1.45;
 }
 
 .evidence-ledger .artifact-evidence-path em {
-  font-size: 0.68rem;
+  font-size: 0.875rem;
   line-height: 1.5;
 }
 

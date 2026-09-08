@@ -8,12 +8,12 @@
 
 .artifact-section-diff > .artifact-section-diff-heading > b {
   color: #263e50;
-  font-size: 12px;
+  font-size: 15px;
 }
 
 .artifact-section-diff > .artifact-section-diff-heading > small {
   color: #718493;
-  font: 700 9px/1.35 "IBM Plex Mono", "Cascadia Mono", monospace;
+  font: 700 13px/1.35 "IBM Plex Mono", "Cascadia Mono", monospace;
   text-align: right;
 }
 
@@ -33,7 +33,7 @@
   padding: 8px 10px;
   border: 1px solid currentColor;
   border-radius: 8px;
-  font-size: 10px;
+  font-size: 14px;
   font-style: normal;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -60,8 +60,8 @@
   min-height: 42px;
   padding: 10px 12px;
   color: #40596d;
-  font-size: 10px;
-  font-weight: 750;
+  font-size: 14px;
+  font-weight: 700;
   cursor: pointer;
   overflow-wrap: anywhere;
 }

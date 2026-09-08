@@ -93,6 +93,7 @@ export function IconRail({
               onPointerEnter={preload}
             >
               <Icon size={20} strokeWidth={1.8} aria-hidden="true" focusable="false" />
+              <span className="rail-button-label">{label}</span>
               {section === "source-inbox" && unreadBadge.count ? (
                 <span className="source-inbox-unread-badge" aria-hidden="true">
                   {unreadBadge.text}

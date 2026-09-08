@@ -28,7 +28,7 @@
     repeating-linear-gradient(90deg, rgba(67, 105, 100, 0.07) 0 1px, transparent 1px 24px),
     linear-gradient(110deg, #eef3ef, #fbfcf8 74%);
   font-family: Bahnschrift, "Aptos Display", "Segoe UI", sans-serif;
-  font-weight: 760;
+  font-weight: 700;
   list-style-position: inside;
 }
 
@@ -40,7 +40,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .industry-proxy-summary-v2 > summary > span svg { color: var(--proxy-teal); }
@@ -52,8 +52,8 @@
   border-radius: 999px;
   color: #63726f;
   background: #f7f9f7;
-  font-size: 9px;
-  font-weight: 750;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .industry-proxy-summary-v2 > summary > small.ready {
@@ -92,20 +92,20 @@
 
 .industry-proxy-overview small {
   color: #74817d;
-  font-size: 8px;
-  font-weight: 800;
+  font-size: 13px;
+  font-weight: 700;
   letter-spacing: .07em;
 }
 
 .industry-proxy-overview strong {
   color: #365a55;
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
 
 .industry-proxy-overview .source strong {
-  font-size: 10px;
+  font-size: 14px;
 }
 
 .industry-proxy-summary-v2 .industry-proxy-list {
@@ -151,9 +151,9 @@
 .industry-proxy-row > header > em {
   padding: 3px 6px;
   border-radius: 999px;
-  font-size: 8px;
+  font-size: 13px;
   font-style: normal;
-  font-weight: 800;
+  font-weight: 700;
 }
 
 .industry-proxy-row > header > span.device {
@@ -184,7 +184,7 @@
 .industry-proxy-row h4 {
   margin: 0;
   color: #2e4644;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -216,13 +216,13 @@
 
 .industry-proxy-value > span em {
   color: #71807c;
-  font-size: 8px;
+  font-size: 13px;
   font-style: normal;
 }
 
 .industry-proxy-value > small {
   color: #657670;
-  font-size: 9px;
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
@@ -234,7 +234,7 @@
   justify-content: space-between;
   gap: 7px;
   color: #6b7976;
-  font-size: 8px;
+  font-size: 13px;
 }
 
 .industry-proxy-row > footer time {
@@ -254,8 +254,8 @@
   border-radius: 6px;
   color: #346a60;
   background: #f2f8f5;
-  font-size: 9px;
-  font-weight: 750;
+  font-size: 13px;
+  font-weight: 700;
   text-decoration: none;
 }
 
@@ -267,7 +267,7 @@
 .proxy-source-missing {
   flex: 0 0 auto;
   color: #876832;
-  font-size: 8px;
+  font-size: 13px;
   font-weight: 700;
 }
 
@@ -281,7 +281,7 @@
   padding: 16px;
   color: #765b2c;
   background: #fcf8ed;
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1.5;
 }
 
@@ -297,7 +297,7 @@
   border-top: 1px solid #d2dad3;
   color: #5f716a;
   background: #f8faf7;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.5;
 }
 

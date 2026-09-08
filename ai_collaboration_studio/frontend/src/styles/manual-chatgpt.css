@@ -49,13 +49,13 @@
 .manual-chatgpt-dialog > header p {
   margin-top: 5px;
   color: #687a90;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .manual-chatgpt-kicker {
   color: #1769e0;
-  font-size: 10px;
-  font-weight: 800;
+  font-size: 14px;
+  font-weight: 700;
   letter-spacing: 0.13em;
 }
 
@@ -82,7 +82,7 @@
   justify-content: space-between;
   gap: 12px;
   color: #60758d;
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .manual-chatgpt-history-list {
@@ -108,14 +108,14 @@
 
 .manual-chatgpt-history-list button strong {
   overflow: hidden;
-  font-size: 12px;
+  font-size: 15px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .manual-chatgpt-history-list button span {
   color: #718198;
-  font-size: 10px;
+  font-size: 14px;
 }
 
 .manual-chatgpt-history-list button.active {
@@ -134,8 +134,8 @@
   display: grid;
   gap: 7px;
   color: #455c76;
-  font-size: 12px;
-  font-weight: 760;
+  font-size: 15px;
+  font-weight: 700;
 }
 
 .manual-chatgpt-setup textarea,
@@ -156,7 +156,7 @@
 .manual-chatgpt-import textarea {
   min-height: 156px;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px;
+  font-size: 15px;
 }
 
 .manual-chatgpt-setup textarea:focus-visible,
@@ -175,8 +175,8 @@
 .manual-chatgpt-setup legend {
   margin-bottom: 8px;
   color: #455c76;
-  font-size: 12px;
-  font-weight: 760;
+  font-size: 15px;
+  font-weight: 700;
 }
 
 .manual-chatgpt-modes,
@@ -244,7 +244,7 @@
 }
 
 .manual-chatgpt-recovery-note span {
-  font-size: 12px;
+  font-size: 15px;
   line-height: 1.5;
 }
 
@@ -257,7 +257,7 @@
 .manual-chatgpt-state span,
 .manual-chatgpt-boundary span {
   color: #63758a;
-  font-size: 12px;
+  font-size: 15px;
   line-height: 1.45;
 }
 
@@ -272,8 +272,8 @@
   display: grid;
   gap: 5px;
   color: #4d657b;
-  font-size: 11px;
-  font-weight: 750;
+  font-size: 14px;
+  font-weight: 700;
 }
 
 .manual-chatgpt-review-route input {
@@ -340,21 +340,21 @@
 .manual-chatgpt-summary span,
 .manual-chatgpt-objective > span {
   color: #75859a;
-  font-size: 10px;
-  font-weight: 750;
+  font-size: 14px;
+  font-weight: 700;
   letter-spacing: 0.04em;
 }
 
 .manual-chatgpt-estimate-note {
   margin: -4px 2px 0;
   color: var(--text-tertiary, #65758b);
-  font-size: 0.76rem;
+  font-size: 0.9375rem;
   line-height: 1.55;
 }
 
 .manual-chatgpt-summary strong {
   overflow: hidden;
-  font-size: 13px;
+  font-size: 15px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -378,8 +378,8 @@
   padding: 13px 14px;
   cursor: pointer;
   color: #6c531a;
-  font-size: 12px;
-  font-weight: 760;
+  font-size: 15px;
+  font-weight: 700;
 }
 
 .manual-chatgpt-prompt-fallback[open] > summary {
@@ -396,8 +396,8 @@
   display: grid;
   gap: 6px;
   color: #53667d;
-  font-size: 11px;
-  font-weight: 750;
+  font-size: 14px;
+  font-weight: 700;
 }
 
 .manual-chatgpt-prompt-fallback textarea {
@@ -408,12 +408,12 @@
   padding: 10px;
   background: rgba(255, 255, 255, 0.88);
   color: #314861;
-  font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+  font: 14px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 .manual-chatgpt-prompt-fallback > p {
   color: #6d6a58;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.5;
 }
 
@@ -441,8 +441,8 @@
 .manual-chatgpt-api-reviews > header span,
 .manual-chatgpt-decision-card > header span {
   color: #1769e0;
-  font-size: 9px;
-  font-weight: 800;
+  font-size: 13px;
+  font-weight: 700;
   letter-spacing: 0.12em;
 }
 
@@ -455,7 +455,7 @@
 .manual-chatgpt-api-reviews > header small,
 .manual-chatgpt-decision-card > header small {
   color: #66788e;
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .manual-chatgpt-review-grid {
@@ -479,13 +479,13 @@
 .manual-chatgpt-review-grid p,
 .manual-chatgpt-decision-card > p {
   color: #4f627a;
-  font-size: 12px;
+  font-size: 15px;
   line-height: 1.55;
 }
 
 .manual-chatgpt-review-grid small {
   color: #718096;
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1.45;
 }
 
@@ -500,7 +500,7 @@
   display: grid;
   gap: 6px;
   color: #5a697c;
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .manual-chatgpt-review-findings li,
@@ -519,8 +519,8 @@
   padding: 3px 7px;
   background: #e8f6f0;
   color: #16684f;
-  font-size: 9px;
-  font-weight: 800;
+  font-size: 13px;
+  font-weight: 700;
   text-transform: uppercase;
 }
 
@@ -543,8 +543,8 @@
 .manual-chatgpt-decision-card legend {
   margin-bottom: 8px;
   color: #455c76;
-  font-size: 12px;
-  font-weight: 760;
+  font-size: 15px;
+  font-weight: 700;
 }
 
 .manual-chatgpt-decision-options label {
@@ -576,7 +576,7 @@
 
 .manual-chatgpt-decision-options em {
   color: #7c5a0c;
-  font-size: 10px;
+  font-size: 14px;
   font-style: normal;
   font-weight: 700;
 }
@@ -585,7 +585,7 @@
   display: grid;
   gap: 2px;
   color: #8a5f23;
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1.45;
 }
 
@@ -600,7 +600,7 @@
   padding: 10px 12px;
   background: rgba(244, 248, 253, 0.78);
   color: #53667d;
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .manual-chatgpt-decision-notes strong {
@@ -622,7 +622,7 @@
   padding: 10px;
   background: rgba(235, 250, 246, 0.86);
   color: #315d51;
-  font-size: 12px;
+  font-size: 15px;
   line-height: 1.5;
 }
 
@@ -631,7 +631,7 @@
   padding: 10px 12px;
   background: rgba(255, 240, 236, 0.9);
   color: #9a3f32;
-  font-size: 12px;
+  font-size: 15px;
 }
 
 .manual-chatgpt-decision-blockers ul {
@@ -647,8 +647,8 @@
   padding: 10px 12px;
   background: rgba(235, 250, 246, 0.86);
   color: #16684f;
-  font-size: 12px;
-  font-weight: 750;
+  font-size: 15px;
+  font-weight: 700;
 }
 
 .manual-chatgpt-objective p {
@@ -677,8 +677,8 @@
 
 .manual-chatgpt-results > header span {
   color: #1769e0;
-  font-size: 9px;
-  font-weight: 800;
+  font-size: 13px;
+  font-weight: 700;
   letter-spacing: 0.12em;
 }
 
@@ -689,7 +689,7 @@
 
 .manual-chatgpt-results > header small {
   color: #7c5a0c;
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .manual-chatgpt-results article {
@@ -710,13 +710,13 @@
   padding: 4px 8px;
   background: rgba(255, 249, 227, 0.9);
   color: #7c5a0c;
-  font-size: 10px;
+  font-size: 14px;
   text-align: right;
 }
 
 .manual-chatgpt-results article > p {
   color: #4f627a;
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1.55;
   white-space: pre-wrap;
 }
@@ -734,8 +734,8 @@
 
 .manual-chatgpt-results summary {
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 760;
+  font-size: 15px;
+  font-weight: 700;
 }
 
 .manual-chatgpt-results details > ul {
@@ -747,7 +747,7 @@
 .manual-chatgpt-results details li {
   border-top: 1px solid rgba(40, 78, 120, 0.08);
   padding-top: 8px;
-  font-size: 12px;
+  font-size: 15px;
 }
 
 .manual-chatgpt-results details li > span,
@@ -786,13 +786,13 @@
 
 .manual-chatgpt-audit-details > summary strong {
   color: #263b55;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .manual-chatgpt-audit-details > summary small,
 .manual-chatgpt-audit-details > summary em {
   color: #6b7c91;
-  font-size: 11px;
+  font-size: 14px;
   font-style: normal;
   line-height: 1.45;
 }
@@ -831,7 +831,7 @@
   display: grid;
   gap: 2px;
   color: #5d6c80;
-  font-size: 12px;
+  font-size: 15px;
 }
 
 .manual-chatgpt-issues code {

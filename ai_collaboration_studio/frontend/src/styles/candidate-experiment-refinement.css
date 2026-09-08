@@ -29,7 +29,7 @@
   padding: 0.5rem 0.7rem;
   border-left: 2px solid var(--experiment-ink);
   color: color-mix(in srgb, currentColor 74%, transparent);
-  font-size: 0.78rem;
+  font-size: 0.9375rem;
 }
 
 .candidate-experiment-workbench .candidate-experiment-heading-copy > strong {
@@ -43,7 +43,7 @@
 .candidate-experiment-workbench .candidate-experiment-error,
 .candidate-experiment-workbench .candidate-experiment-selection-status > p,
 .candidate-experiment-workbench .candidate-experiment-acknowledgement {
-  font-size: 0.76rem;
+  font-size: 0.9375rem;
 }
 
 .candidate-experiment-workbench .candidate-experiment-kicker,
@@ -51,7 +51,7 @@
 .candidate-experiment-workbench .candidate-experiment-selection-status > span small,
 .candidate-experiment-workbench .candidate-experiment-proof > span > small,
 .candidate-experiment-workbench .candidate-experiment-result-heading > em span {
-  font-size: 0.64rem;
+  font-size: 0.875rem;
 }
 
 .candidate-experiment-workbench .candidate-experiment-heading > em,
@@ -59,13 +59,13 @@
 .candidate-experiment-workbench .candidate-experiment-selector legend,
 .candidate-experiment-workbench .candidate-experiment-table-hint,
 .candidate-experiment-workbench .candidate-experiment-safety {
-  font-size: 0.72rem;
+  font-size: 0.9375rem;
 }
 
 .candidate-experiment-workbench .candidate-experiment-workflow li > b,
 .candidate-experiment-workbench .candidate-experiment-workflow li > em,
 .candidate-experiment-workbench .candidate-experiment-order {
-  font-size: 0.66rem;
+  font-size: 0.875rem;
 }
 
 .candidate-experiment-workbench .candidate-experiment-selector > label {
@@ -81,14 +81,14 @@
 .candidate-experiment-workbench .candidate-experiment-selector > label strong,
 .candidate-experiment-workbench .candidate-experiment-common-spec dd,
 .candidate-experiment-workbench .candidate-experiment-arm-index li strong {
-  font-size: 0.76rem;
+  font-size: 0.9375rem;
 }
 
 .candidate-experiment-workbench .candidate-experiment-selector > label small,
 .candidate-experiment-workbench .candidate-experiment-arm-index li small,
 .candidate-experiment-workbench .candidate-experiment-arm-index code,
 .candidate-experiment-workbench .candidate-experiment-common-spec dt {
-  font-size: 0.67rem;
+  font-size: 0.875rem;
 }
 
 .candidate-experiment-more {
@@ -121,8 +121,8 @@
 }
 
 .candidate-experiment-neutrality-ledger small {
-  font-size: 0.68rem;
-  font-weight: 750;
+  font-size: 0.875rem;
+  font-weight: 700;
   letter-spacing: 0.07em;
 }
 
@@ -145,14 +145,14 @@
 }
 
 .candidate-experiment-workbench .candidate-experiment-proof > span > span {
-  font-size: 0.67rem;
+  font-size: 0.875rem;
 }
 
 .candidate-experiment-workbench .candidate-experiment-proof > span > .candidate-experiment-proof-boundary {
   margin-block: 0.18rem 0.12rem;
   color: #765b32;
   font-family: inherit;
-  font-size: 0.72rem;
+  font-size: 0.9375rem;
   font-weight: 700;
   line-height: 1.5;
 }
@@ -169,7 +169,7 @@
 
 .candidate-experiment-workbench .candidate-experiment-table caption,
 .candidate-experiment-workbench .candidate-experiment-table td {
-  font-size: 0.72rem;
+  font-size: 0.9375rem;
 }
 
 .candidate-experiment-workbench .candidate-experiment-table th:first-child {
@@ -182,7 +182,7 @@
 }
 
 .candidate-experiment-workbench .candidate-experiment-table th > strong {
-  font-size: 0.74rem;
+  font-size: 0.9375rem;
 }
 
 .candidate-experiment-workbench .candidate-experiment-table th > small,
@@ -190,11 +190,11 @@
 .candidate-experiment-workbench .candidate-experiment-metric-stack small,
 .candidate-experiment-workbench .candidate-experiment-capacity-block small,
 .candidate-experiment-workbench .candidate-experiment-missing {
-  font-size: 0.66rem;
+  font-size: 0.875rem;
 }
 
 .candidate-experiment-workbench .candidate-experiment-metric-stack strong {
-  font-size: 0.72rem;
+  font-size: 0.9375rem;
 }
 
 .candidate-experiment-workbench label:focus-within,

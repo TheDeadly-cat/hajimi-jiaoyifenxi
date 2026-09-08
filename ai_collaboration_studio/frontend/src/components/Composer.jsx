@@ -20,6 +20,7 @@ export function Composer({
 }) {
   const [mentionOpen, setMentionOpen] = useState(false);
   const textareaRef = useRef(null);
+  const compositionRef = useRef(false);
   const mentionButtonRef = useRef(null);
   const mentionMenuRef = useRef(null);
   const mentionMenuId = useId();
@@ -85,7 +86,19 @@ export function Composer({
         ref={textareaRef}
         value={value}
         onChange={(event) => onChange(event.target.value)}
+        onCompositionStart={() => { compositionRef.current = true; }}
+        onCompositionEnd={() => { compositionRef.current = false; }}
+        onBlur={() => { compositionRef.current = false; }}
         onKeyDown={(event) => {
+          // Enter can confirm an IME candidate instead of sending a message.
+          // Legacy IMEs can report keyCode 229 after compositionend.
+          if (
+            compositionRef.current
+            || event.isComposing
+            || event.nativeEvent?.isComposing
+            || event.keyCode === 229
+            || event.nativeEvent?.keyCode === 229
+          ) return;
           if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
             submit();
@@ -146,15 +159,16 @@ export function Composer({
             type="button"
             onClick={(event) => onStartRound?.(event.currentTarget)}
             disabled={disabled || roundDisabled}
+            title="发起正式讨论轮次；会先打开「启动前确认」，需要你确认后才会调用模型服务。与来源收件箱的「创建轮次草稿」是不同动作。"
           >
-            <Sparkles size={16} />API 轮次
+            <Sparkles size={16} />发起讨论
           </button>
           <button
             className="primary chatgpt-button"
             type="button"
             onClick={(event) => onStartChatGPT?.(event.currentTarget)}
             disabled={disabled || chatGPTDisabled}
-            title={chatGPTStatusTitle || "打开人工 ChatGPT 协作席位；可在弹窗中填写研究问题，不会自动调用 Provider。"}
+            title={chatGPTStatusTitle || "打开人工 ChatGPT 协作席位；可在弹窗中填写研究问题，不会自动调用 Provider，也不会发起正式讨论轮次。"}
             aria-label="打开人工 ChatGPT 协作席位"
           >
             <Sparkles size={16} />ChatGPT 协作
