@@ -246,7 +246,11 @@
   align-items: flex-start;
   gap: 9px;
 }
-.chat-timeline-workspace .message.user { grid-template-columns: minmax(0, 1fr); }
+.chat-timeline-workspace .message.user {
+  /* Give the percentage-capped bubble a stable row width instead of shrinking twice. */
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr);
+}
 .chat-timeline-workspace .avatar {
   display: flex;
   width: 32px;
