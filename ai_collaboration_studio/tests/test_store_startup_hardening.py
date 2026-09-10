@@ -25,6 +25,66 @@ from backend.store import (
 
 
 class StudioStoreInitializationHardeningTests(unittest.TestCase):
+    def test_shutdown_checkpoint_clears_read_only_sidecars_without_changing_data(self) -> None:
+        from backend.instance_ownership import DatabaseInstanceOwner
+        from backend.database_migration import assert_database_ready_for_startup, DatabaseMigrationError
+        with tempfile.TemporaryDirectory(prefix="studio-shutdown-checkpoint-") as directory:
+            path = Path(directory) / "trial.sqlite3"
+            store = StudioStore(path)
+            # This is the normal monitoring repository's last-reader pattern.
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as reader:
+                before = list(reader.iterdump())
+            self.assertTrue(Path(str(path) + "-wal").exists())
+            self.assertTrue(Path(str(path) + "-shm").exists())
+            with self.assertRaises(DatabaseMigrationError):
+                assert_database_ready_for_startup(path)
+            owner = DatabaseInstanceOwner(path).acquire()
+            try:
+                store.checkpoint_after_shutdown(instance_owner=owner)
+                self.assertTrue(owner.held)
+                self.assertFalse(Path(str(path) + "-wal").exists())
+                self.assertFalse(Path(str(path) + "-shm").exists())
+                assert_database_ready_for_startup(path)
+                with closing(sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)) as reader:
+                    self.assertEqual(list(reader.iterdump()), before)
+            finally:
+                owner.release()
+
+    def test_shutdown_checkpoint_requires_current_owner_before_sqlite_access(self) -> None:
+        from backend.instance_ownership import DatabaseInstanceOwner
+        with tempfile.TemporaryDirectory(prefix="studio-shutdown-owner-") as directory:
+            path = Path(directory) / "trial.sqlite3"
+            store = StudioStore(path)
+            owner = DatabaseInstanceOwner(path)
+            with patch.object(sqlite3, "connect", side_effect=AssertionError("must not open")) as connect:
+                with self.assertRaises(RuntimeError):
+                    store.checkpoint_after_shutdown(instance_owner=owner)
+            connect.assert_not_called()
+
+    def test_shutdown_checkpoint_refuses_an_active_reader_without_discarding_wal(self) -> None:
+        from backend.instance_ownership import DatabaseInstanceOwner
+        with tempfile.TemporaryDirectory(prefix="studio-shutdown-reader-") as directory:
+            path = Path(directory) / "trial.sqlite3"
+            store = StudioStore(path)
+            owner = DatabaseInstanceOwner(path).acquire()
+            try:
+                with closing(store._connect()) as writer, closing(store._connect()) as reader:
+                    writer.execute("CREATE TABLE shutdown_probe (value INTEGER)")
+                    writer.execute("INSERT INTO shutdown_probe VALUES (1)")
+                    writer.commit()
+                    reader.execute("BEGIN")
+                    self.assertEqual(reader.execute("SELECT value FROM shutdown_probe").fetchone()[0], 1)
+                    writer.execute("UPDATE shutdown_probe SET value=2")
+                    writer.commit()
+                    with self.assertRaisesRegex(RuntimeError, "could not drain"):
+                        store.checkpoint_after_shutdown(instance_owner=owner)
+                    self.assertTrue(owner.held)
+                    self.assertGreater(Path(str(path) + "-wal").stat().st_size, 0)
+                    self.assertEqual(writer.execute("SELECT value FROM shutdown_probe").fetchone()[0], 2)
+                store.checkpoint_after_shutdown(instance_owner=owner)
+            finally:
+                owner.release()
+
     def test_migration_shadow_initializes_system_temp_without_skip_env(self) -> None:
         migration_epoch_ms = 1_950_000_000_000
         with tempfile.TemporaryDirectory(

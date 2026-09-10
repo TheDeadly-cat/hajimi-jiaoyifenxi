@@ -748,6 +748,25 @@ class StudioStore:
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
+    def checkpoint_after_shutdown(self, *, instance_owner: Any) -> None:
+        """Finish WAL housekeeping only after the host has drained all workers.
+
+        A final mode=ro reader can leave an empty WAL/SHM pair behind. SQLite's
+        writable close removes that pair; never unlink it or weaken preflight.
+        """
+        instance_owner.assert_held_for(self.path)
+        if first_reparse_component(self.path) is not None:
+            raise RuntimeError("Shutdown checkpoint path contains a reparse point")
+        with self._lock, closing(sqlite3.connect(
+            self.path.as_uri() + "?mode=rw", uri=True, timeout=5,
+        )) as connection:
+            instance_owner.assert_held_for(self.path)
+            result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if result is None or result[0] != 0 or result[1] != result[2]:
+                raise RuntimeError("Shutdown checkpoint could not drain WAL readers")
+        if any(Path(str(self.path) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")):
+            raise RuntimeError("Shutdown checkpoint left SQLite sidecars; another connection may remain")
+
     def _initialize(self) -> None:
         with self._lock, closing(self._connect()) as connection, connection:
             connection.executescript(

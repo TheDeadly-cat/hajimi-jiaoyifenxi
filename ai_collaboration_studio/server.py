@@ -53,6 +53,15 @@ def main() -> None:
                 instance_owner=owner,
                 runtime_factory=build_source_monitoring_runtime,
             )
+            # run_server has drained HTTP handlers and the monitoring worker.
+            # Keep ownership until SQLite has finished its own WAL cleanup.
+            try:
+                STORE.checkpoint_after_shutdown(instance_owner=owner)
+            except Exception as exc:
+                emit_event("server_database_checkpoint_failed", severity="error",
+                           fields={"exception_type": type(exc).__name__})
+                raise SystemExit(1) from None
+            emit_event("server_database_checkpoint_completed")
         except RuntimeShutdownIncomplete as exc:
             # A non-daemon monitoring worker may still own the shared store.
             # Retain the OS-level owner object and fail-stop this main thread;
