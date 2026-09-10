@@ -2,6 +2,9 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$ConfigPath,
+    [ValidateSet('Offline', 'Online')]
+    [string]$Mode = 'Offline',
+    [string]$NetworkConfigPath,
     [switch]$CheckOnly
 )
 
@@ -106,6 +109,12 @@ $environmentApplied = $false
 $serverInvoked = $false
 $serverExitCode = 1
 try {
+    if ($Mode -eq 'Offline' -and $PSBoundParameters.ContainsKey('NetworkConfigPath')) {
+        throw '离线模式不接受联网配置。请明确选择 -Mode Online，或移除 -NetworkConfigPath。'
+    }
+    if ($Mode -eq 'Online' -and [string]::IsNullOrWhiteSpace($NetworkConfigPath)) {
+        throw '联网模式必须显式提供 -NetworkConfigPath；不会读取外层环境中的监控授权。'
+    }
     $configFile = Get-AbsolutePath $ConfigPath "ConfigPath"
     if (-not (Test-Path -LiteralPath $configFile -PathType Leaf)) { throw "试用配置文件不存在。" }
     try { $config = Get-Content -LiteralPath $configFile -Raw -Encoding UTF8 | ConvertFrom-Json }
@@ -132,6 +141,34 @@ try {
     if (-not (Test-Path -LiteralPath $databasePath -PathType Leaf)) {
         throw "独立试用数据库不存在。本入口不会新建、恢复或迁移数据库。"
     }
+    $secUserAgent = $null
+    $secDirect = $false
+    if ($Mode -eq 'Online') {
+        $networkFile = Get-AbsolutePath $NetworkConfigPath 'NetworkConfigPath'
+        try { $network = Get-Content -LiteralPath $networkFile -Raw -Encoding UTF8 | ConvertFrom-Json }
+        catch { throw '联网配置不存在或不是有效 JSON。' }
+        Assert-ExactProperties $network @('format_version', 'data_directory', 'sec_user_agent_file', 'sec_route') 'Network configuration'
+        if ($network.format_version -isnot [string] -or
+            $network.format_version -cne 'studio_source_collection_v1' -or
+            (Get-AbsolutePath $network.data_directory 'Online data directory') -ine $dataDirectory -or
+            $network.sec_route -isnot [string] -or
+            $network.sec_route -cnotin @('inherit', 'sec_direct_only')) {
+            throw '联网配置必须绑定当前独立数据目录，且只允许继承路由或 SEC 域名直连。'
+        }
+        $contactFile = Get-AbsolutePath $network.sec_user_agent_file 'SEC contact file'
+        if ((Test-DescendantPath $contactFile $projectRoot) -or
+            -not (Test-Path -LiteralPath $contactFile -PathType Leaf) -or
+            (Get-Item -LiteralPath $contactFile).Length -gt 1024) {
+            throw 'SEC 联系标识文件必须保存在源码目录之外，且不超过 1024 字节。'
+        }
+        $secUserAgent = [System.IO.File]::ReadAllText($contactFile, [System.Text.Encoding]::UTF8).Trim()
+        if ($secUserAgent.Length -lt 10 -or $secUserAgent.Length -gt 300 -or
+            $secUserAgent -match '[^\x20-\x7E]' -or
+            $secUserAgent -notmatch '^.+\s+[^\s@]+@[^\s@]+\.[^\s@]+$') {
+            throw 'SEC 联系标识需要单行应用／组织名称及联系邮箱；内容不会打印。'
+        }
+        $secDirect = $network.sec_route -ceq 'sec_direct_only'
+    }
     $runtimeDirectory = Join-Path $dataDirectory 'runtime'
     [void](Get-AbsolutePath $runtimeDirectory "Runtime directory")
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw "需要 Git 才能核验试用候选版本。" }
@@ -157,7 +194,14 @@ try {
     Write-Host ("候选版本：" + $config.candidate_sha)
     Write-Host ("试用数据库：" + $databasePath)
     Write-Host ("网页地址：" + $url)
-    Write-Host '本入口固定关闭来源监控、禁用全部模型 Provider，不自动打开浏览器。'
+    if ($Mode -eq 'Online') {
+        Write-Host '运行模式：联网自动采集；固定 sec_micron_trial_v1，NVDA 8-K / Micron recent-30，每 300 秒检查。'
+        Write-Host '启用全局监控与后台调度，关闭 dry-run；逐来源开关沿用本数据目录的状态。首次须在网页逐来源预览并确认启用。'
+        Write-Host '首次 seed_only 只建立历史基线。来源失败分别显示；本入口不执行 AI 分析，全部模型 Provider 仍禁用。'
+        Write-Host $(if ($secDirect) { '网络：仅为当前进程追加 SEC 两个域名的代理例外；Micron 沿用现有网络。' } else { '网络：继承现有路由，不修改代理配置。' })
+    } else {
+        Write-Host '运行模式：离线人工研究；来源监控关闭，全部模型 Provider 禁用。'
+    }
     if ($CheckOnly) {
         Write-Host '配置与构建检查通过。未打开数据库，未启动服务；宿主 readiness 尚未验证。'
         exit 0
@@ -183,10 +227,22 @@ try {
         PYTHONUTF8 = '1'
         PYTHONIOENCODING = 'utf-8'
     }
+    if ($Mode -eq 'Online') {
+        $trialEnvironment.AI_STUDIO_SOURCE_MONITOR_ENABLED = '1'
+        $trialEnvironment.AI_STUDIO_SOURCE_MONITOR_AUTO_START = '1'
+        $trialEnvironment.AI_STUDIO_SOURCE_MONITOR_DRY_RUN = '0'
+        $trialEnvironment.SEC_USER_AGENT = $secUserAgent
+        if ($secDirect) {
+            $bypass = @(([Environment]::GetEnvironmentVariable('NO_PROXY', 'Process') -split ',') |
+                ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            $trialEnvironment.NO_PROXY = (@($bypass + @('www.sec.gov', 'data.sec.gov')) | Select-Object -Unique) -join ','
+        }
+    }
     $clearNames = @('AI_STUDIO_SOURCE_MONITOR_CATCH_UP_MAX_ITEMS', 'AI_STUDIO_SOURCE_MONITOR_INITIAL_PREVIEW_SHA256',
         'AI_STUDIO_SOURCE_MONITOR_FROM_TIME', 'AI_STUDIO_SOURCE_MONITOR_CONTINUOUS_EVENT_CUTOFF', 'SEC_USER_AGENT',
-        'OPENAI_API_KEY', 'DEEPSEEK_API_KEY', 'ARK_API_KEY', 'DOUBAO_API_KEY', 'GLM_API_KEY', 'ZHIPUAI_API_KEY',
+        'OPENAI_API_KEY', 'DEEPSEEK_API_KEY', 'ARK_API_KEY', 'DOUBAO_API_KEY', 'GLM_API_KEY', 'ZHIPU_API_KEY', 'ZHIPUAI_API_KEY',
         'AI_STUDIO_PROJECT_CAPABILITY_SIGNING_SECRET')
+    if ($Mode -eq 'Online') { $clearNames = @($clearNames | Where-Object { $_ -ne 'SEC_USER_AGENT' }) }
     foreach ($name in @($trialEnvironment.Keys) + $clearNames) {
         $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
     }

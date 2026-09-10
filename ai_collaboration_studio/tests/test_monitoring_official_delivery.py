@@ -26,11 +26,13 @@ from backend.source_inbox_service import SourceInboxService
 from backend.source_monitoring.adapters.company_ir import CompanyIrSourceAdapter
 from backend.source_monitoring.adapters.sec_filings import SecFilingsSourceAdapter
 from backend.source_monitoring.registry import SourceAdapterRegistry
+from backend.source_monitoring.profiles import SEC_MICRON_TRIAL_PROFILE
 from backend.source_monitoring.runtime import DEFAULT_RUNTIME_POLL_TIMEOUT_MS, SourceMonitoringRuntime
 from backend.source_monitoring.scheduler import SourceMonitoringScheduler
 from backend.source_monitoring.settings import SourceMonitoringSettings
 from backend.source_monitoring.state_repository import SourceMonitoringStateRepository
 from backend.source_monitoring.supervisor import SourceMonitoringSupervisor
+from backend.source_monitoring.trading_impact_rules import TradingImpactRulesV1
 from backend.store import StudioStore
 from tests import test_source_inbox_http as http_helpers
 from tests.test_source_monitoring_micron_json import MicronJsonFixtureTransport
@@ -54,6 +56,8 @@ class OfficialDeliveryCompositionTests(unittest.TestCase):
         self.sec = MutableSecRecentFetcher(count=13)
         self.ir = MutableIrFixtureFetcher()
         self.micron = None
+        self.profile = ""
+        self.impact_rules_enabled = False
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.provider_spies = [
@@ -107,12 +111,16 @@ class OfficialDeliveryCompositionTests(unittest.TestCase):
         store = StudioStore(self.path)
         repository = SourceMonitoringStateRepository(store, clock_ms=lambda: self.clock)
         registry = SourceAdapterRegistry(adapters)
-        settings = SourceMonitoringSettings(enabled=True, auto_start=True, dry_run=False)
+        settings = SourceMonitoringSettings(
+            enabled=True, auto_start=True, dry_run=False, source_profile=self.profile,
+            trading_impact_rules_enabled=self.impact_rules_enabled,
+        )
         supervisor = SourceMonitoringSupervisor(
             registry=registry, repository=repository,
             source_inbox=SourceInboxService(store, clock=lambda: self.clock / 1_000),
             settings=settings, clock_ms=lambda: self.clock,
             event_sink=lambda *_args, **_kwargs: None, after_import_hook=after_import_hook,
+            impact_rules=TradingImpactRulesV1() if self.impact_rules_enabled else None,
         )
         if enable:
             for adapter in adapters:
@@ -158,6 +166,52 @@ class OfficialDeliveryCompositionTests(unittest.TestCase):
     def test_micron_json_event_restart_notification_and_user_draft_have_zero_model_calls(self) -> None:
         self.micron = MicronJsonFixtureTransport()
         self.assert_official_event_restart_notification_and_user_draft()
+
+    def test_online_profile_preserves_seed_delivery_restart_and_explicit_draft(self) -> None:
+        self.profile = SEC_MICRON_TRIAL_PROFILE
+        self.micron = MicronJsonFixtureTransport()
+        self.assert_official_event_restart_notification_and_user_draft()
+
+    def test_profile_micron_failure_does_not_block_sec_or_unmatched_micron_delivery(self) -> None:
+        self.profile = SEC_MICRON_TRIAL_PROFILE
+        self.micron = MicronJsonFixtureTransport()
+        self.impact_rules_enabled = True
+        before = self.counts()
+        repository, seeded = self.poll_both(enable=True)
+        self.assertTrue(all(row["status"] == "SUCCEEDED" for row in seeded), seeded)
+        self.assertEqual(self.counts(), before)  # seed_only publishes no history.
+        micron_checkpoint = repository.get_state("company_ir")["checkpoint"]
+        self.sec.records.append((14, "2026-09-04T20:00:00Z"))
+        self.micron.missing_metadata_id = 1
+        repository, observed = self.poll_both()
+        statuses = {row["adapter_key"]: row["status"] for row in observed}
+        self.assertEqual(statuses["sec_filings"], "SUCCEEDED", observed)
+        self.assertIn(statuses["company_ir"], {"FAILED", "DEGRADED"}, observed)
+        self.assertEqual(repository.get_state("company_ir")["checkpoint"], micron_checkpoint)
+        self.assertEqual(self.counts()["source_inbox_items"], 1)
+
+        self.micron.missing_metadata_id = 0
+        self.micron.records = self.micron.records[1:] + [self.micron.record(31)]
+        _, recovered = self.poll_both()
+        self.assertTrue(all(row["status"] == "SUCCEEDED" for row in recovered), recovered)
+        status, listing = self.request("/api/monitoring/inbox")
+        self.assertEqual(status, 200)
+        items = listing["source_inbox"]["items"]
+        self.assertEqual(len(items), 2)
+        micron_item = next(row for row in items if "company_ir_v2" in row["item"]["extensions"])
+        status, detail = self.request(f"/api/monitoring/events/{micron_item['id']}")
+        self.assertEqual(status, 200)
+        projections = detail["source_item"]["impact_rule_projections"]
+        self.assertEqual(len(projections), 1)
+        self.assertEqual(projections[0]["projection"]["evaluation"], "no_match")
+        self.assertEqual(projections[0]["projection"]["hypotheses"], [])
+        delivered = self.counts()
+        self.poll_both()
+        self.assertEqual(self.counts(), delivered)
+        for spy in self.provider_spies:
+            spy.assert_not_called()
+        for table in ("provider_execution_runs", "provider_call_attempts", "rounds"):
+            self.assertEqual(delivered[table], before[table])
 
     def test_composition_accepts_sec_fixture_delay_below_production_poll_budget(self) -> None:
         self.micron = MicronJsonFixtureTransport()
