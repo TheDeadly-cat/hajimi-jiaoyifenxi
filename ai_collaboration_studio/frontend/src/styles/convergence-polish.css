@@ -17,7 +17,7 @@
 .convergence-section[data-convergence-tone="blocked"] { box-shadow: inset 3px 0 0 rgb(169 87 77 / 55%); }
 .convergence-section .section-heading { padding-bottom: 8px; border-bottom: 1px solid rgb(60 116 140 / 20%); }
 .convergence-section .section-heading strong { color: var(--convergence-ink); font-size: 14px; }
-.convergence-section .convergence-badge { font-size: 9px; }
+.convergence-section .convergence-badge { font-size: 13px; }
 .convergence-section .convergence-badge.candidate {
   border-color: #a8c6d3;
   color: #315f75;
@@ -42,8 +42,8 @@
 }
 .convergence-section .convergence-overview.review { border-left-color: var(--convergence-amber); }
 .convergence-section .convergence-overview.blocked { border-left-color: var(--convergence-danger); }
-.convergence-section .convergence-overview strong { font-size: 12px; }
-.convergence-section .convergence-overview small { font-size: 10px; line-height: 1.55; }
+.convergence-section .convergence-overview strong { font-size: 15px; }
+.convergence-section .convergence-overview small { font-size: 14px; line-height: 1.55; }
 
 .convergence-section .convergence-progress {
   display: grid;
@@ -61,15 +61,15 @@
 }
 .convergence-section .convergence-progress span {
   color: #617985;
-  font-size: 9px;
-  font-weight: 850;
+  font-size: 13px;
+  font-weight: 700;
   letter-spacing: 0.08em;
 }
 .convergence-section .convergence-progress data {
   color: #315f75;
   font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 11px;
-  font-weight: 900;
+  font-size: 14px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 .convergence-section .convergence-progress progress {
@@ -95,19 +95,19 @@
 }
 .convergence-section .convergence-progress > small {
   color: #71838b;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.45;
 }
 
-.convergence-section .convergence-primary-blocker em { font-size: 9px; }
-.convergence-section .convergence-primary-blocker strong { font-size: 11px; }
-.convergence-section .convergence-primary-blocker small { font-size: 9px; line-height: 1.5; }
-.convergence-section .convergence-next span { font-size: 9px; }
-.convergence-section .convergence-next strong { font-size: 11px; line-height: 1.55; }
-.convergence-section .convergence-gate strong { font-size: 11px; }
-.convergence-section .convergence-gate small { font-size: 10px; line-height: 1.5; }
-.convergence-section .convergence-blockers strong { font-size: 10px; }
-.convergence-section .convergence-blockers small { font-size: 9px; line-height: 1.5; }
+.convergence-section .convergence-primary-blocker em { font-size: 13px; }
+.convergence-section .convergence-primary-blocker strong { font-size: 14px; }
+.convergence-section .convergence-primary-blocker small { font-size: 13px; line-height: 1.5; }
+.convergence-section .convergence-next span { font-size: 13px; }
+.convergence-section .convergence-next strong { font-size: 14px; line-height: 1.55; }
+.convergence-section .convergence-gate strong { font-size: 14px; }
+.convergence-section .convergence-gate small { font-size: 14px; line-height: 1.5; }
+.convergence-section .convergence-blockers strong { font-size: 14px; }
+.convergence-section .convergence-blockers small { font-size: 13px; line-height: 1.5; }
 .convergence-section .convergence-details > summary { min-height: 44px; }
 .convergence-section .convergence-boundary {
   padding: 8px 9px;
@@ -116,7 +116,7 @@
   border-radius: 5px;
   color: #6f5932;
   background: #fff9e9;
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1.55;
 }
 

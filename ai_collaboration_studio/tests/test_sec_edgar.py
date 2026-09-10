@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
+import backend.market.sec_edgar as sec_edgar_module
 from backend.market.futu_readonly import STORAGE_SYMBOLS
 from backend.market.sec_edgar import SEC_TICKERS_URL, SecEdgarAdapter
 
@@ -25,7 +27,9 @@ class FakeSecFetcher:
                 }
                 for index, symbol in enumerate(STORAGE_SYMBOLS)
             }
+        cik = url.removesuffix(".json").rsplit("CIK", 1)[-1]
         return {
+            "cik": cik,
             "name": "Official Company Name",
             "filings": {
                 "recent": {
@@ -111,6 +115,60 @@ class SecEdgarAdapterTests(unittest.TestCase):
     def test_default_fetcher_rejects_non_sec_endpoint_before_network(self) -> None:
         with self.assertRaisesRegex(ValueError, "非官方固定端点"):
             SecEdgarAdapter._default_fetch_json("https://example.com/data.json", "AI Studio contact@example.com")
+
+    def test_default_fetcher_rejects_declared_and_streaming_oversize(self) -> None:
+        class FakeResponse:
+            def __init__(self, *, declared_length: str, body: bytes) -> None:
+                self.headers = {"Content-Length": declared_length}
+                self.body = body
+                self.read_calls = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+            def read(self, _limit: int) -> bytes:
+                self.read_calls += 1
+                return self.body
+
+        for response, expected_reads in (
+            (FakeResponse(declared_length="9", body=b""), 0),
+            (FakeResponse(declared_length="", body=b"123456789"), 1),
+        ):
+            with (
+                self.subTest(expected_reads=expected_reads),
+                patch.object(sec_edgar_module, "SEC_MAX_RESPONSE_BYTES", 8),
+                patch.object(
+                    sec_edgar_module,
+                    "open_official_https",
+                    return_value=response,
+                ),
+                self.assertRaisesRegex(ValueError, "2 MB"),
+            ):
+                SecEdgarAdapter._default_fetch_json(
+                    SEC_TICKERS_URL,
+                    "AI Studio contact@example.com",
+                )
+            self.assertEqual(response.read_calls, expected_reads)
+
+    def test_submissions_payload_cik_must_match_requested_entity(self) -> None:
+        class WrongCikFetcher(FakeSecFetcher):
+            def __call__(self, url: str, user_agent: str) -> dict:
+                payload = super().__call__(url, user_agent)
+                if url != SEC_TICKERS_URL:
+                    payload["cik"] = "0000000001"
+                return payload
+
+        payload = self.make_adapter(WrongCikFetcher()).recent_filings_batch(
+            [STORAGE_SYMBOLS[0]]
+        )
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["rows"], [])
+        self.assertEqual(payload["source_errors"][0]["code"], "SEC_SUBMISSIONS_ERROR")
+        self.assertIn("does not match", payload["source_errors"][0]["message"])
 
 
 if __name__ == "__main__":

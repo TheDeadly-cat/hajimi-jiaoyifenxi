@@ -275,7 +275,7 @@ test("artifact workspace CSS follows its lazy dialog while eager host entries an
     assert.doesNotMatch(artifactDialogStyles, new RegExp(`\\.${selector}(?:\\s*,|\\s*\\{)`));
   }
 
-  assert.match(artifactDialogStyles, /@media \(max-width: 620px\)[\s\S]*\.artifact-item-title\s*\{[\s\S]*min-height:\s*44px;[\s\S]*font-size:\s*12px;[\s\S]*line-height:\s*1\.4;[\s\S]*white-space:\s*normal;/);
+  assert.match(artifactDialogStyles, /@media \(max-width: 620px\)[\s\S]*\.artifact-item-title\s*\{[\s\S]*min-height:\s*44px;[\s\S]*font-size:\s*15px;[\s\S]*line-height:\s*1\.4;[\s\S]*white-space:\s*normal;/);
   assert.match(artifactDialogStyles, /@media \(max-width: 620px\)[\s\S]*\.artifact-item-remove\s*\{\s*width:\s*44px;\s*height:\s*44px;\s*\}/);
 });
 

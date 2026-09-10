@@ -31,12 +31,12 @@
   font-size: 14px;
   letter-spacing: .01em;
 }
-.project-round-focus-card .project-round-focus-mode { font-size: 10px; letter-spacing: .08em; }
+.project-round-focus-card .project-round-focus-mode { font-size: 14px; letter-spacing: .08em; }
 
 .project-round-focus-card .project-round-focus-state,
-.project-round-focus-card .project-round-focus-source { font-size: 10px; }
+.project-round-focus-card .project-round-focus-source { font-size: 14px; }
 .project-round-focus-card .project-round-focus-state small,
-.project-round-focus-card .project-round-focus-source small { font-size: 9px; line-height: 1.5; }
+.project-round-focus-card .project-round-focus-source small { font-size: 13px; line-height: 1.5; }
 .project-round-focus-card .project-round-focus-state > button { flex: 0 0 auto; min-height: 38px; }
 
 .project-round-focus-card .project-round-focus-source {
@@ -64,7 +64,7 @@
 }
 .project-round-focus-card .project-round-focus-counts > span.blocker { border-top-color: rgb(169 120 56 / 78%); }
 .project-round-focus-card .project-round-focus-counts > span.evidence { border-top-color: rgb(47 117 108 / 72%); }
-.project-round-focus-card .project-round-focus-counts small { color: #667d86; font-size: 9px; letter-spacing: .04em; }
+.project-round-focus-card .project-round-focus-counts small { color: #667d86; font-size: 13px; letter-spacing: .04em; }
 .project-round-focus-card .project-round-focus-counts strong { font-size: 18px; font-variant-numeric: tabular-nums; }
 
 .project-round-focus-card .project-round-focus-list { gap: 6px; }
@@ -78,13 +78,13 @@
 .project-round-focus-card .project-round-focus-item.blocker { border-left: 3px solid rgb(169 120 56 / 68%); }
 .project-round-focus-card .project-round-focus-item.evidence { border-left: 3px solid rgb(47 117 108 / 62%); }
 .project-round-focus-card .project-round-focus-item.structural { border-left: 3px solid rgb(57 117 144 / 62%); }
-.project-round-focus-card .project-round-focus-item strong { font-size: 11px; line-height: 1.55; }
-.project-round-focus-card .project-round-focus-item small { color: #71838a; font-size: 9px; }
-.project-round-focus-card .project-round-focus-capabilities em { padding: 3px 6px; font-size: 8px; }
+.project-round-focus-card .project-round-focus-item strong { font-size: 14px; line-height: 1.55; }
+.project-round-focus-card .project-round-focus-item small { color: #71838a; font-size: 13px; }
+.project-round-focus-card .project-round-focus-capabilities em { padding: 3px 6px; font-size: 13px; }
 .project-round-focus-card .project-round-focus-empty,
 .project-round-focus-card .project-round-focus-more,
 .project-round-focus-card .project-round-focus-boundary,
-.project-round-focus-card .project-round-focus-frozen-note { font-size: 9px; line-height: 1.55; }
+.project-round-focus-card .project-round-focus-frozen-note { font-size: 13px; line-height: 1.55; }
 
 .project-round-focus-card .project-round-focus-list-heading {
   display: flex;
@@ -100,12 +100,12 @@
 }
 .project-round-focus-card .project-round-focus-list-heading strong {
   color: var(--focus-ink);
-  font-size: 11px;
+  font-size: 14px;
   letter-spacing: .04em;
 }
 .project-round-focus-card .project-round-focus-list-heading small {
   color: #6f858e;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.4;
 }
 .project-round-focus-card .project-round-focus-list-heading data {
@@ -115,8 +115,8 @@
   border: 1px solid rgb(57 117 144 / 20%);
   border-radius: 999px;
   color: #426879;
-  font-size: 10px;
-  font-weight: 800;
+  font-size: 14px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   text-align: center;
   background: rgb(246 250 251 / 92%);
@@ -140,14 +140,14 @@
 .project-round-focus-card .project-round-focus-objective > header { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
 .project-round-focus-card .project-round-focus-objective > header > span {
   color: var(--focus-ink);
-  font-size: 10px;
-  font-weight: 800;
+  font-size: 14px;
+  font-weight: 700;
   letter-spacing: .06em;
 }
 .project-round-focus-card .project-round-focus-objective > header > span small {
   margin-left: 4px;
   color: #78909a;
-  font-size: 8px;
+  font-size: 13px;
   letter-spacing: .12em;
 }
 .project-round-focus-card .project-round-focus-objective > header > em {
@@ -155,12 +155,12 @@
   border: 1px solid rgb(57 117 144 / 18%);
   border-radius: 999px;
   color: #55727e;
-  font-size: 8px;
+  font-size: 13px;
   background: rgb(255 255 255 / 76%);
 }
 .project-round-focus-card .project-round-focus-objective > p {
   overflow-wrap: anywhere;
-  font-size: 12px;
+  font-size: 15px;
   line-height: 1.6;
 }
 .project-round-focus-card .project-round-focus-objective > p.is-collapsed {
@@ -210,8 +210,8 @@
   padding: 8px;
   background: #fffaf0;
 }
-.project-round-focus-card .project-round-focus-boundary strong { font-size: 10px; }
-.project-round-focus-card .project-round-focus-boundary small { color: #867352; font-size: 9px; line-height: 1.4; }
+.project-round-focus-card .project-round-focus-boundary strong { font-size: 14px; }
+.project-round-focus-card .project-round-focus-boundary small { color: #867352; font-size: 13px; line-height: 1.4; }
 
 .project-round-focus-card :is(button, input, textarea):focus-visible {
   outline: 3px solid rgb(57 117 144 / 32%);

@@ -47,7 +47,7 @@
     inset 0 1px rgba(255, 255, 255, 0.2);
   color: #fff;
   font-size: 14px;
-  font-weight: 820;
+  font-weight: 700;
   letter-spacing: 0.06em;
 }
 
@@ -84,11 +84,13 @@
 .icon-rail .rail-button {
   position: relative;
   display: grid;
-  width: 44px;
-  height: 44px;
-  min-width: 44px;
-  min-height: 44px;
-  place-items: center;
+  grid-template-rows: auto auto;
+  justify-items: center;
+  align-content: center;
+  gap: 5px;
+  width: 100%;
+  min-height: 58px;
+  padding: 8px 4px;
   border: 1px solid transparent;
   border-radius: 13px;
   overflow: visible;
@@ -101,6 +103,21 @@
     box-shadow 160ms ease,
     color 160ms ease,
     transform 160ms ease;
+}
+
+/* 高频入口的中文名称直接可见，图标降为辅助识别；
+   用户不需要靠悬停提示去猜「来源收件箱 / 共享资料」在哪。
+   标签属于关键文字，因此使用 14px 而不是 12px 以下。 */
+.icon-rail .rail-button-label {
+  max-width: 100%;
+  color: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0;
+  text-align: center;
+  white-space: nowrap;
+  overflow-wrap: break-word;
 }
 
 .icon-rail .rail-button:hover:not(:disabled) {
@@ -147,45 +164,32 @@
   content: "";
 }
 
+.icon-rail .source-inbox-unread-badge {
+  position: absolute;
+  z-index: 2;
+  top: 4px;
+  right: 6px;
+  display: inline-grid;
+  min-width: 17px;
+  height: 17px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 999px;
+  padding: 0 4px;
+  color: #172638;
+  background: #f2c74e;
+  box-shadow: 0 3px 9px rgba(4, 20, 42, 0.34);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+}
+
 .icon-rail .rail-button:focus-visible {
   outline: 3px solid rgba(91, 166, 255, 0.35);
   outline-offset: 2px;
   border-color: rgba(147, 204, 255, 0.56);
   color: #fff;
-}
-
-.icon-rail .rail-button::after {
-  position: absolute;
-  z-index: 90;
-  top: 50%;
-  left: calc(100% + 13px);
-  border: 1px solid rgba(133, 178, 218, 0.2);
-  border-radius: 9px;
-  padding: 7px 9px;
-  background: rgba(13, 30, 50, 0.96);
-  box-shadow: 0 10px 28px rgba(5, 17, 31, 0.25);
-  color: #eff7ff;
-  content: attr(data-label);
-  font-size: 10px;
-  font-weight: 680;
-  letter-spacing: 0.035em;
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(-5px, -50%);
-  transition: opacity 140ms ease, transform 140ms ease;
-  white-space: nowrap;
-}
-
-.icon-rail .rail-button:hover::after,
-.icon-rail .rail-button:focus-visible::after {
-  opacity: 1;
-  transform: translate(0, -50%);
-}
-
-.icon-rail .rail-actions:has(.rail-button:focus-visible)
-  .rail-button:hover:not(:focus-visible)::after {
-  opacity: 0;
-  transform: translate(-5px, -50%);
 }
 
 @media (max-width: 760px) {
@@ -204,14 +208,22 @@
     background: linear-gradient(90deg, var(--rail-cyan), var(--rail-accent));
   }
 
-  .icon-rail .rail-button::after {
-    display: none;
+  /* 窄屏下 .icon-rail 由 styles.css 设为 display: none，
+     入口改由 conversation-header 中的 .mobile-room-toggle 与
+     .source-inbox-mobile-entry 承担，这是既有设计，本轮不改动。 */
+}
+
+@media (forced-colors: active) {
+  .icon-rail .source-inbox-unread-badge {
+    border-color: CanvasText;
+    color: Canvas;
+    background: CanvasText;
+    box-shadow: none;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .icon-rail .rail-button,
-  .icon-rail .rail-button::after,
   .icon-rail .rail-button svg {
     transition: none;
   }

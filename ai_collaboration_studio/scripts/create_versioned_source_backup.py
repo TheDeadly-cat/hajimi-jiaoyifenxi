@@ -83,6 +83,14 @@ _SECRET_SUFFIXES = (
     ".jks",
     ".keystore",
 )
+_DATABASE_SUFFIXES = (
+    ".db",
+    ".sqlite",
+    ".sqlite3",
+    "-wal",
+    "-shm",
+    "-journal",
+)
 _MAX_FILES = 200_000
 _MAX_MANIFEST_BYTES = 32 * 1024 * 1024
 _COPY_CHUNK_SIZE = 1024 * 1024
@@ -240,6 +248,7 @@ def _is_excluded(relative_parts: tuple[str, ...], *, is_directory: bool) -> bool
         return True
     if not is_directory and (
         name.endswith(".pyc")
+        or name.endswith(_DATABASE_SUFFIXES)
         or _is_secret_filename(relative_parts[-1])
     ):
         return True
@@ -484,6 +493,8 @@ def _validate_manifest(value: Any) -> dict[str, Any]:
         if not isinstance(raw, dict) or set(raw) != _FILE_KEYS:
             raise SourceBackupError("backup manifest file entry is not closed")
         path = _safe_relative_path(raw.get("path"))
+        if PurePosixPath(path).name.casefold().endswith(_DATABASE_SUFFIXES):
+            raise SourceBackupError("backup manifest contains a database-family file")
         if path == MANIFEST_NAME or path in seen:
             raise SourceBackupError("backup manifest contains a duplicate or reserved path")
         seen.add(path)

@@ -63,6 +63,33 @@ class CIWorkflowContractTests(unittest.TestCase):
         "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02",
     }
 
+    def test_historical_reader_matrix_is_prepared_required_and_uploaded(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/isolated-validation.yml").read_text(encoding="utf-8")
+        self.assertIn("fetch-depth: 0", workflow)
+        preparation = workflow.split("- name: Verify historical reader objects before offline tests", 1)[1].split("- name:", 1)[0]
+        for commit in ("67fdb4ad548059506302298ee4d87846abfcece9", "25f61d00e3ec49e9034dfc3139033e4ff3b3487e"):
+            self.assertIn(commit, preparation)
+        self.assertIn('GIT_NO_LAZY_FETCH: "1"', preparation)
+        self.assertIn('git cat-file -e "${readerCommit}^{commit}"', preparation)
+        self.assertIn('git cat-file -e "${readerCommit}:ai_collaboration_studio/backend/store.py"', preparation)
+        self.assertEqual(preparation.count("if ($LASTEXITCODE -ne 0)"), 2)
+        required = workflow.split("- name: Required historical reader compatibility matrix", 1)[1].split("- name:", 1)[0]
+        self.assertIn("scripts/run_backend_tests_isolated.py", required)
+        self.assertIn("tests.test_release_drill.ReleaseReaderDataContractTests", required)
+        self.assertIn("--require-historical-readers", required)
+        self.assertIn("--historical-reader-report", required)
+        self.assertNotIn("continue-on-error", required)
+        self.assertNotIn("git fetch", required)
+        self.assertLess(workflow.index("Verify historical reader objects before offline tests"),
+                        workflow.index("Required historical reader compatibility matrix"))
+        self.assertLess(workflow.index("Required historical reader compatibility matrix"),
+                        workflow.index("Full isolated backend regression"))
+        self.assertIn("historical-reader-matrix.json", workflow.split("- name: Upload non-secret delivery receipts", 1)[1])
+        projected = root.parent / ".github/workflows/isolated-validation.yml"
+        if projected.is_file():
+            self.assertEqual(projected.read_bytes(), (root / ".github/workflows/isolated-validation.yml").read_bytes())
+
     def test_workflow_uses_only_guarded_delivery_entrypoints(self) -> None:
         workflow = (
             Path(__file__).resolve().parents[1]

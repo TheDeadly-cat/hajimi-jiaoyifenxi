@@ -1,0 +1,16 @@
+{
+  "snapshot_id": "futu_fixture_opend_offline",
+  "source": "futu_opend",
+  "market": "US",
+  "symbols": ["US.MU", "US.SNDK", "US.WDC", "US.STX"],
+  "captured_at": "2026-08-31T14:00:00.000Z",
+  "captured_at_ms": 1788184800000,
+  "rows": [],
+  "missing_symbols": ["US.MU", "US.SNDK", "US.WDC", "US.STX"],
+  "source_errors": [{"source": "futu_opend", "code": "FUTU_OPEND_OFFLINE", "message": "fixture offline"}],
+  "data_quality": {"requested": 4, "received": 0, "ready": 0, "stale_or_invalid": 0},
+  "ok": false,
+  "state": "offline",
+  "execution_capability": "none",
+  "live_trading_allowed": false
+}

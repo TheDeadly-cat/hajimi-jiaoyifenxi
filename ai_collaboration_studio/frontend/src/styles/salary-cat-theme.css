@@ -1,4 +1,58 @@
+/* 样式入口的最后加载层（main.jsx：styles.css → conversation-shell-polish.css →
+   salary-cat-theme.css），因此这里是全局字体与尺寸 token 的唯一权威来源。
+   styles.css 中的两个 :root 仅作为回退值保留，不要再在别处新增同名的
+   字体 / 字号 / 字重定义，也不要新增"最终优化版"覆盖文件。 */
+
 :root {
+  /* —— 中文字体栈：中文优先，全部为本机系统字体，不依赖远程加载 ——
+     基线把西文 Inter 排在中文之前，而 Inter 在 Windows 上通常未安装；
+     再叠加 font-synthesis: none，声明 600/700 的中文会被降级到常规字重，
+     视觉上发虚。这里改为中文优先，并只允许字重合成。 */
+  font-family:
+    "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC",
+    "Noto Sans CJK SC", "Noto Sans SC", system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  font-synthesis: weight;
+  font-optical-sizing: auto;
+
+  /* —— 字号阶梯（rem，尊重浏览器默认字号与页面缩放）—— */
+  --fs-page-title: 1.75rem;    /* 28px 页面主标题 */
+  --fs-section: 1.3125rem;     /* 21px 区域标题 */
+  --fs-heading: 1.1875rem;     /* 19px 事件标题 / 重要结论 */
+  --fs-body: 1.0625rem;        /* 17px 讨论与研究正文 */
+  --fs-control: 1rem;          /* 16px 导航 / 表单 / 按钮 / 表格 */
+  --fs-secondary: 0.9375rem;   /* 15px 来源 / 时间 / 次级说明 */
+  --fs-caption: 0.875rem;      /* 14px 非关键标记（全局下限） */
+
+  /* —— 行高 —— */
+  --lh-body: 1.72;             /* 中文正文 */
+  --lh-control: 1.45;          /* 控件与按钮 */
+  --lh-tight: 1.35;            /* 标题 */
+
+  /* —— 字重：只使用系统中文字体真实具备的字重 ——
+     微软雅黑仅有 Light/Regular/Bold，基线中 204 处 650/750/800/900
+     等取值无法被真实渲染，会被就近匹配而失去层级。 */
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+
+  /* —— 阅读宽度与间距刻度 —— */
+  --measure-body: 42rem;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* —— 圆角、阴影与触控目标 —— */
+  --radius-container: 16px;
+  --radius-control: 11px;
+  --shadow-soft: 0 1px 2px rgba(38, 45, 51, 0.06), 0 6px 18px rgba(38, 45, 51, 0.05);
+  --shadow-raised: 0 2px 6px rgba(38, 45, 51, 0.08), 0 16px 36px rgba(38, 45, 51, 0.1);
+  --tap-target: 44px;
+
   --cat-ink: #23313a;
   --cat-ink-soft: #314650;
   --cat-paper: #fffdf8;
@@ -51,14 +105,14 @@ summary:focus-visible {
   --shell-line: rgba(95, 76, 46, 0.16);
   --shell-accent: #9c6d09;
   --shell-cyan: var(--cat-mint);
-  grid-template-columns: 62px 276px minmax(520px, 1fr);
+  grid-template-columns: 96px 276px minmax(520px, 1fr);
   background:
     linear-gradient(90deg, rgba(89, 69, 38, 0.035) 1px, transparent 1px) 0 0 / 32px 100%,
     var(--cat-canvas);
 }
 
 .app-shell.inspector-open {
-  grid-template-columns: 62px 276px minmax(0, 1fr) 340px;
+  grid-template-columns: 96px 276px minmax(0, 1fr) 340px;
 }
 
 .icon-rail {
@@ -194,9 +248,9 @@ summary:focus-visible {
   position: relative;
   z-index: 2;
   color: var(--cat-ink);
-  font-size: 19px;
-  font-weight: 820;
-  letter-spacing: -0.035em;
+  font-size: 22px;
+  font-weight: var(--fw-bold);
+  letter-spacing: 0;
 }
 
 .room-sidebar .sidebar-brand-copy small {
@@ -204,7 +258,7 @@ summary:focus-visible {
   align-items: center;
   gap: 4px;
   color: #8a6c30;
-  font-size: 9px;
+  font-size: 13px;
   letter-spacing: 0.12em;
 }
 
@@ -212,14 +266,15 @@ summary:focus-visible {
   position: absolute;
   z-index: 1;
   right: -13px;
-  bottom: -19px;
+  bottom: 2px;
   display: block;
   width: 114px;
-  height: 78px;
+  height: 74px;
   pointer-events: none;
 }
 
-.room-sidebar .sidebar-cat-perch img {
+.room-sidebar .sidebar-cat-perch img,
+.room-sidebar .sidebar-cat-perch svg {
   display: block;
   width: 100%;
   height: 100%;
@@ -635,7 +690,7 @@ summary:focus-visible {
 @media (max-width: 1180px) {
   .app-shell,
   .app-shell.inspector-open {
-    grid-template-columns: 54px 228px minmax(0, 1fr);
+    grid-template-columns: 100px 232px minmax(0, 1fr);
   }
 
   .room-sidebar .sidebar-brand {
@@ -705,7 +760,8 @@ summary:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .room-sidebar .sidebar-cat-perch img {
+  .room-sidebar .sidebar-cat-perch img,
+  .room-sidebar .sidebar-cat-perch svg {
     filter: none;
   }
 }

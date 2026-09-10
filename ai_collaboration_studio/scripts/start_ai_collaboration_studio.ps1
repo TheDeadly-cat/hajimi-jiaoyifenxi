@@ -77,7 +77,7 @@ function Test-StudioReady {
         return `
             $readiness.ok -eq $true -and `
             $readiness.ready -eq $true -and `
-            $readiness.schema_version -eq "host_readiness_v1" -and `
+            $readiness.schema_version -eq "host_readiness_v2" -and `
             $readiness.service.id -eq "ai_collaboration_studio" -and `
             $version.ok -eq $true -and `
             $version.schema_version -eq "host_version_v2" -and `

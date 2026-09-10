@@ -10,6 +10,7 @@ QA_SCRIPT_NAMES = (
     "run_isolated_manual_chatgpt_qa.py",
     "run_isolated_project_readiness_qa.py",
     "run_isolated_project_round_focus_qa.py",
+    "run_isolated_source_inbox_qa.py",
 )
 
 

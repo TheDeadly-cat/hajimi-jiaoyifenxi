@@ -40,15 +40,15 @@
 
 .room-inspector-workbench .room-inspector-integrity-ledger small {
   color: var(--inspector-ledger-muted);
-  font-size: 9px;
-  font-weight: 900;
+  font-size: 13px;
+  font-weight: 700;
   letter-spacing: 0.1em;
 }
 
 .room-inspector-workbench .room-inspector-integrity-ledger strong {
   color: var(--inspector-ledger-ink);
   font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 11px;
+  font-size: 14px;
   overflow-wrap: anywhere;
 }
 
@@ -64,7 +64,7 @@
   border-left: 3px solid #a97a39;
   color: #765a2d;
   background: #fff9e9;
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -90,8 +90,8 @@
   border-radius: 2px;
   color: #315f70;
   background: rgba(244, 249, 249, 0.9);
-  font-size: 10px;
-  font-weight: 900;
+  font-size: 14px;
+  font-weight: 700;
 }
 
 .room-inspector-workbench .inspector-list-more:hover:not(:disabled) {
@@ -136,11 +136,11 @@
   }
   .room-inspector-workbench .inspector-list-more {
     min-height: 44px;
-    font-size: 11px;
+    font-size: 14px;
   }
   .room-inspector-workbench .room-inspector-projection-note,
   .room-inspector-workbench .room-inspector-action-error {
-    font-size: 10px;
+    font-size: 14px;
   }
 }
 
@@ -176,8 +176,8 @@
     border-radius: 999px;
     color: #315f70;
     background: rgba(255, 255, 255, 0.88);
-    font-size: 10px;
-    font-weight: 800;
+    font-size: 14px;
+    font-weight: 700;
     text-decoration: none;
   }
 
@@ -308,8 +308,8 @@
     color: #365761;
     background: rgba(255, 255, 255, 0.78);
     font-family: inherit;
-    font-size: 11px;
-    font-weight: 750;
+    font-size: 14px;
+    font-weight: 700;
     line-height: 1;
     letter-spacing: 0.02em;
     text-decoration: none;

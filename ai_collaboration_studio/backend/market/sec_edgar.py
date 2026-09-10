@@ -2,15 +2,23 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from ..config import SEC_CACHE_TTL_SECONDS, SEC_USER_AGENT
 from .futu_readonly import STORAGE_SYMBOLS, US_EASTERN, _utc_iso
+from ..source_poll_control import (
+    SourcePollCancelled,
+    SourcePollDeadlineExceeded,
+    ensure_source_poll_active,
+    wait_for_source_poll,
+)
+from .official_http import open_official_https, read_official_https_body
 
 
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -18,7 +26,44 @@ SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 SEC_ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data"
 SEC_ALLOWED_FORMS = frozenset({"10-K", "10-Q", "8-K", "20-F", "40-F", "6-K"})
 SEC_DEFAULT_FORMS = ("10-K", "10-Q", "8-K", "20-F", "40-F", "6-K")
+SEC_MONITOR_SYMBOLS = (
+    "US.MU",
+    "US.SNDK",
+    "US.WDC",
+    "US.STX",
+    "US.NVDA",
+    "US.MRVL",
+    "US.AMD",
+)
 SEC_MAX_RESPONSE_BYTES = 2_000_000
+SEC_MONITORING_RECENT_SCOPE_VERSION = "sec_monitoring_recent_scope_v1"
+
+_SEC_ACCESSION_RE = re.compile(r"[0-9]{10}-[0-9]{2}-[0-9]{6}\Z")
+_SEC_SYMBOL_RE = re.compile(r"US\.[A-Z][A-Z0-9.-]{0,14}\Z")
+_SEC_PRIMARY_DOCUMENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,239}\Z")
+
+
+def _is_allowed_sec_fetch_url(value: Any) -> bool:
+    if type(value) is not str:
+        return False
+    if value == SEC_TICKERS_URL:
+        return True
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    return bool(
+        parsed.scheme == "https"
+        and parsed.hostname == "data.sec.gov"
+        and parsed.username is None
+        and parsed.password is None
+        and port in {None, 443}
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+        and re.fullmatch(r"/submissions/CIK[0-9]{10}\.json", parsed.path)
+    )
 
 
 class SecEdgarAdapter:
@@ -32,17 +77,23 @@ class SecEdgarAdapter:
         fetch_json: Callable[[str, str], dict[str, Any]] | None = None,
         clock: Callable[[], datetime] | None = None,
         min_request_interval_seconds: float = 0.11,
+        allowed_symbols: tuple[str, ...] | list[str] = STORAGE_SYMBOLS,
     ) -> None:
         self.user_agent = str(user_agent or "").strip()[:300]
         self.cache_ttl_seconds = max(60.0, float(cache_ttl_seconds))
         self._fetch_json = fetch_json or self._default_fetch_json
+        self._fetch_json_is_default = fetch_json is None
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._min_interval = max(0.11, float(min_request_interval_seconds))
+        self.allowed_symbols = self._normalize_allowed_symbols(allowed_symbols)
         self._last_request_monotonic = 0.0
         self._request_lock = threading.Lock()
         self._cache_lock = threading.RLock()
         self._ticker_cache: tuple[float, dict[str, dict[str, str]]] | None = None
-        self._filings_cache: dict[tuple[str, tuple[str, ...], int], tuple[float, dict[str, Any]]] = {}
+        self._filings_cache: dict[
+            tuple[str, tuple[str, ...], int, bool],
+            tuple[float, dict[str, Any]],
+        ] = {}
 
     def status(self) -> dict[str, Any]:
         configured = self._is_declared_user_agent()
@@ -54,7 +105,7 @@ class SecEdgarAdapter:
             "official_submissions": True,
             "authentication_required": False,
             "user_agent_declared": configured,
-            "allowed_symbols": list(STORAGE_SYMBOLS),
+            "allowed_symbols": list(self.allowed_symbols),
             "allowed_forms": list(SEC_DEFAULT_FORMS),
             "execution_capability": "none",
             "live_trading_allowed": False,
@@ -69,17 +120,29 @@ class SecEdgarAdapter:
         )
 
     @staticmethod
-    def _normalize_symbols(symbols: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    def _normalize_allowed_symbols(
+        symbols: tuple[str, ...] | list[str],
+    ) -> tuple[str, ...]:
         requested: list[str] = []
         for raw_symbol in symbols:
             symbol = str(raw_symbol or "").strip().upper()
             if symbol and symbol not in requested:
                 requested.append(symbol)
-        unsupported = [symbol for symbol in requested if symbol not in STORAGE_SYMBOLS]
+        unsupported = [symbol for symbol in requested if not _SEC_SYMBOL_RE.fullmatch(symbol)]
         if unsupported:
-            raise ValueError(f"不在存储产业研究白名单：{', '.join(unsupported)}")
+            raise ValueError(f"SEC 标的代码格式无效：{', '.join(unsupported)}")
         if not requested:
-            raise ValueError("至少需要一个 SEC 标的代码")
+            raise ValueError("SEC allowed_symbols 至少需要一个标的代码")
+        return tuple(requested)
+
+    def _normalize_symbols(
+        self,
+        symbols: tuple[str, ...] | list[str],
+    ) -> tuple[str, ...]:
+        requested = list(self._normalize_allowed_symbols(symbols))
+        unsupported = [symbol for symbol in requested if symbol not in self.allowed_symbols]
+        if unsupported:
+            raise ValueError(f"不在 SEC 适配器白名单：{', '.join(unsupported)}")
         return tuple(requested)
 
     @staticmethod
@@ -99,13 +162,66 @@ class SecEdgarAdapter:
 
     def recent_filings_batch(
         self,
-        symbols: tuple[str, ...] | list[str] = STORAGE_SYMBOLS,
+        symbols: tuple[str, ...] | list[str] | None = None,
         *,
         forms: tuple[str, ...] | list[str] | None = None,
         limit: int = 8,
         force: bool = False,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, Any]:
-        requested = self._normalize_symbols(symbols)
+        """Return the legacy per-symbol bounded filings view."""
+
+        return self._recent_filings_batch(
+            symbols,
+            forms=forms,
+            limit=limit,
+            force=force,
+            monitoring_raw_items=False,
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
+
+    def monitoring_filings_batch(
+        self,
+        symbols: tuple[str, ...] | list[str] | None = None,
+        *,
+        forms: tuple[str, ...] | list[str] | None = None,
+        limit: int = 8,
+        force: bool = False,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """Return every normalized recent filing so monitoring can drain unseen rows."""
+
+        return self._recent_filings_batch(
+            symbols,
+            forms=forms,
+            limit=limit,
+            force=force,
+            monitoring_raw_items=True,
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
+
+    def _recent_filings_batch(
+        self,
+        symbols: tuple[str, ...] | list[str] | None,
+        *,
+        forms: tuple[str, ...] | list[str] | None,
+        limit: int,
+        force: bool,
+        monitoring_raw_items: bool,
+        deadline_monotonic_ms: int,
+        cancel_event: threading.Event | None,
+    ) -> dict[str, Any]:
+        ensure_source_poll_active(
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
+        requested = self._normalize_symbols(
+            list(self.allowed_symbols) if symbols is None else symbols
+        )
         normalized_forms = self._normalize_forms(forms)
         safe_limit = min(40, max(1, int(limit)))
         captured_at = self._clock().astimezone(timezone.utc)
@@ -131,7 +247,13 @@ class SecEdgarAdapter:
             return result
 
         try:
-            ticker_map = self._ticker_map(force=force)
+            ticker_map = self._ticker_map(
+                force=force,
+                deadline_monotonic_ms=deadline_monotonic_ms,
+                cancel_event=cancel_event,
+            )
+        except (SourcePollCancelled, SourcePollDeadlineExceeded):
+            raise
         except Exception as exc:
             result["source_errors"].append({
                 "source": "sec_edgar",
@@ -142,6 +264,10 @@ class SecEdgarAdapter:
 
         today = captured_at.astimezone(US_EASTERN).date()
         for symbol in requested:
+            ensure_source_poll_active(
+                deadline_monotonic_ms=deadline_monotonic_ms,
+                cancel_event=cancel_event,
+            )
             ticker = symbol.removeprefix("US.")
             company = ticker_map.get(ticker)
             if not company:
@@ -152,7 +278,12 @@ class SecEdgarAdapter:
                     "message": "SEC 官方 ticker/CIK 映射中未找到该标的",
                 })
                 continue
-            cache_key = (symbol, normalized_forms, safe_limit)
+            cache_key = (
+                symbol,
+                normalized_forms,
+                safe_limit,
+                monitoring_raw_items,
+            )
             with self._cache_lock:
                 cached = self._filings_cache.get(cache_key)
                 if cached and cached[0] > time.monotonic() and not force:
@@ -161,14 +292,31 @@ class SecEdgarAdapter:
                     result["rows"].append(row)
                     continue
             try:
-                submissions = self._request_json(SEC_SUBMISSIONS_URL.format(cik=company["cik"]))
+                requested_cik = company["cik"]
+                submissions = self._request_json(
+                    SEC_SUBMISSIONS_URL.format(cik=requested_cik),
+                    deadline_monotonic_ms=deadline_monotonic_ms,
+                    cancel_event=cancel_event,
+                )
+                submissions_cik = submissions.get("cik")
+                if (
+                    type(submissions_cik) is not str
+                    or not re.fullmatch(r"[0-9]{10}\Z", submissions_cik)
+                    or submissions_cik != requested_cik
+                ):
+                    raise ValueError(
+                        "SEC submissions payload CIK does not match the requested entity"
+                    )
                 filings = self._normalize_recent_filings(
                     submissions,
-                    cik=company["cik"],
+                    cik=requested_cik,
                     forms=normalized_forms,
-                    limit=safe_limit,
+                    limit=None if monitoring_raw_items else safe_limit,
                     today=today,
+                    captured_at=captured_at,
                 )
+            except (SourcePollCancelled, SourcePollDeadlineExceeded):
+                raise
             except Exception as exc:
                 result["source_errors"].append({
                     "source": "sec_edgar",
@@ -177,7 +325,7 @@ class SecEdgarAdapter:
                     "message": str(exc)[:300],
                 })
                 continue
-            if not filings:
+            if not filings and not monitoring_raw_items:
                 result["source_errors"].append({
                     "source": "sec_edgar",
                     "symbol": symbol,
@@ -195,6 +343,10 @@ class SecEdgarAdapter:
                 "filing_count": len(filings),
                 "filings": filings,
             }
+            if monitoring_raw_items:
+                row["recent_scope_complete"] = self._recent_scope_complete(
+                    submissions, forms=normalized_forms, normalized_filings=filings
+                )
             with self._cache_lock:
                 self._filings_cache[cache_key] = (
                     time.monotonic() + self.cache_ttl_seconds,
@@ -202,13 +354,60 @@ class SecEdgarAdapter:
                 )
             result["rows"].append(row)
         result["ok"] = bool(result["rows"])
+        if monitoring_raw_items:
+            result["monitoring_recent_scope_version"] = SEC_MONITORING_RECENT_SCOPE_VERSION
+            result["monitoring_recent_scope_complete"] = (
+                not result["source_errors"]
+                and [row["symbol"] for row in result["rows"]] == list(requested)
+                and all(row.get("recent_scope_complete") is True for row in result["rows"])
+            )
         return result
 
-    def _ticker_map(self, *, force: bool) -> dict[str, dict[str, str]]:
+    @staticmethod
+    def _recent_scope_complete(
+        payload: dict[str, Any],
+        *,
+        forms: tuple[str, ...],
+        normalized_filings: list[dict[str, Any]],
+    ) -> bool:
+        """Prove that no selected-form recent record was truncated or rejected.
+
+        This covers only the fetched current recent arrays, never archive files.
+        The ordinary on-demand view retains its existing filtering behavior.
+        """
+
+        root = payload.get("filings")
+        recent = root.get("recent") if type(root) is dict else None
+        if type(recent) is not dict or type(recent.get("accessionNumber")) is not list:
+            return False
+        size = len(recent["accessionNumber"])
+        required = ("accessionNumber", "form", "filingDate", "primaryDocument")
+        for name in required + (("acceptanceDateTime",) if "acceptanceDateTime" in recent else ()):
+            values = recent.get(name)
+            if type(values) is not list or len(values) != size or any(type(value) is not str for value in values):
+                return False
+        expected = [
+            accession.strip()
+            for accession, form in zip(recent["accessionNumber"], recent["form"])
+            if form.strip().upper() in forms
+        ]
+        return expected == [filing["accession_number"] for filing in normalized_filings]
+
+    def _ticker_map(
+        self,
+        *,
+        force: bool,
+        deadline_monotonic_ms: int,
+        cancel_event: threading.Event | None,
+    ) -> dict[str, dict[str, str]]:
         with self._cache_lock:
             if self._ticker_cache and self._ticker_cache[0] > time.monotonic() and not force:
                 return copy.deepcopy(self._ticker_cache[1])
-        payload = self._request_json(SEC_TICKERS_URL)
+        payload = self._request_json(
+            SEC_TICKERS_URL,
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        )
         ticker_map: dict[str, dict[str, str]] = {}
         for item in payload.values():
             if not isinstance(item, dict):
@@ -218,7 +417,9 @@ class SecEdgarAdapter:
                 cik = f"{int(item.get('cik_str')):010d}"
             except (TypeError, ValueError):
                 continue
-            if ticker and ticker in {symbol.removeprefix("US.") for symbol in STORAGE_SYMBOLS}:
+            if ticker and ticker in {
+                symbol.removeprefix("US.") for symbol in self.allowed_symbols
+            }:
                 ticker_map[ticker] = {
                     "cik": cik,
                     "title": str(item.get("title") or "")[:240],
@@ -227,13 +428,39 @@ class SecEdgarAdapter:
             self._ticker_cache = (time.monotonic() + 86_400, copy.deepcopy(ticker_map))
         return ticker_map
 
-    def _request_json(self, url: str) -> dict[str, Any]:
+    def _request_json(
+        self,
+        url: str,
+        *,
+        deadline_monotonic_ms: int,
+        cancel_event: threading.Event | None,
+    ) -> dict[str, Any]:
         with self._request_lock:
             remaining = self._min_interval - (time.monotonic() - self._last_request_monotonic)
             if remaining > 0:
-                time.sleep(remaining)
+                wait_for_source_poll(
+                    remaining,
+                    deadline_monotonic_ms=deadline_monotonic_ms,
+                    cancel_event=cancel_event,
+                )
             try:
-                payload = self._fetch_json(url, self.user_agent)
+                ensure_source_poll_active(
+                    deadline_monotonic_ms=deadline_monotonic_ms,
+                    cancel_event=cancel_event,
+                )
+                if self._fetch_json_is_default:
+                    payload = self._fetch_json(
+                        url,
+                        self.user_agent,
+                        deadline_monotonic_ms=deadline_monotonic_ms,
+                        cancel_event=cancel_event,
+                    )
+                else:
+                    payload = self._fetch_json(url, self.user_agent)
+                ensure_source_poll_active(
+                    deadline_monotonic_ms=deadline_monotonic_ms,
+                    cancel_event=cancel_event,
+                )
             finally:
                 self._last_request_monotonic = time.monotonic()
         if not isinstance(payload, dict):
@@ -241,24 +468,44 @@ class SecEdgarAdapter:
         return payload
 
     @staticmethod
-    def _default_fetch_json(url: str, user_agent: str) -> dict[str, Any]:
-        if url != SEC_TICKERS_URL and not url.startswith("https://data.sec.gov/submissions/CIK"):
+    def _default_fetch_json(
+        url: str,
+        user_agent: str,
+        *,
+        deadline_monotonic_ms: int = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        if not _is_allowed_sec_fetch_url(url):
             raise ValueError("SEC 适配器拒绝非官方固定端点")
         request = Request(url, headers={
             "User-Agent": user_agent,
             "Accept": "application/json",
         })
-        with urlopen(request, timeout=12) as response:
-            final_url = str(response.geturl() or "")
-            parsed = urlparse(final_url)
-            if parsed.scheme != "https" or parsed.hostname not in {"www.sec.gov", "data.sec.gov"}:
-                raise ValueError("SEC 响应重定向到了非官方端点")
+        with open_official_https(
+            request,
+            allowed_hosts={"www.sec.gov", "data.sec.gov"},
+            timeout=12,
+            url_validator=lambda candidate: (
+                candidate == url and _is_allowed_sec_fetch_url(candidate)
+            ),
+            deadline_monotonic_ms=deadline_monotonic_ms,
+            cancel_event=cancel_event,
+        ) as response:
             declared_length = response.headers.get("Content-Length")
             if declared_length and int(declared_length) > SEC_MAX_RESPONSE_BYTES:
                 raise ValueError("SEC 响应超过 2 MB 上限")
-            raw = response.read(SEC_MAX_RESPONSE_BYTES + 1)
-        if len(raw) > SEC_MAX_RESPONSE_BYTES:
-            raise ValueError("SEC 响应超过 2 MB 上限")
+            try:
+                raw = read_official_https_body(
+                    response,
+                    SEC_MAX_RESPONSE_BYTES,
+                    deadline_seconds=12,
+                    deadline_monotonic_ms=deadline_monotonic_ms,
+                    cancel_event=cancel_event,
+                )
+            except (SourcePollCancelled, SourcePollDeadlineExceeded):
+                raise
+            except ValueError as exc:
+                raise ValueError("SEC 响应超过 2 MB 上限") from exc
         return json.loads(raw.decode("utf-8"))
 
     @staticmethod
@@ -267,8 +514,9 @@ class SecEdgarAdapter:
         *,
         cik: str,
         forms: tuple[str, ...],
-        limit: int,
+        limit: int | None,
         today: Any,
+        captured_at: datetime,
     ) -> list[dict[str, Any]]:
         recent = ((payload.get("filings") or {}).get("recent") or {})
         if not isinstance(recent, dict):
@@ -288,18 +536,36 @@ class SecEdgarAdapter:
                 continue
             accession_number = str(accession or "").strip()
             primary_document = SecEdgarAdapter._column_value(recent, "primaryDocument", index)
-            if not accession_number or not primary_document or "/" in primary_document or "\\" in primary_document:
+            if (
+                not _SEC_ACCESSION_RE.fullmatch(accession_number)
+                or not _SEC_PRIMARY_DOCUMENT_RE.fullmatch(primary_document)
+                or primary_document in {".", ".."}
+            ):
                 continue
             accession_compact = accession_number.replace("-", "")
             filing_url = f"{SEC_ARCHIVES_BASE}/{int(cik)}/{accession_compact}/{primary_document}"
             acceptance_time = SecEdgarAdapter._column_value(recent, "acceptanceDateTime", index)
+            accepted_at = ""
+            if acceptance_time:
+                try:
+                    accepted = datetime.fromisoformat(
+                        acceptance_time.replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    continue
+                if accepted.tzinfo is None:
+                    continue
+                accepted = accepted.astimezone(timezone.utc)
+                if accepted > captured_at:
+                    continue
+                accepted_at = _utc_iso(accepted)
             filings.append({
                 "accession_number": accession_number[:40],
                 "form": form,
                 "filing_date": filing_date,
                 "report_date": SecEdgarAdapter._column_value(recent, "reportDate", index)[:20],
-                "accepted_at": acceptance_time[:40],
-                "published_at": acceptance_time[:40] or filing_date,
+                "accepted_at": accepted_at,
+                "published_at": accepted_at or filing_date,
                 "primary_document": primary_document[:240],
                 "description": SecEdgarAdapter._column_value(recent, "primaryDocDescription", index)[:300],
                 "items": SecEdgarAdapter._column_value(recent, "items", index)[:240],
@@ -307,7 +573,7 @@ class SecEdgarAdapter:
                 "source_type": "regulatory_filing",
                 "source_tier": "primary",
             })
-            if len(filings) >= limit:
+            if limit is not None and len(filings) >= limit:
                 break
         return filings
 

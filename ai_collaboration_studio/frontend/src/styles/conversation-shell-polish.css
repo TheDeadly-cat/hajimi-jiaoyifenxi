@@ -4,12 +4,16 @@
   --shell-line: rgba(36, 76, 118, 0.13);
   --shell-accent: #1769e0;
   --shell-cyan: #28a9c3;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
   background:
     radial-gradient(circle at 72% -16%, rgba(38, 128, 215, 0.1), transparent 34%),
     linear-gradient(180deg, #f2f6f9, #edf2f6);
 }
 
 .conversation-panel {
+  min-width: 0;
+  min-height: 0;
   background:
     linear-gradient(180deg, rgba(250, 252, 254, 0.94), rgba(245, 249, 252, 0.92)),
     repeating-linear-gradient(90deg, rgba(44, 84, 124, 0.022) 0 1px, transparent 1px 32px);
@@ -71,15 +75,15 @@
   min-width: 0;
   overflow: hidden;
   color: var(--shell-ink);
-  font-weight: 780;
-  letter-spacing: -0.025em;
+  font-weight: 700;
+  letter-spacing: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .conversation-header > div:first-child > span:not(.status) {
   color: var(--shell-muted);
-  font-size: 9px;
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -89,8 +93,8 @@
   padding: 3px 7px;
   background: rgba(245, 248, 251, 0.82);
   color: #687a8e;
-  font-size: 8px;
-  font-weight: 720;
+  font-size: 13px;
+  font-weight: 700;
   letter-spacing: 0.035em;
   white-space: nowrap;
 }
@@ -184,7 +188,7 @@
   padding: 4px 8px;
   background: rgba(255, 255, 255, 0.58);
   color: inherit;
-  font-size: 9px;
+  font-size: 13px;
   font-weight: 700;
 }
 
@@ -207,7 +211,7 @@
     radial-gradient(circle at 50% 34%, rgba(38, 128, 215, 0.14), transparent 30%),
     linear-gradient(180deg, #f7fafc, #edf3f7);
   color: var(--shell-ink, #172b43);
-  font-weight: 720;
+  font-weight: 700;
   letter-spacing: 0.02em;
 }
 
@@ -241,19 +245,37 @@
   }
 }
 
-/* Mobile room identity: remove the inherited grid gap before constraining text. */
+/* Room identity follows the text height; larger Chinese text must not overlap
+   the status or be clipped by a fixed-height header row. */
 @media (max-width: 760px) {
+  .conversation-panel {
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .conversation-header {
+    min-height: 70px;
+    padding-block: 10px;
+  }
+
   .conversation-header > div:first-child {
-    row-gap: 0;
+    grid-template-rows: auto auto;
+    row-gap: 4px;
+  }
+
+  .conversation-header .status {
+    max-width: 100%;
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .conversation-header .status::before {
+    flex: 0 0 auto;
   }
 }
 
-/* Narrow room identity: preserve two readable lines without growing the shell. */
+/* Keep long names within two lines while allowing the status its own height. */
 @media (max-width: 430px) {
-  .conversation-header > div:first-child {
-    grid-template-rows: minmax(32px, auto) 20px;
-  }
-
   .conversation-header > div:first-child > strong {
     display: -webkit-box;
     max-height: 2.3em;

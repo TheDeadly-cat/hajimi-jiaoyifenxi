@@ -17,13 +17,13 @@
   border-bottom: 1px solid rgb(52 116 139 / 22%);
 }
 .action-desk-panel .action-desk-heading strong { color: var(--action-desk-ink); font-size: 14px; }
-.action-desk-panel .action-desk-heading > em { font-size: 9px; }
+.action-desk-panel .action-desk-heading > em { font-size: 13px; }
 .action-desk-panel .action-desk-intro,
 .action-desk-panel .action-desk-empty,
-.action-desk-panel .action-desk-boundary { font-size: 10px; line-height: 1.6; }
+.action-desk-panel .action-desk-boundary { font-size: 14px; line-height: 1.6; }
 
-.action-desk-panel .action-desk-state { font-size: 10px; }
-.action-desk-panel .action-desk-state small { font-size: 9px; }
+.action-desk-panel .action-desk-state { font-size: 14px; }
+.action-desk-panel .action-desk-state small { font-size: 13px; }
 .action-desk-panel .action-desk-state > button { min-height: 38px; }
 
 .action-desk-panel .action-desk-counts > span {
@@ -31,33 +31,33 @@
   border-color: rgb(52 116 139 / 18%);
   background: rgb(255 255 255 / 86%);
 }
-.action-desk-panel .action-desk-counts small { font-size: 9px; }
+.action-desk-panel .action-desk-counts small { font-size: 13px; }
 .action-desk-panel .action-desk-counts strong { font-size: 16px; font-variant-numeric: tabular-nums; }
-.action-desk-panel .action-desk-group-heading { font-size: 11px; }
-.action-desk-panel .action-desk-group-heading > span { font-size: 9px; }
+.action-desk-panel .action-desk-group-heading { font-size: 14px; }
+.action-desk-panel .action-desk-group-heading > span { font-size: 13px; }
 
 .action-desk-panel .action-desk-row { gap: 10px; padding: 11px; }
-.action-desk-panel .action-desk-row.integrity-failed strong { font-size: 11px; }
-.action-desk-panel .action-desk-row.integrity-failed small { font-size: 9px; }
+.action-desk-panel .action-desk-row.integrity-failed strong { font-size: 14px; }
+.action-desk-panel .action-desk-row.integrity-failed small { font-size: 13px; }
 .action-desk-panel .action-desk-source strong,
 .action-desk-panel .action-desk-source small {
   white-space: normal;
   overflow-wrap: anywhere;
 }
-.action-desk-panel .action-desk-source strong { font-size: 11px; }
+.action-desk-panel .action-desk-source strong { font-size: 14px; }
 .action-desk-panel .action-desk-source small,
-.action-desk-panel .action-desk-source code { font-size: 9px; }
-.action-desk-panel .action-desk-text { font-size: 12px; line-height: 1.65; }
-.action-desk-panel .action-desk-row-meta { font-size: 9px; }
+.action-desk-panel .action-desk-source code { font-size: 13px; }
+.action-desk-panel .action-desk-text { font-size: 15px; line-height: 1.65; }
+.action-desk-panel .action-desk-row-meta { font-size: 13px; }
 
-.action-desk-panel .action-desk-continuation { font-size: 10px; }
+.action-desk-panel .action-desk-continuation { font-size: 14px; }
 .action-desk-panel .action-desk-continuation > label,
-.action-desk-panel .action-desk-form-grid > label { font-size: 10px; }
+.action-desk-panel .action-desk-form-grid > label { font-size: 14px; }
 .action-desk-panel .action-desk-continuation select,
 .action-desk-panel .action-desk-continuation textarea,
 .action-desk-panel .action-desk-form-grid input,
 .action-desk-panel .action-desk-form-grid select,
-.action-desk-panel .action-desk-form-grid textarea { font-size: 11px; }
+.action-desk-panel .action-desk-form-grid textarea { font-size: 14px; }
 .action-desk-panel .action-desk-continuation select,
 .action-desk-panel .action-desk-form-grid input,
 .action-desk-panel .action-desk-form-grid select { min-height: 40px; height: auto; }

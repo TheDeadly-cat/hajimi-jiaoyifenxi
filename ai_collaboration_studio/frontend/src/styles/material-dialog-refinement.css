@@ -110,7 +110,7 @@
 
 .material-dialog-v2 .official-supplement-intro > em {
   color: #8b4a43;
-  font-size: 9px;
+  font-size: 13px;
   font-style: normal;
   overflow-wrap: anywhere;
 }
@@ -132,7 +132,7 @@
   border-radius: 6px;
   color: #75592a;
   background: #fcf8ed;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.45;
 }
 
@@ -145,7 +145,7 @@
   border-radius: 7px;
   color: #526b79;
   background: #f1f6f8;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.5;
   overflow-wrap: anywhere;
 }

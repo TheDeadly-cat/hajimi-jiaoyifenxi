@@ -28,7 +28,7 @@
   border-radius: 999px;
   color: #875d17;
   background: #fff7e7;
-  font-size: 9px;
+  font-size: 13px;
 }
 .reflection-status.confirmed { color: #286b57; background: #edf8f3; }
 
@@ -57,8 +57,8 @@
   gap: 7px;
   margin: 0;
   color: #40566a;
-  font-size: 11px;
-  font-weight: 720;
+  font-size: 14px;
+  font-weight: 700;
   letter-spacing: .015em;
 }
 .reflection-dialog-body textarea {
@@ -103,11 +103,11 @@
   border-radius: 8px;
   background: rgb(255 255 255 / 88%);
 }
-.reflection-source small { color: #687986; font-size: 9px; }
+.reflection-source small { color: #687986; font-size: 13px; }
 .reflection-source strong {
   color: #2d4356;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -147,15 +147,15 @@
 .reflection-permit-ledger small {
   color: #687b83;
   font-family: Consolas, "SFMono-Regular", monospace;
-  font-size: 9px;
-  font-weight: 750;
+  font-size: 13px;
+  font-weight: 700;
   letter-spacing: .08em;
   text-transform: uppercase;
 }
 
 .reflection-permit-ledger strong {
   color: #315e70;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -169,7 +169,7 @@
   border-radius: 9px;
   color: #823f39;
   background: #fff4ef;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.5;
 }
 

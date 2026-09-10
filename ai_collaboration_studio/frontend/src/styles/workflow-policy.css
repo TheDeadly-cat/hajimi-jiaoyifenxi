@@ -16,7 +16,7 @@
   color: #536071;
   background: #fff;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 600;
 }
 
@@ -104,7 +104,7 @@
 
 .workflow-dialog-heading-copy > small {
   color: #607d8d;
-  font: 700 9px/1.2 Consolas, "SFMono-Regular", monospace;
+  font: 700 13px/1.2 Consolas, "SFMono-Regular", monospace;
   letter-spacing: 0.11em;
 }
 
@@ -149,7 +149,7 @@
 .workflow-intro p {
   margin: 3px 0 0;
   color: #536274;
-  font-size: 12px;
+  font-size: 15px;
   line-height: 1.55;
 }
 
@@ -157,7 +157,7 @@
   display: block;
   margin-top: 6px;
   color: #8a5a16;
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .workflow-intro .workflow-source-warning {
@@ -191,7 +191,7 @@
 .workflow-policy-ledger small {
   color: #71808b;
   font-family: Consolas, "SFMono-Regular", monospace;
-  font-size: 10px;
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.09em;
   text-transform: uppercase;
@@ -200,7 +200,7 @@
 .workflow-policy-ledger strong {
   color: #315f78;
   font-family: Bahnschrift, "Aptos Display", "Segoe UI", sans-serif;
-  font-size: 12px;
+  font-size: 15px;
   overflow-wrap: anywhere;
 }
 
@@ -232,19 +232,19 @@
 .workflow-readiness-panel > header > svg { color: var(--workflow-blue); }
 .workflow-readiness-panel.blocked > header > svg { color: var(--workflow-amber); }
 .workflow-readiness-panel > header > span { display: grid; gap: 2px; min-width: 0; }
-.workflow-readiness-panel > header small { color: #71808b; font: 700 9px/1.2 Consolas, "SFMono-Regular", monospace; letter-spacing: 0.09em; }
-.workflow-readiness-panel > header h3 { color: var(--workflow-ink); font: 750 13px/1.35 Bahnschrift, "Aptos Display", "Segoe UI", sans-serif; margin: 0; overflow-wrap: anywhere; }
-.workflow-readiness-panel > header > data { border: 1px solid currentColor; border-radius: 999px; color: #526f7d; font: 700 11px/1 Consolas, "SFMono-Regular", monospace; padding: 6px 8px; }
+.workflow-readiness-panel > header small { color: #71808b; font: 700 13px/1.2 Consolas, "SFMono-Regular", monospace; letter-spacing: 0.09em; }
+.workflow-readiness-panel > header h3 { color: var(--workflow-ink); font: 700 15px/1.35 Bahnschrift, "Aptos Display", "Segoe UI", sans-serif; margin: 0; overflow-wrap: anywhere; }
+.workflow-readiness-panel > header > data { border: 1px solid currentColor; border-radius: 999px; color: #526f7d; font: 700 14px/1 Consolas, "SFMono-Regular", monospace; padding: 6px 8px; }
 .workflow-readiness-panel.blocked > header > data { color: #8a5a16; }
-.workflow-readiness-scope { border-top: 1px solid #d7e0e5; color: #526474; font-size: 11px; line-height: 1.55; margin: 0; padding: 9px 12px; }
+.workflow-readiness-scope { border-top: 1px solid #d7e0e5; color: #526474; font-size: 14px; line-height: 1.55; margin: 0; padding: 9px 12px; }
 .workflow-readiness-list { display: grid; gap: 7px; grid-template-columns: repeat(2, minmax(0, 1fr)); list-style: none; margin: 0; padding: 0 12px 10px; }
 .workflow-readiness-list li { border: 1px solid #dfc9aa; border-radius: 8px; display: grid; gap: 2px; min-width: 0; padding: 8px 9px; background: #fffaf1; }
-.workflow-readiness-list strong { color: #704d20; font-size: 11px; line-height: 1.4; }
-.workflow-readiness-list small { color: #7b674c; font-size: 10px; line-height: 1.45; }
-.workflow-readiness-clear { color: #456779; font-size: 11px; line-height: 1.5; margin: 0; padding: 0 12px 11px; }
-.workflow-readiness-guidance { border-top: 1px dashed #d8c5aa; color: #765a35; font-size: 10px; line-height: 1.5; margin: 0; padding: 8px 12px 10px; }
+.workflow-readiness-list strong { color: #704d20; font-size: 14px; line-height: 1.4; }
+.workflow-readiness-list small { color: #7b674c; font-size: 14px; line-height: 1.45; }
+.workflow-readiness-clear { color: #456779; font-size: 14px; line-height: 1.5; margin: 0; padding: 0 12px 11px; }
+.workflow-readiness-guidance { border-top: 1px dashed #d8c5aa; color: #765a35; font-size: 14px; line-height: 1.5; margin: 0; padding: 8px 12px 10px; }
 .workflow-readiness-more { border-top: 1px solid #d7e0e5; }
-.workflow-readiness-more > summary { color: #6d5b44; cursor: pointer; font-size: 11px; font-weight: 700; min-height: 40px; padding: 10px 12px; }
+.workflow-readiness-more > summary { color: #6d5b44; cursor: pointer; font-size: 14px; font-weight: 700; min-height: 40px; padding: 10px 12px; }
 .workflow-readiness-more[open] > summary { margin-bottom: 9px; }
 
 .workflow-fieldset {
@@ -260,13 +260,13 @@
   color: var(--workflow-ink);
   font-family: Bahnschrift, "Aptos Display", "Segoe UI", sans-serif;
   font-size: 14px;
-  font-weight: 750;
+  font-weight: 700;
 }
 
 .workflow-field-help {
   margin: -1px 0 10px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.5;
 }
 
@@ -316,7 +316,7 @@
   color: #2f617f;
   background: #e8f1f5;
   font-family: Consolas, "SFMono-Regular", monospace;
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   text-align: center;
@@ -355,12 +355,12 @@
   color: #35465a;
   color: var(--workflow-ink);
   font-family: Bahnschrift, "Aptos Display", "Segoe UI", sans-serif;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .workflow-stage-name > small {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .workflow-stage-name.shortfall > small,
@@ -374,7 +374,7 @@
   align-items: center;
   gap: 5px;
   color: #697688;
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 600;
 }
 
@@ -427,7 +427,7 @@
 .coverage-readiness {
   margin-top: 6px;
   color: #456779;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.45;
 }
 
@@ -483,7 +483,7 @@
   padding: 8px 2px 2px;
   color: #506075;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 700;
   list-style-position: inside;
 }
@@ -501,7 +501,7 @@
   display: block;
   margin-bottom: 6px;
   color: #6a7584;
-  font-size: 10px;
+  font-size: 14px;
 }
 
 .dialog .counterargument-toggle {
@@ -512,8 +512,8 @@
   gap: 7px;
   margin-top: 9px;
   color: #6c4a27;
-  font-size: 11px;
-  font-weight: 650;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .dialog .counterargument-toggle input {
@@ -547,7 +547,7 @@
   align-items: center;
   gap: 5px;
   color: #647184;
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 500;
 }
 
@@ -572,12 +572,12 @@
 
 .workflow-safety-boundary strong {
   font-family: Bahnschrift, "Aptos Display", "Segoe UI", sans-serif;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .workflow-safety-boundary small {
   color: #526f7d;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.5;
 }
 
@@ -588,7 +588,7 @@
   border-radius: 8px;
   color: #a13939;
   background: #fff4f4;
-  font-size: 11px;
+  font-size: 14px;
 }
 
 .dialog footer.workflow-dialog-footer {
@@ -624,10 +624,10 @@
 .workflow-save-summary.blocked { color: var(--workflow-danger); }
 .workflow-save-summary > svg { margin-top: 1px; }
 .workflow-save-summary > span { display: grid; gap: 2px; min-width: 0; }
-.workflow-save-summary strong { font-size: 11px; line-height: 1.35; }
+.workflow-save-summary strong { font-size: 14px; line-height: 1.35; }
 .workflow-save-summary small {
   color: #657783;
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1.4;
   overflow-wrap: anywhere;
 }

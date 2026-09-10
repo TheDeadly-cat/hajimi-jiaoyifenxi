@@ -30,7 +30,7 @@
   padding: 0.5rem 0.7rem;
   border-left: 2px solid var(--readiness-ink);
   color: color-mix(in srgb, currentColor 74%, transparent);
-  font-size: 0.78rem;
+  font-size: 0.9375rem;
 }
 
 .readiness-docket .project-readiness-gap-group > header {
@@ -111,7 +111,7 @@
 
 .readiness-docket .project-readiness-more small {
   color: color-mix(in srgb, currentColor 62%, transparent);
-  font-size: 0.66rem;
+  font-size: 0.875rem;
 }
 
 .readiness-docket .project-readiness-more[data-list-action="collapse"] {
@@ -135,24 +135,24 @@
 .readiness-docket .project-readiness-metrics li > em small,
 .readiness-docket .project-readiness-gap-title small,
 .readiness-docket .project-readiness-gap-group header > em span {
-  font-size: 0.64rem;
+  font-size: 0.875rem;
 }
 
 .readiness-docket .project-readiness-heading-copy p,
 .readiness-docket .project-readiness-summary-copy > span,
 .readiness-docket .project-readiness-state,
 .readiness-docket .project-readiness-boundary {
-  font-size: 0.75rem;
+  font-size: 0.9375rem;
 }
 
 .readiness-docket .project-readiness-heading > em,
 .readiness-docket .project-readiness-metrics li > b,
 .readiness-docket .project-readiness-gap-title > b {
-  font-size: 0.68rem;
+  font-size: 0.875rem;
 }
 
 .readiness-docket .project-readiness-summary-copy > strong {
-  font-size: 0.86rem;
+  font-size: 0.9375rem;
   line-height: 1.4;
 }
 
@@ -183,14 +183,14 @@
 
 .readiness-docket .project-readiness-scope-ledger small {
   color: color-mix(in srgb, var(--readiness-ink) 62%, #6a7882);
-  font-size: 0.66rem;
-  font-weight: 800;
+  font-size: 0.875rem;
+  font-weight: 700;
   letter-spacing: 0.06em;
 }
 
 .readiness-docket .project-readiness-scope-ledger strong {
   color: color-mix(in srgb, var(--readiness-ink) 88%, #173f5f);
-  font-size: 0.84rem;
+  font-size: 0.9375rem;
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
@@ -231,13 +231,13 @@
 }
 
 .readiness-docket .project-readiness-locator label small {
-  font-size: 0.62rem;
-  font-weight: 900;
+  font-size: 0.875rem;
+  font-weight: 700;
   letter-spacing: 0.08em;
 }
 
 .readiness-docket .project-readiness-locator label strong {
-  font-size: 0.78rem;
+  font-size: 0.9375rem;
 }
 
 .readiness-docket .project-readiness-locator-field {
@@ -256,7 +256,7 @@
   color: #294b64;
   background: rgba(255, 255, 255, 0.92);
   font: inherit;
-  font-size: 0.78rem;
+  font-size: 0.9375rem;
 }
 
 .readiness-docket .project-readiness-locator-clear {
@@ -277,7 +277,7 @@
   grid-column: 1 / -1;
   margin: 0;
   color: color-mix(in srgb, currentColor 68%, transparent);
-  font-size: 0.7rem;
+  font-size: 0.875rem;
 }
 
 .readiness-docket .project-readiness-locator-status[data-empty="true"] {
@@ -287,23 +287,23 @@
 .readiness-docket .project-readiness-metrics li > span strong,
 .readiness-docket .project-readiness-gap-title h4 {
   margin: 0;
-  font-size: 0.76rem;
+  font-size: 0.9375rem;
 }
 
 .readiness-docket .project-readiness-gap-group li strong,
 .readiness-docket .project-readiness-binding summary,
 .readiness-docket .project-readiness-binding dd {
-  font-size: 0.72rem;
+  font-size: 0.9375rem;
 }
 
 .readiness-docket .project-readiness-gap-group li small,
 .readiness-docket .project-readiness-binding dt,
 .readiness-docket .project-readiness-gap-group code {
-  font-size: 0.66rem;
+  font-size: 0.875rem;
 }
 
 .readiness-docket .project-readiness-gap-body > p {
-  font-size: 0.72rem;
+  font-size: 0.9375rem;
 }
 
 .readiness-docket .project-readiness-binding summary {

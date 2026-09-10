@@ -27,11 +27,41 @@ async function jsonRequest(path, options = {}) {
 export const api = {
   bootstrap: (roomId = "") => jsonRequest(`/api/bootstrap${roomId ? `?room=${encodeURIComponent(roomId)}` : ""}`),
   room: (roomId) => jsonRequest(`/api/rooms/${encodeURIComponent(roomId)}`),
-  listSourceInbox: ({ state = "", query = "", limit = 100, signal } = {}) => {
+  listSourceInbox: ({
+    state = "",
+    query = "",
+    source = "",
+    unread = false,
+    limit = 100,
+    signal,
+  } = {}) => {
     const parameters = new URLSearchParams({ limit: String(limit) });
     if (state) parameters.set("state", state);
     if (query) parameters.set("q", query);
+    if (source) parameters.set("source", source);
+    if (unread === true) parameters.set("unread", "true");
     return jsonRequest(`/api/monitoring/inbox?${parameters.toString()}`, { signal });
+  },
+  sourceMonitoringHealth: (signal) => jsonRequest(
+    "/api/monitoring/health",
+    { signal },
+  ),
+  sourceMonitoringOperatorControl: (signal) => jsonRequest(
+    "/api/monitoring/adapters/control",
+    { signal },
+  ),
+  previewSourceMonitoringAdapterInitialization: (adapterKey, payload, signal) => jsonRequest(
+    `/api/monitoring/adapters/${encodeURIComponent(adapterKey)}/initialization-preview`,
+    { method: "POST", body: JSON.stringify(payload), signal },
+  ),
+  setSourceMonitoringAdapterEnablement: (adapterKey, payload, signal) => jsonRequest(
+    `/api/monitoring/adapters/${encodeURIComponent(adapterKey)}/enablement`,
+    { method: "POST", body: JSON.stringify(payload), signal },
+  ),
+  sourceInboxNotifications: ({ after = "", limit = 50, signal } = {}) => {
+    const parameters = new URLSearchParams({ limit: String(limit) });
+    if (after) parameters.set("after", after);
+    return jsonRequest(`/api/monitoring/notifications?${parameters.toString()}`, { signal });
   },
   sourceInboxItem: (itemId, signal) => jsonRequest(
     `/api/monitoring/events/${encodeURIComponent(itemId)}`,
@@ -40,6 +70,14 @@ export const api = {
   importSourceInbox: (content, signal) => jsonRequest(
     "/api/monitoring/imports/chatgpt",
     { method: "POST", body: JSON.stringify({ content }), signal },
+  ),
+  previewSourceInboxImport: (content, signal) => jsonRequest(
+    "/api/monitoring/imports/chatgpt/preview",
+    { method: "POST", body: JSON.stringify({ content }), signal },
+  ),
+  sourceMonitoringPromptTemplate: (signal) => jsonRequest(
+    "/api/monitoring/imports/chatgpt/prompt-template",
+    { signal },
   ),
   acknowledgeSourceInboxItem: (itemId, expectedStateVersion, signal) => jsonRequest(
     `/api/monitoring/events/${encodeURIComponent(itemId)}/acknowledge`,

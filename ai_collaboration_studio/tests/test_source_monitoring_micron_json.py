@@ -1,0 +1,629 @@
+from __future__ import annotations
+
+import copy
+from dataclasses import replace
+import json
+import sqlite3
+import tempfile
+import unittest
+from contextlib import ExitStack, closing
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urljoin
+from urllib.error import URLError
+from unittest.mock import patch
+
+from backend.market.ir_releases import OfficialIrReleaseAdapter
+from backend.providers.compatible_chat_provider import CompatibleChatProvider
+from backend.providers.deepseek_provider import DeepSeekProvider
+from backend.providers.doubao_provider import DoubaoProvider
+from backend.providers.openai_provider import OpenAIProvider
+from backend.source_inbox_service import SourceInboxService
+from backend.source_monitoring.adapters.company_ir import CompanyIrSourceAdapter
+from backend.source_monitoring.registry import SourceAdapterRegistry
+from backend.source_monitoring.settings import SourceMonitoringSettings
+from backend.source_monitoring.state_repository import SourceMonitoringStateRepository
+from backend.source_monitoring.supervisor import SourceMonitoringSupervisor
+from backend.source_monitoring.scheduler import BackoffPolicy, SourceMonitoringScheduler
+from backend.source_monitoring.contracts import MICRON_PENDING_REVALIDATION_STATE_CODE
+from backend.source_monitoring.health import project_adapter_health
+from backend.source_monitoring.trading_impact_rules import TradingImpactRulesV1
+from backend.store import StudioStore
+from tests.test_source_monitoring_sec_baseline import NOW_MS
+
+
+class MicronJsonFixtureTransport:
+    def __init__(self, count: int = 30) -> None:
+        self.records = [self.record(index) for index in range(1, count + 1)]
+        self.calls: list[tuple[str, bool]] = []
+        self.after_list = None
+        self.after_head = None
+        self.missing_metadata_id = 0
+        self.published_at = "2026-09-04T15:01:00Z"
+        self.modified_at_by_id: dict[int, str] = {}
+
+    @staticmethod
+    def record(index: int) -> dict:
+        return {
+            "PressReleaseId": index, "RevisionNumber": 1,
+            "Headline": f"Micron official announcement {index}",
+            "LinkToDetailPage": f"/news/press-release/2026/Announcement-{index}/default.aspx",
+            "PressReleaseDate": "09/04/2026 16:01:00", "ShortDescription": "Official list metadata.",
+        }
+
+    def __call__(self, url, *, deadline_monotonic_ms=0, cancel_event=None, max_bytes, head_only):
+        del deadline_monotonic_ms, cancel_event, max_bytes
+        self.calls.append((url, head_only))
+        if not head_only:
+            rows = copy.deepcopy(self.records)
+            if self.after_list is not None:
+                callback, self.after_list = self.after_list, None
+                callback()
+            return json.dumps({"GetPressReleaseListResult": rows}).encode()
+        row = next(row for row in self.records if urljoin("https://investors.micron.com", row["LinkToDetailPage"]) == url)
+        metadata = {
+            "@type": "NewsArticle", "mainEntityOfPage": {"@id": url},
+            "headline": row["Headline"], "datePublished": self.published_at,
+            "dateModified": self.modified_at_by_id.get(row["PressReleaseId"], self.published_at),
+        }
+        if row["PressReleaseId"] == self.missing_metadata_id:
+            metadata.pop("datePublished")
+        if self.after_head is not None:
+            self.after_head()
+        return ('<html><head><script type="application/ld+json">' + json.dumps(metadata) + '</script></head>').encode()
+
+
+class MicronJsonCompositionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory(prefix="studio-micron-json-")
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / "isolated.sqlite3"
+        self.clock_ms = NOW_MS
+        self.store = StudioStore(self.path)
+        self.repository = SourceMonitoringStateRepository(self.store, clock_ms=lambda: self.clock_ms)
+        self.inbox = SourceInboxService(self.store, clock=lambda: self.clock_ms / 1_000)
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.provider_spies = [self.stack.enter_context(patch.object(
+            cls, method, side_effect=AssertionError("Provider forbidden in Micron metadata polling"),
+        )) for cls, method in (
+            (CompatibleChatProvider, "generate"), (CompatibleChatProvider, "probe"),
+            (OpenAIProvider, "generate"), (OpenAIProvider, "probe"),
+            (DoubaoProvider, "generate"), (DoubaoProvider, "generate_json"),
+            (DoubaoProvider, "probe"), (DeepSeekProvider, "generate_json"),
+        )]
+        self.addCleanup(self.assert_model_free)
+
+    def assert_model_free(self):
+        for spy in self.provider_spies:
+            spy.assert_not_called()
+        with closing(sqlite3.connect(self.path)) as connection:
+            for table in ("provider_execution_runs", "provider_call_attempts", "rounds"):
+                self.assertEqual(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
+
+    def clock(self):
+        return datetime.fromtimestamp(self.clock_ms / 1_000, tz=timezone.utc)
+
+    def adapter(self, transport, *, monotonic=None):
+        return CompanyIrSourceAdapter(
+            adapter=OfficialIrReleaseAdapter(source_format="q4_json", micron_fetch_bytes=transport, clock=self.clock, monotonic=monotonic),
+            symbols=["US.MU"], per_symbol_limit=8, force=True, receipt_clock=self.clock,
+        )
+
+    def supervisor(self, adapter, *, from_time=False, impact=False):
+        self.repository.set_enabled(adapter.adapter_key, config_version=adapter.config_version, enabled=True)
+        settings = SourceMonitoringSettings(enabled=True, dry_run=False, trading_impact_rules_enabled=impact, **(
+            {"initial_mode": "from_time", "from_time": "1970-01-01T00:00:00Z"} if from_time else {}
+        ))
+        return SourceMonitoringSupervisor(
+            registry=SourceAdapterRegistry((adapter,)), repository=self.repository,
+            source_inbox=self.inbox, settings=settings, clock_ms=lambda: self.clock_ms,
+            event_sink=lambda *_args, **_kwargs: None,
+            impact_rules=TradingImpactRulesV1() if impact else None,
+        )
+
+    def items(self):
+        with closing(sqlite3.connect(self.path)) as connection:
+            return [json.loads(row[0]) for row in connection.execute("SELECT item_json FROM source_inbox_items ORDER BY id")]
+
+    def assert_scheduler_recovers_after_one_transient_fault(self, random_sample):
+        fixture = MicronJsonFixtureTransport()
+        fail = [False]
+        calls = []
+        def transport(url, **controls):
+            calls.append((url, controls["head_only"], fail[0] and controls["head_only"]))
+            if calls[-1][2]:
+                raise URLError("fixture single transient fault")
+            return fixture(url, **controls)
+        adapter = self.adapter(transport, monotonic=lambda: 10000 + (self.clock_ms - NOW_MS) / 1000)
+        supervisor = self.supervisor(adapter)
+        supervisor.settings = replace(supervisor.settings, auto_start=True)
+        supervisor.backoff_policy = BackoffPolicy(random_source=lambda: random_sample)
+        scheduler = SourceMonitoringScheduler(registry=supervisor.registry, repository=self.repository,
+            supervisor=supervisor, clock_ms=lambda: self.clock_ms)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(baseline["status"], "SUCCEEDED")
+        self.assertEqual(len(calls), 31)
+        recovered = False
+        for cycle in range(1, 11):
+            self.clock_ms = scheduler.effective_next_due_at_ms()
+            fail[0] = cycle == 1
+            before = len(calls)
+            scheduled = scheduler.run_one_due(adapter.adapter_key)
+            self.assertEqual(scheduled["run_count"], 1)
+            result = scheduled["results"][0]
+            self.assertEqual(len(calls) - before, 5)
+            state = result["state"]
+            if result["status"] == "SUCCEEDED":
+                self.assertEqual(state["consecutive_failures"], 0)
+                recovered = True
+                break
+            self.assertEqual(result["status"], "DEGRADED")
+            self.assertEqual(state["checkpoint"], baseline["state"]["checkpoint"])
+            self.assertEqual(state["last_success_at_ms"], baseline["state"]["last_success_at_ms"])
+            self.assertEqual(state["consecutive_failures"], 1)
+            if cycle > 1:
+                self.assertEqual(state["last_error_code"], MICRON_PENDING_REVALIDATION_STATE_CODE)
+                self.assertEqual(project_adapter_health(state, now_ms=self.clock_ms)["state"], "degraded")
+                self.assertEqual(state["next_due_at_ms"] - self.clock_ms, adapter.poll_interval_ms)
+        self.assertTrue(recovered, "all-success transport must recover on the same scheduler and client")
+        self.assertEqual(sum(call[2] for call in calls), 4)
+        self.assertEqual(self.items(), [])
+
+    def test_scheduler_retry_recovers_with_minimum_jitter_and_advancing_clocks(self):
+        self.assert_scheduler_recovers_after_one_transient_fault(0.0)
+
+    def test_scheduler_retry_recovers_with_midpoint_jitter_and_advancing_clocks(self):
+        self.assert_scheduler_recovers_after_one_transient_fault(0.5)
+
+    def test_scheduler_retry_recovers_with_maximum_jitter_and_advancing_clocks(self):
+        self.assert_scheduler_recovers_after_one_transient_fault(1.0)
+
+    def test_expired_cache_pending_preserves_zero_failures_and_never_looks_healthy(self):
+        adapter = self.adapter(MicronJsonFixtureTransport(), monotonic=lambda: 10000 + (self.clock_ms - NOW_MS) / 1000)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        self.clock_ms += 3_601_000
+        pending = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(pending["status"], "DEGRADED")
+        self.assertEqual(pending["state"]["consecutive_failures"], 0)
+        self.assertEqual(pending["state"]["last_success_at_ms"], baseline["state"]["last_success_at_ms"])
+        self.assertEqual(pending["state"]["checkpoint"], baseline["state"]["checkpoint"])
+        self.assertEqual(project_adapter_health(pending["state"], now_ms=self.clock_ms)["state"], "degraded")
+
+    def pending_fixture_payload(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        transport.missing_metadata_id = 1
+        supervisor.run_once(adapter.adapter_key)
+        transport.missing_metadata_id = 0
+        payload = adapter._adapter.monitoring_releases_batch(["US.MU"], force=True, require_complete_metadata=False)
+        return adapter, supervisor, baseline, payload
+
+    def test_pending_requires_complete_raw_errors_and_unattempted_valid_progress(self):
+        adapter, _, baseline, original = self.pending_fixture_payload()
+        checkpoint = baseline["state"]["checkpoint"]
+        with patch.object(adapter._adapter, "monitoring_releases_batch", return_value=original):
+            self.assertTrue(adapter.poll(checkpoint, observed_at_ms=self.clock_ms).pending_revalidation_only)
+        for mutation in ("malformed_error", "hidden_actual_error", "unknown_error", "attempted", "bad_progress", "rejected"):
+            payload = copy.deepcopy(original)
+            if mutation == "malformed_error":
+                payload["source_errors"].append(None)
+            elif mutation == "hidden_actual_error":
+                payload["source_errors"].extend([None] * 49 + [{"code": "ACTUAL_FAILURE", "message": "failure", "symbol": "US.OTHER"}])
+            elif mutation == "unknown_error":
+                payload["source_errors"][0]["code"] = "UNKNOWN_FAILURE"
+                payload["rows"][0]["metadata_progress"]["failed"][0]["code"] = "UNKNOWN_FAILURE"
+            elif mutation == "attempted":
+                payload["rows"][0]["metadata_progress"]["requested_ids"].append(1)
+            elif mutation == "bad_progress":
+                payload["rows"][0]["metadata_progress"]["failed"][0]["press_release_id"] = 999
+            else:
+                payload["rows"].append("bad")
+            with self.subTest(mutation=mutation), patch.object(adapter._adapter, "monitoring_releases_batch", return_value=payload):
+                self.assertFalse(adapter.poll(checkpoint, observed_at_ms=self.clock_ms).pending_revalidation_only)
+
+    def test_pending_retry_after_floor_and_next_actual_failure_keep_original_streak(self):
+        adapter, supervisor, _, payload = self.pending_fixture_payload()
+        supervisor.backoff_policy = BackoffPolicy(random_source=lambda: 0.5)
+        with patch.object(adapter._adapter, "monitoring_releases_batch", return_value=payload):
+            pending = adapter.poll(self.repository.get_state(adapter.adapter_key)["checkpoint"], observed_at_ms=self.clock_ms)
+        self.assertTrue(pending.pending_revalidation_only)
+        pending = replace(pending, retry_after_ms=900_000)
+        with patch.object(adapter, "poll", autospec=True, return_value=pending):
+            result = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(result["status"], "DEGRADED")
+        self.assertEqual(result["state"]["consecutive_failures"], 1)
+        self.assertEqual(result["state"]["next_due_at_ms"] - self.clock_ms, 900_000)
+        from backend.source_monitoring.contracts import SourcePollError
+        for code, retry_after, expected_delay in (("MICRON_IR_REVALIDATION_TIMEOUT", 900_000, 900_000),
+                                                  ("UNKNOWN_FAILURE", 0, 120_000)):
+            failure = replace(pending, pending_revalidation_only=False, retry_after_ms=retry_after,
+                              source_errors=(*pending.source_errors, SourcePollError.build(code, "actual", "US.MU")))
+            before = self.repository.get_state(adapter.adapter_key)["consecutive_failures"]
+            with patch.object(adapter, "poll", autospec=True, return_value=failure):
+                result = supervisor.run_once(adapter.adapter_key)
+            self.assertEqual(result["state"]["consecutive_failures"], before + 1)
+            self.assertEqual(result["state"]["next_due_at_ms"] - self.clock_ms, expected_delay)
+            self.assertNotEqual(result["state"]["last_error_code"], MICRON_PENDING_REVALIDATION_STATE_CODE)
+
+    def test_initialization_policy_cannot_authorize_pending_hint_even_with_old_checkpoint(self):
+        adapter, _, baseline, payload = self.pending_fixture_payload()
+        policy = SourceMonitoringSettings(enabled=True, dry_run=False, initial_mode="from_time",
+            from_time="1970-01-01T00:00:00Z").initialization_policy_for(official_source=True)
+        with patch.object(adapter._adapter, "monitoring_releases_batch", return_value=payload):
+            result = adapter._poll(baseline["state"]["checkpoint"], observed_at_ms=self.clock_ms,
+                deadline_monotonic_ms=0, cancel_event=None, etag="", last_modified="", max_items=50,
+                seed_baseline=False, initialization_policy=policy)
+        self.assertTrue(result.source_errors)
+        self.assertEqual(result.initial_history_sha256, "")
+        self.assertFalse(result.pending_revalidation_only)
+
+    def test_pending_dry_run_keeps_persisted_state_unchanged(self):
+        adapter, supervisor, _, payload = self.pending_fixture_payload()
+        before = self.repository.get_state(adapter.adapter_key)
+        supervisor.settings = replace(supervisor.settings, dry_run=True)
+        with patch.object(adapter._adapter, "monitoring_releases_batch", return_value=payload):
+            result = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(result["status"], "DRY_RUN")
+        self.assertEqual(self.repository.get_state(adapter.adapter_key), before)
+
+    def test_reused_production_adapter_reduces_duplicate_poll_from_thirty_one_to_five_requests(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        first = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(first["status"], "SUCCEEDED")
+        self.assertEqual(len(transport.calls), 31)
+        checkpoint = copy.deepcopy(first["state"]["checkpoint"])
+        for _ in range(3):
+            before = len(transport.calls)
+            repeated = supervisor.run_once(adapter.adapter_key)
+            self.assertEqual(repeated["status"], "SUCCEEDED", repeated)
+            self.assertEqual(len(transport.calls) - before, 5)
+            self.assertEqual(repeated["state"]["checkpoint"], checkpoint)
+        self.assertEqual(self.items(), [])
+
+    def test_failed_old_revalidation_does_not_block_new_release_and_checkpoint_waits_for_recovery(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        checkpoint = copy.deepcopy(baseline["state"]["checkpoint"])
+        transport.records = transport.records[:-1] + [transport.record(31)]
+        transport.missing_metadata_id = 1
+        first = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(first["status"], "DEGRADED", first)
+        self.assertEqual(first["state"]["checkpoint"], checkpoint)
+        self.assertEqual([item["extensions"]["company_ir_v2"]["press_release_id"] for item in self.items()], [31])
+        self.assertTrue(any("Micron ID 1:" in error["message"] and "attempt_count=2" in error["message"]
+                            for error in first["run"]["source_errors"]))
+        transport.records = transport.records[:-2] + [transport.record(31), transport.record(32)]
+        second = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(second["status"], "DEGRADED", second)
+        self.assertEqual(second["state"]["checkpoint"], checkpoint)
+        self.assertEqual({item["extensions"]["company_ir_v2"]["press_release_id"] for item in self.items()}, {31, 32})
+        self.assertTrue(any("retry_position=" in error["message"] for error in second["run"]["source_errors"]))
+        transport.missing_metadata_id = 0
+        recovered = None
+        for _ in range(8):
+            recovered = supervisor.run_once(adapter.adapter_key)
+            if recovered["status"] == "SUCCEEDED":
+                break
+        self.assertEqual(recovered["status"], "SUCCEEDED", recovered)
+        self.assertEqual(len(self.items()), 2)
+        self.assertNotEqual(recovered["state"]["checkpoint"], checkpoint)
+        replay = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(replay["status"], "SUCCEEDED")
+        self.assertEqual(len(self.items()), 2)
+
+    def test_partial_metadata_report_must_match_failed_identity_before_micron_delivery(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        transport.records = transport.records[:-1] + [transport.record(31)]
+        transport.missing_metadata_id = 1
+        client = adapter._adapter._micron_client
+        snapshot = client.read_recent(require_complete=False)
+        snapshot["metadata_progress"]["failed"][0]["press_release_id"] = 999
+        with patch.object(client, "read_recent", return_value=snapshot):
+            result = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(result["status"], "DEGRADED")
+        self.assertEqual(result["state"]["checkpoint"], baseline["state"]["checkpoint"])
+        self.assertEqual(self.items(), [])
+
+    def test_persistent_old_failure_cannot_fill_every_slot_with_previous_uncommitted_replays(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        transport.missing_metadata_id = 1
+        for offset in range(12):
+            new_id = 31 + offset
+            removed_old_id = 30 - offset
+            transport.records = [row for row in transport.records if row["PressReleaseId"] != removed_old_id]
+            transport.records.append(transport.record(new_id))
+            result = supervisor.run_once(adapter.adapter_key)
+            self.assertEqual(result["status"], "DEGRADED", result)
+            self.assertEqual(result["state"]["checkpoint"], baseline["state"]["checkpoint"])
+            self.assertEqual(
+                {item["extensions"]["company_ir_v2"]["press_release_id"] for item in self.items()},
+                set(range(31, new_id + 1)),
+            )
+
+    def test_burst_larger_than_delivery_limit_drains_while_old_metadata_remains_degraded(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        transport.records = transport.records[:18] + [transport.record(identity) for identity in range(31, 43)]
+        transport.missing_metadata_id = 1
+        first = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(first["status"], "DEGRADED", first)
+        self.assertEqual(first["state"]["checkpoint"], baseline["state"]["checkpoint"])
+        self.assertEqual(len(self.items()), 8)
+        second = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(second["status"], "DEGRADED", second)
+        self.assertEqual(second["state"]["checkpoint"], baseline["state"]["checkpoint"])
+        self.assertEqual({item["extensions"]["company_ir_v2"]["press_release_id"] for item in self.items()}, set(range(31, 43)))
+        rows = self.items()
+        for _ in range(3):
+            replay = supervisor.run_once(adapter.adapter_key)
+            self.assertEqual(replay["status"], "DEGRADED", replay)
+            self.assertEqual(replay["state"]["checkpoint"], baseline["state"]["checkpoint"])
+            self.assertEqual(self.items(), rows)
+
+    def test_failed_first_burst_import_does_not_consume_uncommitted_delivery_rotation(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        transport.records = transport.records[:18] + [transport.record(identity) for identity in range(31, 43)]
+        transport.missing_metadata_id = 1
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("""CREATE TRIGGER fail_first_incremental_burst AFTER INSERT ON source_inbox_items
+                BEGIN SELECT RAISE(ABORT,'injected first burst import failure'); END""")
+        failed = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(failed["status"], "FAILED", failed)
+        self.assertIn("injected first burst import failure", failed["run"]["error_message"])
+        self.assertEqual(failed["state"]["checkpoint"], baseline["state"]["checkpoint"])
+        self.assertEqual(self.items(), [])
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM source_inbox_imports").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM source_inbox_state_events").fetchone()[0], 0)
+            connection.execute("DROP TRIGGER fail_first_incremental_burst")
+        for _ in range(2):
+            retried = supervisor.run_once(adapter.adapter_key)
+            self.assertEqual(retried["status"], "DEGRADED", retried)
+            self.assertEqual(retried["state"]["checkpoint"], baseline["state"]["checkpoint"])
+        self.assertEqual({item["extensions"]["company_ir_v2"]["press_release_id"] for item in self.items()}, set(range(31, 43)))
+        self.assertEqual(len(self.items()), 12)
+
+    def test_degraded_burst_survives_one_cold_restart_before_remaining_delivery(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        baseline = supervisor.run_once(adapter.adapter_key)
+        transport.records = transport.records[:18] + [transport.record(identity) for identity in range(31, 43)]
+        transport.missing_metadata_id = 1
+        first = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(first["status"], "DEGRADED", first)
+        checkpoint = copy.deepcopy(baseline["state"]["checkpoint"])
+        self.assertEqual(first["state"]["checkpoint"], checkpoint)
+        first_items = self.items()
+        self.assertEqual(len(first_items), 8)
+
+        # Reopen the same temporary database with entirely new store, reader,
+        # adapter and supervisor instances. No checkpoint or item is cleared.
+        self.store = StudioStore(self.path)
+        self.repository = SourceMonitoringStateRepository(self.store, clock_ms=lambda: self.clock_ms)
+        self.inbox = SourceInboxService(self.store, clock=lambda: self.clock_ms / 1_000)
+        restarted_adapter = self.adapter(transport)
+        self.assertEqual(restarted_adapter._json_offered_order, [])
+        self.assertEqual(restarted_adapter._adapter._micron_client._metadata_cache, {})
+        restarted = self.supervisor(restarted_adapter)
+        before = len(transport.calls)
+        cold_replay = restarted.run_once(restarted_adapter.adapter_key)
+        self.assertEqual(cold_replay["status"], "DEGRADED", cold_replay)
+        self.assertEqual(len(transport.calls) - before, 31)
+        self.assertEqual(cold_replay["state"]["checkpoint"], checkpoint)
+        self.assertEqual(cold_replay["import"]["created_item_count"], 0)
+        self.assertEqual(self.items(), first_items)
+
+        drained = restarted.run_once(restarted_adapter.adapter_key)
+        self.assertEqual(drained["status"], "DEGRADED", drained)
+        self.assertEqual(drained["state"]["checkpoint"], checkpoint)
+        self.assertEqual(drained["import"]["created_item_count"], 4)
+        self.assertEqual({item["extensions"]["company_ir_v2"]["press_release_id"] for item in self.items()}, set(range(31, 43)))
+        stable_items = self.items()
+        self.assertEqual(len(stable_items), 12)
+        for _ in range(2):
+            replay = restarted.run_once(restarted_adapter.adapter_key)
+            self.assertEqual(replay["status"], "DEGRADED", replay)
+            self.assertEqual(replay["state"]["checkpoint"], checkpoint)
+            self.assertEqual(self.items(), stable_items)
+
+    def test_unchanged_list_and_revision_detect_head_only_revision_on_bounded_revalidation(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        seeded = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(seeded["status"], "SUCCEEDED")
+        original_list = copy.deepcopy(transport.records)
+        client = adapter._adapter._micron_client
+        previous_head_evidence = copy.deepcopy(client._metadata_cache[30])
+        transport.modified_at_by_id[30] = "2026-09-05T10:00:00Z"
+        target_url = urljoin("https://investors.micron.com", transport.records[29]["LinkToDetailPage"])
+
+        for cycle in range(1, 9):
+            self.clock_ms += 300_000
+            before = len(transport.calls)
+            result = supervisor.run_once(adapter.adapter_key)
+            self.assertEqual(result["status"], "SUCCEEDED", result)
+            self.assertEqual(transport.records, original_list)
+            self.assertEqual(len(transport.calls) - before, 5)
+            if cycle < 8:
+                self.assertNotIn((target_url, True), transport.calls[before:])
+                self.assertEqual(client._metadata_cache[30], previous_head_evidence)
+                self.assertEqual(self.items(), [])
+            else:
+                self.assertIn((target_url, True), transport.calls[before:])
+                self.assertEqual(client._metadata_cache[30]["verified_at_ms"], self.clock_ms)
+
+        self.assertEqual(len(self.items()), 1)
+        item = self.items()[0]
+        extension = item["extensions"]["company_ir_v2"]
+        self.assertEqual(extension["press_release_id"], 30)
+        self.assertEqual(extension["revision_number"], original_list[29]["RevisionNumber"])
+        self.assertTrue(extension["is_revision"])
+        self.assertEqual(extension["metadata_date_modified"], transport.modified_at_by_id[30])
+        self.assertEqual(item["published_at"], transport.published_at)
+        self.assertNotEqual(extension["time_metadata_sha256"], previous_head_evidence["time_metadata_sha256"])
+        self.assertTrue(extension["previous_projection_sha256"])
+        self.assertEqual(supervisor.run_once(adapter.adapter_key)["status"], "SUCCEEDED")
+        self.assertEqual(self.items(), [item])
+
+    def test_default_micron_format_is_explicit_json_and_legacy_injection_requires_rss(self):
+        self.assertEqual(OfficialIrReleaseAdapter().source_format, "q4_json")
+        with self.assertRaises(ValueError):
+            OfficialIrReleaseAdapter(fetch_bytes=lambda *_args: b"<rss/>")
+
+    def test_json_projection_uses_bound_utc_head_metadata_and_never_claims_rss_or_body(self):
+        transport = MicronJsonFixtureTransport(1)
+        adapter = self.adapter(transport)
+        result = adapter.poll({}, observed_at_ms=self.clock_ms)
+        self.assertEqual(result.source_errors, ())
+        item = result.observed_items[0]
+        extension = item["extensions"]["company_ir_v2"]
+        self.assertEqual(extension["source_declared_time_raw"], "09/04/2026 16:01:00")
+        self.assertEqual(item["published_at"], "2026-09-04T15:01:00Z")
+        self.assertNotIn("company_ir_v1", item["extensions"])
+        self.assertEqual([source["source_type"] for source in item["sources"]], ["company_ir_time_metadata", "company_ir_json_projection"])
+        self.assertEqual(item["sources"][0]["content_sha256"], extension["time_metadata_sha256"])
+        self.assertEqual(item["sources"][1]["content_sha256"], extension["projection_sha256"])
+        self.assertEqual(len(transport.calls), 2)
+        self.assertRegex(adapter.config_version, r"^company_ir_config_v3_[0-9a-f]{16}$")
+
+    def test_full_recent30_baseline_then_new_and_revision_survive_restart_once(self):
+        transport = MicronJsonFixtureTransport()
+        adapter = self.adapter(transport)
+        supervisor = self.supervisor(adapter)
+        seed = supervisor.run_once(adapter.adapter_key)
+        self.assertEqual(seed["status"], "SUCCEEDED")
+        self.assertEqual(len(seed["state"]["checkpoint"]["projections"]), 30)
+        self.assertEqual(self.items(), [])
+        transport.records[29]["RevisionNumber"] = 2
+        transport.records[29]["ShortDescription"] = "Revised official list metadata."
+        transport.records = transport.records[1:] + [transport.record(31)]
+        self.assertEqual(supervisor.run_once(adapter.adapter_key)["status"], "SUCCEEDED")
+        extensions = {item["extensions"]["company_ir_v2"]["press_release_id"]: item["extensions"]["company_ir_v2"] for item in self.items()}
+        self.assertEqual(set(extensions), {30, 31})
+        self.assertTrue(extensions[30]["is_revision"])
+        self.assertFalse(extensions[31]["is_revision"])
+        restarted = self.supervisor(self.adapter(transport))
+        self.assertEqual(restarted.run_once(adapter.adapter_key)["status"], "SUCCEEDED")
+        self.assertEqual(len(self.items()), 2)
+
+    def test_one_missing_head_timestamp_blocks_complete_seed_without_import(self):
+        transport = MicronJsonFixtureTransport()
+        transport.missing_metadata_id = 30
+        adapter = self.adapter(transport)
+        result = self.supervisor(adapter).run_once(adapter.adapter_key)
+        self.assertEqual(result["status"], "DEGRADED")
+        self.assertEqual(result["state"]["checkpoint"], {})
+        self.assertEqual(result["initialization"]["outcome"], "blocked")
+        self.assertEqual(self.items(), [])
+
+    def test_publication_during_metadata_request_uses_trusted_receipt_clock(self):
+        transport = MicronJsonFixtureTransport(1)
+        start_ms = self.clock_ms
+        transport.published_at = "2026-09-05T12:00:01Z"
+        transport.after_head = lambda: setattr(self, "clock_ms", start_ms + 2_000)
+        result = self.adapter(transport).poll({}, observed_at_ms=start_ms)
+        self.assertEqual(result.source_errors, ())
+        self.assertEqual(result.captured_at_ms, start_ms)
+        self.assertEqual(result.observed_items[0]["published_at"], transport.published_at)
+
+    def test_true_future_metadata_does_not_advance_checkpoint(self):
+        transport = MicronJsonFixtureTransport(1)
+        transport.published_at = "2026-09-05T12:01:00Z"
+        result = self.adapter(transport).poll({}, observed_at_ms=self.clock_ms)
+        self.assertTrue(result.source_errors)
+        self.assertEqual(result.observed_items, ())
+        self.assertEqual(result.next_checkpoint, {})
+
+    def test_delayed_uncommitted_replay_has_identical_json_projection(self):
+        transport = MicronJsonFixtureTransport(1)
+        adapter = self.adapter(transport)
+        first = adapter.poll({}, observed_at_ms=self.clock_ms)
+        self.clock_ms += 60_000
+        replay = self.adapter(transport).poll({}, observed_at_ms=self.clock_ms)
+        self.assertEqual(first.observed_items, replay.observed_items)
+
+    def test_real_json_producer_imports_with_independently_validated_neutral_sidecar(self):
+        transport = MicronJsonFixtureTransport(1)
+        transport.records[0]["Headline"] = "Micron Technology to Report Fiscal Fourth Quarter Results"
+        transport.records[0]["ShortDescription"] = ""
+        adapter = self.adapter(transport)
+        result = self.supervisor(adapter, from_time=True, impact=True).run_once(adapter.adapter_key)
+        self.assertEqual(result["status"], "SUCCEEDED")
+        self.assertEqual(result["import"]["created_item_count"], 1)
+        accounting = result["trading_impact_rules"]
+        self.assertEqual(accounting["evaluated_count"], 1)
+        self.assertEqual(accounting["no_match_count"], 1)
+        self.assertEqual(accounting["matched_count"], 0)
+        self.assertEqual(result["safety"]["provider_calls_performed"], 0)
+        item = self.items()[0]
+        self.assertEqual(item["extensions"]["company_ir_v2"]["event_type"], "earnings_schedule")
+        self.assertEqual(item["impact_hypotheses"], [])
+        self.assertTrue(item["summary"].startswith("Official Micron press-release metadata:"))
+
+    def mixed_adapter(self, transport, *, rss_fails):
+        def rss_fetch(_url, _hosts):
+            if rss_fails:
+                raise OSError("fixture Seagate RSS unavailable")
+            return b'<rss><channel><item><title>Seagate official release</title><guid>stx-1</guid><link>https://investors.seagate.com/news/release-1</link><pubDate>Fri, 04 Sep 2026 20:00:00 +0000</pubDate><description>Official RSS metadata.</description></item></channel></rss>'
+        return CompanyIrSourceAdapter(
+            adapter=OfficialIrReleaseAdapter(
+                source_format="q4_json", micron_fetch_bytes=transport,
+                fetch_bytes=rss_fetch, clock=self.clock,
+            ),
+            symbols=["US.MU", "US.STX"], force=True, receipt_clock=self.clock,
+        )
+
+    def test_normal_mixed_rss_failure_imports_healthy_micron_and_preserves_checkpoint(self):
+        monitor = self.mixed_adapter(MicronJsonFixtureTransport(1), rss_fails=True)
+        supervisor = self.supervisor(monitor)
+        run = self.repository.start_run(monitor.adapter_key, config_version=monitor.config_version)["run"]
+        self.repository.complete_run(run["run_id"], next_checkpoint={}, status="SUCCEEDED", observed_count=0, accepted_count=0, duplicate_count=0, rejected_count=0, next_due_at_ms=self.clock_ms)
+        result = supervisor.run_once(monitor.adapter_key)
+        self.assertEqual(result["status"], "DEGRADED")
+        self.assertEqual(result["state"]["checkpoint"], {})
+        self.assertEqual([item["entities"][0]["id"] for item in self.items()], ["US.MU"])
+
+    def test_normal_mixed_bad_micron_metadata_imports_only_healthy_rss(self):
+        transport = MicronJsonFixtureTransport(1)
+        transport.missing_metadata_id = 1
+        monitor = self.mixed_adapter(transport, rss_fails=False)
+        supervisor = self.supervisor(monitor)
+        run = self.repository.start_run(monitor.adapter_key, config_version=monitor.config_version)["run"]
+        self.repository.complete_run(run["run_id"], next_checkpoint={}, status="SUCCEEDED", observed_count=0, accepted_count=0, duplicate_count=0, rejected_count=0, next_due_at_ms=self.clock_ms)
+        result = supervisor.run_once(monitor.adapter_key)
+        self.assertEqual(result["status"], "DEGRADED")
+        self.assertEqual(result["state"]["checkpoint"], {})
+        self.assertEqual([item["entities"][0]["id"] for item in self.items()], ["US.STX"])
+
+    def test_mixed_seed_rss_failure_cannot_import_or_advance_any_source(self):
+        monitor = self.mixed_adapter(MicronJsonFixtureTransport(1), rss_fails=True)
+        result = self.supervisor(monitor).run_once(monitor.adapter_key)
+        self.assertEqual(result["status"], "DEGRADED")
+        self.assertEqual(result["initialization"]["outcome"], "blocked")
+        self.assertEqual(result["state"]["checkpoint"], {})
+        self.assertEqual(self.items(), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

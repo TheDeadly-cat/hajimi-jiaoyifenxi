@@ -34,12 +34,12 @@
 
 .plugin-registry-audit-control strong {
   color: var(--registry-ink);
-  font: 750 0.86rem/1.35 "Noto Serif SC", "Songti SC", serif;
+  font: 700 0.86rem/1.35 "Noto Serif SC", "Songti SC", serif;
 }
 
 .plugin-registry-audit-control p {
   color: var(--registry-muted);
-  font-size: 0.69rem;
+  font-size: 0.875rem;
   line-height: 1.5;
   margin: 0;
 }
@@ -52,7 +52,7 @@
   color: #285c70;
   display: inline-flex;
   font: inherit;
-  font-size: 0.7rem;
+  font-size: 0.875rem;
   font-weight: 700;
   gap: 6px;
   justify-content: center;

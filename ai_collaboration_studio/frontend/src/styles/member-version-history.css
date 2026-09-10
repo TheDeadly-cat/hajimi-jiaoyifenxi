@@ -45,7 +45,7 @@
 
 .member-history-dialog > header small {
   color: #c8d8e2;
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 500;
 }
 
@@ -83,7 +83,7 @@
 .member-history-status small {
   color: #71808a;
   font-family: Consolas, "SFMono-Regular", monospace;
-  font-size: 9px;
+  font-size: 13px;
   font-weight: 700;
   letter-spacing: .08em;
   text-transform: uppercase;
@@ -92,7 +92,7 @@
 .member-history-status strong {
   overflow: hidden;
   color: #315d73;
-  font-size: 11px;
+  font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -115,7 +115,7 @@
   gap: 8px;
   margin: 0;
   color: #627083;
-  font-size: 12px;
+  font-size: 15px;
 }
 
 .member-history-integrity-warning {
@@ -129,7 +129,7 @@
   border-radius: 9px;
   color: #805d27;
   background: #fff9ed;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.5;
 }
 
@@ -179,13 +179,13 @@
 .member-history-ledger > span strong {
   color: var(--member-archive-ink);
   font-family: Bahnschrift, "Aptos Display", "Segoe UI", sans-serif;
-  font-size: 13px;
+  font-size: 15px;
   letter-spacing: 0.02em;
 }
 
 .member-history-ledger > span small {
   color: var(--muted);
-  font-size: 10px;
+  font-size: 14px;
 }
 
 .member-history-ledger ol {
@@ -238,13 +238,13 @@
 .member-history-ledger li strong {
   color: #344358;
   font-family: Bahnschrift, "Aptos Display", "Segoe UI", sans-serif;
-  font-size: 13px;
+  font-size: 15px;
   font-variant-numeric: tabular-nums;
 }
 
 .member-history-ledger li small {
   color: var(--muted);
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
@@ -254,7 +254,7 @@
   align-items: center;
   gap: 3px;
   color: #66788d;
-  font-size: 9px;
+  font-size: 13px;
   font-style: normal;
   font-weight: 700;
   white-space: nowrap;
@@ -308,7 +308,7 @@
 .member-version-selectors label {
   gap: 5px;
   color: #52677a;
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 700;
 }
 
@@ -316,7 +316,7 @@
   height: 40px;
   border-color: #b7c6d1;
   background: #fff;
-  font-size: 12px;
+  font-size: 15px;
 }
 
 .member-version-cards {
@@ -348,7 +348,7 @@
 .member-version-card strong {
   color: #334255;
   font-family: Bahnschrift, "Aptos Display", "Segoe UI", sans-serif;
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .member-version-card em {
@@ -356,7 +356,7 @@
   align-items: center;
   gap: 3px;
   color: #27805b;
-  font-size: 9px;
+  font-size: 13px;
   font-style: normal;
   font-weight: 700;
 }
@@ -366,7 +366,7 @@
 
 .member-version-card small {
   color: #6c7888;
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -377,7 +377,7 @@
   border-radius: 9px;
   color: #6f7c8d;
   background: #fafbfd;
-  font-size: 11px;
+  font-size: 14px;
   line-height: 1.5;
 }
 
@@ -403,7 +403,7 @@
   color: var(--member-archive-ink);
   background: linear-gradient(90deg, #eaf1f5, #f8fafb);
   font-family: Bahnschrift, "Aptos Display", "Segoe UI", sans-serif;
-  font-size: 12px;
+  font-size: 15px;
 }
 
 .member-version-field-diff article {
@@ -418,7 +418,7 @@
 
 .member-version-field-diff article > span:first-child {
   color: #59677a;
-  font-size: 10px;
+  font-size: 14px;
   font-weight: 700;
 }
 
@@ -435,7 +435,7 @@
   overflow: auto;
   padding: 8px 9px;
   border-radius: 7px;
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1.5;
   text-decoration: none;
   white-space: pre-wrap;
@@ -464,7 +464,7 @@
 .member-capability-diff em {
   padding: 4px 7px;
   border-radius: 6px;
-  font-size: 10px;
+  font-size: 14px;
   font-style: normal;
   font-weight: 700;
 }
@@ -484,7 +484,7 @@
   align-items: center;
   gap: 5px;
   color: #627083;
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1.45;
 }
 

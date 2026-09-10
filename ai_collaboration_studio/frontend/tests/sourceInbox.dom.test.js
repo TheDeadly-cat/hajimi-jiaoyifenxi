@@ -67,14 +67,21 @@ function sourceRecord({
   acknowledged = false,
   attachments = [],
   drafts = [],
+  headline = "GitHub / CI 运行结果摘要",
+  id = "source_item_one",
+  impactRuleProjections = [],
+  sourceChannel = "chatgpt_scheduled_task",
+  sourceKey = "github_ci_watch",
+  sourceTier = "external_manual",
   state = "AWAITING_USER",
   stateVersion = 1,
 } = {}) {
   return {
     version: "source_inbox_item_record_v1",
-    id: "source_item_one",
-    source_channel: "chatgpt_scheduled_task",
-    source_key: "github_ci_watch",
+    id,
+    source_channel: sourceChannel,
+    source_key: sourceKey,
+    source_tier: sourceTier,
     external_run_id: "run_one",
     received_at: 1_777_777_777_000,
     server_fingerprint: "a".repeat(64),
@@ -94,7 +101,7 @@ function sourceRecord({
       severity: "high",
       occurred_at: "2026-08-28T12:55:00Z",
       published_at: "2026-08-28T12:56:00Z",
-      headline: "GitHub / CI 运行结果摘要",
+      headline,
       summary: "外部系统声明隔离测试失败。",
       facts: [{ claim: "workflow conclusion is failure", source_indexes: [0] }],
       sources: [{
@@ -117,6 +124,7 @@ function sourceRecord({
     },
     attachments,
     round_drafts: drafts,
+    impact_rule_projections: impactRuleProjections,
     events: [],
     safety: {
       acknowledgement_is_fact_confirmation: false,
@@ -125,6 +133,596 @@ function sourceRecord({
       market_calls_performed: 0,
       execution_capability: "none",
     },
+  };
+}
+
+function sectorImpactProjection() {
+  return {
+    version: "source_inbox_trading_impact_projection_record_v1",
+    id: "impact_deep",
+    source_item_sha256: "b".repeat(64),
+    server_fingerprint: "a".repeat(64),
+    projection_sha256: "e".repeat(64),
+    status: "MATCHED",
+    hypothesis_count: 1,
+    projection: {
+      version: "trading_impact_projection_v1",
+      ruleset_version: "trading_impact_rules_v1",
+      source_binding: {
+        adapter_id: "federal_reserve",
+        source_channel: "official_source_monitor",
+      },
+      source_item_binding: {
+        item_sha256: "b".repeat(64),
+        server_fingerprint: "a".repeat(64),
+      },
+      evaluation: "matched",
+      matched_rule_ids: ["macro_release_review_v1"],
+      hypotheses: [{
+        version: "trading_impact_hypothesis_v1",
+        hypothesis_sha256: "d".repeat(64),
+        rule_id: "macro_release_review_v1",
+        impact_hypothesis: {
+          statement: "The fixed rule maps this release to DRAM research review.",
+          affected_area: "sector:dram",
+          time_horizon: "next_release_window",
+          source_indexes: [0],
+          confidence: 0.5,
+        },
+        affected_area_binding: { kind: "sector", id: "dram", security_ids: ["US.MU"] },
+        time_dimension: { horizon_id: "next_release_window" },
+        confidence_basis: { outcome_probability: false },
+        counterevidence: { status: "unknown" },
+      }],
+      verification_state: "external_unverified",
+      interpretation_boundary: {
+        directional_forecast: false,
+        causal_attribution: "none",
+        profitability_claim: false,
+        execution_authority: "none",
+        user_review_required: true,
+      },
+      accounting: {
+        model_calls_performed: 0,
+        provider_calls_performed: 0,
+        network_requests_performed: 0,
+        market_calls_performed: 0,
+        database_writes_performed: 0,
+      },
+      projection_sha256: "e".repeat(64),
+    },
+    safety: {
+      model_calls_performed: 0,
+      provider_calls_performed: 0,
+      network_requests_performed: 0,
+      market_calls_performed: 0,
+      database_writes_performed: 0,
+      formal_rounds_created: 0,
+      live_trading_allowed: false,
+      execution_capability: "none",
+    },
+  };
+}
+
+function monitoringHealth() {
+  return {
+    ok: true,
+    source_monitoring_health: {
+      version: "source_monitoring_health_service_v3",
+      health_projection_version: "source_monitoring_health_v1",
+      captured_at_ms: 1_777_777_777_000,
+      state: "disabled",
+      adapter_count: 0,
+      counts: { disabled: 0, idle: 0, running: 0, healthy: 0, degraded: 0, backing_off: 0, failed: 0 },
+      adapters: [],
+      settings: {
+        enabled: false,
+        auto_start: false,
+        official_only: true,
+        allow_readonly_market: false,
+        trading_impact_rules_enabled: false,
+        dry_run: true,
+        max_items_per_run: 50,
+        initial_mode: "seed_only",
+        catch_up_max_items: 0,
+        initial_preview_sha256: "",
+        from_time: "",
+        continuous_event_cutoff: "",
+      },
+      persistence_available: true,
+      runtime_liveness_verified: false,
+      runtime: {
+        version: "source_monitoring_runtime_health_v1",
+        status: "disabled",
+        runtime_id: "",
+        started_at: 0,
+        heartbeat_at: 0,
+        last_loop_at: 0,
+        active_adapter: "",
+        next_due_at: 0,
+        thread_alive: false,
+        last_fatal_error_code: "",
+        heartbeat_age_ms: 0,
+        stall_after_ms: 120000,
+        liveness_verified: false,
+        enabled: false,
+        auto_start: false,
+        dry_run: true,
+        execution_capability: "none",
+        live_trading_allowed: false,
+      },
+      safety: {
+        database_writes_performed: 0,
+        provider_calls_performed: 0,
+        network_requests_performed: 0,
+        market_calls_performed: 0,
+        formal_rounds_created: 0,
+        execution_capability: "none",
+        live_trading_allowed: false,
+      },
+    },
+  };
+}
+
+function activeMonitoringHealth({ failed = false, stalled = false } = {}) {
+  const payload = monitoringHealth();
+  const view = payload.source_monitoring_health;
+  const unhealthy = failed || stalled;
+  Object.assign(view.settings, { enabled: true, auto_start: true });
+  Object.assign(view.runtime, {
+    status: failed ? "failed" : stalled ? "stalled" : "running",
+    runtime_id: `source_monitor_runtime_${"1".repeat(32)}`,
+    started_at: 1_777_777_776_000,
+    heartbeat_at: 1_777_777_776_900,
+    last_loop_at: 1_777_777_776_900,
+    active_adapter: failed ? "" : "sec_filings",
+    next_due_at: 1_777_777_780_000,
+    thread_alive: !failed,
+    last_fatal_error_code: failed ? "SOURCE_MONITORING_RUNTIME_FATAL" : "",
+    heartbeat_age_ms: stalled ? 120001 : 100,
+    liveness_verified: !unhealthy,
+    enabled: true,
+    auto_start: true,
+  });
+  view.runtime_liveness_verified = !unhealthy;
+  view.state = unhealthy ? "healthy" : "running";
+  view.adapter_count = 1;
+  view.counts = {
+    disabled: 0,
+    idle: 0,
+    running: unhealthy ? 0 : 1,
+    healthy: unhealthy ? 1 : 0,
+    degraded: 0,
+    backing_off: 0,
+    failed: 0,
+  };
+  view.adapters = [{
+    version: "source_adapter_health_v1",
+    adapter_key: "sec_filings",
+    catalog_registered: true,
+    persisted_state: true,
+    persisted_enabled: true,
+    config_status: "current",
+    persisted_config_version: "sec_filings_config_v1",
+    runtime_liveness_verified: !unhealthy,
+    metadata: {
+      contract_version: "source_adapter_contract_v1",
+      config_version: "sec_filings_config_v1",
+      poll_interval_ms: 900000,
+      max_candidates_per_poll: 50,
+      source_class: "official_source",
+      source_channel: "official_source_monitor",
+      official_source: true,
+      max_market_calls_per_poll: 0,
+      execution_capability: "none",
+      live_trading_allowed: false,
+    },
+    latest_run: null,
+    state: unhealthy ? "healthy" : "running",
+    enabled: true,
+    running: !unhealthy,
+    last_checked_at_ms: 1_777_777_776_900,
+    last_success_at_ms: 1_777_777_776_900,
+    last_event_at_ms: 0,
+    next_due_at_ms: 1_777_777_780_000,
+    consecutive_failures: 0,
+    discovery_delay_ms: 0,
+    last_error_code: "",
+    execution_capability: "none",
+    live_trading_allowed: false,
+  }];
+  return payload;
+}
+
+function operatorHealth() {
+  const payload = monitoringHealth();
+  payload.source_monitoring_health.state = "idle";
+  Object.assign(payload.source_monitoring_health.settings, {
+    enabled: true,
+    auto_start: false,
+  });
+  Object.assign(payload.source_monitoring_health.runtime, {
+    status: "stopped",
+    enabled: true,
+  });
+  return payload;
+}
+
+function operatorSafety({ network = 0, preview = false, writeFlags = false, writes = 0 } = {}) {
+  return {
+    database_writes_performed: writeFlags ? Boolean(writes) : writes,
+    checkpoint_writes_performed: writeFlags ? false : 0,
+    source_inbox_writes_performed: writeFlags ? false : 0,
+    provider_calls_performed: 0,
+    model_calls_performed: 0,
+    formal_rounds_created: 0,
+    market_calls_performed: 0,
+    network_requests_performed: network,
+    execution_capability: "none",
+    live_trading_allowed: false,
+    ...(preview ? {
+      network_requests_accounting: network === null ? "not_instrumented" : "exact",
+    } : {}),
+  };
+}
+
+function operatorAdapter(overrides = {}) {
+  return {
+    version: "source_monitoring_adapter_control_v1",
+    adapter_key: "sec_filings",
+    config_version: "sec_filings_config_v2",
+    state_version: 0,
+    persisted_state: false,
+    persisted_enabled: false,
+    effective_enabled: false,
+    active_run: false,
+    source_class: "official_source",
+    source_channel: "official_source_monitor",
+    official_source: true,
+    initialization_status: "required",
+    initialization_mode: "seed_only",
+    initialization_preview_sha256: "",
+    initialization_completed_at_ms: 0,
+    pending_authorization: false,
+    can_preview: true,
+    can_enable: false,
+    can_disable: false,
+    blocked_reason_codes: [],
+    ...overrides,
+  };
+}
+
+function operatorControl(adapterOverrides = {}) {
+  return {
+    ok: true,
+    source_monitoring_operator_control: {
+      version: "source_monitoring_operator_control_v2",
+      captured_at_ms: 1_777_777_777_000,
+      settings: {
+        global_enabled: true,
+        auto_start: false,
+        dry_run: true,
+        initial_mode: "seed_only",
+        catch_up_max_items: 0,
+        from_time: "",
+        continuous_event_cutoff: "",
+      },
+      adapters: [operatorAdapter(adapterOverrides)],
+      safety: operatorSafety(),
+    },
+  };
+}
+
+function trialOperatorControl() {
+  const payload = operatorControl();
+  const view = payload.source_monitoring_operator_control;
+  view.version = "source_monitoring_operator_control_v3";
+  view.profile = {
+    version: "source_monitoring_profile_v1", profile_id: "sec_micron_trial_v1",
+    label: "SEC + Micron 官方来源试用", initial_mode: "seed_only",
+    sources: [
+      { adapter_key: "sec_filings", symbols: ["US.NVDA"], forms: ["8-K"],
+        format: "sec_submissions_recent", history_limit: 1000,
+        per_symbol_limit: 3, poll_interval_ms: 300_000 },
+      { adapter_key: "company_ir", symbols: ["US.MU"], forms: [],
+        format: "micron_q4_public_json_v1", history_limit: 30,
+        per_symbol_limit: 8, poll_interval_ms: 300_000 },
+    ],
+    model_calls_allowed: false, execution_capability: "none", live_trading_allowed: false,
+    scope_sha256: "e6f07d2c97d71c1280ab653352fc019cd99845be5bd06468ae6ace65899454e3",
+  };
+  view.adapters.push(operatorAdapter({ adapter_key: "company_ir", config_version: "company_ir_config_v2" }));
+  return payload;
+}
+
+function operatorPreview(overrides = {}) {
+  return {
+    ok: true,
+    source_monitoring_operator_preview: {
+      version: "source_monitoring_operator_preview_v1",
+      adapter_key: "sec_filings",
+      config_version: "sec_filings_config_v2",
+      state_version: 0,
+      mode: "seed_only",
+      initial_required: true,
+      initialization_blocked: false,
+      catch_up_max_items: 0,
+      from_time: "",
+      candidate_count: 3,
+      selected_count: 0,
+      skipped_count: 3,
+      adapter_duplicate_count: 0,
+      source_error_count: 0,
+      rejected_count: 0,
+      earliest_occurred_at: "2026-09-01T00:00:00Z",
+      latest_occurred_at: "2026-09-02T00:00:00Z",
+      preview_sha256: "a".repeat(64),
+      starting_checkpoint_sha256: "b".repeat(64),
+      next_checkpoint_sha256: "c".repeat(64),
+      captured_at_ms: 1_777_777_777_000,
+      safety: operatorSafety({ network: null, preview: true }),
+      ...overrides,
+    },
+  };
+}
+
+function enablementResult({
+  adapterKey = "sec_filings",
+  configVersion = "sec_filings_config_v2",
+  enabled,
+  network = undefined,
+  stateVersion,
+  initializationAuthorized = enabled,
+  previewSha256 = enabled ? "a".repeat(64) : "",
+}) {
+  return {
+    ok: true,
+    source_monitoring_enablement_result: {
+      version: "source_monitoring_enablement_result_v1",
+      adapter_key: adapterKey,
+      config_version: configVersion,
+      state_version: stateVersion,
+      persisted_enabled: enabled,
+      initialization_authorized: initializationAuthorized,
+      preview_sha256: previewSha256,
+      safety: operatorSafety({
+        network: network ?? (initializationAuthorized ? null : 0),
+        preview: true,
+        writeFlags: true,
+        writes: 1,
+      }),
+    },
+  };
+}
+
+function sourceImportPreview() {
+  return {
+    ok: true,
+    source_import_preview: {
+      version: "source_import_preview_v1",
+      valid: true,
+      received_at_ms: 1_777_777_777_000,
+      packet: {
+        version: "source_import_packet_v1",
+        source_channel: "chatgpt_manual",
+        source_key: "github_ci_watch",
+        external_run_id: "run one with spaces",
+        checked_at: "2026-08-28T13:03:00Z",
+        cutoff_at: "2026-08-28T13:00:00Z",
+        meaningful_change: true,
+        items: [{
+          version: "project_source_item_v1",
+          external_item_id: "github-run-100",
+          item_type: "ci_run_failure",
+          severity: "high",
+          occurred_at: "2026-08-28T12:55:00Z",
+          published_at: "2026-08-28T12:56:00Z",
+          entities: [{ kind: "repository", id: "acme/project", label: "project" }],
+          headline: "CI 运行结果摘要",
+          summary: "外部系统声明测试失败。",
+          facts: [{ claim: "workflow conclusion is failure", source_indexes: [0] }],
+          sources: [{
+            url: "https://github.com/acme/project/actions/runs/100",
+            publisher: "GitHub",
+            source_type: "official_platform",
+            published_at: "2026-08-28T12:56:00Z",
+            content_sha256: "c".repeat(64),
+          }],
+          impact_hypotheses: [{
+            statement: "发布窗口可能受影响。",
+            affected_area: "release readiness",
+            time_horizon: "next publication",
+            confidence: 0.7,
+            source_indexes: [0],
+          }],
+          unknowns: ["失败断言尚未导入。"],
+          confidence: 0.9,
+          recommended_route: "open_round_draft",
+          extensions: {},
+          external_claims_verification: "external_unverified",
+          server_fingerprint_version: "project_source_item_fingerprint_v1",
+          server_fingerprint: "a".repeat(64),
+        }],
+        generation: {
+          channel: "chatgpt_manual",
+          model: "",
+          cost: {
+            status: "unavailable",
+            amount: null,
+            currency: "",
+            usage_source: "subscription_unavailable",
+          },
+          correlated_output: true,
+        },
+        external_claims_verification: {
+          checked_at: "external_unverified",
+          cost: "external_unverified",
+          cutoff_at: "external_unverified",
+          item_times: "external_unverified",
+          model: "external_unverified",
+          recommended_routes: "external_unverified",
+          source_times: "external_unverified",
+        },
+        safety: {
+          execution_capability: "none",
+          execution_fields_present: false,
+          market_calls_performed: 0,
+          network_requests_performed: 0,
+          provider_calls_performed: 0,
+          user_action_required: true,
+        },
+      },
+      candidate: {
+        source_payload_bytes: 1024,
+        source_payload_sha256: "b".repeat(64),
+        normalized_packet_sha256: "c".repeat(64),
+        import_key_version: "source_import_key_v1",
+        import_key_sha256: "d".repeat(64),
+        item_count: 1,
+        source_count: 1,
+        item_fingerprints: ["a".repeat(64)],
+      },
+      store_disposition: {
+        evaluated: false,
+        reason: "preview_does_not_open_database",
+      },
+      external_claims_verification: "external_unverified",
+      safety: {
+        database_reads_performed: 0,
+        database_writes_performed: 0,
+        provider_calls_performed: 0,
+        market_calls_performed: 0,
+        network_requests_performed: 0,
+        formal_rounds_created: 0,
+        chatgpt_page_controlled: false,
+        chatgpt_automation_performed: false,
+        external_task_created: false,
+        import_performed: false,
+        execution_capability: "none",
+        revalidation_required: true,
+        user_confirmation_required: true,
+      },
+      preview_sha256: "e".repeat(64),
+    },
+  };
+}
+
+function sourceMonitoringPromptTemplate() {
+  return {
+    ok: true,
+    source_monitoring_prompt_template: {
+      version: "source_monitoring_prompt_template_v1",
+      template_id: "manual_chatgpt_source_monitoring",
+      default_source_channel: "chatgpt_manual",
+      packet_version: "source_import_packet_v1",
+      item_version: "project_source_item_v1",
+      prompt: "只读监控 {{monitoring_scope}}\nsource_import_packet_v1\nexternal_unverified",
+      result_template: {},
+      constraints: {
+        one_json_object_only: true,
+        markdown_fence_tolerated: true,
+        manual_copy_paste_only: true,
+        unmodified_template_is_importable: false,
+        public_http_sources_only: true,
+        reserved_source_channels: ["futu_anomaly_monitor", "official_source_monitor"],
+        severities: ["critical", "high", "info", "low", "medium"],
+        recommended_routes: ["attach_to_room", "notify_only", "open_round_draft"],
+        max_payload_bytes: 256 * 1024,
+        max_items: 50,
+        max_sources_per_item: 12,
+        max_total_sources: 200,
+      },
+      safety: {
+        database_reads_performed: 0,
+        database_writes_performed: 0,
+        provider_calls_performed: 0,
+        market_calls_performed: 0,
+        network_requests_performed: 0,
+        formal_rounds_created: 0,
+        chatgpt_page_controlled: false,
+        chatgpt_automation_performed: false,
+        external_task_created: false,
+        execution_capability: "none",
+        user_review_required: true,
+      },
+      template_sha256: "f".repeat(64),
+    },
+  };
+}
+
+function sourceImportResult(items) {
+  return {
+    ok: true,
+    source_import: {
+      version: "source_inbox_import_result_v1",
+      import_id: "source_import_one",
+      status: "AWAITING_USER",
+      receipt: {
+        version: "source_import_receipt_v1",
+        status: "AWAITING_USER",
+        received_at_ms: 1_777_777_777_000,
+        source_payload_bytes: 1024,
+        source_payload_sha256: "1".repeat(64),
+        normalized_packet_sha256: "2".repeat(64),
+        import_key_version: "source_import_key_v1",
+        import_key_sha256: "3".repeat(64),
+        source_channel: "chatgpt_manual",
+        source_key: "github_ci_watch",
+        external_run_id: "run one with spaces",
+        item_count: items.length,
+        source_count: items.length,
+        item_fingerprints: items.map((item) => item.server_fingerprint),
+        external_claims_verification: "external_unverified",
+        safety: {
+          database_writes_performed: 0,
+          execution_capability: "none",
+          market_calls_performed: 0,
+          network_requests_performed: 0,
+          provider_calls_performed: 0,
+          user_action_required: true,
+        },
+        receipt_sha256: "4".repeat(64),
+      },
+      items,
+      idempotent_replay: false,
+      created_item_count: items.length,
+      duplicate_item_count: 0,
+    },
+  };
+}
+
+function sourceInboxList(items = [], overrides = {}) {
+  const counts = {};
+  const facets = new Map();
+  for (const item of items) {
+    counts[item.state] = (counts[item.state] || 0) + 1;
+    const source = `${item.source_channel}:${item.source_key}`;
+    const current = facets.get(source) || {
+      source,
+      source_channel: item.source_channel,
+      source_key: item.source_key,
+      source_tier: item.source_tier,
+      count: 0,
+      unread_count: 0,
+    };
+    current.count += 1;
+    if (!item.acknowledged) current.unread_count += 1;
+    facets.set(source, current);
+  }
+  return {
+    version: "source_inbox_list_v1",
+    items,
+    counts,
+    total_count: items.length,
+    unread_count: items.filter((item) => !item.acknowledged).length,
+    matched_count: items.length,
+    source_facets: [...facets.values()],
+    query: "",
+    state: "",
+    source: "",
+    unread: "",
+    limit: 100,
+    ...overrides,
   };
 }
 
@@ -213,18 +811,14 @@ test("source actions require explicit read and room choices and stop at a zero-c
   const requests = [];
   let current = sourceRecord();
   let attachedRefreshes = 0;
+  let unreadCount = -1;
   globalThis.fetch = async (path, options = {}) => {
     requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
     if (path.startsWith("/api/monitoring/inbox?")) {
       return response({
         ok: true,
-        source_inbox: {
-          version: "source_inbox_list_v1",
-          items: [current],
-          counts: { [current.state]: 1 },
-          query: "",
-          state: "",
-        },
+        source_inbox: sourceInboxList([current]),
       });
     }
     if (path.endsWith("/acknowledge")) {
@@ -282,6 +876,7 @@ test("source actions require explicit read and room choices and stop at a zero-c
 
   const host = await mountPanel({
     async onRoomAttached() { attachedRefreshes += 1; },
+    onUnreadCountChange(value) { unreadCount = value; },
   });
 
   assert.match(host.textContent, /external_unverified/);
@@ -294,7 +889,8 @@ test("source actions require explicit read and room choices and stop at a zero-c
 
   await click(host.querySelector('.source-inbox-acknowledgement input[type="checkbox"]'));
   await click(buttonWithText(host, "记录已阅"));
-  assert.deepEqual(JSON.parse(requests.at(-1).options.body), {
+  assert.equal(unreadCount, 0, "acknowledgement refreshes the independent unread count");
+  assert.deepEqual(JSON.parse(requests.filter((request) => request.options.method === "POST").at(-1).options.body), {
     expected_state_version: 1,
     acknowledgement: true,
   });
@@ -302,14 +898,14 @@ test("source actions require explicit read and room choices and stop at a zero-c
   await change(roomSelect, "room_current");
   await click(buttonWithText(host, "附加到房间"));
   assert.equal(attachedRefreshes, 1);
-  assert.deepEqual(JSON.parse(requests.at(-1).options.body), {
+  assert.deepEqual(JSON.parse(requests.filter((request) => request.options.method === "POST").at(-1).options.body), {
     room_id: "room_current",
     expected_state_version: 2,
   });
 
   await change(host.querySelector(".source-inbox-draft-actions textarea"), "仅讨论失败断言");
-  await click(buttonWithText(host, "仅生成 round draft"));
-  assert.deepEqual(JSON.parse(requests.at(-1).options.body), {
+  await click(buttonWithText(host, "创建轮次草稿"));
+  assert.deepEqual(JSON.parse(requests.filter((request) => request.options.method === "POST").at(-1).options.body), {
     room_id: "room_current",
     expected_state_version: 3,
     objective: "仅讨论失败断言",
@@ -327,14 +923,1039 @@ test("source actions require explicit read and room choices and stop at a zero-c
   assert.equal(requests.some((request) => /providers|market|rounds\/stream/.test(request.path)), false);
 });
 
+test("expired acknowledged sources explain blocked room and draft actions without inviting a click", async () => {
+  for (const attached of [false, true]) {
+    const current = sourceRecord({
+      acknowledged: true,
+      state: "EXPIRED",
+      attachments: attached ? [{
+        version: "source_inbox_attachment_v1",
+        id: "attachment_expired",
+        room_id: "room_current",
+        material_id: "material_one",
+        material_version: 1,
+        item_sha256: "b".repeat(64),
+        attachment_sha256: "d".repeat(64),
+        attached_at: 1_777_777_777_200,
+      }] : [],
+    });
+    const requests = [];
+    globalThis.fetch = async (path, options = {}) => {
+      requests.push({ path, options });
+      if (path === "/api/monitoring/health") return response(monitoringHealth());
+      if (path.startsWith("/api/monitoring/inbox?")) {
+        return response({ ok: true, source_inbox: sourceInboxList([current]) });
+      }
+      return response({ ok: true, source_item: current });
+    };
+
+    const host = await mountPanel();
+    await change(host.querySelector(".source-inbox-room-actions select"), "room_current");
+    const steps = [...host.querySelectorAll(".source-inbox-steps li")];
+    const attachStep = steps.find((step) => step.querySelector("strong")?.textContent === "附加到房间");
+    const draftStep = steps.find((step) => step.querySelector("strong")?.textContent === "创建轮次草稿");
+    assert.ok(attachStep);
+    assert.ok(draftStep);
+    assert.match(attachStep.textContent, /不能附加到房间/);
+    assert.match(draftStep.textContent, /不能创建草稿/);
+    assert.doesNotMatch(attachStep.textContent, /点击/);
+    assert.doesNotMatch(draftStep.textContent, /点击/);
+
+    const attach = host.querySelector(".source-inbox-room-actions button");
+    const draft = host.querySelector(".source-inbox-draft-actions button");
+    assert.equal(attach.disabled, true);
+    assert.equal(draft.disabled, true);
+    await click(attach);
+    await click(draft);
+    assert.equal(requests.some((request) => request.options.method === "POST"), false);
+  }
+});
+
+function mobileDetailScrollProbe(t) {
+  const originalMatchMedia = Object.getOwnPropertyDescriptor(globalThis, "matchMedia");
+  const originalScroll = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
+  const calls = [];
+  Object.defineProperty(globalThis, "matchMedia", {
+    configurable: true,
+    value: (query) => ({ matches: query === "(max-width: 760px)", media: query }),
+  });
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value(options) { calls.push({ target: this, options }); },
+  });
+  t.after(() => {
+    if (originalMatchMedia) Object.defineProperty(globalThis, "matchMedia", originalMatchMedia);
+    else delete globalThis.matchMedia;
+    if (originalScroll) Object.defineProperty(HTMLElement.prototype, "scrollIntoView", originalScroll);
+    else delete HTMLElement.prototype.scrollIntoView;
+  });
+  return calls;
+}
+
+async function mountMobileNavigationPanel(requestedItemId = "") {
+  const items = [
+    sourceRecord({ id: "source_item_first", headline: "第一条消息" }),
+    sourceRecord({ id: "source_item_second", headline: "第二条消息" }),
+  ];
+  const requests = [];
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList(items) });
+    }
+    const item = items.find((entry) => path === `/api/monitoring/events/${entry.id}`);
+    assert.ok(item, `unexpected request: ${path}`);
+    return response({ ok: true, source_item: item });
+  };
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  mountedRoots.add(root);
+  let props = {
+    activeRoomId: "room_current",
+    open: true,
+    requestedItemId,
+    refreshToken: 0,
+    restoreFocusRef: { current: null },
+    rooms: [{ id: "room_current", title: "方案共创会" }],
+    onClose() {},
+    onRoomAttached() {},
+    onEventTargetChange(itemId) {
+      // App mirrors an explicit list selection back into requestedItemId.
+      if (itemId !== props.requestedItemId) {
+        props = { ...props, requestedItemId: itemId };
+        root.render(h(SourceInboxPanel, props));
+      }
+    },
+  };
+  await act(async () => root.render(h(SourceInboxPanel, props)));
+  await settle();
+  return {
+    host,
+    requests,
+    async refresh() {
+      props = { ...props, refreshToken: props.refreshToken + 1 };
+      await act(async () => root.render(h(SourceInboxPanel, props)));
+      await settle();
+    },
+  };
+}
+
+test("mobile inbox opening and same-item refresh do not skip the notification controls", async (t) => {
+  const scrolls = mobileDetailScrollProbe(t);
+  const panel = await mountMobileNavigationPanel();
+  assert.match(panel.host.querySelector(".source-inbox-detail-heading").textContent, /第一条消息/);
+  assert.equal(scrolls.length, 0, "automatic selection is not a request to scroll");
+  await panel.refresh();
+  assert.equal(scrolls.length, 0);
+  assert.equal(panel.requests.some((request) => request.options.method === "POST"), false);
+});
+
+test("mobile deep-link scrolling happens once and background refresh preserves the reading position", async (t) => {
+  const scrolls = mobileDetailScrollProbe(t);
+  const panel = await mountMobileNavigationPanel("source_item_second");
+  assert.match(panel.host.querySelector(".source-inbox-detail-heading").textContent, /第二条消息/);
+  assert.equal(scrolls.length, 1);
+  assert.equal(scrolls[0].target, panel.host.querySelector(".source-inbox-detail-wrap"));
+  assert.deepEqual(scrolls[0].options, { block: "start" });
+  await panel.refresh();
+  assert.equal(scrolls.length, 1, "refreshing the same detail must not consume another navigation");
+  assert.equal(panel.requests.some((request) => request.options.method === "POST"), false);
+});
+
+test("mobile explicit selection scrolls different and already-selected messages exactly once", async (t) => {
+  const scrolls = mobileDetailScrollProbe(t);
+  const panel = await mountMobileNavigationPanel();
+  const first = buttonWithText(panel.host.querySelector(".source-inbox-list"), "第一条消息");
+  await click(first);
+  assert.equal(scrolls.length, 1, "explicitly selecting the default item should reveal its detail");
+  await panel.refresh();
+  assert.equal(scrolls.length, 1, "the mirrored source_event must not leave a pending scroll behind");
+
+  await click(buttonWithText(panel.host.querySelector(".source-inbox-list"), "第二条消息"));
+  assert.match(panel.host.querySelector(".source-inbox-detail-heading").textContent, /第二条消息/);
+  assert.equal(scrolls.length, 2);
+  await click(buttonWithText(panel.host.querySelector(".source-inbox-list"), "第二条消息"));
+  assert.equal(scrolls.length, 3);
+  await panel.refresh();
+  assert.equal(scrolls.length, 3);
+  assert.equal(scrolls.every((call) => call.target === panel.host.querySelector(".source-inbox-detail-wrap")), true);
+  assert.equal(panel.requests.some((request) => request.options.method === "POST"), false);
+});
+
+test("deep-linked events, source filters, sector mappings, health, and notifications stay read-only", async () => {
+  const requests = [];
+  const copied = [];
+  const notificationChoices = [];
+  const unreadCounts = [];
+  const firstPageItem = sourceRecord();
+  const deepItem = sourceRecord({
+    headline: "官方宏观发布研究映射",
+    id: "source_item_deep",
+    impactRuleProjections: [sectorImpactProjection()],
+    sourceChannel: "official_source_monitor",
+    sourceKey: "federal_reserve",
+    sourceTier: "official_source",
+  });
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({
+        ok: true,
+        source_inbox: sourceInboxList([firstPageItem], {
+          counts: { AWAITING_USER: 2 },
+          total_count: 2,
+          unread_count: 2,
+          matched_count: 1,
+          source_facets: [{
+            source: "official_source_monitor:federal_reserve",
+            source_channel: "official_source_monitor",
+            source_key: "federal_reserve",
+            source_tier: "official_source",
+            count: 1,
+            unread_count: 1,
+          }, {
+            source: "chatgpt_scheduled_task:github_ci_watch",
+            source_channel: "chatgpt_scheduled_task",
+            source_key: "github_ci_watch",
+            source_tier: "external_manual",
+            count: 1,
+            unread_count: 1,
+          }],
+          query: "",
+          state: "",
+          source: "",
+          unread: "",
+        }),
+      });
+    }
+    if (path === "/api/monitoring/events/source_item_deep") {
+      return response({ ok: true, source_item: deepItem });
+    }
+    return response({ ok: true, source_item: firstPageItem });
+  };
+
+  const host = await mountPanel({
+    requestedItemId: "source_item_deep",
+    notificationState: { supported: true, permission: "granted", enabled: false },
+    async onCopyEventLink(itemId) { copied.push(itemId); },
+    onNotificationPreferenceChange(enabled) { notificationChoices.push(enabled); },
+    onUnreadCountChange(value) { unreadCounts.push(value); },
+  });
+
+  assert.match(host.textContent, /官方宏观发布研究映射/);
+  assert.match(host.textContent, /L1 · 官方发布通道/);
+  assert.match(host.textContent, /行业 · DRAM/);
+  assert.match(host.textContent, /不是方向预测、因果结论、盈利声明或执行授权/);
+  assert.ok(requests.some((request) => request.path === "/api/monitoring/events/source_item_deep"));
+  assert.equal(unreadCounts.at(-1), 2);
+
+  await change(
+    host.querySelector('select[aria-label="按接入来源筛选"]'),
+    "official_source_monitor:federal_reserve",
+  );
+  assert.ok(requests.some((request) => (
+    request.path.includes("source=official_source_monitor%3Afederal_reserve")
+  )));
+  await click(buttonWithText(host, "仅看未读"));
+  assert.ok(requests.some((request) => request.path.includes("unread=true")));
+
+  // 通知设置已从「Adapter 健康」折叠区移到收件箱顶部：
+  // 不展开任何技术健康详情也必须能直接找到并操作开关。
+  const notifyToggle = buttonWithText(host, "启用桌面提醒");
+  assert.ok(notifyToggle, "通知开关应在不展开健康详情时可直接找到");
+  assert.equal(
+    notifyToggle.closest(".source-inbox-health"),
+    null,
+    "通知开关不得再嵌在 Adapter 健康折叠区内",
+  );
+  await click(notifyToggle);
+  assert.deepEqual(notificationChoices, [true]);
+  await click(buttonWithText(host, "复制此事件链接"));
+  assert.deepEqual(copied, ["source_item_deep"]);
+  assert.equal(requests.some((request) => request.options.method === "POST"), false);
+});
+
+test("Micron Q4 metadata with neutral v2 sidecar renders no match without a mapping error or RSS hypotheses", async () => {
+  const requests = [];
+  const sidecar = sectorImpactProjection();
+  Object.assign(sidecar, { status: "NO_MATCH", hypothesis_count: 0 });
+  Object.assign(sidecar.projection, { evaluation: "no_match", matched_rule_ids: [], hypotheses: [] });
+  sidecar.projection.source_binding.adapter_id = "company_ir";
+  // Fields mirror the backend Q4 neutral projection; RSS rule IDs stay empty.
+  sidecar.projection.source_item_binding.source_semantic_binding = {
+    version: "trading_impact_source_semantics_v2", source_format: "micron_q4_public_json_v1",
+    adapter_id: "company_ir", rule_id: "", source_index: 1, symbol: "US.MU", form: "",
+    event_type: "earnings_schedule", revision_state: "original", authority: "", family: "",
+    subject_phase: "", event_state: "", occurrence_basis: "", upstream_rule_id: "", session_date: "",
+    anchor_at: "2026-08-28T12:55:00Z", anchor_semantics: "source_publication_time", precision: "timestamp",
+  };
+  const item = sourceRecord({
+    id: "source_item_q4", headline: "Micron Q4 metadata fixture",
+    sourceChannel: "official_source_monitor", sourceKey: "company_ir", sourceTier: "official_source",
+    impactRuleProjections: [sidecar],
+  });
+  Object.assign(item.item, {
+    item_type: "company_ir_release", severity: "info", impact_hypotheses: [],
+    summary: "Fixed Q4 metadata fixture; no announcement body was ingested.",
+    extensions: { company_ir_v2: { source_format: "micron_q4_public_json_v1" } },
+    sources: [
+      { url: "https://investors.micron.com/news/press-release/2026/fixture/default.aspx",
+        publisher: "Micron Technology Investor Relations", source_type: "company_ir_time_metadata",
+        published_at: "2026-08-28T12:55:00Z", content_sha256: "c".repeat(64) },
+      { url: "https://investors.micron.com/feed/PressRelease.svc/GetPressReleaseList",
+        publisher: "Micron Technology Investor Relations", source_type: "company_ir_json_projection",
+        published_at: "2026-08-28T12:55:00Z", content_sha256: "d".repeat(64) },
+    ],
+  });
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) return response({ ok: true, source_inbox: sourceInboxList([item]) });
+    if (path === "/api/monitoring/events/source_item_q4") return response({ ok: true, source_item: item });
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+  const host = await mountPanel({ requestedItemId: "source_item_q4" });
+  assert.match(host.textContent, /Micron Q4 metadata fixture/);
+  const impact = host.querySelector(".source-inbox-impact-rules");
+  assert.ok(impact);
+  assert.match(impact.textContent, /已执行固定规则，但没有匹配映射/);
+  assert.match(impact.textContent, /不等于“没有影响”/);
+  assert.doesNotMatch(impact.textContent, /影响映射完整性校验失败|行业 ·|DRAM/);
+  assert.equal(impact.querySelector(".source-inbox-impact-list"), null);
+  assert.ok(requests.every(({ options }) => !options.method || options.method === "GET"));
+  assert.equal(requests.some(({ path }) => /providers|market|rounds\/stream/.test(path)), false);
+});
+
+test("runtime health renders fresh progress neutrally and stalled state accessibly", async () => {
+  let healthPayload = activeMonitoringHealth();
+  globalThis.fetch = async (path) => {
+    if (path === "/api/monitoring/health") return response(healthPayload);
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const runningHost = await mountPanel();
+  assert.match(runningHost.textContent, /Runtime运行中/);
+  assert.match(runningHost.textContent, /活动 Adapter sec_filings/);
+  assert.match(runningHost.textContent, /下次检查/);
+  assert.match(runningHost.textContent, /dry-run 已启用/);
+  assert.match(
+    runningHost.textContent,
+    /新鲜本机心跳只证明 worker 有进展，不证明来源可用、内容为事实或具备交易权限/,
+  );
+  assert.equal(runningHost.querySelector('[role="alert"]'), null);
+
+  healthPayload = activeMonitoringHealth({ stalled: true });
+  const stalledHost = await mountPanel();
+  assert.match(stalledHost.textContent, /Runtime心跳停滞/);
+  const stalledSummary = stalledHost.querySelector(".source-inbox-health summary");
+  assert.doesNotMatch(stalledSummary.textContent, /最近检查成功/);
+  assert.match(stalledSummary.textContent, /心跳停滞/);
+  const warning = stalledSummary.querySelector('[role="alert"]');
+  assert.ok(warning);
+  assert.match(warning.textContent, /心跳停滞/);
+
+  healthPayload = activeMonitoringHealth({ failed: true });
+  const failedHost = await mountPanel();
+  const failedSummary = failedHost.querySelector(".source-inbox-health summary");
+  assert.doesNotMatch(failedSummary.textContent, /最近检查成功/);
+  assert.match(failedSummary.textContent, /运行失败/);
+  assert.equal(failedSummary.querySelector('[role="alert"]')?.textContent, "监控降级 · 运行失败 · 1 个 Adapter");
+
+  healthPayload = activeMonitoringHealth();
+  healthPayload.source_monitoring_health.runtime.thread_alive = false;
+  const forgedHost = await mountPanel();
+  const forgedWarning = forgedHost.querySelector('.source-inbox-health [role="alert"]');
+  assert.ok(forgedWarning);
+  assert.match(forgedWarning.textContent, /未满足零执行与 Runtime 在线性边界/);
+});
+
+test("monitoring shows effective settings and requires loaded complete baseline before normal status", async () => {
+  const requests = [];
+  const healthPayload = activeMonitoringHealth();
+  const view = healthPayload.source_monitoring_health;
+  view.settings.dry_run = false;
+  view.runtime.dry_run = false;
+  view.runtime.active_adapter = "";
+  view.state = "healthy";
+  view.counts.running = 0;
+  view.counts.healthy = 1;
+  Object.assign(view.adapters[0], {
+    state: "healthy", running: false,
+    latest_run: {
+      version: "source_adapter_run_v1", status: "SUCCEEDED", dry_run: false,
+      observed_count: 0, accepted_count: 0, duplicate_count: 0, rejected_count: 0,
+      completed_at_ms: 1_777_777_776_900,
+    },
+  });
+  const controlPayload = operatorControl({
+    config_version: "sec_filings_config_v1", state_version: 1,
+    persisted_state: true, persisted_enabled: true, effective_enabled: true,
+    initialization_status: "complete", initialization_preview_sha256: "a".repeat(64),
+    initialization_completed_at_ms: 1_777_777_776_900,
+    can_preview: false, can_disable: true,
+  });
+  Object.assign(controlPayload.source_monitoring_operator_control.settings, { auto_start: true, dry_run: false });
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(healthPayload);
+    if (path === "/api/monitoring/adapters/control") return response(controlPayload);
+    if (path.startsWith("/api/monitoring/inbox?")) return response({ ok: true, source_inbox: sourceInboxList([]) });
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+  const host = await mountPanel();
+  const summary = host.querySelector(".source-inbox-health summary");
+  assert.match(summary.textContent, /基线状态未读取/);
+  assert.doesNotMatch(summary.textContent, /监控正常/);
+  assert.match(host.textContent, /来源：当前启动进程/);
+  assert.match(host.textContent, /写入 .env.local 不会自动生效/);
+  assert.match(host.textContent, /轮询周期 15 分钟/);
+  assert.match(host.textContent, /上次检查.*下次检查/);
+  assert.match(host.textContent, /检查成功、无新增/);
+  assert.match(host.textContent, /最近成功/);
+  assert.equal(requests.some(({ path }) => path === "/api/monitoring/adapters/control"), false);
+
+  await click(summary);
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  assert.match(summary.textContent, /监控正常/);
+
+  Object.assign(controlPayload.source_monitoring_operator_control.adapters[0], {
+    initialization_status: "legacy", initialization_mode: "",
+    initialization_preview_sha256: "", initialization_completed_at_ms: 0,
+  });
+  await click(buttonWithText(host, "重读设置"));
+  assert.match(summary.textContent, /基线未完成或待核实/);
+  assert.doesNotMatch(summary.textContent, /监控正常/);
+  assert.match(host.textContent, /旧 SEC 状态无法证明完整首次基线/);
+  assert.match(host.textContent, /不自动重置或迁移/);
+  assert.ok(requests.every(({ options }) => !options.method || options.method === "GET"));
+});
+
+test("monitoring dry-run and failed or migration-blocked checks do not render successful empty results", async () => {
+  let healthPayload = activeMonitoringHealth();
+  healthPayload.source_monitoring_health.adapters[0].latest_run = {
+    version: "source_adapter_run_v1", status: "DRY_RUN", dry_run: true,
+    observed_count: 0, accepted_count: 0, duplicate_count: 0, rejected_count: 0,
+    completed_at_ms: 1_777_777_776_900,
+  };
+  globalThis.fetch = async (path) => {
+    if (path === "/api/monitoring/health") return response(healthPayload);
+    if (path.startsWith("/api/monitoring/inbox?")) return response({ ok: true, source_inbox: sourceInboxList([]) });
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+  const trialHost = await mountPanel();
+  assert.match(trialHost.querySelector(".source-inbox-health summary").textContent, /监控试运行/);
+  assert.match(trialHost.textContent, /观察到 0 条；未导入收件箱/);
+  assert.doesNotMatch(trialHost.textContent, /检查成功、无新增/);
+
+  healthPayload = activeMonitoringHealth({ failed: true });
+  const adapter = healthPayload.source_monitoring_health.adapters[0];
+  Object.assign(adapter, {
+    config_status: "migration_required", enabled: false, last_error_code: "SEC_BASELINE_UPGRADE_REQUIRED",
+    latest_run: {
+      version: "source_adapter_run_v1", status: "FAILED", dry_run: false,
+      observed_count: 0, accepted_count: 0, duplicate_count: 0, rejected_count: 0,
+      completed_at_ms: 1_777_777_776_900,
+    },
+  });
+  const failedHost = await mountPanel();
+  assert.match(failedHost.querySelector(".source-inbox-health summary").textContent, /监控降级/);
+  assert.match(failedHost.textContent, /最近检查失败/);
+  assert.match(failedHost.textContent, /旧 SEC 状态需先核对完整基线并明确升级方案/);
+  assert.doesNotMatch(failedHost.textContent, /检查成功、无新增/);
+});
+
+test("initial health read waits for the inbox database read to finish", async () => {
+  let listReadActive = false;
+  let healthOverlappedList = false;
+  globalThis.fetch = async (path) => {
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      listReadActive = true;
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      listReadActive = false;
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/health") {
+      healthOverlappedList = listReadActive;
+      return response(operatorHealth());
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  await act(async () => new Promise((resolve) => setTimeout(resolve, 30)));
+  await settle();
+  assert.equal(healthOverlappedList, false);
+  assert.match(host.querySelector(".source-inbox-health summary").textContent, /等待首次检查/);
+});
+
+test("trial scope is read from the closed profile and disappears when its authority drifts", async () => {
+  const payload = trialOperatorControl();
+  const requests = [];
+  globalThis.fetch = async (path) => {
+    requests.push(path);
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") return response(payload);
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+  const host = await mountPanel();
+  assert.doesNotMatch(host.textContent, /SEC \+ Micron 官方来源试用/);
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  const scope = host.querySelector('[aria-label="官方来源试用范围"]');
+  assert.ok(scope);
+  assert.match(scope.textContent, /SEC \+ Micron 官方来源试用/);
+  assert.match(scope.textContent, /SEC · US\.NVDA · 8-K/);
+  assert.match(scope.textContent, /Micron 官方 IR · US\.MU · Q4 公开 JSON 最近 30 条/);
+  assert.equal(scope.textContent.match(/每 5 分钟轮询/g).length, 2);
+  assert.match(scope.textContent, /仅建基线.*采集\/草稿不调用模型/);
+  assert.equal(scope.querySelectorAll("input, select, textarea").length, 0);
+  assert.equal(requests.some((path) => path.endsWith("/initialization-preview") || path.endsWith("/enablement")), false);
+
+  payload.source_monitoring_operator_control.profile.model_calls_allowed = true;
+  await click(buttonWithText(host, "重读设置"));
+  assert.equal(host.querySelector('[aria-label="官方来源试用范围"]'), null);
+  assert.equal(host.querySelectorAll(".source-monitoring-control-list button").length, 0);
+  assert.ok(host.querySelector('.source-monitoring-controls [role="alert"]'));
+});
+
+test("adapter enablement stays lazy and requires a sealed preview plus explicit confirmation", async () => {
+  const requests = [];
+  let enabled = false;
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") {
+      return response(enabled
+        ? operatorControl({
+          state_version: 1,
+          persisted_state: true,
+          persisted_enabled: true,
+          effective_enabled: true,
+          initialization_status: "authorized",
+          initialization_preview_sha256: "a".repeat(64),
+          pending_authorization: true,
+          can_preview: false,
+          can_disable: true,
+        })
+        : operatorControl());
+    }
+    if (path.endsWith("/initialization-preview")) return response(operatorPreview());
+    if (path.endsWith("/enablement")) {
+      enabled = true;
+      return response(enablementResult({ enabled: true, stateVersion: 1 }));
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  assert.equal(requests.some((request) => request.path.includes("/adapters/")), false);
+  await click(host.querySelector(".source-inbox-health summary"));
+  assert.equal(requests.some((request) => request.path.includes("/adapters/")), false);
+
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  assert.equal(requests.filter((request) => request.path === "/api/monitoring/adapters/control").length, 1);
+  assert.equal(requests.some((request) => request.path.endsWith("/initialization-preview")), false);
+  assert.match(host.textContent, /auto-start 关闭/);
+  assert.match(host.textContent, /保存 Adapter 启用状态不证明 Runtime 在线/);
+  assert.match(host.textContent, /服务端会重读同一固定来源并核对预览哈希/);
+  assert.doesNotMatch(host.textContent, /SEC \+ Micron 官方来源试用/);
+
+  await click(buttonWithText(host, "预览首次读取范围"));
+  const previewRequest = requests.find((request) => request.path.endsWith("/initialization-preview"));
+  assert.deepEqual(JSON.parse(previewRequest.options.body), {
+    expected_state_version: 0,
+    expected_config_version: "sec_filings_config_v2",
+  });
+  assert.match(host.textContent, /将跳过3/);
+  assert.match(host.textContent, /本次预览当前有 3 条，来源变化可能改变数量/);
+  assert.equal(host.querySelector(".source-monitoring-preview a"), null);
+  await click(buttonWithText(host, "重读设置"));
+  assert.equal(host.querySelector(".source-monitoring-confirmation"), null);
+  await click(buttonWithText(host, "预览首次读取范围"));
+  const enableButton = buttonWithText(host, "确认保存 Adapter 启用状态");
+  assert.equal(enableButton.disabled, true);
+
+  await click(host.querySelector('.source-monitoring-confirmation input[type="checkbox"]'));
+  assert.equal(enableButton.disabled, false);
+  await click(enableButton);
+  const enableRequest = requests.find((request) => request.path.endsWith("/enablement"));
+  assert.deepEqual(JSON.parse(enableRequest.options.body), {
+    expected_state_version: 0,
+    expected_config_version: "sec_filings_config_v2",
+    enabled: true,
+    preview_sha256: "a".repeat(64),
+    confirmation: "ENABLE_SOURCE_MONITORING_ADAPTER",
+  });
+  assert.ok(requests.filter((request) => request.path === "/api/monitoring/adapters/control").length >= 2);
+  assert.match(host.textContent, /Runtime 在线状态请以上方健康记录为准/);
+  assert.match(host.textContent, /Runtime已停止/);
+  assert.equal(requests.some((request) => /providers|market|rounds\/stream/.test(request.path)), false);
+});
+
+test("readonly market initialization preview stays static and performs no market read", async () => {
+  const requests = [];
+  const marketPreview = operatorPreview();
+  Object.assign(marketPreview.source_monitoring_operator_preview, {
+    version: "source_monitoring_operator_static_seed_preview_v2",
+    preview_kind: "static_seed_policy",
+    candidate_evidence: "deferred_to_first_runtime_poll",
+    candidate_count: 0,
+    selected_count: 0,
+    skipped_count: 0,
+    earliest_occurred_at: "",
+    latest_occurred_at: "",
+    source_policy_sha256: "d".repeat(64),
+    symbol_allowlist: ["US.MU", "US.SNDK", "US.WDC", "US.STX"],
+    next_checkpoint_sha256: "b".repeat(64),
+  });
+  marketPreview.source_monitoring_operator_preview.safety.market_calls_performed = 0;
+  marketPreview.source_monitoring_operator_preview.safety.network_requests_performed = 0;
+  marketPreview.source_monitoring_operator_preview.safety.network_requests_accounting = "exact";
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") {
+      return response(operatorControl({
+        source_class: "readonly_market",
+        source_channel: "futu_anomaly_monitor",
+        official_source: false,
+      }));
+    }
+    if (path.endsWith("/initialization-preview")) return response(marketPreview);
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  assert.match(host.textContent, /readonly_market 首次预览仅展示静态政策，不读取行情/);
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  assert.match(host.textContent, /readonly_market 首次只预览静态政策，不读取行情/);
+  await click(buttonWithText(host, "预览首次读取范围"));
+  assert.match(host.textContent, /只读市场调用0/);
+  assert.match(host.textContent, /当前未读取行情，首次 Runtime 成功轮询/);
+  assert.equal(requests.filter((request) => request.path.endsWith("/initialization-preview")).length, 1);
+  assert.equal(requests.some((request) => /providers|rounds\/stream/.test(request.path)), false);
+});
+
+test("dual source control binds market enablement to its effective seed policy", async () => {
+  const requests = [];
+  let marketEnabled = false;
+  const marketKey = "futu_anomaly_signals";
+  const marketConfig = "futu_anomaly_config_v2_0123456789abcdef";
+
+  const dualControl = () => {
+    const payload = operatorControl();
+    Object.assign(payload.source_monitoring_operator_control.settings, {
+      initial_mode: "catch_up",
+      catch_up_max_items: 2,
+    });
+    payload.source_monitoring_operator_control.adapters = [
+      operatorAdapter({
+        initialization_mode: "catch_up",
+      }),
+      operatorAdapter({
+        adapter_key: marketKey,
+        config_version: marketConfig,
+        source_class: "readonly_market",
+        source_channel: "futu_anomaly_monitor",
+        official_source: false,
+        initialization_mode: "seed_only",
+        ...(marketEnabled ? {
+          state_version: 1,
+          persisted_state: true,
+          persisted_enabled: true,
+          effective_enabled: true,
+          initialization_status: "authorized",
+          initialization_preview_sha256: "a".repeat(64),
+          pending_authorization: true,
+          can_preview: false,
+          can_disable: true,
+        } : {}),
+      }),
+    ];
+    return payload;
+  };
+
+  const marketPreview = operatorPreview({
+    version: "source_monitoring_operator_static_seed_preview_v2",
+    preview_kind: "static_seed_policy",
+    candidate_evidence: "deferred_to_first_runtime_poll",
+    adapter_key: marketKey,
+    config_version: marketConfig,
+    mode: "seed_only",
+    catch_up_max_items: 0,
+    from_time: "",
+    candidate_count: 0,
+    selected_count: 0,
+    skipped_count: 0,
+    earliest_occurred_at: "",
+    latest_occurred_at: "",
+    source_policy_sha256: "d".repeat(64),
+    symbol_allowlist: ["US.MU", "US.SNDK", "US.WDC", "US.STX"],
+    next_checkpoint_sha256: "b".repeat(64),
+  });
+  Object.assign(marketPreview.source_monitoring_operator_preview.safety, {
+    market_calls_performed: 0,
+    network_requests_performed: 0,
+    network_requests_accounting: "exact",
+  });
+
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") return response(dualControl());
+    if (path.endsWith("/initialization-preview")) return response(marketPreview);
+    if (path.endsWith("/enablement")) {
+      marketEnabled = true;
+      return response(enablementResult({
+        adapterKey: marketKey,
+        configVersion: marketConfig,
+        enabled: true,
+        network: 0,
+        stateVersion: 1,
+      }));
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  const marketCard = [...host.querySelectorAll(".source-monitoring-control-list article")]
+    .find((card) => card.textContent.includes(marketKey));
+  assert.ok(marketCard);
+  await click(buttonWithText(marketCard, "预览首次读取范围"));
+  assert.match(host.textContent, /当前未读取行情，首次 Runtime 成功轮询/);
+  const enableButton = buttonWithText(host, "确认保存 Adapter 启用状态");
+  assert.equal(enableButton.disabled, true);
+  await click(host.querySelector('.source-monitoring-confirmation input[type="checkbox"]'));
+  assert.equal(enableButton.disabled, false);
+  await click(enableButton);
+
+  const enableRequest = requests.find((request) => request.path.endsWith("/enablement"));
+  assert.deepEqual(JSON.parse(enableRequest.options.body), {
+    expected_state_version: 0,
+    expected_config_version: marketConfig,
+    enabled: true,
+    preview_sha256: "a".repeat(64),
+    confirmation: "ENABLE_SOURCE_MONITORING_ADAPTER",
+  });
+  assert.equal(marketEnabled, true);
+  assert.match(host.textContent, /Runtime 在线状态请以上方健康记录为准/);
+});
+
+test("first enable rejects a valid-looking receipt not bound to its preview", async () => {
+  const requests = [];
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") return response(operatorControl());
+    if (path.endsWith("/initialization-preview")) return response(operatorPreview());
+    if (path.endsWith("/enablement")) {
+      return response(enablementResult({
+        enabled: true,
+        stateVersion: 1,
+        initializationAuthorized: false,
+        previewSha256: "",
+      }));
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  await click(buttonWithText(host, "预览首次读取范围"));
+  await click(host.querySelector('.source-monitoring-confirmation input[type="checkbox"]'));
+  await click(buttonWithText(host, "确认保存 Adapter 启用状态"));
+
+  assert.match(host.textContent, /Adapter 启停回执未绑定本次精确请求/);
+  assert.equal(requests.filter((request) => request.path === "/api/monitoring/adapters/control").length, 1);
+  assert.doesNotMatch(host.textContent, /Runtime 在线状态请以上方健康记录为准/);
+});
+
+test("adapter disablement requires a second confirmation and never previews or deletes evidence", async () => {
+  const requests = [];
+  let enabled = true;
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") {
+      return response(operatorControl(enabled ? {
+        state_version: 5,
+        persisted_state: true,
+        persisted_enabled: true,
+        effective_enabled: true,
+        initialization_status: "complete",
+        initialization_preview_sha256: "d".repeat(64),
+        initialization_completed_at_ms: 1_777_777_777_000,
+        can_preview: false,
+        can_disable: true,
+      } : {
+        state_version: 6,
+        persisted_state: true,
+        initialization_status: "complete",
+        initialization_preview_sha256: "d".repeat(64),
+        initialization_completed_at_ms: 1_777_777_777_000,
+        can_preview: false,
+        can_enable: true,
+      }));
+    }
+    if (path.endsWith("/enablement")) {
+      enabled = JSON.parse(options.body).enabled;
+      return response(enablementResult({
+        enabled,
+        stateVersion: enabled ? 7 : 6,
+        initializationAuthorized: false,
+        previewSha256: "",
+      }));
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  await click(buttonWithText(host, "准备停用"));
+  assert.match(host.textContent, /不会删除 checkpoint、初始化收据或 Source Inbox 记录/);
+  const disableButton = buttonWithText(host, "确认停止后续轮询");
+  assert.equal(disableButton.disabled, true);
+  await click(host.querySelector('.source-monitoring-confirmation input[type="checkbox"]'));
+  await click(disableButton);
+
+  const disableRequest = requests.find((request) => request.path.endsWith("/enablement"));
+  assert.deepEqual(JSON.parse(disableRequest.options.body), {
+    expected_state_version: 5,
+    expected_config_version: "sec_filings_config_v2",
+    enabled: false,
+    preview_sha256: "",
+    confirmation: "DISABLE_SOURCE_MONITORING_ADAPTER",
+  });
+  assert.equal(requests.some((request) => request.path.endsWith("/initialization-preview")), false);
+  assert.match(host.textContent, /历史 checkpoint 与收件箱记录未被删除/);
+
+  await click(buttonWithText(host, "准备启用"));
+  await click(host.querySelector('.source-monitoring-confirmation input[type="checkbox"]'));
+  await click(buttonWithText(host, "确认保存 Adapter 启用状态"));
+  const enableRequest = requests.filter(
+    (request) => request.path.endsWith("/enablement"),
+  )[1];
+  assert.deepEqual(JSON.parse(enableRequest.options.body), {
+    expected_state_version: 6,
+    expected_config_version: "sec_filings_config_v2",
+    enabled: true,
+    preview_sha256: "",
+    confirmation: "ENABLE_SOURCE_MONITORING_ADAPTER",
+  });
+  assert.equal(requests.some((request) => request.path.endsWith("/initialization-preview")), false);
+});
+
+test("config-mismatched persisted adapter remains explicitly disableable", async () => {
+  const requests = [];
+  let enabled = true;
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") {
+      return response(operatorControl({
+        config_version: "sec_filings_config_v3",
+        state_version: enabled ? 8 : 9,
+        persisted_state: true,
+        persisted_enabled: enabled,
+        initialization_status: "legacy",
+        initialization_mode: "",
+        can_preview: false,
+        can_disable: enabled,
+        blocked_reason_codes: [
+          ...(enabled ? ["SOURCE_MONITORING_ADAPTER_ENABLED"] : []),
+          "SOURCE_MONITORING_CONFIG_MIGRATION_REQUIRED",
+        ],
+      }));
+    }
+    if (path.endsWith("/enablement")) {
+      enabled = false;
+      return response({
+        ...enablementResult({ enabled: false, stateVersion: 9 }),
+      });
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  assert.match(host.textContent, /SOURCE_MONITORING_CONFIG_MIGRATION_REQUIRED/);
+  await click(buttonWithText(host, "准备停用"));
+  await click(host.querySelector('.source-monitoring-confirmation input[type="checkbox"]'));
+  await click(buttonWithText(host, "确认停止后续轮询"));
+
+  const request = requests.find((candidate) => candidate.path.endsWith("/enablement"));
+  assert.equal(JSON.parse(request.options.body).expected_config_version, "sec_filings_config_v3");
+  assert.equal(JSON.parse(request.options.body).enabled, false);
+});
+
+test("adapter enablement conflict rereads authority and never retries the mutation", async () => {
+  const requests = [];
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(operatorHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    if (path === "/api/monitoring/adapters/control") return response(operatorControl());
+    if (path.endsWith("/initialization-preview")) return response(operatorPreview());
+    if (path.endsWith("/enablement")) {
+      return response({
+        ok: false,
+        error: "adapter state changed",
+        code: "SOURCE_MONITORING_STATE_CONFLICT",
+      }, 409);
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel();
+  await click(host.querySelector(".source-inbox-health summary"));
+  await click(buttonWithText(host, "查看 Adapter 接入设置"));
+  await click(buttonWithText(host, "预览首次读取范围"));
+  await click(host.querySelector('.source-monitoring-confirmation input[type="checkbox"]'));
+  await click(buttonWithText(host, "确认保存 Adapter 启用状态"));
+
+  assert.equal(requests.filter((request) => request.path.endsWith("/enablement")).length, 1);
+  assert.ok(requests.filter((request) => request.path === "/api/monitoring/adapters/control").length >= 2);
+  assert.match(host.textContent, /已权威重读，请重新预览和确认/);
+  assert.equal(host.querySelector(".source-monitoring-confirmation"), null);
+});
+
+test("requested event details load independently of list availability", async () => {
+  const requested = sourceRecord({
+    headline: "列表失败时仍精确读取的事件",
+    id: "source_item_direct",
+  });
+  globalThis.fetch = async (path) => {
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: false, error: "fixture list unavailable" }, 503);
+    }
+    if (path === "/api/monitoring/events/source_item_direct") {
+      return response({ ok: true, source_item: requested });
+    }
+    return response({ ok: false, error: "unexpected fixture route" }, 404);
+  };
+
+  const host = await mountPanel({ requestedItemId: "source_item_direct" });
+  assert.match(host.textContent, /列表失败时仍精确读取的事件/);
+  assert.match(host.textContent, /fixture list unavailable/);
+});
+
+test("mutation success requires a valid same-identity response", async () => {
+  const current = sourceRecord();
+  globalThis.fetch = async (path, options = {}) => {
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([current]) });
+    }
+    if (path.endsWith("/acknowledge") && options.method === "POST") {
+      const invalidResponse = sourceRecord({
+        acknowledged: true,
+        stateVersion: 2,
+      });
+      invalidResponse.external_claims_verification = "verified";
+      return response({
+        ok: true,
+        source_item: invalidResponse,
+      });
+    }
+    return response({ ok: true, source_item: current });
+  };
+
+  const host = await mountPanel();
+  await click(host.querySelector('.source-inbox-acknowledgement input[type="checkbox"]'));
+  await click(buttonWithText(host, "记录已阅"));
+  assert.match(host.textContent, /服务端未返回更新后的来源条目/);
+  assert.doesNotMatch(host.textContent, /已记录为已阅；这不代表事实确认/);
+});
+
+test("deep-linked details require exact identity and invalid impact projections stay hidden", async () => {
+  const wrongIdentity = sourceRecord({
+    headline: "不应展示的错配详情",
+    id: "source_item_other",
+  });
+  globalThis.fetch = async (path) => {
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({
+        ok: true,
+        source_inbox: sourceInboxList([]),
+      });
+    }
+    return response({ ok: true, source_item: wrongIdentity });
+  };
+
+  const mismatchHost = await mountPanel({ requestedItemId: "source_item_expected" });
+  assert.match(mismatchHost.textContent, /来源详情与请求事件 ID 不一致/);
+  assert.doesNotMatch(mismatchHost.textContent, /不应展示的错配详情/);
+
+  const invalidProjection = sectorImpactProjection();
+  invalidProjection.projection.interpretation_boundary.directional_forecast = true;
+  const invalidItem = sourceRecord({
+    headline: "投影完整性异常",
+    id: "source_item_invalid_impact",
+    impactRuleProjections: [invalidProjection],
+    sourceChannel: "official_source_monitor",
+    sourceKey: "federal_reserve",
+    sourceTier: "official_source",
+  });
+  globalThis.fetch = async (path) => {
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([invalidItem]) });
+    }
+    return response({ ok: true, source_item: invalidItem });
+  };
+
+  const invalidHost = await mountPanel();
+  assert.match(invalidHost.textContent, /影响映射完整性校验失败/);
+  assert.doesNotMatch(invalidHost.textContent, /行业 · DRAM/);
+  assert.equal(buttonWithText(invalidHost, "记录已阅").disabled, true);
+});
+
 test("a CAS conflict rereads the exact item and requires a fresh acknowledgement", async () => {
   let current = sourceRecord();
   let detailReads = 0;
   globalThis.fetch = async (path, options = {}) => {
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
     if (path.startsWith("/api/monitoring/inbox?")) {
       return response({
         ok: true,
-        source_inbox: { items: [current], counts: { AWAITING_USER: 1 } },
+        source_inbox: sourceInboxList([current]),
       });
     }
     if (path.endsWith("/acknowledge") && options.method === "POST") {
@@ -359,29 +1980,34 @@ test("a CAS conflict rereads the exact item and requires a fresh acknowledgement
   assert.equal(buttonWithText(host, "记录已阅").disabled, true);
 });
 
-test("fenced ChatGPT source packets reach only the inbox import endpoint", async () => {
+test("fenced ChatGPT source packets require an exact-snapshot preview before inbox import", async () => {
   const requests = [];
-  const imported = sourceRecord();
+  const imported = sourceRecord({
+    sourceChannel: "chatgpt_manual",
+    sourceKey: "github_ci_watch",
+  });
   let importedVisible = false;
+  let importAttempts = 0;
   globalThis.fetch = async (path, options = {}) => {
     requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path === "/api/monitoring/imports/chatgpt/preview") {
+      return response(sourceImportPreview());
+    }
     if (path === "/api/monitoring/imports/chatgpt") {
+      importAttempts += 1;
+      if (importAttempts === 1) {
+        const unsafe = sourceImportResult([imported]);
+        unsafe.source_import.receipt.safety.execution_capability = "trade";
+        return response(unsafe, 201);
+      }
       importedVisible = true;
-      return response({
-        ok: true,
-        source_import: {
-          idempotent_replay: false,
-          items: [imported],
-        },
-      }, 201);
+      return response(sourceImportResult([imported]), 201);
     }
     if (path.startsWith("/api/monitoring/inbox?")) {
       return response({
         ok: true,
-        source_inbox: {
-          items: importedVisible ? [imported] : [],
-          counts: importedVisible ? { AWAITING_USER: 1 } : {},
-        },
+        source_inbox: sourceInboxList(importedVisible ? [imported] : []),
       });
     }
     return response({ ok: true, source_item: imported });
@@ -390,13 +2016,143 @@ test("fenced ChatGPT source packets reach only the inbox import endpoint", async
   const host = await mountPanel();
   await click(buttonWithText(host, "导入 JSON"));
   const fenced = "```json\n{\"version\":\"source_import_packet_v1\"}\n```";
-  await change(host.querySelector('.source-inbox-import textarea'), fenced);
-  await click(buttonWithText(host, "仅导入到收件箱"));
+  const editor = host.querySelector('.source-inbox-import > textarea');
+  const confirmButton = buttonWithText(host, "确认仅导入收件箱");
+  await change(editor, fenced);
 
-  const importRequest = requests.find((request) => request.path === "/api/monitoring/imports/chatgpt");
-  assert.ok(importRequest);
-  assert.deepEqual(JSON.parse(importRequest.options.body), { content: fenced });
-  assert.equal(requests.filter((request) => request.options.method === "POST").length, 1);
+  assert.equal(confirmButton.disabled, true);
+  assert.equal(requests.some((request) => request.path === "/api/monitoring/imports/chatgpt"), false);
+
+  await click(buttonWithText(host, "预览导入内容"));
+  assert.match(host.textContent, /严格合同预览通过/);
+  assert.match(host.textContent, /CI 运行结果摘要/);
+  assert.equal(host.querySelector(".source-inbox-import-preview a"), null);
+  assert.equal(confirmButton.disabled, false);
+
+  await change(editor, `${fenced}\n `);
+  assert.match(host.textContent, /内容已更改，请重新预览/);
+  assert.equal(confirmButton.disabled, true);
+  assert.equal(requests.some((request) => request.path === "/api/monitoring/imports/chatgpt"), false);
+
+  await change(editor, fenced);
+  assert.equal(confirmButton.disabled, true, "restoring text must not silently revive an old preview");
+  await click(buttonWithText(host, "预览导入内容"));
+  assert.equal(confirmButton.disabled, false);
+  await click(confirmButton);
+  assert.match(host.textContent, /导入响应未满足固定回执、身份和零执行合同/);
+  assert.doesNotMatch(host.textContent, /GitHub \/ CI 运行结果摘要/);
+  assert.equal(confirmButton.disabled, false, "a rejected response must not consume the valid preview");
+  await click(confirmButton);
+
+  const previewRequests = requests.filter(
+    (request) => request.path === "/api/monitoring/imports/chatgpt/preview",
+  );
+  assert.equal(previewRequests.length, 2);
+  assert.deepEqual(previewRequests.map((request) => JSON.parse(request.options.body)), [
+    { content: fenced },
+    { content: fenced },
+  ]);
+  const importRequests = requests.filter(
+    (request) => request.path === "/api/monitoring/imports/chatgpt",
+  );
+  assert.equal(importRequests.length, 2);
+  assert.deepEqual(importRequests.map((request) => JSON.parse(request.options.body)), [
+    { content: fenced },
+    { content: fenced },
+  ]);
+  assert.deepEqual(
+    requests.filter((request) => request.options.method === "POST").map((request) => request.path),
+    [
+      "/api/monitoring/imports/chatgpt/preview",
+      "/api/monitoring/imports/chatgpt/preview",
+      "/api/monitoring/imports/chatgpt",
+      "/api/monitoring/imports/chatgpt",
+    ],
+  );
   assert.equal(requests.some((request) => /providers|market|rounds\/stream/.test(request.path)), false);
   assert.match(host.textContent, /GitHub \/ CI 运行结果摘要/);
+});
+
+test("preview validation issues stay visible beside the unchanged import draft", async () => {
+  const issue = {
+    path: "$.items[0].sources[0].url",
+    code: "SOURCE_IMPORT_URL_INVALID",
+    message: "URL 必须是公开的 HTTP(S) 来源。",
+  };
+  globalThis.fetch = async (path) => {
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path === "/api/monitoring/imports/chatgpt/preview") {
+      return response({ ok: false, error: "来源包校验失败。", issues: [issue] }, 400);
+    }
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    return response({ ok: false, error: "unexpected request" }, 404);
+  };
+
+  const host = await mountPanel();
+  await click(buttonWithText(host, "导入 JSON"));
+  const editor = host.querySelector('.source-inbox-import > textarea');
+  const draft = '{"version":"source_import_packet_v1","bad":true}';
+  await change(editor, draft);
+  await click(buttonWithText(host, "预览导入内容"));
+
+  assert.equal(editor.value, draft);
+  assert.match(host.textContent, /SOURCE_IMPORT_URL_INVALID/);
+  assert.match(host.textContent, /\$\.items\[0\]\.sources\[0\]\.url/);
+  assert.match(host.textContent, /公开的 HTTP\(S\) 来源/);
+  assert.equal(buttonWithText(host, "确认仅导入收件箱").disabled, true);
+});
+
+test("GPT monitoring template is fetched and copied without opening or navigating ChatGPT", async (t) => {
+  const requests = [];
+  const copied = [];
+  let openCalls = 0;
+  const originalOpen = window.open;
+  t.after(() => {
+    window.open = originalOpen;
+    delete navigator.clipboard;
+  });
+  window.open = () => {
+    openCalls += 1;
+    return null;
+  };
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: {
+      writeText: async (value) => copied.push(value),
+    },
+  });
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path === "/api/monitoring/health") return response(monitoringHealth());
+    if (path === "/api/monitoring/imports/chatgpt/prompt-template") {
+      return response(sourceMonitoringPromptTemplate());
+    }
+    if (path.startsWith("/api/monitoring/inbox?")) {
+      return response({ ok: true, source_inbox: sourceInboxList([]) });
+    }
+    return response({ ok: false, error: "unexpected request" }, 404);
+  };
+
+  const initialLocation = window.location.href;
+  const host = await mountPanel();
+  await click(buttonWithText(host, "导入 JSON"));
+  await click(buttonWithText(host, "GPT 监控提示词模板"));
+
+  const prompt = sourceMonitoringPromptTemplate().source_monitoring_prompt_template.prompt;
+  const promptTextarea = host.querySelector('textarea[aria-label="GPT 监控提示词"]');
+  assert.equal(promptTextarea.readOnly, true);
+  assert.equal(promptTextarea.value, prompt);
+  await click(buttonWithText(host, "复制 GPT 监控提示词"));
+
+  assert.deepEqual(copied, [prompt]);
+  assert.equal(openCalls, 0);
+  assert.equal(window.location.href, initialLocation);
+  assert.equal(
+    requests.filter((request) => request.path === "/api/monitoring/imports/chatgpt/prompt-template").length,
+    1,
+  );
+  assert.match(host.textContent, /本页没有打开、登录或控制 ChatGPT/);
+  assert.equal(requests.some((request) => /chatgpt\.com|scheduled|tasks/.test(request.path)), false);
 });

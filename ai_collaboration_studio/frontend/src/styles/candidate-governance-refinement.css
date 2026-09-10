@@ -34,7 +34,7 @@
 
 .governance-ledger .artifact-governance-ledger > span:last-child strong {
   color: #76552f;
-  font-size: 0.82rem;
+  font-size: 0.9375rem;
 }
 
 .governance-ledger .artifact-governance-status.ready {
@@ -45,7 +45,7 @@
 
 .governance-ledger .artifact-candidate-governance-heading > span > strong,
 .governance-ledger .artifact-governance-layer-heading > span > strong {
-  font-size: 0.86rem;
+  font-size: 0.9375rem;
   line-height: 1.4;
 }
 
@@ -54,7 +54,7 @@
 .governance-ledger .artifact-governance-summary,
 .governance-ledger .artifact-governance-empty,
 .governance-ledger .artifact-governance-boundary {
-  font-size: 0.74rem;
+  font-size: 0.9375rem;
   line-height: 1.5;
 }
 
@@ -67,8 +67,8 @@
 }
 
 .governance-ledger .artifact-governance-ledger small {
-  font-size: 0.68rem;
-  font-weight: 750;
+  font-size: 0.875rem;
+  font-weight: 700;
   letter-spacing: 0.07em;
 }
 
@@ -100,7 +100,7 @@
   padding: 0.48rem 0.66rem;
   border-left: 2px solid var(--governance-ink);
   color: color-mix(in srgb, currentColor 74%, transparent);
-  font-size: 0.76rem;
+  font-size: 0.9375rem;
 }
 
 .governance-ledger .artifact-governance-list-status progress {
@@ -142,7 +142,7 @@
 
 .governance-ledger .artifact-lineage-item strong,
 .governance-ledger .artifact-risk-review-item strong {
-  font-size: 0.76rem;
+  font-size: 0.9375rem;
   line-height: 1.45;
 }
 
@@ -151,7 +151,7 @@
 .governance-ledger .artifact-lineage-item code,
 .governance-ledger .artifact-risk-review-item code,
 .governance-ledger .artifact-risk-review-item em {
-  font-size: 0.68rem;
+  font-size: 0.875rem;
   line-height: 1.5;
 }
 
@@ -171,7 +171,7 @@
   cursor: pointer;
   min-height: 44px;
   padding: 0.62rem 0.72rem;
-  font-weight: 750;
+  font-weight: 700;
   touch-action: manipulation;
 }
 

@@ -10,7 +10,7 @@ import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from .action_desk import ActionDeskError, ActionDeskService
@@ -74,8 +74,22 @@ from .providers.registry import PROVIDERS
 from .round_launch_plan import RoundLaunchPlanService
 from .round_contexts import RoundContextError
 from .stock_research_service import StockResearchError, StockResearchService
-from .source_inbox_contracts import SourceInboxContractError
+from .source_inbox_contracts import MAX_SOURCE_IMPORT_BYTES, SourceInboxContractError
+from .source_inbox_import_ux import build_source_monitoring_prompt_template
 from .source_inbox_service import SourceInboxError, SourceInboxService
+from .source_monitoring.health_service import (
+    SourceMonitoringHealthService,
+    SourceMonitoringHealthServiceError,
+)
+from .source_monitoring.operations import (
+    SourceMonitoringOperationsError,
+    SourceMonitoringRetentionService,
+)
+from .source_monitoring.operator_service import (
+    SourceMonitoringOperatorError,
+    SourceMonitoringOperatorService,
+)
+from .source_monitoring.state_repository import SourceMonitoringStateError
 from .storage_sample_acceptance import StorageSampleAcceptance
 from .structured_logging import (
     classify_request_target,
@@ -101,19 +115,41 @@ from .user_decision import (
 from .walk_forward import WalkForwardFeasibilityError
 
 
+# `content` is itself JSON text inside an outer JSON request string.  Allow a
+# bounded 3x escape envelope (including ensure_ascii clients) plus fixed framing;
+# the inner contract remains authoritative at exactly 256 KiB UTF-8.
+_SOURCE_INBOX_HTTP_ENVELOPE_MAX_BYTES = (MAX_SOURCE_IMPORT_BYTES * 3) + 16_384
 LOCAL_SESSION_TOKEN = secrets.token_urlsafe(32)
 LOCAL_HOSTNAMES = {"127.0.0.1", "localhost", "::1"}
 SERVICE_ID = "ai_collaboration_studio"
 SERVICE_NAME = "AI 共创室"
 SERVICE_VERSION = "0.1.0"
 HOST_API_CONTRACT_VERSION = "host_delivery_v1"
-HOST_READINESS_SCHEMA_VERSION = "host_readiness_v1"
+HOST_READINESS_SCHEMA_VERSION = "host_readiness_v2"
 HOST_VERSION_SCHEMA_VERSION = "host_version_v2"
+
+
+class RuntimeShutdownIncomplete(RuntimeError):
+    """Raised while retaining DB ownership after a worker misses both bounds."""
 
 
 def _is_source_inbox_path(path: str) -> bool:
     return bool(
-        path in {"/api/monitoring/inbox", "/api/monitoring/imports/chatgpt"}
+        path in {
+            "/api/monitoring/health",
+            "/api/monitoring/inbox",
+            "/api/monitoring/imports/chatgpt",
+            "/api/monitoring/imports/chatgpt/preview",
+            "/api/monitoring/imports/chatgpt/prompt-template",
+            "/api/monitoring/notifications",
+            "/api/monitoring/adapters/control",
+            "/api/monitoring/retention/attest",
+            "/api/monitoring/retention/preview",
+        }
+        or re.fullmatch(
+            r"/api/monitoring/adapters/[^/]+/(?:initialization-preview|enablement)",
+            path,
+        )
         or re.fullmatch(r"/api/monitoring/events/[^/]+(?:/(?:acknowledge|attach|round-draft))?", path)
     )
 
@@ -386,10 +422,73 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             and database_ready
             and frontend["available"]
         )
+        runtime = getattr(
+            self.server,
+            "ai_studio_source_monitoring_runtime",
+            None,
+        )
+        runtime_settings = getattr(runtime, "settings", None)
+        monitoring_requested = bool(
+            getattr(runtime_settings, "enabled", False) is True
+            and getattr(runtime_settings, "auto_start", False) is True
+        )
+        runtime_state = "unavailable"
+        runtime_error_code = ""
+        runtime_thread_alive = False
+        runtime_liveness_verified = False
+        if runtime is not None:
+            snapshot_provider = getattr(runtime, "snapshot", None)
+            if callable(snapshot_provider):
+                try:
+                    runtime_snapshot = snapshot_provider()
+                    if type(runtime_snapshot) is dict:
+                        candidate_state = runtime_snapshot.get("status")
+                        candidate_error = runtime_snapshot.get(
+                            "last_fatal_error_code"
+                        )
+                        if type(candidate_state) is str and candidate_state:
+                            runtime_state = candidate_state[:40]
+                        if type(candidate_error) is str:
+                            runtime_error_code = candidate_error[:100]
+                        runtime_thread_alive = (
+                            runtime_snapshot.get("thread_alive") is True
+                        )
+                        runtime_liveness_verified = (
+                            runtime_snapshot.get("liveness_verified") is True
+                        )
+                except BaseException:
+                    runtime_state = "unavailable"
+                    runtime_error_code = (
+                        "SOURCE_MONITORING_RUNTIME_HEALTH_READ_FAILED"
+                    )
+        monitoring_operational = bool(
+            monitoring_requested
+            and runtime_thread_alive
+            and runtime_state in {"starting", "running", "degraded"}
+        )
+        monitoring_ready = bool(
+            not monitoring_requested or monitoring_operational
+        )
+        monitoring_degraded = bool(
+            monitoring_requested
+            and (
+                not monitoring_operational
+                or runtime_state == "degraded"
+                or not runtime_liveness_verified
+                and runtime_state != "starting"
+            )
+        )
         return {
             "ok": ready,
             "ready": ready,
-            "status": "ready" if ready else "not_ready",
+            "degraded": bool(ready and monitoring_degraded),
+            "status": (
+                "not_ready"
+                if not ready
+                else "ready_with_degradation"
+                if monitoring_degraded
+                else "ready"
+            ),
             "schema_version": HOST_READINESS_SCHEMA_VERSION,
             "service": {
                 "id": SERVICE_ID,
@@ -403,6 +502,13 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     "ready": bool(frontend["available"]),
                     "index_bytes": int(frontend["index_bytes"]),
                     "index_sha256": str(frontend["index_sha256"]),
+                },
+                "monitoring_runtime": {
+                    "requested": monitoring_requested,
+                    "ready": monitoring_ready,
+                    "operational": monitoring_operational,
+                    "state": runtime_state,
+                    "error_code": runtime_error_code,
                 },
             },
         }
@@ -555,16 +661,168 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"ok": True, "action_desk_overview": overview})
             return
+        if parsed.path == "/api/monitoring/imports/chatgpt/prompt-template":
+            if parsed.query:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "GPT 监控提示词模板不接受查询参数。",
+                        "code": "SOURCE_INBOX_PROMPT_TEMPLATE_QUERY_UNSUPPORTED",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "source_monitoring_prompt_template": (
+                        build_source_monitoring_prompt_template()
+                    ),
+                }
+            )
+            return
+        if parsed.path == "/api/monitoring/health":
+            if parsed.query:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "Source Monitoring health does not accept query parameters.",
+                        "code": "SOURCE_MONITORING_HEALTH_QUERY_UNSUPPORTED",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                runtime = getattr(
+                    self.server,
+                    "ai_studio_source_monitoring_runtime",
+                    None,
+                )
+                runtime_snapshot = getattr(runtime, "snapshot", None)
+                health = SourceMonitoringHealthService(
+                    STORE,
+                    settings=getattr(runtime, "settings", None),
+                    runtime_snapshot=(
+                        runtime_snapshot if callable(runtime_snapshot) else None
+                    ),
+                ).snapshot()
+            except (SourceMonitoringHealthServiceError, SourceMonitoringStateError) as exc:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "code": getattr(
+                            exc,
+                            "code",
+                            "SOURCE_MONITORING_HEALTH_UNAVAILABLE",
+                        ),
+                    },
+                    HTTPStatus(getattr(exc, "status", 409)),
+                )
+                return
+            self._send_json({"ok": True, "source_monitoring_health": health})
+            return
+        if parsed.path == "/api/monitoring/adapters/control":
+            if parsed.query:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "Source Monitoring controls do not accept query parameters.",
+                        "code": "SOURCE_MONITORING_OPERATOR_QUERY_UNSUPPORTED",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            service = self._source_monitoring_operator_service()
+            if service is None:
+                return
+            try:
+                control = service.control_snapshot()
+            except SourceMonitoringOperatorError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "source_monitoring_operator_control": control,
+                },
+                cache_control="no-store",
+            )
+            return
+        if parsed.path == "/api/monitoring/retention/preview":
+            if parsed.query:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "Source Monitoring retention preview does not accept query parameters.",
+                        "code": "SOURCE_MONITORING_RETENTION_QUERY_UNSUPPORTED",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                preview = SourceMonitoringRetentionService(STORE).preview()
+            except SourceMonitoringOperationsError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json({
+                "ok": True,
+                "source_monitoring_retention_preview": preview,
+            })
+            return
+        if parsed.path == "/api/monitoring/notifications":
+            notification_query = parse_qs(parsed.query, keep_blank_values=True)
+            if (
+                set(notification_query) - {"after", "limit"}
+                or any(len(values) != 1 for values in notification_query.values())
+            ):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "通知流只接受 after 和 limit。",
+                        "code": "SOURCE_INBOX_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                limit = int((notification_query.get("limit") or ["50"])[0])
+                notifications = SourceInboxService(STORE).list_notifications(
+                    after=(
+                        notification_query["after"][0]
+                        if "after" in notification_query
+                        else None
+                    ),
+                    limit=limit,
+                )
+            except (TypeError, ValueError, SourceInboxError) as exc:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "code": getattr(exc, "code", "SOURCE_INBOX_REQUEST_INVALID"),
+                    },
+                    HTTPStatus(getattr(exc, "status", 400)),
+                )
+                return
+            self._send_json({"ok": True, "source_notifications": notifications})
+            return
         if parsed.path == "/api/monitoring/inbox":
             source_query = parse_qs(parsed.query, keep_blank_values=True)
             if (
-                set(source_query) - {"state", "q", "limit"}
+                set(source_query) - {"state", "q", "source", "unread", "limit"}
                 or any(len(values) != 1 for values in source_query.values())
             ):
                 self._send_json(
                     {
                         "ok": False,
-                        "error": "来源收件箱只接受 state、q 和 limit。",
+                        "error": "来源收件箱只接受 state、q、source、unread 和 limit。",
                         "code": "SOURCE_INBOX_REQUEST_INVALID",
                     },
                     HTTPStatus.BAD_REQUEST,
@@ -575,6 +833,16 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 inbox = SourceInboxService(STORE).list_items(
                     state=(source_query.get("state") or [""])[0],
                     query=(source_query.get("q") or [""])[0],
+                    source=(
+                        source_query["source"][0]
+                        if "source" in source_query
+                        else None
+                    ),
+                    unread=(
+                        source_query["unread"][0]
+                        if "unread" in source_query
+                        else None
+                    ),
                     limit=limit,
                 )
             except (TypeError, ValueError, SourceInboxError) as exc:
@@ -1469,8 +1737,26 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             parsed.path,
         ))
         is_source_inbox_import = parsed.path == "/api/monitoring/imports/chatgpt"
+        is_source_inbox_import_preview = (
+            parsed.path == "/api/monitoring/imports/chatgpt/preview"
+        )
+        is_monitoring_retention_attest = (
+            parsed.path == "/api/monitoring/retention/attest"
+        )
+        monitoring_initial_preview_match = re.fullmatch(
+            r"/api/monitoring/adapters/([a-z][a-z0-9_]{0,63})/initialization-preview",
+            parsed.path,
+        )
+        monitoring_enablement_match = re.fullmatch(
+            r"/api/monitoring/adapters/([a-z][a-z0-9_]{0,63})/enablement",
+            parsed.path,
+        )
         is_source_inbox_request = bool(
             is_source_inbox_import
+            or is_source_inbox_import_preview
+            or is_monitoring_retention_attest
+            or monitoring_initial_preview_match
+            or monitoring_enablement_match
             or re.fullmatch(
                 r"/api/monitoring/events/[^/]+/(?:acknowledge|attach|round-draft)",
                 parsed.path,
@@ -1488,27 +1774,131 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 if readonly_research_match is not None or carries_round_context
                 else 256_000
                 if is_manual_chatgpt_import
-                else 512_000
-                if is_source_inbox_import
+                else _SOURCE_INBOX_HTTP_ENVELOPE_MAX_BYTES
+                if is_source_inbox_import or is_source_inbox_import_preview
                 else 128_000
             ),
             strict=is_source_inbox_request,
         )
         if payload is None:
             return
-        if is_source_inbox_import:
+        if monitoring_initial_preview_match:
+            if (
+                parsed.query
+                or set(payload)
+                != {"expected_config_version", "expected_state_version"}
+            ):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": (
+                            "Initialization preview requires only expected config "
+                            "and state versions."
+                        ),
+                        "code": "SOURCE_MONITORING_OPERATOR_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            service = self._source_monitoring_operator_service()
+            if service is None:
+                return
+            try:
+                preview = service.preview(
+                    monitoring_initial_preview_match.group(1),
+                    expected_config_version=payload.get(
+                        "expected_config_version"
+                    ),
+                    expected_state_version=payload.get("expected_state_version"),
+                )
+            except SourceMonitoringOperatorError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "source_monitoring_operator_preview": preview,
+                },
+                cache_control="no-store",
+            )
+            return
+        if monitoring_enablement_match:
+            if (
+                parsed.query
+                or set(payload)
+                != {
+                    "expected_config_version",
+                    "expected_state_version",
+                    "enabled",
+                    "preview_sha256",
+                    "confirmation",
+                }
+            ):
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": (
+                            "Adapter enablement requires the exact version, state, "
+                            "preview, and confirmation fields."
+                        ),
+                        "code": "SOURCE_MONITORING_OPERATOR_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            service = self._source_monitoring_operator_service()
+            if service is None:
+                return
+            try:
+                result = service.set_enablement(
+                    monitoring_enablement_match.group(1),
+                    enabled=payload.get("enabled"),
+                    expected_config_version=payload.get(
+                        "expected_config_version"
+                    ),
+                    expected_state_version=payload.get("expected_state_version"),
+                    confirmation=payload.get("confirmation"),
+                    preview_sha256=payload.get("preview_sha256"),
+                )
+            except SourceMonitoringOperatorError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "source_monitoring_enablement_result": result,
+                },
+                cache_control="no-store",
+            )
+            return
+        if is_source_inbox_import or is_source_inbox_import_preview:
             if set(payload) != {"content"} or type(payload.get("content")) is not str:
                 self._send_json(
                     {
                         "ok": False,
-                        "error": "来源导入请求必须只包含字符串 content。",
+                        "error": (
+                            "来源预览请求必须只包含字符串 content。"
+                            if is_source_inbox_import_preview
+                            else "来源导入请求必须只包含字符串 content。"
+                        ),
                         "code": "SOURCE_INBOX_REQUEST_INVALID",
                     },
                     HTTPStatus.BAD_REQUEST,
                 )
                 return
             try:
-                result = SourceInboxService(STORE).import_packet(payload["content"])
+                source_inbox_service = SourceInboxService(STORE)
+                result = (
+                    source_inbox_service.preview_packet(payload["content"])
+                    if is_source_inbox_import_preview
+                    else source_inbox_service.import_packet(payload["content"])
+                )
             except SourceInboxContractError as exc:
                 self._send_json(
                     {
@@ -1526,9 +1916,49 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     HTTPStatus(exc.status),
                 )
                 return
+            if is_source_inbox_import_preview:
+                self._send_json(
+                    {"ok": True, "source_import_preview": result},
+                    HTTPStatus.OK,
+                )
+                return
             self._send_json(
                 {"ok": True, "source_import": result},
                 HTTPStatus.OK if result["idempotent_replay"] else HTTPStatus.CREATED,
+            )
+            return
+        if is_monitoring_retention_attest:
+            if parsed.query or set(payload) != {"preview", "confirmation"}:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "Retention attestation requires only preview and confirmation.",
+                        "code": "SOURCE_MONITORING_RETENTION_REQUEST_INVALID",
+                    },
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                result = SourceMonitoringRetentionService(STORE).attest(
+                    payload.get("preview"),
+                    confirmation=payload.get("confirmation"),
+                )
+            except SourceMonitoringOperationsError as exc:
+                self._send_json(
+                    {"ok": False, "error": str(exc), "code": exc.code},
+                    HTTPStatus(exc.status),
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "source_monitoring_retention_attestation": result,
+                },
+                (
+                    HTTPStatus.OK
+                    if result["idempotent_replay"]
+                    else HTTPStatus.CREATED
+                ),
             )
             return
         source_inbox_ack_match = re.fullmatch(
@@ -5234,6 +5664,80 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             )
         return True
 
+    def _source_monitoring_operator_service(
+        self,
+    ) -> SourceMonitoringOperatorService | None:
+        """Bind operator actions to the live host owner/runtime graph."""
+
+        phase = "owner"
+        try:
+            owner = getattr(self.server, "ai_studio_instance_owner", None)
+            if owner is None:
+                raise RuntimeError("operator owner is unavailable")
+            owner.assert_held_for(STORE.path)
+            phase = "runtime"
+            runtime = getattr(
+                self.server,
+                "ai_studio_source_monitoring_runtime",
+                None,
+            )
+            if runtime is None:
+                raise RuntimeError("operator runtime is unavailable")
+            phase = "service"
+            registry_catalog = getattr(runtime, "registry_catalog", None)
+            if type(registry_catalog) is tuple and len(registry_catalog) > 1:
+                repository = getattr(runtime, "repository", None)
+                if repository is None:
+                    raise RuntimeError(
+                        "coordinated operator repository is unavailable"
+                    )
+                return SourceMonitoringOperatorService(
+                    store=STORE,
+                    settings=runtime.settings,
+                    registry_catalog=registry_catalog,
+                    repository=repository,
+                    cancel_event=getattr(
+                        self.server,
+                        "ai_studio_shutdown_event",
+                        None,
+                    ),
+                )
+            scheduler = getattr(runtime, "scheduler", None)
+            if scheduler is None:
+                raise RuntimeError("operator runtime scheduler is unavailable")
+            return SourceMonitoringOperatorService(
+                store=STORE,
+                settings=runtime.settings,
+                registry=scheduler.registry,
+                repository=scheduler.repository,
+                cancel_event=getattr(
+                    self.server,
+                    "ai_studio_shutdown_event",
+                    None,
+                ),
+            )
+        except Exception as exc:
+            emit_event(
+                "source_monitoring_operator_unavailable",
+                severity="error",
+                fields={
+                    "phase": phase,
+                    "exception_type": type(exc).__name__,
+                    "execution_capability": "none",
+                    "live_trading_allowed": False,
+                },
+            )
+            self._send_json(
+                {
+                    "ok": False,
+                    "error": "Source Monitoring operator control is unavailable.",
+                    "code": "SOURCE_MONITORING_OPERATOR_UNAVAILABLE",
+                },
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                cache_control="no-store",
+            )
+            return None
+
     def _send_json(
         self,
         payload: dict[str, Any],
@@ -5295,6 +5799,7 @@ def run_server(
     port: int = PORT,
     *,
     instance_owner: DatabaseInstanceOwner,
+    runtime_factory: Callable[[Any], Any] | None = None,
 ) -> None:
     if not _is_loopback_address(host):
         raise ValueError("AI 共创室只能监听回环地址")
@@ -5306,10 +5811,62 @@ def run_server(
     store_path = STORE.path
     instance_owner.assert_held_for(store_path)
     server = ThreadingHTTPServer((host, port), StudioRequestHandler)
+    # Python's ThreadingHTTPServer defaults request workers to daemon threads.
+    # The database owner must outlive every handler, so make close a real drain.
+    server.daemon_threads = False
+    server.block_on_close = True
     server.ai_studio_startup_ready = False
+    # Operator-control handlers must re-check the same owner immediately
+    # before any source preview or enablement write.  Keep the already
+    # verified owner attached for the full handler-drain/runtime lifetime.
+    server.ai_studio_instance_owner = instance_owner
+    server.ai_studio_source_monitoring_runtime = None
+    server.ai_studio_source_monitoring_start_result = None
+    server.ai_studio_shutdown_event = threading.Event()
+    runtime = None
     started = False
     try:
         recovery = STORE.recover_orphaned_work(instance_owner=instance_owner)
+        if runtime_factory is not None:
+            runtime = runtime_factory(STORE)
+            server.ai_studio_source_monitoring_runtime = runtime
+            runtime_start_result = runtime.start()
+            server.ai_studio_source_monitoring_start_result = (
+                runtime_start_result
+            )
+            runtime_settings = getattr(runtime, "settings", None)
+            monitoring_requested = bool(
+                getattr(runtime_settings, "enabled", False) is True
+                and getattr(runtime_settings, "auto_start", False) is True
+            )
+            if monitoring_requested and runtime_start_result is not True:
+                snapshot_provider = getattr(runtime, "snapshot", None)
+                runtime_state = "unavailable"
+                error_code = "SOURCE_MONITORING_RUNTIME_START_FAILED"
+                if callable(snapshot_provider):
+                    try:
+                        snapshot = snapshot_provider()
+                        if type(snapshot) is dict:
+                            state_value = snapshot.get("status")
+                            error_value = snapshot.get(
+                                "last_fatal_error_code"
+                            )
+                            if type(state_value) is str and state_value:
+                                runtime_state = state_value[:40]
+                            if type(error_value) is str and error_value:
+                                error_code = error_value[:100]
+                    except BaseException:
+                        pass
+                emit_event(
+                    "source_monitoring_runtime_start_degraded",
+                    severity="error",
+                    fields={
+                        "runtime_state": runtime_state,
+                        "error_code": error_code,
+                        "execution_capability": "none",
+                        "live_trading_allowed": False,
+                    },
+                )
         server.ai_studio_startup_ready = True
         started = True
         emit_event(
@@ -5333,5 +5890,69 @@ def run_server(
         except KeyboardInterrupt:
             emit_event("server_interrupt_received")
     finally:
-        server.server_close()
+        server.ai_studio_startup_ready = False
+        server.ai_studio_shutdown_event.set()
+        if runtime is not None:
+            request_stop = getattr(runtime, "request_stop", None)
+            if callable(request_stop):
+                try:
+                    request_stop()
+                except BaseException:
+                    # Continue into handler drain and the two bounded runtime
+                    # stop attempts.  A shutdown callback must never bypass
+                    # the fail-stop owner-retention decision.
+                    pass
+        try:
+            server.server_close()
+        finally:
+            first_stop_complete = True
+            if runtime is not None:
+                try:
+                    first_stop_complete = runtime.stop() is True
+                except BaseException:
+                    first_stop_complete = False
+            if runtime is not None and not first_stop_complete:
+                emit_event(
+                    "source_monitoring_runtime_stop_timeout",
+                    severity="critical",
+                    fields={
+                        "database_owner_retained": True,
+                        "execution_capability": "none",
+                        "live_trading_allowed": False,
+                    },
+                )
+                timeout_ms = getattr(runtime, "join_timeout_ms", 30_000)
+                timeout_seconds = (
+                    timeout_ms / 1_000
+                    if type(timeout_ms) is int and timeout_ms > 0
+                    else 30.0
+                )
+                request_stop = getattr(runtime, "request_stop", None)
+                if callable(request_stop):
+                    try:
+                        request_stop()
+                    except BaseException:
+                        pass
+                wait_until_stopped = getattr(
+                    runtime,
+                    "wait_until_stopped",
+                    None,
+                )
+                try:
+                    joined = bool(
+                        callable(wait_until_stopped)
+                        and wait_until_stopped(timeout_seconds) is True
+                    )
+                except BaseException:
+                    joined = False
+                resources_stopped = False
+                if joined:
+                    try:
+                        resources_stopped = runtime.stop() is True
+                    except BaseException:
+                        resources_stopped = False
+                if not joined or not resources_stopped:
+                    raise RuntimeShutdownIncomplete(
+                        "source monitoring runtime did not stop within bounded shutdown"
+                    )
         emit_event("server_stopped", fields={"started": started})

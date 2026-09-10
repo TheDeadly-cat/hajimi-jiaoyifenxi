@@ -183,6 +183,9 @@ from .round_contexts import (
     round_context_binding_payload,
 )
 from .source_inbox_service import ensure_source_inbox_schema
+from .source_inbox_trading_impact import ensure_source_inbox_trading_impact_schema
+from .source_monitoring.operations import ensure_source_monitoring_operations_schema
+from .source_monitoring.state_repository import ensure_source_monitoring_schema
 from .templates import (
     get_room_template,
     member_template_catalog,
@@ -744,6 +747,25 @@ class StudioStore:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
+
+    def checkpoint_after_shutdown(self, *, instance_owner: Any) -> None:
+        """Finish WAL housekeeping only after the host has drained all workers.
+
+        A final mode=ro reader can leave an empty WAL/SHM pair behind. SQLite's
+        writable close removes that pair; never unlink it or weaken preflight.
+        """
+        instance_owner.assert_held_for(self.path)
+        if first_reparse_component(self.path) is not None:
+            raise RuntimeError("Shutdown checkpoint path contains a reparse point")
+        with self._lock, closing(sqlite3.connect(
+            self.path.as_uri() + "?mode=rw", uri=True, timeout=5,
+        )) as connection:
+            instance_owner.assert_held_for(self.path)
+            result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if result is None or result[0] != 0 or result[1] != result[2]:
+                raise RuntimeError("Shutdown checkpoint could not drain WAL readers")
+        if any(Path(str(self.path) + suffix).exists() for suffix in ("-wal", "-shm", "-journal")):
+            raise RuntimeError("Shutdown checkpoint left SQLite sidecars; another connection may remain")
 
     def _initialize(self) -> None:
         with self._lock, closing(self._connect()) as connection, connection:
@@ -1620,7 +1642,20 @@ class StudioStore:
                     ON paper_portfolio_walk_forward_runs(room_id, portfolio_id, created_at DESC);
                 """
             )
+            schema_applied_at_ms = now_ms()
             ensure_source_inbox_schema(connection)
+            ensure_source_inbox_trading_impact_schema(
+                connection,
+                applied_at_ms=schema_applied_at_ms,
+            )
+            ensure_source_monitoring_schema(
+                connection,
+                applied_at_ms=schema_applied_at_ms,
+            )
+            ensure_source_monitoring_operations_schema(
+                connection,
+                applied_at_ms=schema_applied_at_ms,
+            )
             self._ensure_column(connection, "rooms", "category", "TEXT NOT NULL DEFAULT '通用共创'")
             self._ensure_column(connection, "rooms", "template_id", "TEXT NOT NULL DEFAULT 'open_collaboration'")
             self._ensure_column(connection, "rooms", "capability_packs_json", "TEXT NOT NULL DEFAULT '[]'")

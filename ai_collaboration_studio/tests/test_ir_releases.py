@@ -5,10 +5,12 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from unittest.mock import patch
 from urllib.parse import urlparse
 
+import backend.market.ir_releases as ir_releases_module
 from backend.market.futu_readonly import STORAGE_SYMBOLS
-from backend.market.ir_releases import OfficialIrReleaseAdapter
+from backend.market.ir_releases import IR_FEEDS, OfficialIrReleaseAdapter
 from backend.market.storage_service import StorageResearchMarketService
 
 
@@ -49,7 +51,7 @@ class FakeIrFetcher:
 
 class OfficialIrReleaseAdapterTests(unittest.TestCase):
     def make_adapter(self, fetcher: FakeIrFetcher) -> OfficialIrReleaseAdapter:
-        return OfficialIrReleaseAdapter(
+        return OfficialIrReleaseAdapter(source_format="rss",
             fetch_bytes=fetcher,
             clock=lambda: FIXED_NOW,
             cache_ttl_seconds=300,
@@ -78,7 +80,7 @@ class OfficialIrReleaseAdapterTests(unittest.TestCase):
             barrier.wait(timeout=2)
             return fetcher(url, allowed_hosts)
 
-        adapter = OfficialIrReleaseAdapter(
+        adapter = OfficialIrReleaseAdapter(source_format="rss",
             fetch_bytes=concurrent_fetch,
             clock=lambda: FIXED_NOW,
         )
@@ -98,7 +100,7 @@ class OfficialIrReleaseAdapterTests(unittest.TestCase):
             self.assertTrue(release_fetch.wait(timeout=2))
             return fetcher(url, allowed_hosts)
 
-        adapter = OfficialIrReleaseAdapter(
+        adapter = OfficialIrReleaseAdapter(source_format="rss",
             fetch_bytes=blocked_fetch,
             clock=lambda: FIXED_NOW,
         )
@@ -145,7 +147,7 @@ class OfficialIrReleaseAdapterTests(unittest.TestCase):
     def test_failed_feed_negative_cache_expires_and_empty_feed_is_cached(self) -> None:
         monotonic_clock = [10.0]
         failing_fetcher = FakeIrFetcher(fail_symbol_host="investor.wdc.com")
-        failing_adapter = OfficialIrReleaseAdapter(
+        failing_adapter = OfficialIrReleaseAdapter(source_format="rss",
             fetch_bytes=failing_fetcher,
             clock=lambda: FIXED_NOW,
             monotonic=lambda: monotonic_clock[0],
@@ -160,7 +162,7 @@ class OfficialIrReleaseAdapterTests(unittest.TestCase):
         self.assertEqual(len(failing_fetcher.calls), 2)
 
         empty_calls: list[str] = []
-        empty_adapter = OfficialIrReleaseAdapter(
+        empty_adapter = OfficialIrReleaseAdapter(source_format="rss",
             fetch_bytes=lambda url, _hosts: empty_calls.append(url) or b"<rss><channel /></rss>",
             clock=lambda: FIXED_NOW,
         )
@@ -180,6 +182,44 @@ class OfficialIrReleaseAdapterTests(unittest.TestCase):
             adapter.recent_releases_batch(["US.AAPL"])
         with self.assertRaisesRegex(ValueError, "非固定 HTTPS"):
             OfficialIrReleaseAdapter._default_fetch_bytes("https://example.com/rss.xml", {"official.example"})
+
+    def test_default_fetcher_rejects_declared_and_streaming_oversize(self) -> None:
+        class FakeResponse:
+            def __init__(self, *, declared_length: str, body: bytes) -> None:
+                self.headers = {"Content-Length": declared_length}
+                self.body = body
+                self.read_calls = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+            def read(self, _limit: int) -> bytes:
+                self.read_calls += 1
+                return self.body
+
+        config = IR_FEEDS["US.MU"]
+        for response, expected_reads in (
+            (FakeResponse(declared_length="9", body=b""), 0),
+            (FakeResponse(declared_length="", body=b"123456789"), 1),
+        ):
+            with (
+                self.subTest(expected_reads=expected_reads),
+                patch.object(ir_releases_module, "IR_MAX_RESPONSE_BYTES", 8),
+                patch.object(
+                    ir_releases_module,
+                    "open_official_https",
+                    return_value=response,
+                ),
+                self.assertRaisesRegex(ValueError, "1 MB"),
+            ):
+                OfficialIrReleaseAdapter._default_fetch_bytes(
+                    str(config["url"]),
+                    set(config["hosts"]),
+                )
+            self.assertEqual(response.read_calls, expected_reads)
 
     def test_sec_association_is_a_candidate_not_silent_deduplication(self) -> None:
         releases = {

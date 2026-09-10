@@ -8,7 +8,7 @@ test("mobile conversation header keeps the room state visible in a two-line rese
   assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.conversation-panel\s*\{\s*grid-template-rows:\s*clamp\(56px,\s*calc\(var\(--visual-viewport-height, 100dvh\) - 394px\),\s*70px\)/);
   assert.match(styles, /\.conversation-header > div:first-child\s*\{[\s\S]*?grid-template-columns:\s*var\(--mobile-touch-target\) minmax\(0, 1fr\);[\s\S]*?grid-template-rows:\s*26px 24px;/);
   assert.match(styles, /\.conversation-header \.mobile-room-toggle\s*\{\s*grid-row:\s*1 \/ span 2;/);
-  assert.match(styles, /\.conversation-header \.status\s*\{[\s\S]*?display:\s*inline-flex;[\s\S]*?font-size:\s*9px;/);
+  assert.match(styles, /\.conversation-header \.status\s*\{[\s\S]*?display:\s*inline-flex;[\s\S]*?font-size:\s*13px;/);
   assert.doesNotMatch(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.conversation-header \.status\s*\{\s*display:\s*none;/);
 });
 

@@ -72,8 +72,8 @@
   gap: 4px;
   color: #71818d;
   font-family: Consolas, "SFMono-Regular", monospace;
-  font-size: 7px;
-  font-weight: 800;
+  font-size: 13px;
+  font-weight: 700;
   letter-spacing: .11em;
 }
 
@@ -84,7 +84,7 @@
 
 .evidence-source-dossier-v2 > summary strong {
   color: var(--source-ink);
-  font-size: 10px;
+  font-size: 14px;
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
@@ -96,9 +96,9 @@
   border-radius: 999px;
   color: #65747f;
   background: #f7f9fa;
-  font-size: 8px;
+  font-size: 13px;
   font-style: normal;
-  font-weight: 750;
+  font-weight: 700;
 }
 
 .evidence-source-dossier-v2[data-source-status="ready"] > summary > em,
@@ -134,7 +134,7 @@
   min-width: 0;
   margin: 0;
   color: #637583;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -159,7 +159,7 @@
   border-radius: 7px;
   color: #8c433e;
   background: #fff4f2;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.5;
 }
 
@@ -210,12 +210,12 @@
 
 .evidence-source-preview-text > header strong {
   color: #34566d;
-  font-size: 9px;
+  font-size: 13px;
 }
 
 .evidence-source-preview-text > header small {
   color: #72818b;
-  font-size: 8px;
+  font-size: 13px;
   text-align: right;
 }
 
@@ -230,7 +230,7 @@
     repeating-linear-gradient(0deg, rgba(59, 96, 121, .035) 0 1px, transparent 1px 24px),
     #fbfcfd;
   font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 9px;
+  font-size: 13px;
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -247,8 +247,8 @@
   border-radius: 7px;
   color: #315f7e;
   background: #f1f7fa;
-  font-size: 9px;
-  font-weight: 750;
+  font-size: 13px;
+  font-weight: 700;
   justify-self: start;
   text-decoration: none;
 }

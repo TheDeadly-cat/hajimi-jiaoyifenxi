@@ -8,9 +8,11 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.run_isolated_12_role_e2e import (
     CallLedger,
@@ -23,6 +25,37 @@ from scripts.run_isolated_12_role_e2e import (
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = PROJECT_DIR / "scripts" / "run_isolated_12_role_e2e.py"
+
+# The full integration exercise includes database setup, twelve turns, reviewed
+# artifacts, portfolio gates and cleanup. The 532c112 CI run exhausted 30s;
+# the same-tree PR completed in 14.653s. Keep a bounded integration budget
+# without changing the 30s early-rejection budget or any production deadline.
+FULL_DRY_RUN_TIMEOUT_SECONDS = 60
+
+
+def run_cli_process(
+    command: list[str],
+    *,
+    child_env: dict[str, str],
+    parent_directory: Path,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    # subprocess.run kills and waits on timeout. Keep the child's temporary
+    # databases under a parent-owned root so cleanup still runs after that kill.
+    with tempfile.TemporaryDirectory(
+        prefix="cli-child-", dir=parent_directory,
+    ) as child_root:
+        isolated_env = dict(child_env)
+        isolated_env.update({name: child_root for name in ("TEMP", "TMP", "TMPDIR")})
+        return subprocess.run(
+            command,
+            cwd=PROJECT_DIR,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            env=isolated_env,
+        )
 
 
 SOCKET_DENIED_RUNNER = r"""
@@ -208,6 +241,7 @@ class IsolatedTwelveRoleE2ETests(unittest.TestCase):
         self,
         *args: str,
         clear_local_env: bool = False,
+        timeout: float = 30,
     ) -> tuple[subprocess.CompletedProcess[str], dict]:
         child_env = os.environ.copy()
         child_env["AI_STUDIO_SKIP_LOCAL_ENV"] = "1"
@@ -222,7 +256,7 @@ class IsolatedTwelveRoleE2ETests(unittest.TestCase):
             "ZHIPU_API_KEY",
         ):
             child_env.pop(key, None)
-        completed = subprocess.run(
+        completed = run_cli_process(
             [
                 sys.executable,
                 "-c",
@@ -232,12 +266,9 @@ class IsolatedTwelveRoleE2ETests(unittest.TestCase):
                 "--source-db",
                 str(self.source_db),
             ],
-            cwd=PROJECT_DIR,
-            text=True,
-            capture_output=True,
-            timeout=30,
-            check=False,
-            env=child_env,
+            timeout=timeout,
+            child_env=child_env,
+            parent_directory=Path(self.temp_dir.name),
         )
         self.assertEqual(completed.stderr, "")
         self.assertEqual(len(completed.stdout.strip().splitlines()), 1)
@@ -247,6 +278,7 @@ class IsolatedTwelveRoleE2ETests(unittest.TestCase):
         completed, report = self.run_cli(
             "--dry-run",
             clear_local_env=True,
+            timeout=FULL_DRY_RUN_TIMEOUT_SECONDS,
         )
 
         self.assertEqual(completed.returncode, 0)
@@ -267,11 +299,19 @@ class IsolatedTwelveRoleE2ETests(unittest.TestCase):
 
     def test_dry_run_covers_all_gates_without_external_calls_or_source_writes(self) -> None:
         before = sha256(self.source_db)
+        report_file = Path(self.temp_dir.name) / "full-dry-run-report.json"
 
-        completed, report = self.run_cli("--dry-run")
+        completed, report = self.run_cli(
+            "--dry-run",
+            "--report-file",
+            str(report_file),
+            timeout=FULL_DRY_RUN_TIMEOUT_SECONDS,
+        )
 
         self.assertEqual(completed.returncode, 0)
         self.assertTrue(report["ok"])
+        self.assertTrue(report_file.is_file())
+        self.assertEqual(json.loads(report_file.read_text(encoding="utf-8")), report)
         self.assertEqual(sha256(self.source_db), before)
         self.assertTrue(report["source_database"]["query_only_asserted"])
         self.assertEqual(report["source_database"]["read_connection_total_changes"], 0)
@@ -483,7 +523,9 @@ class IsolatedTwelveRoleE2ETests(unittest.TestCase):
             )
         before = sha256(self.source_db)
 
-        completed, report = self.run_cli("--dry-run")
+        completed, report = self.run_cli(
+            "--dry-run", timeout=FULL_DRY_RUN_TIMEOUT_SECONDS,
+        )
 
         self.assertEqual(completed.returncode, 0)
         self.assertTrue(report["ok"])
@@ -516,26 +558,37 @@ class IsolatedTwelveRoleE2ETests(unittest.TestCase):
 
     def test_report_file_is_exclusive_and_matches_stdout(self) -> None:
         report_file = Path(self.temp_dir.name) / "safe-report.json"
+        before = sha256(self.source_db)
 
+        # Successful full-run report parity is covered with the existing gate
+        # test above. Exercise output-file handling here without another round.
         completed, report = self.run_cli(
-            "--dry-run",
             "--report-file",
             str(report_file),
         )
 
-        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.returncode, 2)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["mode"], "none")
+        self.assertEqual(report["error"]["code"], "MODE_REQUIRED")
         self.assertTrue(report_file.is_file())
         self.assertEqual(json.loads(report_file.read_text(encoding="utf-8")), report)
+        self.assertEqual(sha256(self.source_db), before)
 
-        completed_again, blocked = self.run_cli(
-            "--dry-run",
-            "--report-file",
-            str(report_file),
-        )
+        missing_source = Path(self.temp_dir.name) / "must-not-be-opened.sqlite3"
+        # Existing report paths must be rejected before the source DB is read.
+        with patch.object(self, "source_db", missing_source):
+            completed_again, blocked = self.run_cli(
+                "--dry-run",
+                "--report-file",
+                str(report_file),
+            )
         self.assertEqual(completed_again.returncode, 2)
         self.assertFalse(blocked["ok"])
         self.assertEqual(blocked["error"]["code"], "REPORT_FILE_INVALID")
         self.assertEqual(json.loads(report_file.read_text(encoding="utf-8")), report)
+        self.assertEqual(sha256(self.source_db), before)
+        self.assertFalse(missing_source.exists())
 
     def test_call_ledger_blocks_the_twenty_ninth_call_before_reservation(self) -> None:
         ledger = CallLedger(mode="dry-run")
@@ -558,6 +611,86 @@ class IsolatedTwelveRoleE2ETests(unittest.TestCase):
 
         self.assertEqual(ledger.summary()["total_calls"], 28)
         self.assertEqual(ledger.summary()["external_network_calls"], 0)
+
+    def test_cli_timeout_reaps_child_and_removes_its_temporary_database(self) -> None:
+        marker = Path(self.temp_dir.name) / "hanging-child-ready.json"
+        source_before = sha256(self.source_db)
+        child_code = r"""
+import json, os, sqlite3, sys, tempfile, time
+from pathlib import Path
+root = Path(tempfile.gettempdir())
+connection = sqlite3.connect(root / "unfinished.sqlite3")
+connection.execute("CREATE TABLE fixture (value INTEGER)")
+connection.commit()
+marker = Path(sys.argv[1])
+pending = marker.with_suffix(".pending")
+pending.write_text(json.dumps({"pid": os.getpid(), "root": str(root)}), encoding="utf-8")
+pending.replace(marker)
+time.sleep(120)
+"""
+        processes = []
+        runtime_handles = []
+        real_popen = subprocess.Popen
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel32.WaitForSingleObject.restype = wintypes.DWORD
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+
+        def start_ready_child(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            processes.append(process)
+            try:
+                # Handshake before the tested wait budget starts, so a slow
+                # process launch cannot masquerade as a cleanup regression.
+                deadline = time.monotonic() + 10
+                while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(marker.is_file(), "child did not create its temporary database")
+                if os.name == "nt":
+                    # A Windows venv redirector has a different PID from its
+                    # runtime. Hold the actual runtime handle while it is alive.
+                    child_pid = json.loads(marker.read_text(encoding="utf-8"))["pid"]
+                    handle = kernel32.OpenProcess(0x00100000, False, child_pid)
+                    self.assertTrue(handle, "could not observe the actual Python runtime")
+                    runtime_handles.append(handle)
+                return process
+            except BaseException:
+                process.kill()
+                process.communicate(timeout=5)
+                raise
+
+        try:
+            with patch.object(subprocess, "Popen", side_effect=start_ready_child):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    run_cli_process(
+                        [sys.executable, "-c", child_code, str(marker)],
+                        child_env=os.environ.copy(),
+                        parent_directory=Path(self.temp_dir.name),
+                        timeout=0.2,
+                    )
+
+            self.assertEqual(len(processes), 1)
+            self.assertIsNotNone(processes[0].poll())
+            self.assertNotEqual(processes[0].returncode, 0)
+            child = json.loads(marker.read_text(encoding="utf-8"))
+            if os.name == "nt":
+                self.assertEqual(len(runtime_handles), 1)
+                self.assertEqual(kernel32.WaitForSingleObject(runtime_handles[0], 5000), 0)
+            else:
+                self.assertEqual(child["pid"], processes[0].pid)
+            self.assertFalse(Path(child["root"]).exists())
+            self.assertEqual(sha256(self.source_db), source_before)
+        finally:
+            if os.name == "nt":
+                for handle in runtime_handles:
+                    kernel32.CloseHandle(handle)
 
     def test_strict_market_evidence_preflight_accepts_clean_ready_evidence(self) -> None:
         snapshot = DryRunMarketService().capture()

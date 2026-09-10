@@ -1,4 +1,4 @@
-import { ClipboardList, PawPrint, Plus, Search, X } from "lucide-react";
+import { ClipboardList, Plus, Search, X } from "lucide-react";
 import { useMemo, useRef } from "react";
 import dutyCatArt from "../assets/duty-cat.png";
 import { groupedRooms } from "../roomCategories";
@@ -69,11 +69,11 @@ export function RoomSidebar({
     >
       <div className="sidebar-brand">
         <span id="room-sidebar-title" className="sidebar-brand-copy">
-          <small><PawPrint size={10} aria-hidden="true" />值班协作空间</small>
+          <small>值班协作空间</small>
           AI 共创室
         </span>
-        <span className="sidebar-cat-perch" aria-hidden="true">
-          <img src={dutyCatArt} alt="" decoding="async" />
+        <span className="sidebar-cat-perch">
+          <img src={dutyCatArt} alt="" />
         </span>
         <button ref={closeButtonRef} className="icon-button sidebar-mobile-close" type="button" aria-label="关闭房间列表" onClick={onClose}><X size={18} /></button>
       </div>
