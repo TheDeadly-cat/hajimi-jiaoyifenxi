@@ -20,6 +20,7 @@ import {
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import dutyCatArt from "../assets/duty-cat.png";
 import { SourceInboxNotifications } from "./SourceInboxNotifications";
+import { DocumentEvidence, DocumentEvidenceControl } from "./DocumentEvidence";
 import { api } from "../api";
 import {
   EXTERNAL_UNVERIFIED,
@@ -484,6 +485,7 @@ function SourceInboxDetail({
       </section>
 
       <DeterministicImpactSection item={item} />
+      {item.valid && item.sourceChannel === "official_source_monitor" ? <DocumentEvidence key={item.id} item={item} /> : null}
 
       <section className="source-inbox-section">
         <h3><Search aria-hidden="true" size={16} />外部声明与影响假设</h3>
@@ -2067,6 +2069,7 @@ export function SourceInboxPanel({
           onSubmitAdapterEnablement={() => void submitAdapterEnablement()}
         />
 
+        <DocumentEvidenceControl />
         <div className="source-inbox-filter-groups">
           <fieldset className="source-inbox-filters">
             <legend>工作状态（全局计数）</legend>

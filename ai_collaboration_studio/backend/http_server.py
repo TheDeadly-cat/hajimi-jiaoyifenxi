@@ -77,6 +77,7 @@ from .stock_research_service import StockResearchError, StockResearchService
 from .source_inbox_contracts import MAX_SOURCE_IMPORT_BYTES, SourceInboxContractError
 from .source_inbox_import_ux import build_source_monitoring_prompt_template
 from .source_inbox_service import SourceInboxError, SourceInboxService
+from .document_evidence import DocumentEvidenceController, DocumentEvidenceService
 from .source_monitoring.health_service import (
     SourceMonitoringHealthService,
     SourceMonitoringHealthServiceError,
@@ -142,6 +143,7 @@ def _is_source_inbox_path(path: str) -> bool:
             "/api/monitoring/imports/chatgpt/preview",
             "/api/monitoring/imports/chatgpt/prompt-template",
             "/api/monitoring/notifications",
+            "/api/monitoring/documents/control",
             "/api/monitoring/adapters/control",
             "/api/monitoring/retention/attest",
             "/api/monitoring/retention/preview",
@@ -150,7 +152,7 @@ def _is_source_inbox_path(path: str) -> bool:
             r"/api/monitoring/adapters/[^/]+/(?:initialization-preview|enablement)",
             path,
         )
-        or re.fullmatch(r"/api/monitoring/events/[^/]+(?:/(?:acknowledge|attach|round-draft))?", path)
+        or re.fullmatch(r"/api/monitoring/events/[^/]+(?:/(?:acknowledge|attach|round-draft|document))?", path)
     )
 
 
@@ -856,6 +858,20 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             self._send_json({"ok": True, "source_inbox": inbox})
+            return
+        document_match = re.fullmatch(r"/api/monitoring/events/([^/]+)/document", parsed.path)
+        if document_match or parsed.path == "/api/monitoring/documents/control":
+            if parsed.query:
+                self._send_json({"ok": False, "error": "正文接口不接受查询参数。"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                controller = getattr(self.server, "ai_studio_document_evidence", None)
+                result = DocumentEvidenceService(STORE).view(document_match.group(1)) if document_match else (
+                    controller.snapshot() if controller else {"network_allowed": False, "enabled": False}
+                )
+                self._send_json({"ok": True, "document": result})
+            except SourceInboxError as exc:
+                self._send_json({"ok": False, "error": str(exc), "code": exc.code}, HTTPStatus(exc.status))
             return
         source_inbox_item_match = re.fullmatch(
             r"/api/monitoring/events/([^/]+)",
@@ -1757,8 +1773,9 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             or is_monitoring_retention_attest
             or monitoring_initial_preview_match
             or monitoring_enablement_match
+            or parsed.path == "/api/monitoring/documents/control"
             or re.fullmatch(
-                r"/api/monitoring/events/[^/]+/(?:acknowledge|attach|round-draft)",
+                r"/api/monitoring/events/[^/]+/(?:acknowledge|attach|round-draft|document)",
                 parsed.path,
             )
         )
@@ -1781,6 +1798,22 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             strict=is_source_inbox_request,
         )
         if payload is None:
+            return
+        document_match = re.fullmatch(r"/api/monitoring/events/([^/]+)/document", parsed.path)
+        if document_match or parsed.path == "/api/monitoring/documents/control":
+            try:
+                expected = {"confirmation", "refresh"} if document_match else {"confirmation"}
+                if parsed.query or set(payload) != expected:
+                    raise SourceInboxError("正文请求字段不正确。", code="DOCUMENT_REQUEST_INVALID")
+                controller = getattr(self.server, "ai_studio_document_evidence", None)
+                owner = getattr(self.server, "ai_studio_instance_owner", None)
+                if controller is None or owner is None:
+                    raise SourceInboxError("正文服务尚未就绪。", code="DOCUMENT_NETWORK_DISABLED", status=503)
+                owner.assert_held_for(STORE.path)
+                result = controller.request(document_match.group(1), **payload) if document_match else controller.authorize(**payload)
+                self._send_json({"ok": True, "document": result}, HTTPStatus.ACCEPTED)
+            except SourceInboxError as exc:
+                self._send_json({"ok": False, "error": str(exc), "code": exc.code}, HTTPStatus(exc.status))
             return
         if monitoring_initial_preview_match:
             if (
@@ -5824,6 +5857,7 @@ def run_server(
     server.ai_studio_source_monitoring_start_result = None
     server.ai_studio_shutdown_event = threading.Event()
     runtime = None
+    documents = None
     started = False
     try:
         recovery = STORE.recover_orphaned_work(instance_owner=instance_owner)
@@ -5867,6 +5901,13 @@ def run_server(
                         "live_trading_allowed": False,
                     },
                 )
+        runtime_settings = getattr(runtime, "settings", None)
+        documents = DocumentEvidenceController(STORE, network_allowed=(
+            getattr(runtime_settings, "enabled", False) is True
+            and getattr(runtime_settings, "dry_run", True) is False
+        ))
+        server.ai_studio_document_evidence = documents
+        documents.start()
         server.ai_studio_startup_ready = True
         started = True
         emit_event(
@@ -5892,6 +5933,8 @@ def run_server(
     finally:
         server.ai_studio_startup_ready = False
         server.ai_studio_shutdown_event.set()
+        if documents is not None:
+            documents.stop_event.set()
         if runtime is not None:
             request_stop = getattr(runtime, "request_stop", None)
             if callable(request_stop):
@@ -5955,4 +5998,11 @@ def run_server(
                     raise RuntimeShutdownIncomplete(
                         "source monitoring runtime did not stop within bounded shutdown"
                     )
+        if documents is not None:
+            try:
+                documents_stopped = documents.stop() is True
+            except Exception:
+                documents_stopped = False
+            if not documents_stopped:
+                raise RuntimeShutdownIncomplete("document evidence worker did not stop; database owner retained")
         emit_event("server_stopped", fields={"started": started})

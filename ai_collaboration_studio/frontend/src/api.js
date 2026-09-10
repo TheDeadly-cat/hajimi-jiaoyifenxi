@@ -25,6 +25,10 @@ async function jsonRequest(path, options = {}) {
 }
 
 export const api = {
+  sourceDocument: (itemId, signal) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document`, { signal }),
+  requestSourceDocument: (itemId, payload) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document`, { method: "POST", body: JSON.stringify(payload) }),
+  sourceDocumentControl: () => jsonRequest("/api/monitoring/documents/control"),
+  enableSourceDocuments: (payload) => jsonRequest("/api/monitoring/documents/control", { method: "POST", body: JSON.stringify(payload) }),
   bootstrap: (roomId = "") => jsonRequest(`/api/bootstrap${roomId ? `?room=${encodeURIComponent(roomId)}` : ""}`),
   room: (roomId) => jsonRequest(`/api/rooms/${encodeURIComponent(roomId)}`),
   listSourceInbox: ({
