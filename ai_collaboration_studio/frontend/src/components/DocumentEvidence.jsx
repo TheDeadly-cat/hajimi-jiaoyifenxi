@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 
 const states = {
@@ -7,7 +7,15 @@ const states = {
   failed: "读取失败／等待重试", cancelled: "读取已中断 · 需重新确认",
 };
 
-export function DocumentEvidence({ item }) {
+const dispositionLabels = {
+  DOCUMENT_PUBLISHER_COOLDOWN: "该发布者在排队后要求等待；本任务已取消，预约额度不退回。冷却结束后需手动确认。",
+  DOCUMENT_NOT_RESERVED_COOLDOWN: "因发布者冷却未预约正文读取；冷却结束后需手动确认。",
+  DOCUMENT_NOT_RESERVED_BUDGET: "因本轮或滚动额度不足未预约正文读取；稍后需手动确认。",
+  DOCUMENT_AUTHORIZATION_EXPIRED: "授权已到期，未开始正文请求；需重新手动确认。",
+  DOCUMENT_RETRY_AFTER_UNREPRESENTABLE: "来源要求的等待时间超出可表示范围，已暂停该发布者的正文访问，需要人工处理。",
+};
+
+export function DocumentEvidence({ item, refreshToken = 0, authorizationUntil = 0 }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -18,6 +26,8 @@ export function DocumentEvidence({ item }) {
   useEffect(() => {
     const controller = new AbortController();
     let timer;
+    const fallbackUntil = Date.now() + 30_000;
+    const observeLimit = Date.now() + 20 * 60_000 + 15_000;
     const read = async () => {
       try {
         const result = await api.sourceDocument(item.id, controller.signal);
@@ -29,14 +39,17 @@ export function DocumentEvidence({ item }) {
         )))) throw new Error("正文证据与当前事件不匹配，已拒绝展示。");
         setData(result.document);
         setError("");
-        if (["waiting", "fetching"].includes(result.document.status)) timer = setTimeout(read, 1500);
+        const pending = ["waiting", "fetching"].includes(result.document.status);
+        const jobUntil = Number(result.document.job?.expires_at) || fallbackUntil;
+        const until = Math.min(observeLimit, Math.max(authorizationUntil, Number(result.document.authorization_until) || 0, pending ? jobUntil + 15_000 : 0));
+        if (Date.now() < until) timer = setTimeout(read, Math.min(pending ? 1500 : 5000, until - Date.now()));
       } catch (err) {
         if (!controller.signal.aborted) setError(err.message);
       }
     };
     void read();
     return () => { controller.abort(); clearTimeout(timer); };
-  }, [item.id, item.serverFingerprint, refresh]);
+  }, [item.id, item.serverFingerprint, refresh, refreshToken, authorizationUntil]);
   const pending = busy || ["waiting", "fetching"].includes(data?.status);
   const versions = Array.isArray(data?.versions) ? data.versions : [];
   const version = versions.find((value) => value.id === selected) || versions.at(-1);
@@ -67,9 +80,10 @@ export function DocumentEvidence({ item }) {
     <h3>官方正文证据</h3>
     <p role="status">{states[data?.status] || "正在读取证据状态…"}</p>
     <p>原文摘录，不是 AI 总结。只读事件绑定的官方 HTML；正文和附件不代表已核验事实。</p>
+    <button className="secondary compact" type="button" onClick={() => setRefresh((value) => value + 1)}>刷新本地正文状态</button>
     {error ? <p role="alert">{error}</p> : null}
-    {data?.job?.error_code ? <p>读取记录：<code>{data.job.error_code}</code>。原消息仍保留。</p> : null}
-    {data?.job?.retry_at > 0 ? <p>来源要求至少等待至 {new Date(data.job.retry_at).toLocaleString()}。</p> : null}
+    {data?.job?.error_code ? <p>{dispositionLabels[data.job.error_code] || "正文任务未完成；原消息仍保留。"} 读取记录：<code>{data.job.error_code}</code></p> : null}
+    {data?.job?.retry_at > 0 ? <p>{data.job.retry_at >= 8.64e15 ? "发布者正文访问处于人工处理暂停状态。" : `来源要求至少等待至 ${new Date(data.job.retry_at).toLocaleString()}。`}</p> : null}
     {version ? <>
       <label>证据版本
         <select aria-label="正文证据版本" value={version.id} onChange={(event) => { setSelected(event.target.value); setCopied(false); }}>
@@ -108,29 +122,49 @@ export function DocumentEvidence({ item }) {
   </section>;
 }
 
-export function DocumentEvidenceControl() {
+export function DocumentEvidenceControl({ onStateChange }) {
   const [data, setData] = useState(null);
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [expanded, setExpanded] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const expiresAt = Number(data?.expires_at) || 0;
+  const adopt = useCallback((next) => {
+    setData(next);
+    onStateChange?.(next);
+  }, [onStateChange]);
   // Opening this control reads local status only. Never grants network access.
-  const read = async () => {
-    try { setData((await api.sourceDocumentControl()).document); }
-    catch (err) { setError(err.message); }
-  };
+  useEffect(() => {
+    if (!expanded && !expiresAt) return undefined;
+    const controller = new AbortController();
+    let timer;
+    const read = async () => {
+      try {
+        const next = (await api.sourceDocumentControl(controller.signal)).document;
+        if (controller.signal.aborted) return;
+        adopt(next);
+        setError("");
+        const remaining = Math.min(20 * 60_000, (Number(next?.expires_at) || 0) - Date.now());
+        if (remaining > 0) timer = setTimeout(read, expanded ? Math.min(5000, remaining + 50) : remaining + 50);
+      } catch (err) { if (!controller.signal.aborted) setError(err.message); }
+    };
+    void read();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [expanded, revision, adopt, expiresAt]);
   const enable = async () => {
     setBusy(true);
-    try { setData((await api.enableSourceDocuments({ confirmation: confirmed })).document); setConfirmed(false); setError(""); }
+    try { adopt((await api.enableSourceDocuments({ confirmation: confirmed })).document); setConfirmed(false); setError(""); }
     catch (err) { setError(err.message); }
     finally { setBusy(false); }
   };
-  return <details className="source-inbox-section document-evidence-control" onToggle={(event) => { if (event.currentTarget.open) void read(); }}>
+  return <details className="source-inbox-section document-evidence-control" onToggle={(event) => setExpanded(event.currentTarget.open)}>
     <summary>正文自动补全（默认关闭，需单独确认）</summary>
     <p>确认后只处理之后新入库的 NVDA 8-K 主 HTML 和 Micron 公告 HTML，20 分钟内合计最多 6 次。到期或重启即关闭，不自动回填历史，不读取附件，不调用模型。</p>
     {data ? <p role="status">{data.enabled ? `已启用，到期时间 ${new Date(data.expires_at).toLocaleString()}，剩余最多 ${data.remaining} 次。` : "自动正文读取未启用。"}{!data.network_allowed ? "当前宿主未开放正文联网，请使用联网采集入口。" : ""}</p> : null}
     {error || data?.error ? <p role="alert">{error || data.error}</p> : null}
     <label><input type="checkbox" checked={confirmed} disabled={!data?.network_allowed || data?.enabled || busy} onChange={(event) => setConfirmed(event.target.checked)} />我确认上述范围和次数上限</label>
     <button className="secondary" type="button" disabled={!confirmed || busy || data?.enabled} onClick={() => void enable()}>确认启用新事件正文补全</button>
-    <button className="secondary" type="button" onClick={() => void read()}>刷新正文补全状态</button>
+    <button className="secondary" type="button" onClick={() => setRevision((value) => value + 1)}>刷新正文补全状态</button>
   </details>;
 }

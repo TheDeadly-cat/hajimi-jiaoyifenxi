@@ -363,6 +363,8 @@ function SourceInboxDetail({
   onRoomChange,
   roomId,
   rooms,
+  documentRefreshToken,
+  documentAuthorizationUntil,
 }) {
   const permissions = sourceInboxItemPermissions(item, roomId);
   const busy = actionState.status === "loading";
@@ -485,7 +487,7 @@ function SourceInboxDetail({
       </section>
 
       <DeterministicImpactSection item={item} />
-      {item.valid && item.sourceChannel === "official_source_monitor" ? <DocumentEvidence key={item.id} item={item} /> : null}
+      {item.valid && item.sourceChannel === "official_source_monitor" ? <DocumentEvidence key={item.id} item={item} refreshToken={documentRefreshToken} authorizationUntil={documentAuthorizationUntil} /> : null}
 
       <section className="source-inbox-section">
         <h3><Search aria-hidden="true" size={16} />外部声明与影响假设</h3>
@@ -1041,6 +1043,10 @@ export function SourceInboxPanel({
   const [operatorActionState, setOperatorActionState] = useState(EMPTY_OPERATOR_ACTION_STATE);
   const [selectedItemId, setSelectedItemId] = useState("");
   const [detailState, setDetailState] = useState(EMPTY_DETAIL_STATE);
+  const [documentState, setDocumentState] = useState({ revision: 0, expiresAt: 0 });
+  const adoptDocumentControl = useCallback((control) => {
+    setDocumentState((current) => ({ revision: current.revision + 1, expiresAt: Number(control?.expires_at) || 0 }));
+  }, []);
   const [selectedRoomId, setSelectedRoomId] = useState("");
   const [acknowledgementChecked, setAcknowledgementChecked] = useState(false);
   const [objective, setObjective] = useState("");
@@ -2069,7 +2075,7 @@ export function SourceInboxPanel({
           onSubmitAdapterEnablement={() => void submitAdapterEnablement()}
         />
 
-        <DocumentEvidenceControl />
+        <DocumentEvidenceControl onStateChange={adoptDocumentControl} />
         <div className="source-inbox-filter-groups">
           <fieldset className="source-inbox-filters">
             <legend>工作状态（全局计数）</legend>
@@ -2170,6 +2176,8 @@ export function SourceInboxPanel({
             ) : null}
             {detailState.status === "ready" && selectedItem ? (
               <SourceInboxDetail
+                documentRefreshToken={documentState.revision + refreshToken}
+                documentAuthorizationUntil={documentState.expiresAt}
                 item={selectedItem}
                 rooms={roomOptions}
                 roomId={selectedRoomId}

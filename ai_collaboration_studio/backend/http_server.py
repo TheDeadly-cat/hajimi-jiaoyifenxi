@@ -869,6 +869,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 result = DocumentEvidenceService(STORE).view(document_match.group(1)) if document_match else (
                     controller.snapshot() if controller else {"network_allowed": False, "enabled": False}
                 )
+                if document_match:
+                    result["authorization_until"] = controller.snapshot()["expires_at"] if controller else 0
                 self._send_json({"ok": True, "document": result})
             except SourceInboxError as exc:
                 self._send_json({"ok": False, "error": str(exc), "code": exc.code}, HTTPStatus(exc.status))

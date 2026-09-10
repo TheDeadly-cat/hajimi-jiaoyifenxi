@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from contextlib import closing
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from urllib.parse import urlsplit
@@ -29,6 +30,43 @@ MAX_CHARS = 50_000
 WINDOW_MS = 20 * 60_000
 MAX_REQUESTS = 6
 RECHECK_MS = 5 * 60_000
+RETRY_MANUAL_HOLD = (1 << 63) - 1
+MAX_RETRY_TIMESTAMP_MS = 253402300799999  # last millisecond of year 9999
+NOT_RESERVED_PREFIX = "document_disposition_"
+
+
+def retry_after_timestamp(value, *, now_ms):
+    """A representable not-before time, or an indefinite manual-review sentinel.
+
+    Never turn a huge, valid delay into a shorter retry due to int/date limits.
+    Invalid/missing fields use the existing conservative five-minute fallback.
+    """
+    fallback = now_ms + RECHECK_MS
+    raw = value.strip() if isinstance(value, str) else ""
+    if re.fullmatch(r"[0-9]+", raw):
+        digits = raw.lstrip("0") or "0"
+        maximum = str(max(0, (MAX_RETRY_TIMESTAMP_MS - now_ms) // 1000))
+        if len(digits) > len(maximum) or (len(digits) == len(maximum) and digits > maximum):
+            return RETRY_MANUAL_HOLD
+        return max(fallback, now_ms + int(digits) * 1000)
+    try:
+        parsed = parsedate_to_datetime(raw)
+        # HTTP's obsolete asctime representation also denotes UTC, not local time.
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        delta = parsed.astimezone(timezone.utc) - datetime(1970, 1, 1, tzinfo=timezone.utc)
+        timestamp = delta.days * 86_400_000 + delta.seconds * 1000
+        return max(fallback, timestamp) if timestamp <= MAX_RETRY_TIMESTAMP_MS else RETRY_MANUAL_HOLD
+    except (ValueError, TypeError):
+        return fallback
+    except (OverflowError, OSError):
+        return RETRY_MANUAL_HOLD
+
+
+def _safe_retry_timestamp(value):
+    if type(value) is not int or value < 0:
+        return RETRY_MANUAL_HOLD
+    return value if value <= MAX_RETRY_TIMESTAMP_MS else RETRY_MANUAL_HOLD
 
 
 def ensure_document_evidence_schema(connection, *, applied_at_ms):
@@ -235,12 +273,9 @@ def fetch_document(source, *, deadline_monotonic_ms, cancel_event, resolver=None
     try:
         ensure_source_poll_active(**controls)
         if response.status == 429 or response.status == 503:
-            retry = response.headers.get("Retry-After", "")
-            try:
-                retry_at = int(time.time() * 1000) + int(retry) * 1000 if str(retry).isdecimal() else int(parsedate_to_datetime(retry).timestamp() * 1000)
-            except (ValueError, TypeError, OverflowError):
-                retry_at = int(time.time() * 1000) + RECHECK_MS
-            raise DocumentFetchError("DOCUMENT_RATE_LIMITED", max(retry_at, int(time.time() * 1000) + RECHECK_MS))
+            retry_at = retry_after_timestamp(response.headers.get("Retry-After", ""), now_ms=int(time.time() * 1000))
+            code = "DOCUMENT_RETRY_AFTER_UNREPRESENTABLE" if retry_at == RETRY_MANUAL_HOLD else "DOCUMENT_RATE_LIMITED"
+            raise DocumentFetchError(code, retry_at)
         if response.status != 200:
             raise DocumentFetchError("DOCUMENT_REDIRECT_REJECTED" if 300 <= response.status < 400 else "DOCUMENT_HTTP_FAILED")
         length = response.headers.get("Content-Length", "")
@@ -301,7 +336,7 @@ class DocumentEvidenceService:
                 if now < max(previous["retry_at"], previous["requested_at"] + RECHECK_MS):
                     raise fail("仍在读取间隔或来源限流等待期，请稍后重试。", "DOCUMENT_RETRY_LATER")
             # Persistent cross-session cap also covers manual confirmation/restarts.
-            count = db.execute("SELECT COUNT(*) FROM source_document_jobs WHERE requested_at>?", (now - WINDOW_MS,)).fetchone()[0]
+            count = db.execute("SELECT COUNT(*) FROM source_document_jobs WHERE requested_at>? AND id NOT GLOB ?", (now - WINDOW_MS, NOT_RESERVED_PREFIX + "*")).fetchone()[0]
             if count >= MAX_REQUESTS:
                 raise fail("正文读取在 20 分钟内最多 6 次，请稍后继续。", "DOCUMENT_BUDGET_EXHAUSTED")
             embargo = db.execute("SELECT COALESCE(MAX(retry_at),0) FROM source_document_jobs WHERE source_host=?", (host,)).fetchone()[0]
@@ -311,6 +346,48 @@ class DocumentEvidenceService:
             db.execute("INSERT INTO source_document_jobs(id,item_id,session_id,source_host,expires_at,status,requested_at) VALUES(?,?,?,?,?,'waiting',?)", (job_id, item_id, session_id, host, expires_at or now + 120_000, now))
             return dict(db.execute("SELECT * FROM source_document_jobs WHERE id=?", (job_id,)).fetchone())
 
+    def record_not_reserved(self, item_id, *, session_id, expires_at, reason):
+        """Persist a terminal, event-local disposition; this grants no request.
+
+        Distinct IDs mark records that never reserved budget. All actual job IDs
+        still consume their reservation even if cancelled before network I/O.
+        """
+        codes = {"DOCUMENT_RETRY_LATER": "DOCUMENT_NOT_RESERVED_COOLDOWN",
+                 "DOCUMENT_BUDGET_EXHAUSTED": "DOCUMENT_NOT_RESERVED_BUDGET"}
+        if reason not in codes:
+            raise ValueError("unsupported document disposition")
+        source = bound_source(self.item(item_id))
+        host = urlsplit(source["url"]).hostname
+        with self.store._lock, closing(self.store._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            previous = db.execute("SELECT * FROM source_document_jobs WHERE item_id=? ORDER BY requested_at DESC,rowid DESC LIMIT 1", (item_id,)).fetchone()
+            if previous:
+                return dict(previous)
+            now = self.clock()
+            retry_at = db.execute("SELECT COALESCE(MAX(retry_at),0) FROM source_document_jobs WHERE source_host=?", (host,)).fetchone()[0]
+            job_id = NOT_RESERVED_PREFIX + uuid.uuid4().hex
+            db.execute("""INSERT INTO source_document_jobs
+                (id,item_id,session_id,source_host,expires_at,status,requested_at,completed_at,retry_at,error_code)
+                VALUES(?,?,?,?,?,'cancelled',?,?,?,?)""",
+                (job_id, item_id, session_id, host, expires_at, now, now, retry_at, codes[reason]))
+            return dict(db.execute("SELECT * FROM source_document_jobs WHERE id=?", (job_id,)).fetchone())
+
+    def _cancel_inadmissible(self, db, job, *, cancel_event, deadline_monotonic_ms):
+        """Recheck at execution time; cancellation never refunds a reservation."""
+        now = self.clock()
+        retry_at = db.execute("SELECT COALESCE(MAX(retry_at),0) FROM source_document_jobs WHERE source_host=?", (job["source_host"],)).fetchone()[0]
+        code = ""
+        if cancel_event.is_set():
+            code = "DOCUMENT_CANCELLED"
+        elif now >= job["expires_at"] or int(time.monotonic() * 1000) >= deadline_monotonic_ms:
+            code = "DOCUMENT_AUTHORIZATION_EXPIRED"
+        elif retry_at == RETRY_MANUAL_HOLD or now < retry_at:
+            code = "DOCUMENT_PUBLISHER_COOLDOWN"
+        if code:
+            db.execute("UPDATE source_document_jobs SET status='cancelled',error_code=?,retry_at=?,completed_at=? WHERE id=?",
+                       (code, retry_at, now, job["id"]))
+        return bool(code)
+
     def recover(self):
         # Host owner is held by caller; interrupted work never silently refetches.
         with self.store._lock, closing(self.store._connect()) as db, db:
@@ -318,18 +395,25 @@ class DocumentEvidenceService:
 
     def run(self, job_id, *, cancel_event, deadline_monotonic_ms):
         with self.store._lock, closing(self.store._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
             job = db.execute("SELECT * FROM source_document_jobs WHERE id=?", (job_id,)).fetchone()
             if not job or job["status"] != "waiting":
-                return
-            if self.clock() >= job["expires_at"]:
-                db.execute("UPDATE source_document_jobs SET status='cancelled',error_code='DOCUMENT_AUTHORIZATION_EXPIRED',completed_at=? WHERE id=?", (self.clock(), job_id))
-                return
+                return False
+            if self._cancel_inadmissible(db, job, cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms):
+                return False
             db.execute("UPDATE source_document_jobs SET status='fetching' WHERE id=?", (job_id,))
         # All network/parse work is outside the store lock and SQLite transaction.
         try:
             deadline_monotonic_ms = min(deadline_monotonic_ms, int(time.monotonic() * 1000) + max(1, job["expires_at"] - self.clock()))
             record = self.item(job["item_id"])
             source = bound_source(record)
+            # Event verification may take time. Recheck the latest cooldown and
+            # authorization after it, immediately before the one outbound read.
+            with self.store._lock, closing(self.store._connect()) as db, db:
+                db.execute("BEGIN IMMEDIATE")
+                if self._cancel_inadmissible(db, job, cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms):
+                    return False
+            ensure_source_poll_active(cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)
             resource = self.fetcher(source, cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)
             ensure_source_poll_active(cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)
             if resource.final_url != source["url"]:
@@ -357,7 +441,8 @@ class DocumentEvidenceService:
             if cancel_event.is_set():
                 code = "DOCUMENT_CANCELLED"
             with self.store._lock, closing(self.store._connect()) as db, db:
-                db.execute("UPDATE source_document_jobs SET status='failed',error_code=?,retry_at=?,completed_at=? WHERE id=?", (code, getattr(exc, "retry_at", 0), self.clock(), job_id))
+                db.execute("UPDATE source_document_jobs SET status='failed',error_code=?,retry_at=?,completed_at=? WHERE id=?", (code, _safe_retry_timestamp(getattr(exc, "retry_at", 0)), self.clock(), job_id))
+        return True
 
 
 class DocumentEvidenceController:
@@ -414,27 +499,41 @@ inert with respect to network. Pending job recovery requires the host owner.
 
     def cycle(self):
         with self.lock:
-            if not self.has_requests and not (self.auto_until > self.service.clock() and self.auto_remaining > 0):
+            if not self.has_requests and not (self.auto_until > self.service.clock()):
                 return
-            if self.auto_until > self.service.clock() and self.auto_remaining > 0:
+            if self.auto_until > self.service.clock():
                 with closing(self.store._connect()) as db:
                     rows = db.execute("SELECT rowid,id FROM source_inbox_items WHERE rowid>? ORDER BY rowid LIMIT 20", (self.auto_cursor,)).fetchall()
                 for row in rows:
-                    if self.auto_remaining <= 0:
+                    if self.stop_event.is_set() or self.service.clock() >= self.auto_until:
                         break
-                    self.auto_cursor = row["rowid"]
                     try:
+                        if self.auto_remaining <= 0:
+                            self.service.record_not_reserved(row["id"], session_id=self.session_id,
+                                expires_at=self.auto_until, reason="DOCUMENT_BUDGET_EXHAUSTED")
+                            self.auto_cursor = row["rowid"]
+                            continue
                         self.service.request(row["id"], session_id=self.session_id, confirmation=True, expires_at=self.auto_until)
                         self.has_requests = True
                         self.auto_remaining -= 1
                     except SourceInboxError as exc:
-                        if exc.code != "DOCUMENT_SCOPE_UNSUPPORTED":
+                        if exc.code in {"DOCUMENT_RETRY_LATER", "DOCUMENT_BUDGET_EXHAUSTED"}:
+                            self.service.record_not_reserved(row["id"], session_id=self.session_id,
+                                expires_at=self.auto_until, reason=exc.code)
                             self.error = exc.code
+                        elif exc.code != "DOCUMENT_SCOPE_UNSUPPORTED":
+                            raise
+                    # Advance only after a durable job/disposition, or a source
+                    # that is explicitly outside this feature's fixed scope.
+                    self.auto_cursor = row["rowid"]
             with closing(self.store._connect()) as db:
-                job = db.execute("SELECT id FROM source_document_jobs WHERE session_id=? AND status='waiting' ORDER BY requested_at,rowid LIMIT 1", (self.session_id,)).fetchone()
-                self.has_requests = job is not None
-        if job and not self.stop_event.is_set():
-            self.service.run(job["id"], cancel_event=self.stop_event, deadline_monotonic_ms=int(time.monotonic() * 1000) + 12_000)
+                jobs = db.execute("SELECT id FROM source_document_jobs WHERE session_id=? AND status='waiting' ORDER BY requested_at,rowid LIMIT ?", (self.session_id, MAX_REQUESTS)).fetchall()
+                self.has_requests = bool(jobs)
+        for job in jobs:
+            if self.stop_event.is_set():
+                break
+            if self.service.run(job["id"], cancel_event=self.stop_event, deadline_monotonic_ms=int(time.monotonic() * 1000) + 12_000):
+                break  # at most one outbound operation per cycle; cancelled heads do not block others
 
     def _work(self):
         while not self.stop_event.wait(1):

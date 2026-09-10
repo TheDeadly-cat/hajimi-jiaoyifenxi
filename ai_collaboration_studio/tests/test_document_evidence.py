@@ -66,8 +66,138 @@ class DocumentEvidenceFixture(unittest.TestCase):
     def run_job(self, job):
         self.service.run(job["id"], cancel_event=self.cancel, deadline_monotonic_ms=int(time.monotonic() * 1000) + 12_000)
 
+    def import_micron(self):
+        from datetime import datetime, timezone
+        from backend.market.ir_releases import OfficialIrReleaseAdapter
+        from backend.source_monitoring.adapters.company_ir import CompanyIrSourceAdapter
+        from tests.test_source_monitoring_micron_json import MicronJsonFixtureTransport
+        clock = lambda: datetime.fromtimestamp(NOW / 1000, tz=timezone.utc)
+        adapter = CompanyIrSourceAdapter(adapter=OfficialIrReleaseAdapter(source_format="q4_json", micron_fetch_bytes=MicronJsonFixtureTransport(), clock=clock),
+            symbols=["US.MU"], per_symbol_limit=8, force=True, receipt_clock=clock)
+        poll = adapter.poll({}, observed_at_ms=NOW, max_items=50)
+        self.assertFalse(poll.source_errors)
+        packet = build_source_import_packet(adapter_key="company_ir", external_run_id="cooldown-micron-fixture", captured_at_ms=NOW, observed_items=[poll.observed_items[0]])
+        return SourceInboxService(self.store, clock=lambda: NOW / 1000).import_packet(json.dumps(packet), actor="source_monitoring_worker")["items"][0]["id"]
+
 
 class DocumentEvidenceTests(DocumentEvidenceFixture):
+    def test_cancelled_cooldown_head_does_not_block_micron_or_retry_failed_sec(self):
+        controller = DocumentEvidenceController(self.store, service=self.service, network_allowed=True)
+        controller.request(self.item_id, confirmation=True)
+        second_id = import_event(self.store, 2)
+        controller.request(second_id, confirmation=True)
+        micron_id = self.import_micron()
+        controller.request(micron_id, confirmation=True)
+        def fetch(source, **kw):
+            if source["kind"] == "sec":
+                raise DocumentFetchError("DOCUMENT_RATE_LIMITED", self.now + 600_000)
+            return FetchedResource(MICRON_HTML, "text/html", source["url"])
+        self.fetcher.side_effect = fetch
+        controller.cycle()
+        controller.cycle()
+        self.assertEqual(self.fetcher.call_count, 2)
+        self.assertEqual(self.service.view(second_id)["status"], "cancelled")
+        self.assertEqual(self.service.view(micron_id)["status"], "complete")
+        self.now += 600_001
+        controller.cycle()
+        self.assertEqual(self.fetcher.call_count, 2)
+
+    def test_authorization_rechecked_after_event_verification_and_before_fetch(self):
+        job = self.request(expires_at=self.now + 1)
+        original_item = self.service.item
+        def read(item_id):
+            self.now += 2
+            return original_item(item_id)
+        with patch.object(self.service, "item", side_effect=read):
+            self.run_job(job)
+        self.fetcher.assert_not_called()
+        self.assertEqual(self.service.view(self.item_id)["job"]["error_code"], "DOCUMENT_AUTHORIZATION_EXPIRED")
+
+    def test_cancellation_restart_reauthorization_and_dispositions_do_not_refund_budget(self):
+        controller = DocumentEvidenceController(self.store, service=self.service, network_allowed=True)
+        ids = [self.item_id] + [import_event(self.store, index) for index in range(2, 7)]
+        jobs = [controller.request(item_id, confirmation=True) for item_id in ids]
+        self.cancel.set()
+        for job in jobs:
+            self.run_job(job)
+        controller.service.recover()
+        controller.authorize(confirmation=True)
+        seventh = import_event(self.store, 7)
+        controller.cycle()
+        disposition = self.service.view(seventh)["job"]
+        controller.cycle()
+        self.assertEqual(self.service.view(seventh)["job"], disposition)
+        self.now += RECHECK_MS
+        restarted = DocumentEvidenceController(self.store, service=self.service, network_allowed=True)
+        self.assertFalse(restarted.snapshot()["enabled"])
+        restarted.authorize(confirmation=True)
+        for _ in range(2):
+            with self.assertRaises(SourceInboxError) as caught:
+                restarted.request(seventh, confirmation=True, refresh=True)
+            self.assertEqual(caught.exception.code, "DOCUMENT_BUDGET_EXHAUSTED")
+        with closing(self.store._connect()) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM source_document_jobs WHERE id GLOB 'document_job_*'").fetchone()[0], 6)
+        self.fetcher.assert_not_called()
+
+    def test_failed_disposition_write_does_not_advance_auto_cursor(self):
+        self.fetcher.side_effect = DocumentFetchError("DOCUMENT_RATE_LIMITED", self.now + 600_000)
+        self.run_job(self.request())
+        controller = DocumentEvidenceController(self.store, service=self.service, network_allowed=True)
+        controller.authorize(confirmation=True)
+        before = controller.auto_cursor
+        second_id = import_event(self.store, 2)
+        with patch.object(self.service, "record_not_reserved", side_effect=sqlite3.OperationalError("fixture write failure")):
+            with self.assertRaises(sqlite3.OperationalError):
+                controller.cycle()
+        self.assertEqual(controller.auto_cursor, before)
+        self.assertIsNone(self.service.view(second_id)["job"])
+
+    def test_extreme_transport_retry_value_does_not_kill_worker_or_escape_sqlite(self):
+        self.fetcher.side_effect = DocumentFetchError("DOCUMENT_RATE_LIMITED", 10**100)
+        self.run_job(self.request())
+        result = self.service.view(self.item_id)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["job"]["retry_at"], (1 << 63) - 1)
+        self.assertIsNotNone(import_event(self.store, 2))
+
+    def test_already_queued_job_rechecks_publisher_cooldown_before_fetch(self):
+        first = self.request(expires_at=self.now + WINDOW_MS)
+        second_id = import_event(self.store, 2)
+        second = self.service.request(second_id, session_id="fixture", confirmation=True, expires_at=self.now + WINDOW_MS)
+        self.fetcher.side_effect = DocumentFetchError("DOCUMENT_RATE_LIMITED", self.now + 600_000)
+        self.run_job(first)
+        self.run_job(second)
+        self.assertEqual(self.fetcher.call_count, 1)
+        self.assertEqual(self.service.view(second_id)["status"], "cancelled")
+        self.assertEqual(self.service.view(second_id)["job"]["error_code"], "DOCUMENT_PUBLISHER_COOLDOWN")
+        self.assertEqual(self.service.view(self.item_id)["status"], "failed")
+
+    def test_auto_cooldown_rejection_retains_event_level_disposition(self):
+        self.fetcher.side_effect = DocumentFetchError("DOCUMENT_RATE_LIMITED", self.now + 600_000)
+        self.run_job(self.request())
+        controller = DocumentEvidenceController(self.store, service=self.service, network_allowed=True)
+        controller.authorize(confirmation=True)
+        second_id = import_event(self.store, 2)
+        controller.cycle()
+        result = self.service.view(second_id)
+        self.assertIsNotNone(result["job"])
+        self.assertEqual(result["job"]["error_code"], "DOCUMENT_NOT_RESERVED_COOLDOWN")
+        self.now += 600_001
+        controller.cycle()
+        self.assertEqual(self.fetcher.call_count, 1)  # explicit disposition, not silent retry
+        self.assertIsNotNone(self.service.item(second_id))
+
+    def test_over_budget_batch_has_dispositions_without_extra_reservations(self):
+        controller = DocumentEvidenceController(self.store, service=self.service, network_allowed=True)
+        controller.authorize(confirmation=True)
+        ids = [import_event(self.store, index) for index in range(2, 10)]
+        for _ in range(9):
+            controller.cycle()
+        results = [self.service.view(item_id) for item_id in ids]
+        self.assertTrue(all(result["job"] is not None for result in results))
+        self.assertEqual(sum(result["job"]["error_code"] == "DOCUMENT_NOT_RESERVED_BUDGET" for result in results), 2)
+        self.assertEqual(self.fetcher.call_count, 6)
+
     def test_micron_metadata_event_gets_separate_body_hash_and_modified_time(self):
         from datetime import datetime, timezone
         from backend.market.ir_releases import OfficialIrReleaseAdapter
@@ -265,6 +395,31 @@ class DocumentEvidenceTests(DocumentEvidenceFixture):
 
 
 class DocumentParserTests(unittest.TestCase):
+    def test_retry_after_seconds_http_dates_missing_and_invalid(self):
+        from backend.document_evidence import retry_after_timestamp
+        from datetime import datetime, timezone
+        from email.utils import format_datetime
+        target = NOW + 600_000
+        future = datetime.fromtimestamp(target / 1000, timezone.utc)
+        for header in ["600", " 600 ", "0" * 5000 + "600", format_datetime(future, usegmt=True), future.strftime("%a %b %d %H:%M:%S %Y")]:
+            with self.subTest(header=header[:60]):
+                self.assertEqual(retry_after_timestamp(header, now_ms=NOW), target)
+        for header in [None, "", "not-a-date", "-2", "0", "3.5", "٠١", "Fri, 31 Dec 1999 23:59:59 GMT"]:
+            with self.subTest(header=header):
+                self.assertEqual(retry_after_timestamp(header, now_ms=NOW), NOW + RECHECK_MS)
+        self.assertEqual(retry_after_timestamp("Fri, 31 Dec 9999 23:59:59 GMT", now_ms=NOW), 253402300799000)
+
+    def test_unrepresentable_retry_after_is_a_persistent_manual_hold(self):
+        source = {"kind": "micron", "url": "https://investors.micron.com/news/press-release/2026/fixture/default.aspx"}
+        resolver = Mock(return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443))])
+        for header in ["9" * 5000, "99999999999999999"]:
+            response = Mock(status=429, headers={"Retry-After": header})
+            with patch("backend.document_evidence.time.time", return_value=NOW / 1000), self.assertRaises(DocumentFetchError) as caught:
+                fetch_document(source, resolver=resolver, transport=Mock(return_value=response),
+                    deadline_monotonic_ms=int(time.monotonic() * 1000) + 12_000, cancel_event=threading.Event())
+            self.assertEqual(caught.exception.retry_at, (1 << 63) - 1)
+            self.assertEqual(caught.exception.code, "DOCUMENT_RETRY_AFTER_UNREPRESENTABLE")
+
     def test_head_only_missing_body_and_micron_article_scope(self):
         for raw in [b"<html><head><title>Announcement</title></head></html>", b'<html><head><script type="application/ld+json">{"articleBody":"fake full text"}</script></head><body><h1>Title only</h1></body></html>']:
             result = extract_document(raw, "text/html", {"kind": "micron", "scope": "article"})
