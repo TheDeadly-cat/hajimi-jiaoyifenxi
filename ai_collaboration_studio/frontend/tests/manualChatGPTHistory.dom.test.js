@@ -226,6 +226,25 @@ test("oversized evidence preview shows the omitted scope and keeps freeze disabl
   assert.equal(buttonWithText(view.host, "冻结任务包").disabled, true);
 });
 
+test("a room with a frozen bundle can explicitly preview new evidence in a new task without dispatching the old bundle", async () => {
+  const writes = [];
+  const old = { ...manualSession({ id: "mcg_old", objective: "Existing frozen scope" }), state: "BUNDLE_READY" };
+  globalThis.fetch = async (path, options = {}) => {
+    if (options.method) writes.push(path);
+    if (path.endsWith("/evidence-preview")) return response({ ok: true, evidence_preview: { ready: true, issues: [], omitted_item_count: 0, items: [], package_characters: 0, evidence_sha256: "f".repeat(64) } });
+    return response({ ok: true, manual_chatgpt_sessions: [old] });
+  };
+  const view = await mountDialog({ roomId: "room_market" });
+  await settle();
+  await click(buttonWithText(view.host, "创建新任务"));
+  assert.ok(view.host.querySelector('[aria-label="冻结前研究资料预览"]'));
+  assert.equal(buttonWithText(view.host, "冻结任务包").disabled, true);
+  await click(buttonWithText(view.host, "预览实际研究资料"));
+  assert.equal(buttonWithText(view.host, "冻结任务包").disabled, false);
+  assert.ok(view.host.querySelector('[aria-label="ChatGPT 协作任务列表"]'), "old task stays accessible");
+  assert.deepEqual(writes, []);
+});
+
 test("history list replaces latest-only loading and switches tasks without automatic calls", async () => {
   const requests = [];
   const current = manualSession({

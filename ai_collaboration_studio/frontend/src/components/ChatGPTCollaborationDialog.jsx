@@ -604,6 +604,7 @@ export function ChatGPTCollaborationDialog({
             </section>
           ) : (
             <>
+              <p className="manual-chatgpt-estimate-note">已冻结任务包不会自动加入后来的资料。需要使用新增选段时，请点击“{primaryAction.id === "reset_for_new_bundle" ? primaryAction.label : "创建新任务"}”并重新预览；旧任务包继续保留。</p>
               <section className={`manual-chatgpt-state ${view.tone}`} role="status" aria-live="polite">
                 {view.integrityOk ? <CheckCircle2 size={20} /> : <AlertTriangle size={20} />}
                 <div><strong>{view.label}</strong><span>{view.detail}</span></div>
@@ -848,8 +849,7 @@ export function ChatGPTCollaborationDialog({
 
         <footer>
           {view
-          && primaryAction.id !== "reset_for_new_bundle"
-          && !["BUNDLE_READY", "WAITING_FOR_CHATGPT", "IMPORT_REJECTED", "CONTEXT_STALE"].includes(view.state) ? (
+          && primaryAction.id !== "reset_for_new_bundle" ? (
             <button className="secondary" type="button" disabled={busy} onClick={resetForNewBundle}>创建新任务</button>
           ) : <span />}
           {renderPrimaryAction()}
