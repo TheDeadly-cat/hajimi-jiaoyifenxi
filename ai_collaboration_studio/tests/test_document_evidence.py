@@ -81,6 +81,24 @@ class DocumentEvidenceFixture(unittest.TestCase):
 
 
 class DocumentEvidenceTests(DocumentEvidenceFixture):
+    def test_parser_upgrade_preserves_legacy_versions_and_changes_identity(self):
+        with patch("backend.document_evidence.PARSER", "official_html_blocks_v1"):
+            self.run_job(self.request())
+        legacy = self.service.view(self.item_id)["versions"][0]
+        self.now += RECHECK_MS + 1
+        self.run_job(self.request(refresh=True))
+        versions = self.service.view(self.item_id)["versions"]
+        self.assertEqual(len(versions), 2)
+        self.assertEqual(versions[0], legacy)
+        self.assertEqual(legacy["parser_version"], "official_html_blocks_v1")
+        self.assertEqual(versions[1]["parser_version"], "official_html_blocks_v2")
+        self.assertNotEqual(versions[0]["id"], versions[1]["id"])
+        self.assertEqual(versions[0]["raw_bytes_sha256"], versions[1]["raw_bytes_sha256"])
+        self.now += RECHECK_MS + 1
+        self.run_job(self.request(refresh=True))
+        self.assertEqual(self.service.view(self.item_id)["versions"], versions)
+
+
     def test_cancelled_cooldown_head_does_not_block_micron_or_retry_failed_sec(self):
         controller = DocumentEvidenceController(self.store, service=self.service, network_allowed=True)
         controller.request(self.item_id, confirmation=True)
@@ -395,6 +413,43 @@ class DocumentEvidenceTests(DocumentEvidenceFixture):
 
 
 class DocumentParserTests(unittest.TestCase):
+    def test_evergreen_body_inside_page_form_keeps_article_only(self):
+        first = "A synthetic issuer announced a conference call on October 15, 2026 at 2:30 p.m. Mountain time. This fixture verifies text boundaries and does not report a real company event."
+        raw = (f'<html><body><form id="fmForm1" action="default.aspx" method="post">'
+               '<nav>Unrelated navigation</nav><input value="secret"><p>Search label</p>'
+               '<form id="header-search-form"><p>Search controls</p></form>'
+               f'<div class="layout evergreen-news-body"><p>{first}</p>'
+               '<form id="newsletter"><p>Subscribe controls</p></form>'
+               '<p>Article ending with <a href="/unread">an unread link</a>.</p></div>'
+               '<footer>Unrelated footer</footer></form></body></html>').encode()
+        result = extract_document(raw, "text/html", {"kind": "micron", "scope": "selected HTML"})
+        self.assertTrue(result["body_located"])
+        self.assertEqual(result["blocks"], [first, "Article ending with an unread link."])
+        self.assertEqual(result["linked_targets_unread"], ["/unread"])
+        self.assertEqual(result["status"], "partial")
+        for excluded in ("navigation", "secret", "Search", "Subscribe", "footer"):
+            self.assertNotIn(excluded, result["text"])
+
+    def test_evergreen_marker_does_not_bypass_ignored_ancestors_or_other_forms(self):
+        text = "Synthetic material for checking a closed extraction boundary. " * 4
+        cases = [
+            f'<form id="search"><div class="evergreen-news-body"><p>{text}</p></div></form>',
+            f'<form id="fmForm1" hidden><div class="evergreen-news-body"><p>{text}</p></div></form>',
+            f'<form id="fmForm1"><nav><div class="evergreen-news-body"><p>{text}</p></div></nav></form>',
+            f'<form id="fmForm1"><div class="not-evergreen-news-body"><p>{text}</p></div></form>',
+        ]
+        for fragment in cases:
+            with self.subTest(fragment=fragment[:80]):
+                result = extract_document(("<html><body>" + fragment + "</body></html>").encode(),
+                                          "text/html", {"kind": "micron", "scope": "selected HTML"})
+                self.assertFalse(result["body_located"])
+                self.assertEqual(result["text"], "")
+        sec = extract_document(('<html><body><form id="fmForm1"><p>Item 2.02 ' + text +
+                                '</p></form></body></html>').encode(),
+                               "text/html", {"kind": "sec", "scope": "main"})
+        self.assertEqual(sec["text"], "")
+
+
     def test_retry_after_seconds_http_dates_missing_and_invalid(self):
         from backend.document_evidence import retry_after_timestamp
         from datetime import datetime, timezone

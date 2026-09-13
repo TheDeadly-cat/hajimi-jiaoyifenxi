@@ -24,7 +24,7 @@ from .source_inbox_service import SourceInboxError, SourceInboxService
 from .source_poll_control import ensure_source_poll_active, source_poll_timeout_seconds
 
 FORMAT = "official_document_evidence_v1"
-PARSER = "official_html_blocks_v1"
+PARSER = "official_html_blocks_v2"
 MAX_BYTES = 1_500_000
 MAX_CHARS = 50_000
 WINDOW_MS = 20 * 60_000
@@ -153,12 +153,16 @@ class DocumentHTMLParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         values = dict(attrs)
         parent_active = self.stack[-1][1] if self.stack else False
-        ignored = (self.stack[-1][2] if self.stack else False) or tag in self.IGNORE or (
+        # Micron's Evergreen page wraps its article in this ASP.NET page form.
+        # It grants no article scope itself; ordinary/nested forms stay ignored.
+        page_form = self.kind == "micron" and tag == "form" and values.get("id") == "fmForm1" and not parent_active
+        ignored = (self.stack[-1][2] if self.stack else False) or (tag in self.IGNORE and not page_form) or (
             "hidden" in values or values.get("aria-hidden") == "true"
             or bool(re.search(r"(?:display\s*:\s*none|visibility\s*:\s*hidden)", values.get("style", "") or "", re.I))
         )
         marker = (values.get("class", "") or "") + " " + (values.get("id", "") or "")
-        article = tag == "article" or any(key in marker.lower() for key in (
+        evergreen_body = self.kind == "micron" and "evergreen-news-body" in (values.get("class", "") or "").lower().split()
+        article = evergreen_body or tag == "article" or any(key in marker.lower() for key in (
             "field--name-body", "article-body", "article_body", "module_body", "press-release-body",
         ))
         active = parent_active or (tag == "body" if self.kind == "sec" else article)
