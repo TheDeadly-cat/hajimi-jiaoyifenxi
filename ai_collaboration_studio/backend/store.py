@@ -183,6 +183,7 @@ from .round_contexts import (
     round_context_binding_payload,
 )
 from .source_inbox_service import ensure_source_inbox_schema
+from .document_evidence import ensure_document_evidence_schema
 from .source_inbox_trading_impact import ensure_source_inbox_trading_impact_schema
 from .source_monitoring.operations import ensure_source_monitoring_operations_schema
 from .source_monitoring.state_repository import ensure_source_monitoring_schema
@@ -1644,6 +1645,7 @@ class StudioStore:
             )
             schema_applied_at_ms = now_ms()
             ensure_source_inbox_schema(connection)
+            ensure_document_evidence_schema(connection, applied_at_ms=schema_applied_at_ms)
             ensure_source_inbox_trading_impact_schema(
                 connection,
                 applied_at_ms=schema_applied_at_ms,
@@ -7851,6 +7853,8 @@ class StudioStore:
         official_supplement_pending: bool = False,
         required_plugin_action: str = "",
     ) -> dict[str, Any] | None:
+        if isinstance(payload.get("metadata"), dict) and "document_selection" in payload["metadata"]:
+            raise ValueError("正文来源身份只能通过正文选段入口生成。")
         title = str(payload.get("title") or "").strip()[:120]
         content = str(payload.get("content") or "").strip()[:50000]
         kind = str(payload.get("kind") or "note").strip().lower()[:24]
@@ -7890,19 +7894,22 @@ class StudioStore:
             room = connection.execute("SELECT id FROM rooms WHERE id=?", (room_id,)).fetchone()
             if not room:
                 return None
-            connection.execute(
-                """INSERT INTO materials(
-                    id,room_id,title,kind,source_url,content,metadata_json,version,active,
-                    official_supplement_pending,created_at,updated_at
-                ) VALUES(
-                    :id,:room_id,:title,:kind,:source_url,:content,:metadata_json,:version,:active,
-                    :official_supplement_pending,:created_at,:updated_at
-                )""",
-                material,
-            )
-            self._record_material_version(connection, material, timestamp)
-            connection.execute("UPDATE rooms SET updated_at=? WHERE id=?", (timestamp, room_id))
+            self._insert_material_connection(connection, material, timestamp)
         return self._public_material_dict(material)
+
+    def _insert_material_connection(self, connection, material, timestamp):
+        """Caller owns the material transaction, including its version and room timestamp."""
+        connection.execute(
+            """INSERT INTO materials(
+                id,room_id,title,kind,source_url,content,metadata_json,version,active,
+                official_supplement_pending,created_at,updated_at
+            ) VALUES(
+                :id,:room_id,:title,:kind,:source_url,:content,:metadata_json,:version,:active,
+                :official_supplement_pending,:created_at,:updated_at
+            )""", material,
+        )
+        self._record_material_version(connection, material, timestamp)
+        connection.execute("UPDATE rooms SET updated_at=? WHERE id=?", (timestamp, material["room_id"]))
 
     def update_material(
         self,
@@ -7933,6 +7940,11 @@ class StudioStore:
             current = dict(row)
             if "expected_version" not in payload:
                 raise ValueError("保存资料必须提供 expected_version")
+            if isinstance(payload.get("metadata"), dict) and "document_selection" in payload["metadata"]:
+                raise ValueError("正文来源身份只能通过正文选段入口生成。")
+            if self._metadata_from_json(current.get("metadata_json")).get("document_selection"):
+                if set(payload) - {"expected_version", "active"} or type(payload.get("active")) is not bool:
+                    raise ValueError("正文选段不可改写；可停用该材料，或重新选择正文段落。")
             try:
                 expected_version = int(payload.get("expected_version"))
             except (TypeError, ValueError) as exc:
@@ -8028,6 +8040,11 @@ class StudioStore:
             "presentation_hub_url", "direct_material_count", "located_metric_count",
         }
         clean: dict[str, Any] = {}
+        selection = value.get("document_selection")
+        if isinstance(selection, dict) and selection.get("format") == "document_selection_v1":
+            # Created only by the local immutable-document selection service.
+            # Retain the exact contract: normalization must not shorten citations.
+            clean["document_selection"] = json.loads(json.dumps(selection, ensure_ascii=False))
         for key in allowed:
             raw = value.get(key)
             if isinstance(raw, bool):

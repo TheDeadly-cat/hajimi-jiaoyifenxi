@@ -101,6 +101,8 @@ INDEPENDENCE_CLASSIFICATIONS = frozenset({
 MAX_IMPORT_CHARS = 200_000
 MAX_OBJECTIVE_CHARS = 4_000
 MAX_EVIDENCE_ITEMS = 40
+MAX_EVIDENCE_EXCERPT_CHARS = 1_600
+MAX_TASK_PROMPT_UTF16_UNITS = 500_000  # Existing frontend taskPrompt export bound.
 MAX_CANDIDATE_GROUPS = 12
 MAX_HISTORY_ITEMS = 20
 MAX_ROLE_COUNT = 24
@@ -340,6 +342,44 @@ def _role_projection(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
     return roles
 
 
+def evidence_scope_preview(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """New-bundle admission only; historical v2 projection/hashes remain unchanged."""
+    materials = snapshot.get("materials") if isinstance(snapshot.get("materials"), list) else []
+    items, issues = [], []
+    for position, material in enumerate(materials):
+        if not isinstance(material, Mapping) or material.get("active") is not True:
+            continue
+        content = str(material.get("content") or "").strip()
+        fits = len(content) <= MAX_EVIDENCE_EXCERPT_CHARS and position < MAX_EVIDENCE_ITEMS
+        if not fits:
+            issues.append(f"资料「{_bounded_text(material.get('title'), 120)}」超出研究范围，请减少选段或停用不需要的资料。")
+        if len(items) < MAX_EVIDENCE_ITEMS:
+            metadata = material.get("metadata") if isinstance(material.get("metadata"), Mapping) else {}
+            selection = metadata.get("document_selection") or {}
+            items.append({"material_id": material.get("id"), "title": material.get("title"),
+                          "original_characters": len(content), "package_characters": len(content) if fits else 0,
+                          "excerpt": content if fits else "", "fits": fits,
+                          "source_url": _safe_http_url(material.get("source_url") or metadata.get("source_url") or metadata.get("url")),
+                          "selection": selection})
+    return {"format": "manual_evidence_scope_preview_v1", "ready": not issues,
+            "excerpt_limit": MAX_EVIDENCE_EXCERPT_CHARS, "item_limit": MAX_EVIDENCE_ITEMS,
+            "items": items, "issues": issues[:MAX_EVIDENCE_ITEMS],
+            "omitted_item_count": max(0, sum(isinstance(m, Mapping) and m.get("active") is True for m in materials) - len(items)),
+            "package_characters": sum(item["package_characters"] for item in items) if not issues else 0,
+            "evidence_sha256": canonical_sha256(_evidence_projection(snapshot)) if not issues else ""}
+
+
+def require_complete_evidence_projection(snapshot, expected_sha256=None):
+    preview = evidence_scope_preview(snapshot)
+    if not preview["ready"]:
+        raise ManualChatGPTError("研究资料超过 1,600 字符或 40 份边界。请重新选段或停用多余资料；本次未冻结、未截断。",
+                                 code="MANUAL_CHATGPT_EVIDENCE_SCOPE_EXCEEDED", status=409)
+    if expected_sha256 is not None and expected_sha256 != preview["evidence_sha256"]:
+        raise ManualChatGPTError("研究资料在预览后发生变化，请重新预览再冻结。",
+                                 code="MANUAL_CHATGPT_EVIDENCE_PREVIEW_STALE", status=409)
+    return preview
+
+
 def _evidence_projection(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     materials = snapshot.get("materials") if isinstance(snapshot.get("materials"), list) else []
@@ -501,6 +541,7 @@ def build_compact_bundle(
     created_at: int,
     review_rate_card: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    require_complete_evidence_projection(snapshot)
     context = compact_context(snapshot, objective=objective, mode=mode)
     preset = mode_preset(mode)
     bundle: dict[str, Any] = {
@@ -530,6 +571,11 @@ def build_compact_bundle(
         "import_contract_version": MANUAL_CHATGPT_IMPORT_CONTRACT_VERSION,
     }
     bundle["bundle_sha256"] = canonical_sha256(bundle)
+    if len(task_prompt(bundle).encode("utf-16-le", errors="surrogatepass")) // 2 > MAX_TASK_PROMPT_UTF16_UNITS:
+        raise ManualChatGPTError(
+            "整份任务提示超过现有 500,000 字符导出上限。请减少房间上下文或选择另一个房间，再重新预览；本次未冻结、未截断。",
+            code="MANUAL_CHATGPT_PROMPT_EXPORT_TOO_LARGE", status=409,
+        )
     return bundle
 
 
@@ -1535,7 +1581,15 @@ class ManualChatGPTService:
                 status=409,
             )
 
-    def create(self, room_id: str, *, objective: Any, mode: Any = "standard") -> dict[str, Any]:
+    def preview_evidence(self, room_id: str) -> dict[str, Any]:
+        with self.store._lock:
+            snapshot = self.store.room_snapshot(room_id)
+            if not snapshot:
+                raise LookupError("房间不存在。")
+            return evidence_scope_preview(snapshot)
+
+    def create(self, room_id: str, *, objective: Any, mode: Any = "standard",
+               expected_evidence_sha256=None) -> dict[str, Any]:
         clean_room_id = _bounded_text(room_id, 80)
         preset = mode_preset(mode)
         timestamp = now_ms()
@@ -1545,6 +1599,7 @@ class ManualChatGPTService:
             snapshot = self.store.room_snapshot(clean_room_id)
             if not snapshot:
                 raise LookupError("房间不存在。")
+            require_complete_evidence_projection(snapshot, expected_evidence_sha256)
             bundle = build_compact_bundle(
                 snapshot,
                 objective=objective,

@@ -187,6 +187,64 @@ test.after(async () => {
   dom.window.close();
 });
 
+test("new bundle requires actual evidence preview and sends its identity without dispatching models", async () => {
+  const requests = [];
+  const scope = { format: "manual_evidence_scope_preview_v1", ready: true, package_characters: 42,
+    evidence_sha256: "e".repeat(64), issues: [], omitted_item_count: 0,
+    items: [{ material_id: "mat_one", title: "Selected tail risk", original_characters: 42, package_characters: 42,
+      excerpt: "Exact tail risk and citations <script>x</script>", source_url: "https://investors.micron.com/fixture", selection: {} }] };
+  globalThis.fetch = async (path, options = {}) => {
+    requests.push({ path, options });
+    if (path.endsWith("/evidence-preview")) return response({ ok: true, evidence_preview: scope });
+    if (options.method === "POST") return response({ ok: true, manual_chatgpt: { ...manualSession({ id: "mcg_new", objective: "Selected research" }), state: "BUNDLE_READY" } });
+    return response({ ok: true, manual_chatgpt_sessions: [] });
+  };
+  const view = await mountDialog({ roomId: "room_market", initialObjective: "Selected research" });
+  await settle();
+  assert.equal(buttonWithText(view.host, "冻结任务包").disabled, true);
+  await click(buttonWithText(view.host, "预览实际研究资料"));
+  assert.equal(buttonWithText(view.host, "冻结任务包").disabled, false);
+  assert.match(view.host.textContent, /Exact tail risk and citations/);
+  assert.equal(view.host.querySelector("script"), null);
+  await click(buttonWithText(view.host, "冻结任务包"));
+  const writes = requests.filter((r) => r.options.method === "POST");
+  assert.equal(writes.length, 1);
+  assert.equal(JSON.parse(writes[0].options.body).expected_evidence_sha256, scope.evidence_sha256);
+  assert.ok(!requests.some((r) => /dispatch|api-reviews|rounds/.test(r.path)));
+});
+
+test("oversized evidence preview shows the omitted scope and keeps freeze disabled", async () => {
+  globalThis.fetch = async (path) => response(path.endsWith("/evidence-preview")
+    ? { ok: true, evidence_preview: { ready: false, package_characters: 0, omitted_item_count: 0,
+      issues: ["资料超过 1,600 字符，请重新选段。"], items: [{ material_id: "long", title: "Long evidence", original_characters: 1700, package_characters: 0, excerpt: "", selection: {} }] } }
+    : { ok: true, manual_chatgpt_sessions: [] });
+  const view = await mountDialog({ roomId: "room_market", initialObjective: "Inspect complete evidence" });
+  await settle();
+  await click(buttonWithText(view.host, "预览实际研究资料"));
+  assert.match(view.host.textContent, /当前不能冻结/);
+  assert.match(view.host.textContent, /未生成截断摘录/);
+  assert.equal(buttonWithText(view.host, "冻结任务包").disabled, true);
+});
+
+test("a room with a frozen bundle can explicitly preview new evidence in a new task without dispatching the old bundle", async () => {
+  const writes = [];
+  const old = { ...manualSession({ id: "mcg_old", objective: "Existing frozen scope" }), state: "BUNDLE_READY" };
+  globalThis.fetch = async (path, options = {}) => {
+    if (options.method) writes.push(path);
+    if (path.endsWith("/evidence-preview")) return response({ ok: true, evidence_preview: { ready: true, issues: [], omitted_item_count: 0, items: [], package_characters: 0, evidence_sha256: "f".repeat(64) } });
+    return response({ ok: true, manual_chatgpt_sessions: [old] });
+  };
+  const view = await mountDialog({ roomId: "room_market" });
+  await settle();
+  await click(buttonWithText(view.host, "创建新任务"));
+  assert.ok(view.host.querySelector('[aria-label="冻结前研究资料预览"]'));
+  assert.equal(buttonWithText(view.host, "冻结任务包").disabled, true);
+  await click(buttonWithText(view.host, "预览实际研究资料"));
+  assert.equal(buttonWithText(view.host, "冻结任务包").disabled, false);
+  assert.ok(view.host.querySelector('[aria-label="ChatGPT 协作任务列表"]'), "old task stays accessible");
+  assert.deepEqual(writes, []);
+});
+
 test("history list replaces latest-only loading and switches tasks without automatic calls", async () => {
   const requests = [];
   const current = manualSession({

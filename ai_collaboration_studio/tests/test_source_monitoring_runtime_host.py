@@ -39,6 +39,14 @@ from backend.store import StudioStore  # noqa: E402
 
 
 class SourceMonitoringRuntimeHostTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These tests exercise the metadata runtime using deliberately minimal
+        # fake stores. Document lifecycle has separate real-SQLite coverage.
+        document_patch = patch.object(http_server, "DocumentEvidenceController")
+        document_factory = document_patch.start()
+        self.addCleanup(document_patch.stop)
+        document_factory.return_value.stop.return_value = True
+
     def test_non_daemon_block_on_close_really_drains_active_handler(self) -> None:
         entered = threading.Event()
         release = threading.Event()

@@ -931,3 +931,6 @@
 @media (prefers-reduced-motion: reduce) {
   .manual-chatgpt-dialog .spin { animation: none; }
 }
+.manual-evidence-preview { min-width: 0; padding: 1rem; border: 1px solid var(--border-color, #c7c1b4); border-radius: 10px; }
+.manual-evidence-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 20rem; overflow-y: auto; font: inherit; }
+.manual-evidence-preview p, .manual-evidence-preview summary { overflow-wrap: anywhere; }

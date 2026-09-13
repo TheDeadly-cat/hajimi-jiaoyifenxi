@@ -147,14 +147,18 @@ class StructuredHttpLoggingTests(unittest.TestCase):
 
         with (
             patch.object(http_server, "STORE", store),
+            patch.object(http_server, "DocumentEvidenceController") as documents,
             patch.object(http_server, "ThreadingHTTPServer", return_value=fake_server),
             patch.object(http_server, "emit_event") as emit,
         ):
+            documents.return_value.stop.return_value = True
             http_server.run_server(
                 host="127.0.0.1",
                 port=0,
                 instance_owner=owner,
             )
+            documents.return_value.start.assert_called_once()
+            documents.return_value.stop.assert_called_once()
 
         events = [call.args[0] for call in emit.call_args_list]
         self.assertEqual(

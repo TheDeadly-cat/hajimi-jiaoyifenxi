@@ -1187,3 +1187,12 @@
   .source-inbox-notify-action { width: 100%; }
   .source-inbox-notify-action button { width: 100%; }
 }
+.document-evidence { min-width: 0; }
+.document-evidence code { overflow-wrap: anywhere; }
+.document-evidence label { display: flex; gap: 8px; align-items: start; margin: 12px 0; }
+.document-evidence select { max-width: 100%; min-width: 0; }
+.document-evidence-paragraphs { max-height: 420px; overflow: auto; padding: 4px 12px; }
+.document-evidence-paragraphs blockquote { margin: 12px 0; padding: 8px 12px; border-left: 3px solid #c99c38; }
+.document-evidence-paragraphs p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; margin: 6px 0; }
+.document-evidence-control summary { cursor: pointer; font-weight: 600; }
+.document-evidence-control button { margin: 8px; }
