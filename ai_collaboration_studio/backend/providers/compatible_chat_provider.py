@@ -5,7 +5,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from ..execution_boundary import build_text_provider_request
+from ..execution_boundary import build_text_provider_request, open_text_provider_request, read_text_provider_response, text_generation_body
 from .base import (
     ProviderProbeResult,
     ProviderResponse,
@@ -178,15 +178,9 @@ class CompatibleChatProvider:
                 error=f"{self._api_key_name} 未配置",
                 error_code="provider_error",
             )
-        body = {
-            "model": selected_model,
-            "messages": [
-                {"role": "system", "content": instructions},
-                {"role": "user", "content": input_text},
-            ],
-            "max_tokens": max(1, int(max_tokens)),
-            "stream": False,
-        }
+        body = text_generation_body(api="chat_completions", model=selected_model,
+                                    instructions=instructions, input_text=input_text,
+                                    max_output_tokens=max(1, int(max_tokens)))
         if response_format:
             body["response_format"] = response_format
         request = build_text_provider_request(
@@ -200,8 +194,8 @@ class CompatibleChatProvider:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds))) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            with open_text_provider_request(request, timeout=max(1, int(timeout_seconds))) as response:
+                payload = json.loads(read_text_provider_response(response))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")[:800]
             return ProviderResponse(

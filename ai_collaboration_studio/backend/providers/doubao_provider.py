@@ -6,7 +6,7 @@ import urllib.request
 from typing import Any
 
 from ..config import ARK_API_KEY, ARK_BASE_URL, ARK_MODEL
-from ..execution_boundary import build_text_provider_request
+from ..execution_boundary import build_text_provider_request, open_text_provider_request, read_text_provider_response, text_generation_body
 from .base import (
     ProviderProbeResult,
     ProviderResponse,
@@ -139,14 +139,9 @@ class DoubaoProvider:
                 error="ARK_API_KEY 未配置",
                 error_code="provider_error",
             )
-        body = {
-            "model": selected_model,
-            "instructions": instructions,
-            "input": input_text,
-            "max_output_tokens": max(1, int(max_output_tokens)),
-            "thinking": {"type": "disabled"},
-            "store": False,
-        }
+        body = text_generation_body(api="responses", model=selected_model,
+                                    instructions=instructions, input_text=input_text,
+                                    max_output_tokens=max(1, int(max_output_tokens)), thinking_disabled=True)
         if text_format:
             body["text"] = {"format": text_format}
         request = build_text_provider_request(
@@ -160,11 +155,11 @@ class DoubaoProvider:
             },
         )
         try:
-            with urllib.request.urlopen(
+            with open_text_provider_request(
                 request,
                 timeout=max(1, int(timeout_seconds)),
             ) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+                payload = json.loads(read_text_provider_response(response))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")[:800]
             return ProviderResponse(

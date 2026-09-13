@@ -6,7 +6,7 @@ import urllib.request
 from typing import Any
 
 from ..config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
-from ..execution_boundary import build_text_provider_request
+from ..execution_boundary import build_text_provider_request, open_text_provider_request, read_text_provider_response, text_generation_body
 from .base import (
     ProviderProbeResult,
     ProviderResponse,
@@ -122,13 +122,9 @@ class OpenAIProvider:
                 error="OPENAI_API_KEY 未配置",
                 error_code="provider_error",
             )
-        body = {
-            "model": selected_model,
-            "instructions": instructions,
-            "input": input_text,
-            "max_output_tokens": selected_limit,
-            "store": False,
-        }
+        body = text_generation_body(api="responses", model=selected_model,
+                                    instructions=instructions, input_text=input_text,
+                                    max_output_tokens=selected_limit)
         request = build_text_provider_request(
             self._base_url,
             "responses",
@@ -140,8 +136,8 @@ class OpenAIProvider:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            with open_text_provider_request(request, timeout=60) as response:
+                payload = json.loads(read_text_provider_response(response))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")[:500]
             return ProviderResponse(

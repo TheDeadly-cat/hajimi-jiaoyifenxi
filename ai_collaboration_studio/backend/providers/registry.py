@@ -24,16 +24,23 @@ class ProviderRegistry:
         providers: dict[str, ChatProvider] | None = None,
         *,
         disabled_provider_ids: set[str] | frozenset[str] | None = None,
+        api_keys: dict[str, str] | None = None,
     ) -> None:
         uses_production_providers = providers is None
+        self.uses_production_providers = uses_production_providers
+        if api_keys is not None and (not uses_production_providers or not isinstance(api_keys, dict)
+                or set(api_keys) - {"openai", "deepseek", "doubao", "glm"}
+                or any(not isinstance(value, str) for value in api_keys.values())):
+            raise ValueError("Explicit API keys require known production providers")
+        key_arguments = lambda provider_id: ({"api_key": api_keys[provider_id]} if api_keys is not None and provider_id in api_keys else {})
         self._providers: dict[str, ChatProvider] = (
             providers
             if providers is not None
             else {
-                "openai": OpenAIProvider(),
-                "deepseek": DeepSeekProvider(),
-                "doubao": DoubaoProvider(),
-                "glm": GLMProvider(),
+                "openai": OpenAIProvider(**key_arguments("openai")),
+                "deepseek": DeepSeekProvider(**key_arguments("deepseek")),
+                "doubao": DoubaoProvider(**key_arguments("doubao")),
+                "glm": GLMProvider(**key_arguments("glm")),
             }
         )
         configured_disabled_ids: set[str] | frozenset[str]
