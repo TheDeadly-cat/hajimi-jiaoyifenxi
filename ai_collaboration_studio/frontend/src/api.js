@@ -25,6 +25,13 @@ async function jsonRequest(path, options = {}) {
 }
 
 export const api = {
+  previewDocumentSelection: (itemId, payload, signal) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document/selection/preview`, { method: "POST", body: JSON.stringify(payload), signal }),
+  saveDocumentSelection: (itemId, payload, signal) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document/selection`, { method: "POST", body: JSON.stringify(payload), signal }),
+  manualEvidencePreview: (roomId, signal) => jsonRequest(`/api/rooms/${encodeURIComponent(roomId)}/chatgpt-collaborations/evidence-preview`, { signal }),
+  sourceDocument: (itemId, signal) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document`, { signal }),
+  requestSourceDocument: (itemId, payload) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document`, { method: "POST", body: JSON.stringify(payload) }),
+  sourceDocumentControl: (signal) => jsonRequest("/api/monitoring/documents/control", { signal }),
+  enableSourceDocuments: (payload) => jsonRequest("/api/monitoring/documents/control", { method: "POST", body: JSON.stringify(payload) }),
   bootstrap: (roomId = "") => jsonRequest(`/api/bootstrap${roomId ? `?room=${encodeURIComponent(roomId)}` : ""}`),
   room: (roomId) => jsonRequest(`/api/rooms/${encodeURIComponent(roomId)}`),
   listSourceInbox: ({

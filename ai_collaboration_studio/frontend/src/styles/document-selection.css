@@ -1,0 +1,13 @@
+.document-selection { margin-block: 1rem; padding: 1rem; border: 1px solid var(--border-color, #c7c1b4); border-radius: 10px; min-width: 0; }
+.document-selection fieldset { border: 0; padding: 0; min-width: 0; }
+.document-selection-options { max-height: 24rem; overflow-y: auto; margin-block: .75rem; }
+.document-selection-options label, .document-selection-confirm { display: flex; align-items: flex-start; gap: .65rem; padding-block: .6rem; }
+.document-selection input[type="checkbox"] { width: auto; flex: 0 0 auto; margin-top: .3rem; }
+.document-selection-text { display: block; white-space: pre-wrap; overflow-wrap: anywhere; }
+.document-selection-room { display: grid; gap: .4rem; margin-block: .8rem; }
+.document-selection-preview { margin-top: 1rem; min-width: 0; }
+.document-selection-preview dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: .65rem; }
+.document-selection-preview dd { margin: .2rem 0; font-weight: 600; }
+.document-selection-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 25rem; overflow-y: auto; padding: .75rem; border: 1px solid var(--border-color, #c7c1b4); font: inherit; }
+.document-selection-preview p, .document-selection-preview code { overflow-wrap: anywhere; }
+.document-selection button { white-space: normal; }
