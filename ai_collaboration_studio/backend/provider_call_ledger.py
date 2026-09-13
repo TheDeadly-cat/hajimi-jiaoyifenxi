@@ -171,9 +171,11 @@ class ProviderCallLedger:
         member_version: int = 0,
         target_type: str = "",
         target_id: str = "",
+        database_max_calls: int | None = None,
     ) -> dict[str, Any]:
         """Spend one slot before the caller begins an external provider request."""
 
+        ceiling = {"database_max_calls": database_max_calls} if database_max_calls is not None else {}
         return self.store.reserve_provider_call(
             self.run_id,
             kind=kind,
@@ -183,6 +185,7 @@ class ProviderCallLedger:
             member_version=member_version,
             target_type=target_type,
             target_id=target_id,
+            **ceiling,
         )
 
     def finish(

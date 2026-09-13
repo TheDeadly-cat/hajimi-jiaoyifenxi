@@ -32457,8 +32457,12 @@ class StudioStore:
         member_version: int = 0,
         target_type: str = "",
         target_id: str = "",
+        database_max_calls: int | None = None,
     ) -> dict[str, Any]:
         """Atomically spend one call slot before any provider request begins."""
+
+        if database_max_calls is not None and (type(database_max_calls) is not int or not 1 <= database_max_calls <= 1000):
+            raise ValueError("database provider call ceiling must be a positive integer")
 
         clean_run_id = self._clean_provider_ledger_text(run_id, 128)
         clean_kind = self._clean_provider_ledger_slug(
@@ -32512,6 +32516,10 @@ class StudioStore:
             ).fetchone()
             if not run:
                 raise ValueError("provider execution run does not exist")
+            if database_max_calls is not None:
+                total_calls = int(connection.execute("SELECT COUNT(*) FROM provider_call_attempts").fetchone()[0])
+                if total_calls >= database_max_calls:
+                    raise ProviderCallBudgetExceeded(clean_run_id, database_max_calls)
             reserved_calls = int(run["reserved_calls"] or 0)
             max_calls = int(run["max_calls"] or 0)
             if reserved_calls >= max_calls:

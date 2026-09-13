@@ -195,7 +195,8 @@ class DoubaoProvider:
                 error_code="invalid_response",
             )
         response_status = str(payload.get("status") or "").strip().lower()
-        metadata = response_metadata(payload)
+        content = _response_text(payload)
+        metadata = response_metadata(payload, visible_text=content)
         if (response_status and response_status != "completed") or metadata["refused"] or metadata["incomplete_reason"] or payload.get("error"):
             return ProviderResponse(
                 ok=False,
@@ -206,7 +207,6 @@ class DoubaoProvider:
                 usage=payload.get("usage") or {},
                 **metadata,
             )
-        content = _response_text(payload)
         return ProviderResponse(
             ok=bool(content),
             content=content,

@@ -20,7 +20,7 @@ from .decision_lineage import canonical_sha256
 from .execution_boundary import AuthorizedTextRequest, authorized_text_request, build_text_provider_request, text_generation_body
 from .manual_chatgpt import ManualChatGPTService, parse_single_json_object
 from .path_identity import first_reparse_component
-from .provider_call_ledger import ProviderCallLedger, normalized_token_usage
+from .provider_call_ledger import ProviderCallLedger, ProviderCallBudgetExceeded, normalized_token_usage
 from .providers.base import classify_provider_exception
 from .document_evidence import DocumentEvidenceService
 from .source_inbox_service import SourceInboxService
@@ -225,6 +225,7 @@ class ControlledAPIPilot:
                 "http_body_bytes": len(request.data), "http_body": body, "timeout_seconds": timeout,
                 "method": "generate_json" if structured else "generate", "source": source,
                 "max_calls": 1, "additional_calls_authorized": 0,
+                "independent_database_total_call_ceiling": 3,
                 "cost_plan": {"currency": rate["currency"], "estimated_input_tokens": estimated_input,
                               "input_estimation_method": "complete_http_utf8_bytes_plus_256_conservative_estimate",
                               "estimated_cost_ceiling": str(planned_cost), "not_a_bill": True,
@@ -254,10 +255,22 @@ class ControlledAPIPilot:
         if attempts:
             path = folder / "response.json"
             saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+            if saved is not None:
+                expected = saved.get("receipt_sha256")
+                unsigned = {key: value for key, value in saved.items() if key != "receipt_sha256"}
+                if (not expected or canonical_sha256(unsigned) != expected
+                        or saved.get("plan_sha256") != plan["plan_sha256"]
+                        or saved.get("provider_attempt_id") != attempts[0]["id"]
+                        or (attempts[0]["status"] != "STARTED" and saved.get("status") != attempts[0]["status"])
+                        or (attempts[0]["status"] != "STARTED" and saved.get("usage") != attempts[0]["usage"])):
+                    raise PilotError("已保存的模型回执与哈希、计划或账本不一致；禁止重发")
             return {"replayed": True, "run": ledger.snapshot(), "attempts": attempts,
                     "response": saved, "outcome_unknown": saved is None or attempts[0]["status"] == "STARTED"}
         write_record(folder / "request.json", plan)
-        attempt = ledger.reserve(kind="evidence_answer", provider=config["provider"], model=config["model"])
+        try:
+            attempt = ledger.reserve(kind="evidence_answer", provider=config["provider"], model=config["model"], database_max_calls=3)
+        except ProviderCallBudgetExceeded:
+            raise PilotError("单次或独立数据库三次调用上限已用尽，停止；没有退款或自动重试") from None
         policy = AuthorizedTextRequest(plan["endpoint"], plan["http_body_sha256"], config["max_request_bytes"], plan["timeout_seconds"])
         started = time.monotonic()
         receipt = {"version": "api_pilot_response_v1", "plan_sha256": plan["plan_sha256"],
@@ -265,6 +278,7 @@ class ControlledAPIPilot:
                    "claim_status": "unverified_model_output", "source": "provider_api_pilot",
                    "status": "FAILED", "error_code": "provider_error", "usage": {}, "usage_status": "unknown",
                    "result": None, "content": "", "cost_estimate": None, "supplier_bill_verified": False,
+                   "output_text_sha256": "", "result_sha256": "",
                    "content_quality_review": "not_performed", "accounting_acceptance": "unknown"}
         try:
             with authorized_text_request(policy):
@@ -274,7 +288,8 @@ class ControlledAPIPilot:
             receipt.update({"usage": usage, "content": response.content,
                             "actual_model": response.reported_model, "response_id": response.response_id,
                             "response_status": response.response_status, "finish_reason": response.finish_reason,
-                            "refused": response.refused, "incomplete_reason": response.incomplete_reason})
+                            "refused": response.refused, "incomplete_reason": response.incomplete_reason,
+                            "output_text_sha256": response.output_text_sha256})
             if (type(usage.get("input_tokens")) is int and type(usage.get("output_tokens")) is int
                     and not any(key.startswith("usage_") for key in usage)):
                 receipt["usage_status"] = "reported"
@@ -293,6 +308,7 @@ class ControlledAPIPilot:
                 receipt.update(status="INVALID", error_code="response_not_complete")
             else:
                 receipt["result"] = validate_answer(response.content, plan["source"]["evidence"])
+                receipt["result_sha256"] = canonical_sha256(receipt["result"])
                 receipt.update(status="RESPONDED", error_code="")
         except (PilotError, ValueError):
             receipt.update(status="INVALID", error_code="invalid_response")
@@ -303,7 +319,9 @@ class ControlledAPIPilot:
         if secret and secret in json.dumps(receipt, ensure_ascii=False):
             receipt.update(status="INVALID", error_code="credential_echo_redacted", content="", result=None,
                            actual_model="", response_id="", response_status="", finish_reason="", incomplete_reason="",
-                           usage={}, usage_status="unknown", cost_estimate=None, accounting_acceptance="unknown")
+                           usage={}, usage_status="unknown", cost_estimate=None, accounting_acceptance="unknown",
+                           output_text_sha256="", result_sha256="")
+        receipt["receipt_sha256"] = canonical_sha256(receipt)
         write_record(folder / "response.json", receipt)
         ledger.finish(attempt["id"], attempt["attempt_token"], status=receipt["status"], error_code=receipt["error_code"],
                       elapsed_ms=receipt["elapsed_ms"], usage=receipt["usage"])

@@ -230,7 +230,8 @@ class CompatibleChatProvider:
                 error=safe_provider_error_message(self._display_name, "invalid_response"),
                 error_code="invalid_response",
             )
-        metadata = response_metadata(payload, chat_completions=True)
+        content = chat_response_text(payload)
+        metadata = response_metadata(payload, chat_completions=True, visible_text=content)
         if (metadata["finish_reason"] and metadata["finish_reason"] != "stop") or metadata["refused"] or payload.get("error"):
             return ProviderResponse(
                 ok=False,
@@ -241,7 +242,6 @@ class CompatibleChatProvider:
                 usage=payload.get("usage") or {},
                 **metadata,
             )
-        content = chat_response_text(payload)
         return ProviderResponse(
             ok=bool(content),
             content=content,

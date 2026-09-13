@@ -378,6 +378,22 @@ class ProviderCallLedgerTests(unittest.TestCase):
         self.assertEqual(third["sequence_no"], 3)
         self.assertEqual(resumed.snapshot()["reserved_calls"], 3)
 
+    def test_database_call_ceiling_is_atomic_across_store_instances(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        ledgers = [self.create_ledger(f"database-limit-{i}", max_calls=1, plan={"i": i}) for i in range(8)]
+        def reserve_one(original):
+            store = StudioStore._open_existing_schema(self.db_path)
+            ledger = ProviderCallLedger.resume(store, original.run_id)
+            try:
+                ledger.reserve(kind="evidence_answer", provider="deepseek", database_max_calls=3)
+                return True
+            except ProviderCallBudgetExceeded:
+                return False
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(reserve_one, ledgers))
+        self.assertEqual(sum(results), 3)
+        self.assertEqual(sum(len(ledger.attempts()) for ledger in ledgers), 3)
+
     def test_chat_token_usage_survives_the_prompt_secret_filter_without_saving_text(self) -> None:
         ledger = self.create_ledger("chat-usage", max_calls=1, plan={"fixture": True})
         attempt = ledger.reserve(kind="evidence_answer", provider="deepseek", model="fixture-model")

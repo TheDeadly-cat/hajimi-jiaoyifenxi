@@ -172,7 +172,8 @@ class OpenAIProvider:
                 error=safe_provider_error_message("OpenAI", "invalid_response"),
                 error_code="invalid_response",
             )
-        metadata = response_metadata(payload)
+        content = _response_text(payload)
+        metadata = response_metadata(payload, visible_text=content)
         if (metadata["response_status"] and metadata["response_status"] != "completed") or metadata["refused"] or metadata["incomplete_reason"] or payload.get("error"):
             return ProviderResponse(
                 ok=False, provider=self.provider_id,
@@ -181,7 +182,6 @@ class OpenAIProvider:
                 error_code="invalid_response", usage=payload.get("usage") or {},
                 **metadata,
             )
-        content = _response_text(payload)
         return ProviderResponse(
             ok=bool(content),
             content=content,

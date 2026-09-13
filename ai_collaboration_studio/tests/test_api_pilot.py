@@ -238,6 +238,52 @@ class ControlledPilotTests(DocumentSelectionFixture):
         for path in (self.store.path.parent / "pilot-receipts").rglob("*.json"):
             self.assertNotIn("fixture-key", path.read_text(encoding="utf-8"))
 
+    def test_other_enabled_builtin_routes_match_the_same_approved_wire_contract(self):
+        for provider_id, pricing_url in [("glm", "https://docs.bigmodel.cn/"), ("doubao", "https://www.volcengine.com/")]:
+            with self.subTest(provider=provider_id):
+                config = copy.deepcopy(self.config)
+                config.update(provider=provider_id, pilot_id="fixture-" + provider_id)
+                config["rate_card"]["source_url"] = pricing_url
+                registry = ProviderRegistry(disabled_provider_ids={"openai", "deepseek", "glm", "doubao"} - {provider_id}, api_keys={provider_id: "fixture-key"})
+                pilot = ControlledAPIPilot(self.store, registry, instance_owner=self.owner, clock=lambda: self.now)
+                plan = pilot.prepare(config)
+                payload = (self.provider_payload() if provider_id == "glm" else
+                           {"id": "fixture-response", "model": "fixture-model", "status": "completed",
+                            "output_text": json.dumps(self.answer()), "usage": {"input_tokens": 100, "output_tokens": 50}})
+                with patch("urllib.request.OpenerDirector.open", return_value=io.BytesIO(json.dumps(payload).encode())) as transport:
+                    result = pilot.run(config, approved_plan_sha256=plan["plan_sha256"])
+                self.assertEqual(result["response"]["status"], "RESPONDED")
+                self.assertEqual(json.loads(transport.call_args.args[0].data), plan["http_body"])
+                self.assertEqual(transport.call_count, 1)
+
+    def test_database_ceiling_counts_failed_calls_across_distinct_plan_ids(self):
+        for index in range(3):
+            self.config["pilot_id"] = f"database-cap-{index}"
+            plan = self.pilot.prepare(self.config)
+            with patch("urllib.request.OpenerDirector.open", side_effect=TimeoutError()) as transport:
+                self.pilot.run(self.config, approved_plan_sha256=plan["plan_sha256"])
+            self.assertEqual(transport.call_count, 1)
+        self.config["pilot_id"] = "database-cap-fourth"
+        plan = self.pilot.prepare(self.config)
+        with patch("urllib.request.OpenerDirector.open") as transport:
+            with self.assertRaisesRegex(PilotError, "三次"):
+                self.pilot.run(self.config, approved_plan_sha256=plan["plan_sha256"])
+        transport.assert_not_called()
+        self.assertEqual(self.count("provider_call_attempts"), 3)
+
+    def test_changed_saved_response_is_rejected_without_repeating_the_call(self):
+        import hashlib
+        plan, result, _ = self.run_with_payload(self.provider_payload())
+        self.assertEqual(result["response"]["output_text_sha256"], hashlib.sha256(result["response"]["content"].encode()).hexdigest())
+        path = self.store.path.parent / "pilot-receipts" / self.config["pilot_id"] / "response.json"
+        altered = json.loads(path.read_text(encoding="utf-8"))
+        altered["content"] = "Edited after the request."
+        path.write_text(json.dumps(altered), encoding="utf-8")
+        with patch("urllib.request.OpenerDirector.open") as transport:
+            with self.assertRaisesRegex(PilotError, "回执"):
+                self.pilot.run(self.config, approved_plan_sha256=plan["plan_sha256"])
+        transport.assert_not_called()
+
     def test_original_version_is_immutable_and_forged_material_metadata_is_rejected(self):
         from contextlib import closing
         import sqlite3

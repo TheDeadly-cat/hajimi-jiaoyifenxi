@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import hashlib
 import urllib.error
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
@@ -72,7 +73,7 @@ def output_token_limit(value: int | None, *, default: int) -> int:
     return value
 
 
-def response_metadata(payload: dict[str, Any], *, chat_completions: bool = False) -> dict[str, Any]:
+def response_metadata(payload: dict[str, Any], *, chat_completions: bool = False, visible_text: str = "") -> dict[str, Any]:
     """Keep received identity and terminal markers separate from model fallbacks."""
     def text(value: Any, limit: int = 160) -> str:
         return value.strip() if isinstance(value, str) and len(value) <= limit else ""
@@ -96,6 +97,7 @@ def response_metadata(payload: dict[str, Any], *, chat_completions: bool = False
         "finish_reason": reason,
         "refused": refused,
         "incomplete_reason": text(incomplete.get("reason")) if isinstance(incomplete, dict) else "",
+        "output_text_sha256": hashlib.sha256(visible_text.encode("utf-8", errors="surrogatepass")).hexdigest() if visible_text else "",
     }
 
 
@@ -114,6 +116,7 @@ class ProviderResponse:
     finish_reason: str = ""
     refused: bool = False
     incomplete_reason: str = ""
+    output_text_sha256: str = ""
 
 
 @dataclass(slots=True)
