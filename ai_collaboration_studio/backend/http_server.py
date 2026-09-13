@@ -6,6 +6,7 @@ import json
 import mimetypes
 import re
 import secrets
+import sqlite3
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -912,6 +913,14 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"ok": True, "source_item": item})
             return
+        evidence_preview_match = re.fullmatch(r"/api/rooms/([^/]+)/chatgpt-collaborations/evidence-preview", parsed.path)
+        if evidence_preview_match:
+            try:
+                result = ManualChatGPTService(STORE).preview_evidence(evidence_preview_match.group(1))
+                self._send_json({"ok": True, "evidence_preview": result})
+            except LookupError as exc:
+                self._send_json({"ok": False, "error": str(exc)}, HTTPStatus.NOT_FOUND)
+            return
         manual_chatgpt_latest_match = re.fullmatch(
             r"/api/rooms/([^/]+)/chatgpt-collaborations/latest",
             parsed.path,
@@ -1777,7 +1786,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             or monitoring_enablement_match
             or parsed.path == "/api/monitoring/documents/control"
             or re.fullmatch(
-                r"/api/monitoring/events/[^/]+/(?:acknowledge|attach|round-draft|document)",
+                r"/api/monitoring/events/[^/]+/(?:acknowledge|attach|round-draft|document|document/selection(?:/preview)?)",
                 parsed.path,
             )
         )
@@ -1800,6 +1809,31 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             strict=is_source_inbox_request,
         )
         if payload is None:
+            return
+        selection_match = re.fullmatch(r"/api/monitoring/events/([^/]+)/document/selection(/preview)?", parsed.path)
+        if selection_match:
+            try:
+                expected = {"document_version_id", "paragraph_ids", "room_id", "expected_state_version"}
+                if not selection_match.group(2):
+                    expected |= {"confirmation", "preview_sha256"}
+                if parsed.query or set(payload) != expected:
+                    raise SourceInboxError("正文选段请求字段不正确。", code="DOCUMENT_SELECTION_INVALID", status=400)
+                owner = getattr(self.server, "ai_studio_instance_owner", None)
+                if owner is None:
+                    raise SourceInboxError("本机数据库宿主尚未就绪。", code="DOCUMENT_OWNER_REQUIRED", status=503)
+                owner.assert_held_for(STORE.path)
+                service = DocumentEvidenceService(STORE)
+                if selection_match.group(2):
+                    result = service.preview_selection(selection_match.group(1), **payload)
+                    self._send_json({"ok": True, "selection": result})
+                else:
+                    result = service.save_selection(selection_match.group(1), **payload)
+                    self._send_json({"ok": True, **result}, HTTPStatus.OK if result["idempotent_replay"] else HTTPStatus.CREATED)
+            except SourceInboxError as exc:
+                self._send_json({"ok": False, "error": str(exc), "code": exc.code}, HTTPStatus(exc.status))
+            except sqlite3.Error:
+                self._send_json({"ok": False, "error": "本机正文选段操作失败，未完成保存；请刷新后重试。",
+                                 "code": "DOCUMENT_SELECTION_STORE_FAILED"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         document_match = re.fullmatch(r"/api/monitoring/events/([^/]+)/document", parsed.path)
         if document_match or parsed.path == "/api/monitoring/documents/control":
@@ -2146,11 +2180,11 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             parsed.path,
         )
         if manual_chatgpt_create_match:
-            if not set(payload).issubset({"objective", "mode"}):
+            if not set(payload).issubset({"objective", "mode", "expected_evidence_sha256"}):
                 self._send_json(
                     {
                         "ok": False,
-                        "error": "ChatGPT 协作创建请求只接受 objective 和 mode。",
+                        "error": "ChatGPT 协作创建请求字段不正确。",
                         "code": "MANUAL_CHATGPT_REQUEST_INVALID",
                     },
                     HTTPStatus.BAD_REQUEST,
@@ -2161,6 +2195,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     manual_chatgpt_create_match.group(1),
                     objective=payload.get("objective"),
                     mode=payload.get("mode", "standard"),
+                    expected_evidence_sha256=payload.get("expected_evidence_sha256"),
                 )
             except LookupError as exc:
                 self._send_json(

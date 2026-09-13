@@ -67,6 +67,7 @@ export function ChatGPTCollaborationDialog({
   const [freezeAcknowledged, setFreezeAcknowledged] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [evidencePreview, setEvidencePreview] = useState(null);
   const view = useMemo(
     () => (session ? manualChatGPTStateView(session) : null),
     [session],
@@ -85,6 +86,7 @@ export function ChatGPTCollaborationDialog({
     const sequence = operationRef.current + 1;
     operationRef.current = sequence;
     setObjective(initialObjective.trim());
+    setEvidencePreview(null);
     setImportText("");
     setError("");
     setBusy(true);
@@ -126,7 +128,19 @@ export function ChatGPTCollaborationDialog({
 
   if (!open) return null;
 
+  const previewEvidence = async () => {
+    const sequence = ++operationRef.current;
+    setBusy(true); setError(""); setEvidencePreview(null);
+    try {
+      const data = await api.manualEvidencePreview(roomId);
+      if (operationRef.current === sequence) setEvidencePreview(data.evidence_preview);
+    } catch (requestError) {
+      if (operationRef.current === sequence) setError(errorMessage(requestError));
+    } finally { if (operationRef.current === sequence) setBusy(false); }
+  };
+
   const createBundle = async () => {
+    if (!evidencePreview?.ready) { setError("请先预览实际研究资料，处理超限内容后再冻结。"); return; }
     const cleanObjective = objective.trim();
     if (!cleanObjective) {
       setError("请先输入研究问题。 ");
@@ -140,6 +154,7 @@ export function ChatGPTCollaborationDialog({
       const data = await api.createManualChatGPT(roomId, {
         objective: cleanObjective,
         mode,
+        expected_evidence_sha256: evidencePreview.evidence_sha256,
       });
       if (operationRef.current !== sequence) return;
       adoptSession(data.manual_chatgpt);
@@ -147,7 +162,10 @@ export function ChatGPTCollaborationDialog({
       setSelectedOptionId("");
       setFreezeAcknowledged(false);
     } catch (requestError) {
-      if (operationRef.current === sequence) setError(errorMessage(requestError));
+      if (operationRef.current === sequence) {
+        setError(errorMessage(requestError));
+        setEvidencePreview(null);
+      }
     } finally {
       if (operationRef.current === sequence) setBusy(false);
     }
@@ -322,6 +340,7 @@ export function ChatGPTCollaborationDialog({
   };
 
   const resetForNewBundle = () => {
+    setEvidencePreview(null);
     setSession(null);
     setImportText("");
     setError("");
@@ -369,7 +388,7 @@ export function ChatGPTCollaborationDialog({
   };
 
   const renderPrimaryAction = () => {
-    const disabled = busy || !primaryAction.enabled;
+    const disabled = busy || !primaryAction.enabled || (primaryAction.id === "create_bundle" && !evidencePreview?.ready);
     const actionIcon = busy || primaryAction.id === "pending"
       ? <LoaderCircle className="spin" size={16} />
       : primaryAction.id === "copy_and_open_chatgpt"
@@ -538,6 +557,22 @@ export function ChatGPTCollaborationDialog({
           ) : null}
           {!view ? (
             <section className="manual-chatgpt-setup" aria-label="创建 ChatGPT 协作任务">
+              <section className="manual-evidence-preview" aria-label="冻结前研究资料预览">
+                <h3>研究包实际会包含哪些资料</h3>
+                <p>冻结前核对完整摘录。每份最多 1,600 字符、最多 40 份；超限会拒绝，不会静默截断。</p>
+                <button className="secondary" type="button" disabled={busy} onClick={() => void previewEvidence()}>预览实际研究资料</button>
+                {evidencePreview ? <>
+                  <p role="status">{evidencePreview.ready ? `可冻结：拟纳入 ${evidencePreview.items.length} 份资料，共 ${evidencePreview.package_characters} 字符。` : "当前不能冻结；请重新选段或停用超限资料，然后刷新预览。"}</p>
+                  {evidencePreview.issues.map((issue, index) => <p role="alert" key={index}>{issue}</p>)}
+                  {evidencePreview.omitted_item_count ? <p>另有 {evidencePreview.omitted_item_count} 份资料超出本次窗口；尚未纳入。</p> : null}
+                  {evidencePreview.items.map((entry) => <details key={entry.material_id}>
+                    <summary>{entry.title} · 原材料 {entry.original_characters} / 拟传入 {entry.package_characters} 字符</summary>
+                    <p>来源：{entry.source_url || "未填写结构化来源 URL"}</p>
+                    {entry.selection?.format === "document_selection_v1" ? <p>原文 {entry.selection.total_paragraphs} 段，已选 {entry.selection.selected_paragraphs} 段；其余正文及附件未包含。版本：{entry.selection.document_version_id}</p> : null}
+                    <pre>{entry.excerpt || "超出边界，未生成截断摘录。"}</pre>
+                  </details>)}
+                </> : <p>尚未预览。此操作仅读取本机资料，不会调用模型。</p>}
+              </section>
               <label>
                 研究问题
                 <textarea

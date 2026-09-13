@@ -487,7 +487,7 @@ function SourceInboxDetail({
       </section>
 
       <DeterministicImpactSection item={item} />
-      {item.valid && item.sourceChannel === "official_source_monitor" ? <DocumentEvidence key={item.id} item={item} refreshToken={documentRefreshToken} authorizationUntil={documentAuthorizationUntil} /> : null}
+      {item.valid && item.sourceChannel === "official_source_monitor" ? <DocumentEvidence key={item.id} item={item} refreshToken={documentRefreshToken} authorizationUntil={documentAuthorizationUntil} rooms={rooms} roomId={roomId} onRoomChange={onRoomChange} /> : null}
 
       <section className="source-inbox-section">
         <h3><Search aria-hidden="true" size={16} />外部声明与影响假设</h3>

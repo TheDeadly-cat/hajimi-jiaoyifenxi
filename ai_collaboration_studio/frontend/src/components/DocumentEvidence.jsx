@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
+import { DocumentSelection } from "./DocumentSelection";
 
 const states = {
   not_fetched: "尚未读取正文", waiting: "等待读取", fetching: "正在读取",
@@ -15,13 +16,14 @@ const dispositionLabels = {
   DOCUMENT_RETRY_AFTER_UNREPRESENTABLE: "来源要求的等待时间超出可表示范围，已暂停该发布者的正文访问，需要人工处理。",
 };
 
-export function DocumentEvidence({ item, refreshToken = 0, authorizationUntil = 0 }) {
+export function DocumentEvidence({ item, refreshToken = 0, authorizationUntil = 0, rooms = [], roomId = "", onRoomChange }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [selected, setSelected] = useState("");
   const [copied, setCopied] = useState(false);
+  const [selectionOpen, setSelectionOpen] = useState(false);
   const [refresh, setRefresh] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
@@ -52,7 +54,7 @@ export function DocumentEvidence({ item, refreshToken = 0, authorizationUntil = 
   }, [item.id, item.serverFingerprint, refresh, refreshToken, authorizationUntil]);
   const pending = busy || ["waiting", "fetching"].includes(data?.status);
   const versions = Array.isArray(data?.versions) ? data.versions : [];
-  const version = versions.find((value) => value.id === selected) || versions.at(-1);
+  const version = selected ? versions.find((value) => value.id === selected) : versions.at(-1);
   const request = async () => {
     setBusy(true);
     setCopied(false);
@@ -82,6 +84,9 @@ export function DocumentEvidence({ item, refreshToken = 0, authorizationUntil = 
     <p>原文摘录，不是 AI 总结。只读事件绑定的官方 HTML；正文和附件不代表已核验事实。</p>
     <button className="secondary compact" type="button" onClick={() => setRefresh((value) => value + 1)}>刷新本地正文状态</button>
     {error ? <p role="alert">{error}</p> : null}
+    {selected && data && !version ? <p role="alert">所选版本当前不可用，未自动替换为新版。
+      <button type="button" className="secondary compact" onClick={() => { setSelected(""); setSelectionOpen(false); }}>重新选择可用正文版本</button>
+    </p> : null}
     {data?.job?.error_code ? <p>{dispositionLabels[data.job.error_code] || "正文任务未完成；原消息仍保留。"} 读取记录：<code>{data.job.error_code}</code></p> : null}
     {data?.job?.retry_at > 0 ? <p>{data.job.retry_at >= 8.64e15 ? "发布者正文访问处于人工处理暂停状态。" : `来源要求至少等待至 ${new Date(data.job.retry_at).toLocaleString()}。`}</p> : null}
     {version ? <>
@@ -109,8 +114,12 @@ export function DocumentEvidence({ item, refreshToken = 0, authorizationUntil = 
           </blockquote>)}</div>
       </details>
       <button className="secondary" type="button" onClick={() => void copy()}>复制本版正文研究材料</button>
+      <button className="secondary" type="button" disabled={!version.body_located || !version.paragraphs.length || !onRoomChange}
+        onClick={() => { setSelected(version.id); setSelectionOpen(true); }}>选择段落加入研究房间</button>
+      {selectionOpen && version.body_located ? <DocumentSelection key={version.id} item={item} version={version}
+        rooms={rooms} roomId={roomId} onRoomChange={onRoomChange} /> : null}
       {copied ? <p role="status">已复制含版本和段落引用的原文材料。可在目标房间「共享资料」中粘贴，再使用已有 ChatGPT 协作任务包。</p> : null}
-      <p>下方「附加到房间」仍只附加原事件；正文版本请通过上述复制操作另行选入研究资料。读取正文不会自动记录已阅或创建讨论。</p>
+      <p>下方「附加到房间」仍只附加原事件；正文可通过选段入口另行加入研究资料。读取正文不会自动记录已阅或创建讨论。</p>
     </> : null}
     <label className="document-evidence-confirm">
       <input type="checkbox" checked={confirmed} disabled={pending || !data?.eligible} onChange={(event) => setConfirmed(event.target.checked)} />

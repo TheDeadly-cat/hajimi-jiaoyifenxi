@@ -1,4 +1,4 @@
-"""Versioned, inert HTML evidence. No room, model or monitoring writes.
+"""Versioned, inert HTML evidence and explicitly confirmed local selections.
 
 Network reads use the material reader's public-address pinning and the source
 reader's cancellation/deadline control. Only the URL already sealed in an
@@ -304,6 +304,124 @@ class DocumentEvidenceService:
         if record is None:
             raise fail("来源事件不存在。", "SOURCE_INBOX_NOT_FOUND", 404)
         return record
+
+    def _selection(self, db, item_id, *, document_version_id, paragraph_ids,
+                   room_id, expected_state_version):
+        from .manual_chatgpt import MAX_EVIDENCE_EXCERPT_CHARS
+        if (not isinstance(item_id, str) or not isinstance(room_id, str)
+                or not room_id or not isinstance(document_version_id, str)
+                or type(expected_state_version) is not int or expected_state_version < 1
+                or type(paragraph_ids) is not list or not 1 <= len(paragraph_ids) <= 256
+                or any(not isinstance(p, str) for p in paragraph_ids)
+                or len(set(paragraph_ids)) != len(paragraph_ids)):
+            raise fail("请选择明确的事件、正文版本、段落和房间。", "DOCUMENT_SELECTION_INVALID", 400)
+        inbox = SourceInboxService(self.store)
+        row = inbox._select_item(db, item_id)
+        if row is None:
+            raise fail("来源事件不存在。", "SOURCE_INBOX_NOT_FOUND", 404)
+        record = inbox._item_projection(db, row, include_events=True)
+        source = bound_source(record)
+        if record["state_version"] != expected_state_version or record["state"] not in {
+            "AWAITING_USER", "ATTACHED", "ROUND_DRAFTED",
+        }:
+            raise fail("来源状态已变化，请刷新后重新预览。", "SOURCE_INBOX_STATE_CONFLICT")
+        version_row = db.execute("SELECT * FROM source_document_versions WHERE id=? AND item_id=?",
+                                 (document_version_id, item_id)).fetchone()
+        if version_row is None:
+            raise fail("正文版本不属于这个事件。", "DOCUMENT_SELECTION_INVALID", 400)
+        version = json.loads(version_row["record_json"])
+        if (version.get("format") != FORMAT or canonical_sha256(version) != version_row["record_sha256"]
+                or version.get("id") != document_version_id or version.get("item_id") != item_id
+                or version.get("item_fingerprint") != record["server_fingerprint"]
+                or version.get("request_url") != source["url"] or version.get("final_url") != source["url"]):
+            raise fail("正文证据完整性校验失败。", "DOCUMENT_INTEGRITY_FAILED")
+        paragraphs = version.get("paragraphs")
+        if not version.get("body_located") or not isinstance(paragraphs, list) or not paragraphs:
+            raise fail("本版尚未定位正文，不能创建研究材料。", "DOCUMENT_BODY_UNAVAILABLE")
+        selected = [p for p in paragraphs if p["id"] in paragraph_ids]
+        if len(selected) != len(paragraph_ids):
+            raise fail("所选段落不属于本版正文。", "DOCUMENT_SELECTION_INVALID", 400)
+        room = db.execute("SELECT id,title FROM rooms WHERE id=?", (room_id,)).fetchone()
+        if room is None:
+            raise fail("目标房间不存在。", "SOURCE_INBOX_ROOM_NOT_FOUND", 404)
+        selected_ids = [p["id"] for p in selected]
+        selected_text = "\n\n".join(p["text"] for p in selected)
+        omitted_ids = [p["id"] for p in paragraphs if p["id"] not in selected_ids]
+        selection_hash = hashlib.sha256(selected_text.encode("utf-8")).hexdigest()
+        provenance = {
+            "format": "document_selection_v1", "source_item_id": item_id,
+            "document_version_id": document_version_id, "paragraph_ids": selected_ids,
+            "omitted_paragraph_ids": omitted_ids, "parser_version": version["parser_version"],
+            "source_url": source["url"], "raw_bytes_sha256": version["raw_bytes_sha256"],
+            "body_text_sha256": version["body_text_sha256"], "selection_sha256": selection_hash,
+            "fetched_at": version["fetched_at"], "scope": version["scope"],
+            "warnings": version["warnings"], "attachment_reading": "not_read",
+            "total_paragraphs": len(paragraphs), "selected_paragraphs": len(selected),
+            "selected_characters": len(selected_text),
+        }
+        title = f"[正文选段] {record['item'].get('headline') or source['company']}"[:120]
+        text = "\n".join([
+            "[正文选段；不可信外部资料；未核验事实、未经 AI 分析]", title,
+            f"来源：{source['url']}", f"事件：{item_id}", f"版本：{document_version_id}",
+            f"解析器：{version['parser_version']}；获取：{datetime.fromtimestamp(version['fetched_at'] / 1000, timezone.utc).isoformat()}",
+            f"原始 SHA256：{version['raw_bytes_sha256']}", f"正文 SHA256：{version['body_text_sha256']}",
+            f"选段 SHA256：{selection_hash}", f"范围：{version['scope']}",
+            f"已选 {len(selected)}/{len(paragraphs)} 段；其余 {len(omitted_ids)} 段未包含；所有链接和附件未读。",
+            *version["warnings"], *[f"[{p['id']}]\n{p['text']}" for p in selected],
+        ])
+        material_id = "mat_docsel_" + canonical_sha256({"room_id": room_id, "version_id": document_version_id,
+                                                        "paragraph_ids": selected_ids})
+        metadata = {"source_type": "other", "claim_status": "unverified",
+                    "publisher": source["company"], "document_selection": provenance,
+                    "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    "prompt_injection_risk": self.store._material_prompt_injection_risk(text)}
+        fits = len(text) <= MAX_EVIDENCE_EXCERPT_CHARS
+        result = {"format": "document_selection_preview_v1", "room_id": room_id, "room_title": room["title"],
+                  "material_id": material_id, "title": title, "source_url": source["url"],
+                  "content": text, "metadata": metadata, "paragraph_ids": selected_ids,
+                  "document_version_id": document_version_id, "expected_state_version": expected_state_version,
+                  "total_paragraphs": len(paragraphs), "selected_paragraphs": len(selected),
+                  "omitted_paragraphs": len(omitted_ids), "selected_characters": len(selected_text),
+                  "packaged_characters": len(text), "excerpt_limit": MAX_EVIDENCE_EXCERPT_CHARS,
+                  "package_characters": len(text) if fits else 0, "fits": fits,
+                  "acknowledged": record["acknowledged"], "can_save": fits and record["acknowledged"],
+                  "package_excerpt": text if fits else ""}
+        result["preview_sha256"] = canonical_sha256(result)
+        return result
+
+    def preview_selection(self, item_id, **selection):
+        # Local immutable records only. Preview grants no acknowledgement or network access.
+        with self.store._lock, closing(self.store._connect()) as db:
+            db.execute("BEGIN")
+            return self._selection(db, item_id, **selection)
+
+    def save_selection(self, item_id, *, confirmation, preview_sha256, **selection):
+        if confirmation is not True:
+            raise fail("请预览后明确确认加入所选房间。", "DOCUMENT_SELECTION_CONFIRMATION_REQUIRED")
+        with self.store._lock, closing(self.store._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            preview = self._selection(db, item_id, **selection)
+            if preview_sha256 != preview["preview_sha256"]:
+                raise fail("预览已变化，请重新核对内容和目标房间。", "DOCUMENT_SELECTION_PREVIEW_STALE")
+            if not preview["acknowledged"]:
+                raise fail("请先在来源收件箱记录已阅；已阅不代表事实确认。", "SOURCE_INBOX_ACKNOWLEDGEMENT_REQUIRED")
+            if not preview["fits"]:
+                raise fail("选段连同引用超过 1,600 字符，请减少段落后重新预览。", "DOCUMENT_SELECTION_TOO_LARGE")
+            existing = db.execute("SELECT * FROM materials WHERE id=?", (preview["material_id"],)).fetchone()
+            if existing is not None:
+                material = self.store._public_material_dict(existing)
+                if (material["content"] != preview["content"] or material["source_url"] != preview["source_url"]
+                        or material["metadata"].get("document_selection") != preview["metadata"]["document_selection"]):
+                    raise fail("已有选段材料与原版本不一致。", "DOCUMENT_SELECTION_INTEGRITY_FAILED")
+                return {"material": material, "idempotent_replay": True}
+            timestamp = self.clock()
+            material = {"id": preview["material_id"], "room_id": preview["room_id"],
+                        "title": preview["title"], "kind": "note", "source_url": preview["source_url"],
+                        "content": preview["content"], "metadata_json": json.dumps(preview["metadata"], ensure_ascii=False),
+                        "version": 1, "active": 1, "official_supplement_pending": 0,
+                        "created_at": timestamp, "updated_at": timestamp}
+            self.store._insert_material_connection(db, material, timestamp)
+            return {"material": self.store._public_material_dict(material), "idempotent_replay": False}
 
     def view(self, item_id):
         record = self.item(item_id)
