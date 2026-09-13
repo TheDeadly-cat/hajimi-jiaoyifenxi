@@ -102,6 +102,7 @@ MAX_IMPORT_CHARS = 200_000
 MAX_OBJECTIVE_CHARS = 4_000
 MAX_EVIDENCE_ITEMS = 40
 MAX_EVIDENCE_EXCERPT_CHARS = 1_600
+MAX_TASK_PROMPT_UTF16_UNITS = 500_000  # Existing frontend taskPrompt export bound.
 MAX_CANDIDATE_GROUPS = 12
 MAX_HISTORY_ITEMS = 20
 MAX_ROLE_COUNT = 24
@@ -570,6 +571,11 @@ def build_compact_bundle(
         "import_contract_version": MANUAL_CHATGPT_IMPORT_CONTRACT_VERSION,
     }
     bundle["bundle_sha256"] = canonical_sha256(bundle)
+    if len(task_prompt(bundle).encode("utf-16-le", errors="surrogatepass")) // 2 > MAX_TASK_PROMPT_UTF16_UNITS:
+        raise ManualChatGPTError(
+            "整份任务提示超过现有 500,000 字符导出上限。请减少房间上下文或选择另一个房间，再重新预览；本次未冻结、未截断。",
+            code="MANUAL_CHATGPT_PROMPT_EXPORT_TOO_LARGE", status=409,
+        )
     return bundle
 
 

@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from backend import http_server
 from backend.document_evidence import DocumentEvidenceService, RECHECK_MS
-from backend.manual_chatgpt import ManualChatGPTError, ManualChatGPTService, evidence_scope_preview
+from backend.manual_chatgpt import ManualChatGPTError, ManualChatGPTService, evidence_scope_preview, build_compact_bundle
 from backend.material_ingest import FetchedResource
 from backend.source_inbox_service import SourceInboxError, SourceInboxService
 from backend.store import StudioStore
@@ -201,6 +201,18 @@ class DocumentSelectionTests(DocumentSelectionFixture):
         self.assertTrue(evidence_scope_preview({"materials": [base] * 40})["ready"])
         self.assertFalse(evidence_scope_preview({"materials": [base] * 41})["ready"])
         self.assertFalse(evidence_scope_preview({"materials": [{**base, "active": False}] * 40 + [base]})["ready"])
+
+    def test_whole_prompt_export_limit_rejects_before_ui_can_cut_selected_evidence(self):
+        options = [{"id": f"option_{i}", "title": "Option", "description": "d" * 1200,
+                    "benefits": ["b" * 300] * 6, "risks": ["r" * 300] * 6} for i in range(8)]
+        snapshot = self.store.room_snapshot(self.room_id)
+        snapshot["materials"] = [{"id": "selected_tail", "active": True, "content": "SELECTED_EVIDENCE_AT_TAIL", "title": "Selected evidence"}]
+        snapshot["artifacts"] = [{"id": f"candidate_{i}", "content": {"decision": {"options": options}}} for i in range(12)]
+        self.assertTrue(evidence_scope_preview(snapshot)["ready"])
+        with self.assertRaises(ManualChatGPTError) as caught:
+            build_compact_bundle(snapshot, objective="Keep selected evidence complete", mode="standard",
+                                 session_id="mcg_large", round_id="round_large", created_at=self.now)
+        self.assertEqual(caught.exception.code, "MANUAL_CHATGPT_PROMPT_EXPORT_TOO_LARGE")
 
     def test_generic_material_api_cannot_forge_or_rewrite_selection_provenance(self):
         preview = self.preview()

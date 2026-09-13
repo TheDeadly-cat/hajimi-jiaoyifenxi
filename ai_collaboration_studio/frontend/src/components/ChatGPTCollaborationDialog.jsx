@@ -562,7 +562,7 @@ export function ChatGPTCollaborationDialog({
                 <p>冻结前核对完整摘录。每份最多 1,600 字符、最多 40 份；超限会拒绝，不会静默截断。</p>
                 <button className="secondary" type="button" disabled={busy} onClick={() => void previewEvidence()}>预览实际研究资料</button>
                 {evidencePreview ? <>
-                  <p role="status">{evidencePreview.ready ? `可冻结：拟纳入 ${evidencePreview.items.length} 份资料，共 ${evidencePreview.package_characters} 字符。` : "当前不能冻结；请重新选段或停用超限资料，然后刷新预览。"}</p>
+                  <p role="status">{evidencePreview.ready ? `资料摘录已就绪：拟纳入 ${evidencePreview.items.length} 份资料，共 ${evidencePreview.package_characters} 字符。冻结时还会核对完整提示的导出上限。` : "当前不能冻结；请重新选段或停用超限资料，然后刷新预览。"}</p>
                   {evidencePreview.issues.map((issue, index) => <p role="alert" key={index}>{issue}</p>)}
                   {evidencePreview.omitted_item_count ? <p>另有 {evidencePreview.omitted_item_count} 份资料超出本次窗口；尚未纳入。</p> : null}
                   {evidencePreview.items.map((entry) => <details key={entry.material_id}>
