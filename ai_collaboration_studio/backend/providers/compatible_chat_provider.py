@@ -10,6 +10,8 @@ from .base import (
     ProviderProbeResult,
     ProviderResponse,
     classify_provider_exception,
+    output_token_limit,
+    response_metadata,
     safe_provider_error_message,
 )
 from .probe import model_missing_probe, perform_http_probe, unconfigured_probe
@@ -148,12 +150,12 @@ class CompatibleChatProvider:
             response_text_extractor=chat_probe_response_text,
         )
 
-    def generate(self, *, instructions: str, input_text: str, model: str = "") -> ProviderResponse:
+    def generate(self, *, instructions: str, input_text: str, model: str = "", max_output_tokens: int | None = None) -> ProviderResponse:
         return self._generate(
             instructions=instructions,
             input_text=input_text,
             model=model,
-            max_tokens=4096,
+            max_tokens=output_token_limit(max_output_tokens, default=4096),
             timeout_seconds=60,
         )
 
@@ -234,7 +236,8 @@ class CompatibleChatProvider:
                 error=safe_provider_error_message(self._display_name, "invalid_response"),
                 error_code="invalid_response",
             )
-        if chat_finish_reason(payload) == "length":
+        metadata = response_metadata(payload, chat_completions=True)
+        if (metadata["finish_reason"] and metadata["finish_reason"] != "stop") or metadata["refused"] or payload.get("error"):
             return ProviderResponse(
                 ok=False,
                 provider=self.provider_id,
@@ -242,6 +245,7 @@ class CompatibleChatProvider:
                 error=safe_provider_error_message(self._display_name, "invalid_response"),
                 error_code="invalid_response",
                 usage=payload.get("usage") or {},
+                **metadata,
             )
         content = chat_response_text(payload)
         return ProviderResponse(
@@ -252,4 +256,5 @@ class CompatibleChatProvider:
             error="" if content else safe_provider_error_message(self._display_name, "empty_response"),
             error_code="" if content else "empty_response",
             usage=payload.get("usage") or {},
+            **metadata,
         )

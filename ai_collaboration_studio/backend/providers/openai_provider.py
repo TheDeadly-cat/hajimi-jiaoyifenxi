@@ -11,6 +11,8 @@ from .base import (
     ProviderProbeResult,
     ProviderResponse,
     classify_provider_exception,
+    output_token_limit,
+    response_metadata,
     safe_provider_error_message,
 )
 from .probe import model_missing_probe, perform_http_probe, unconfigured_probe
@@ -109,8 +111,9 @@ class OpenAIProvider:
             display_name="OpenAI",
         )
 
-    def generate(self, *, instructions: str, input_text: str, model: str = "") -> ProviderResponse:
+    def generate(self, *, instructions: str, input_text: str, model: str = "", max_output_tokens: int | None = None) -> ProviderResponse:
         selected_model = model or self._default_model
+        selected_limit = output_token_limit(max_output_tokens, default=900)
         if not self._api_key:
             return ProviderResponse(
                 ok=False,
@@ -123,7 +126,7 @@ class OpenAIProvider:
             "model": selected_model,
             "instructions": instructions,
             "input": input_text,
-            "max_output_tokens": 900,
+            "max_output_tokens": selected_limit,
             "store": False,
         }
         request = build_text_provider_request(
@@ -173,6 +176,15 @@ class OpenAIProvider:
                 error=safe_provider_error_message("OpenAI", "invalid_response"),
                 error_code="invalid_response",
             )
+        metadata = response_metadata(payload)
+        if (metadata["response_status"] and metadata["response_status"] != "completed") or metadata["refused"] or metadata["incomplete_reason"] or payload.get("error"):
+            return ProviderResponse(
+                ok=False, provider=self.provider_id,
+                model=str(payload.get("model") or selected_model),
+                error=safe_provider_error_message("OpenAI", "invalid_response"),
+                error_code="invalid_response", usage=payload.get("usage") or {},
+                **metadata,
+            )
         content = _response_text(payload)
         return ProviderResponse(
             ok=bool(content),
@@ -182,4 +194,5 @@ class OpenAIProvider:
             error="" if content else "模型没有返回可显示文本",
             error_code="" if content else "empty_response",
             usage=payload.get("usage") or {},
+            **metadata,
         )

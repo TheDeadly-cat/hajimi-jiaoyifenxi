@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ..config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
-from .base import ProviderResponse
+from .base import ProviderResponse, output_token_limit
 from .compatible_chat_provider import CompatibleChatProvider
 from .output import OUTPUT_MODE_JSON_OBJECT, ProviderOutputCapabilities
 
@@ -35,13 +35,14 @@ class DeepSeekProvider(CompatibleChatProvider):
         instructions: str,
         input_text: str,
         model: str = "",
+        max_output_tokens: int | None = None,
     ) -> ProviderResponse:
         """Generate a bounded JSON artifact without changing normal chat behavior."""
         return self._generate(
             instructions=instructions,
             input_text=input_text,
             model=model,
-            max_tokens=3200,
+            max_tokens=output_token_limit(max_output_tokens, default=3200),
             timeout_seconds=180,
             response_format={"type": "json_object"},
         )

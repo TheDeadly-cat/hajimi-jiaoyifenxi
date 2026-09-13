@@ -11,6 +11,8 @@ from .base import (
     ProviderProbeResult,
     ProviderResponse,
     classify_provider_exception,
+    output_token_limit,
+    response_metadata,
     safe_provider_error_message,
 )
 from .compatible_chat_provider import provider_http_error
@@ -91,12 +93,12 @@ class DoubaoProvider:
             response_text_extractor=_probe_response_text,
         )
 
-    def generate(self, *, instructions: str, input_text: str, model: str = "") -> ProviderResponse:
+    def generate(self, *, instructions: str, input_text: str, model: str = "", max_output_tokens: int | None = None) -> ProviderResponse:
         return self._generate(
             instructions=instructions,
             input_text=input_text,
             model=model,
-            max_output_tokens=4096,
+            max_output_tokens=output_token_limit(max_output_tokens, default=4096),
             timeout_seconds=60,
         )
 
@@ -106,13 +108,14 @@ class DoubaoProvider:
         instructions: str,
         input_text: str,
         model: str = "",
+        max_output_tokens: int | None = None,
     ) -> ProviderResponse:
         """Generate a longer JSON artifact without changing normal chat limits."""
         return self._generate(
             instructions=instructions,
             input_text=input_text,
             model=model,
-            max_output_tokens=6400,
+            max_output_tokens=output_token_limit(max_output_tokens, default=6400),
             timeout_seconds=240,
             text_format={"type": "json_object"},
         )
@@ -197,7 +200,8 @@ class DoubaoProvider:
                 error_code="invalid_response",
             )
         response_status = str(payload.get("status") or "").strip().lower()
-        if response_status in {"incomplete", "failed", "cancelled"}:
+        metadata = response_metadata(payload)
+        if (response_status and response_status != "completed") or metadata["refused"] or metadata["incomplete_reason"] or payload.get("error"):
             return ProviderResponse(
                 ok=False,
                 provider=self.provider_id,
@@ -205,6 +209,7 @@ class DoubaoProvider:
                 error=safe_provider_error_message("豆包 / 火山方舟", "invalid_response"),
                 error_code="invalid_response",
                 usage=payload.get("usage") or {},
+                **metadata,
             )
         content = _response_text(payload)
         return ProviderResponse(
@@ -215,4 +220,5 @@ class DoubaoProvider:
             error="" if content else "豆包 / 火山方舟没有返回可显示文本",
             error_code="" if content else "empty_response",
             usage=payload.get("usage") or {},
+            **metadata,
         )

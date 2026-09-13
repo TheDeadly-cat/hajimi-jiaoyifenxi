@@ -22,6 +22,36 @@ from .store import (
 _PLAN_NOT_SUPPLIED = object()
 
 
+def normalized_token_usage(value: Any) -> Any:
+    """Map provider token counters before the ledger's existing secret filter.
+
+    Chat Completions calls its input count prompt_tokens. Persisting its
+    numeric value as input_tokens preserves it without relaxing the filter
+    against prompt text or changing historical usage/hash readers.
+    """
+    if not isinstance(value, dict):
+        return value
+    result = dict(value)
+    for original, canonical in (
+        ("prompt_tokens", "input_tokens"),
+        ("completion_tokens", "output_tokens"),
+        ("prompt_cache_hit_tokens", "cache_hit_input_tokens"),
+        ("prompt_cache_miss_tokens", "cache_miss_input_tokens"),
+    ):
+        if original not in result:
+            continue
+        count = result.pop(original)
+        if type(count) is not int or count < 0:
+            result.pop(canonical, None)
+            result["usage_invalid_token_counter"] = 1
+        elif canonical in result and result[canonical] != count:
+            result.pop(canonical)
+            result["usage_conflicting_token_counters"] = 1
+        else:
+            result[canonical] = count
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderCallLedger:
     """Thin service bound to one persisted provider execution run."""
@@ -172,7 +202,7 @@ class ProviderCallLedger:
             status=status,
             error_code=error_code,
             elapsed_ms=elapsed_ms,
-            usage=usage,
+            usage=normalized_token_usage(usage),
         )
 
     def abandon_started(
