@@ -48,6 +48,8 @@ def _configure_isolation(temp_root: Path) -> Path:
     for name in (
         "OPENAI_API_KEY",
         "DEEPSEEK_API_KEY",
+        "QWEN_API_KEY",
+        "DASHSCOPE_API_KEY",
         "ARK_API_KEY",
         "GLM_API_KEY",
         "ZHIPUAI_API_KEY",

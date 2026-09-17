@@ -87,6 +87,7 @@ def provider_http_error(raw: str, status_code: int, display_name: str) -> str:
 
 
 class CompatibleChatProvider:
+    completion_token_limit = False
     def __init__(
         self,
         *,
@@ -132,6 +133,8 @@ class CompatibleChatProvider:
             "max_tokens": 4,
             "stream": False,
         }
+        if self.completion_token_limit:
+            body["max_completion_tokens"] = body.pop("max_tokens")
         request = build_text_provider_request(
             self._base_url,
             "chat_completions",
@@ -178,9 +181,13 @@ class CompatibleChatProvider:
                 error=f"{self._api_key_name} 未配置",
                 error_code="provider_error",
             )
+        if not selected_model:
+            return ProviderResponse(ok=False, provider=self.provider_id, model="",
+                                    error="请先明确选择模型 ID", error_code="model_not_configured")
         body = text_generation_body(api="chat_completions", model=selected_model,
                                     instructions=instructions, input_text=input_text,
-                                    max_output_tokens=max(1, int(max_tokens)))
+                                    max_output_tokens=max(1, int(max_tokens)),
+                                    completion_token_limit=self.completion_token_limit)
         if response_format:
             body["response_format"] = response_format
         request = build_text_provider_request(

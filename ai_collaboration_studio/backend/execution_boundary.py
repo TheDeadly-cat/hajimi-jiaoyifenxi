@@ -58,6 +58,7 @@ PROVIDER_ALLOWED_FIELDS = {
         "model",
         "messages",
         "max_tokens",
+        "max_completion_tokens",
         "stream",
         "response_format",
     },
@@ -128,11 +129,14 @@ def read_text_provider_response(response) -> str:
 
 def text_generation_body(*, api: str, model: str, instructions: str, input_text: str,
                          max_output_tokens: int, json_output: bool = False,
-                         thinking_disabled: bool = False) -> dict[str, Any]:
+                         thinking_disabled: bool = False,
+                         completion_token_limit: bool = False) -> dict[str, Any]:
     if api == "chat_completions":
         body = {"model": model, "messages": [{"role": "system", "content": instructions},
                                               {"role": "user", "content": input_text}],
                 "max_tokens": max_output_tokens, "stream": False}
+        if completion_token_limit:
+            body["max_completion_tokens"] = body.pop("max_tokens")
         if json_output:
             body["response_format"] = {"type": "json_object"}
     elif api == "responses":
@@ -237,11 +241,13 @@ def _ensure_text_generation_schema(endpoint: str, payload: Mapping[str, Any]) ->
                 raise ExecutionBoundaryViolation("消息 role 不在文本对话白名单中")
             if not isinstance(message.get("content"), str):
                 raise ExecutionBoundaryViolation("消息 content 必须是文本")
-    token_field = "max_output_tokens" if endpoint == "responses" else "max_tokens"
-    if token_field in payload:
-        token_value = payload.get(token_field)
-        if isinstance(token_value, bool) or not isinstance(token_value, int) or token_value <= 0:
-            raise ExecutionBoundaryViolation(f"{token_field} 必须是正整数")
+    if "max_tokens" in payload and "max_completion_tokens" in payload:
+        raise ExecutionBoundaryViolation("输出上限不能同时使用两种计数参数")
+    for token_field in ("max_output_tokens", "max_tokens", "max_completion_tokens"):
+        if token_field in payload:
+            token_value = payload.get(token_field)
+            if isinstance(token_value, bool) or not isinstance(token_value, int) or token_value <= 0:
+                raise ExecutionBoundaryViolation(f"{token_field} 必须是正整数")
     for boolean_field in ("store", "stream"):
         if boolean_field in payload and not isinstance(payload.get(boolean_field), bool):
             raise ExecutionBoundaryViolation(f"{boolean_field} 必须是布尔值")

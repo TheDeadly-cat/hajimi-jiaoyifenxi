@@ -35,6 +35,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 KEY_ENV_NAMES = (
     "OPENAI_API_KEY",
     "DEEPSEEK_API_KEY",
+    "QWEN_API_KEY",
+    "DASHSCOPE_API_KEY",
     "ARK_API_KEY",
     "GLM_API_KEY",
     "ZHIPUAI_API_KEY",

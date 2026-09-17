@@ -12,8 +12,8 @@ import sys
 import warnings
 
 APP = Path(__file__).resolve().parents[1]
-KEYS = ("OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ARK_API_KEY", "DOUBAO_API_KEY", "GLM_API_KEY", "ZHIPUAI_API_KEY", "ZHIPU_API_KEY")
-KEY_NAME = {"openai": "OPENAI_API_KEY", "deepseek": "DEEPSEEK_API_KEY", "doubao": "ARK_API_KEY", "glm": "GLM_API_KEY"}
+KEYS = ("OPENAI_API_KEY", "DEEPSEEK_API_KEY", "QWEN_API_KEY", "DASHSCOPE_API_KEY", "ARK_API_KEY", "DOUBAO_API_KEY", "GLM_API_KEY", "ZHIPUAI_API_KEY", "ZHIPU_API_KEY")
+KEY_NAME = {"openai": "OPENAI_API_KEY", "deepseek": "DEEPSEEK_API_KEY", "qwen": "QWEN_API_KEY", "doubao": "ARK_API_KEY", "glm": "GLM_API_KEY"}
 
 
 class PilotCLIError(ValueError):

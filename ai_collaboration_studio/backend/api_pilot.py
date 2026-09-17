@@ -25,12 +25,13 @@ from .providers.base import classify_provider_exception
 from .document_evidence import DocumentEvidenceService
 from .source_inbox_service import SourceInboxService
 
-PROVIDERS = frozenset({"openai", "deepseek", "doubao", "glm"})
+PROVIDERS = frozenset({"openai", "deepseek", "doubao", "qwen", "glm"})
 OFFICIAL_ENDPOINTS = {
     "openai": "https://api.openai.com/v1/responses",
     "deepseek": "https://api.deepseek.com/chat/completions",
     "doubao": "https://ark.cn-beijing.volces.com/api/v3/responses",
     "glm": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
 }
 RESPONSE_VERSION = "api_evidence_answer_v1"
 SCOPE = {"selected_paragraphs_only": True, "attachments_read": False,
@@ -196,12 +197,13 @@ class ControlledAPIPilot:
         if type(start) is not int or type(end) is not int or not 0 < end - start <= 7_200_000:
             raise PilotError("试验有效窗口必须明确且不超过两小时")
         source = prepare_evidence(self.store, config["room_id"], config["session_id"])
-        structured = provider_id in {"deepseek", "doubao"}
-        api = "chat_completions" if provider_id in {"deepseek", "glm"} else "responses"
-        timeout = 180 if provider_id == "deepseek" else 240 if provider_id == "doubao" else 60
+        structured = provider_id in {"deepseek", "doubao", "qwen"}
+        api = "chat_completions" if provider_id in {"deepseek", "qwen", "glm"} else "responses"
+        timeout = 180 if provider_id in {"deepseek", "qwen"} else 240 if provider_id == "doubao" else 60
         body = text_generation_body(api=api, model=model, instructions=source["instructions"],
                                     input_text=source["input_text"], max_output_tokens=max_output,
-                                    json_output=structured, thinking_disabled=provider_id == "doubao")
+                                    json_output=structured, thinking_disabled=provider_id == "doubao",
+                                    completion_token_limit=provider_id == "qwen")
         request = build_text_provider_request(provider._base_url, api, body, headers={})
         if request.full_url != OFFICIAL_ENDPOINTS[provider_id] or len(request.data) > max_bytes:
             raise PilotError("端点不是获准的官方地址，或完整请求超过输入范围")
@@ -211,7 +213,8 @@ class ControlledAPIPilot:
         _text(rate["source_url"], 500, "pricing source"); _text(rate["checked_at"], 80, "pricing date")
         pricing_url = urlparse(rate["source_url"])
         pricing_hosts = {"deepseek": {"api-docs.deepseek.com"}, "openai": {"developers.openai.com", "platform.openai.com", "openai.com"},
-                         "glm": {"docs.bigmodel.cn", "bigmodel.cn", "open.bigmodel.cn"}, "doubao": {"www.volcengine.com", "volcengine.com"}}
+                         "glm": {"docs.bigmodel.cn", "bigmodel.cn", "open.bigmodel.cn"}, "doubao": {"www.volcengine.com", "volcengine.com"},
+                         "qwen": {"help.aliyun.com", "www.aliyun.com"}}
         if pricing_url.scheme != "https" or pricing_url.hostname not in pricing_hosts[provider_id] or pricing_url.username or pricing_url.password or pricing_url.query or pricing_url.fragment:
             raise PilotError("价格来源必须是选定供应商的官方页面")
         input_rate, output_rate = _decimal(rate["input_per_million"], "input rate"), _decimal(rate["output_per_million"], "output rate")
@@ -304,7 +307,7 @@ class ControlledAPIPilot:
                 receipt.update(status="INVALID", error_code="reported_usage_exceeds_plan", accounting_acceptance="exceeds_plan")
             elif response.provider != config["provider"] or response.reported_model not in config["accepted_response_models"]:
                 receipt.update(status="INVALID", error_code="model_identity_mismatch")
-            elif response.refused or response.incomplete_reason or not (response.finish_reason == "stop" if config["provider"] in {"deepseek", "glm"} else response.response_status == "completed"):
+            elif response.refused or response.incomplete_reason or not (response.finish_reason == "stop" if config["provider"] in {"deepseek", "qwen", "glm"} else response.response_status == "completed"):
                 receipt.update(status="INVALID", error_code="response_not_complete")
             else:
                 receipt["result"] = validate_answer(response.content, plan["source"]["evidence"])

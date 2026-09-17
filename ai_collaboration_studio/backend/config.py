@@ -32,6 +32,10 @@ def _load_local_env() -> None:
                     "DEEPSEEK_API_KEY",
                     "DEEPSEEK_BASE_URL",
                     "DEEPSEEK_MODEL",
+                    "QWEN_API_KEY",
+                    "DASHSCOPE_API_KEY",
+                    "QWEN_BASE_URL",
+                    "QWEN_MODEL",
                     "ARK_API_KEY",
                     "ARK_BASE_URL",
                     "ARK_MODEL",
@@ -105,13 +109,17 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
+QWEN_API_KEY = os.getenv("QWEN_API_KEY", "") or os.getenv("DASHSCOPE_API_KEY", "")
+QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1").rstrip("/")
+# A model must be chosen explicitly; a paid coding subscription is not a backend API grant.
+QWEN_MODEL = os.getenv("QWEN_MODEL", "").strip()
 ARK_API_KEY = os.getenv("ARK_API_KEY", "")
 ARK_BASE_URL = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3").rstrip("/")
 ARK_MODEL = os.getenv("ARK_MODEL", "doubao-seed-2-0-lite-260215")
 GLM_API_KEY = os.getenv("GLM_API_KEY", "") or os.getenv("ZHIPUAI_API_KEY", "")
 GLM_BASE_URL = os.getenv("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4").rstrip("/")
 GLM_MODEL = os.getenv("GLM_MODEL", "glm-5.2")
-DEFAULT_PROVIDER = os.getenv("AI_STUDIO_DEFAULT_PROVIDER", "deepseek").strip().lower() or "deepseek"
+DEFAULT_PROVIDER = os.getenv("AI_STUDIO_DEFAULT_PROVIDER", "doubao").strip().lower() or "doubao"
 DISABLED_PROVIDER_IDS = _deployment_disabled_provider_ids(
     "AI_STUDIO_DISABLED_PROVIDERS",
     "",

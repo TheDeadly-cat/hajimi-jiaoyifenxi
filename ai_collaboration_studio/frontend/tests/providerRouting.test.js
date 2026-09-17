@@ -260,7 +260,9 @@ test("routing presentation preserves the two-target allowlist and separates conf
     }],
   });
 
-  assert.deepEqual(view.bulkTargets.map((target) => target.id), ["deepseek", "doubao"]);
+  assert.deepEqual(view.bulkTargets.map((target) => target.id), ["doubao", "qwen", "glm", "deepseek"]);
+  assert.equal(view.bulkTargets.find((target) => target.id === "qwen").available, false);
+  assert.equal(view.bulkTargets.find((target) => target.id === "glm").available, false);
   assert.equal(view.catalog.find((entry) => entry.id === "deepseek").status, "ready");
   assert.equal(view.catalog.find((entry) => entry.id === "third").status, "configured");
   assert.equal(view.warnings[0].key, "unassigned");

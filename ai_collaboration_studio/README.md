@@ -33,7 +33,7 @@ AI 共创室是通用多 AI 协作群聊。用户创建房间，为不同 AI 配
 - 主持人的每次点名和“建议结束”都会先按服务端正常写入路径追加到 `director_decisions`，再推送到群聊界面；记录包含轮次内序号、动作、成员、理由、来源、阶段、受限关注点和冻结主持上下文。新记录同时写入 `decision_sha256`，把这些字段、记录 ID、轮次归属和创建时间一起纳入 canonical SHA-256 校验。刷新或恢复后仍能按原顺序查看；旧记录不补造封印，审计轨迹会据实标记 `partial`。
 - 每次真实隐藏主持调用另写入 `director_attempts`：记录冻结主持版本与路由、`STARTED / RESPONDED / FAILED / INVALID / CANCELLED` 状态、规范错误码，以及响应和最终调度摘要的 SHA-256；不保存提示正文、响应正文、异常正文、认证头或密钥。正式轮中的调用还在请求上游前生成 UUID4 `operation_id`，并以 `operation_binding_sha256` 精确绑定本次 Provider attempt 与对应 `director_attempt`。一次 `FAILED / INVALID` 会对同轮同一路由打开熔断器；`round_director` 硬子预算耗尽时则完全不调用 Provider，改走确定性安全回退并标记 `director_call_budget_exhausted`。成功调用只有在主持决定已持久化、普通发言 turn 已预留后才进入 `RESPONDED`；暂停或恢复遗留调用会显式取消，不留下永久 `STARTED`。
 - 新轮目标在会前执行编码完整性检查；高比例 `?` 或 Unicode 损坏字符会在任何模型预检和数据库写入前被拒绝，避免乱码目标进入正式讨论。
-- 已实现 OpenAI、DeepSeek、豆包/火山方舟和智谱 GLM 成员级适配器；适配器存在不等于当前密钥、模型或上游服务可用，实际可用性以会前预检为准。成员调用失败仍按成员隔离并持久化，`speaker_failed` 会记录安全的 `error_code / provider / model`，不保存上游响应正文或异常详情，也不自动重试或切换供应商。
+- 已实现豆包/火山方舟、千问 Qwen、智谱 GLM、DeepSeek 和策略禁用的 OpenAI 成员级适配器；适配器存在不等于当前密钥、模型或上游服务可用，实际可用性以会前预检为准。成员调用失败仍按成员隔离并持久化，`speaker_failed` 会记录安全的 `error_code / provider / model`，不保存上游响应正文或异常详情，也不自动重试或切换供应商。
 - “美国存储产业投资委员会”是交易研究中的一个样板房间，不是产品边界。
 - 12 个正式角色是：投资委员会主持人、存储周期分析师、硬盘产业分析师、基本面分析师、技术与资金分析师、新闻与情绪分析师、多头研究员、空头研究员、数据质量官、模拟交易员、风险经理、投委会决策经理。数据质量官负责统一时间截面、资料版本和防未来数据泄漏；所有身份、职责、边界和模型仍可由用户编辑。
 - 富途只读适配器一次冻结 `US.MU`、`US.SNDK`、`US.WDC`、`US.STX` 的共同证据截面，并标记数据时间、过期和缺失状态。
@@ -198,18 +198,19 @@ python server.py
 
 ### 模型执行器
 
-复制 `.env.example` 中需要的变量到本机 `.env.local`，只填写实际使用的供应商；不要把 `.env.local` 提交到版本库。
+模型与端点变量见 `.env.example`。受控试验使用本机隐藏输入，将密钥仅注入当前进程；不要把真实密钥写进文件、聊天、前端或版本库。接入流程见 [模型服务接入](docs/provider_integration_20260917.md)。
 
 - OpenAI：`OPENAI_API_KEY`，默认模型 `gpt-5.4-mini`。
 - DeepSeek：`DEEPSEEK_API_KEY`，默认模型 `deepseek-v4-pro`。
 - 豆包 / 火山方舟：`ARK_API_KEY`，默认模型 `doubao-seed-2-0-lite-260215`。
+- 千问 Qwen：`QWEN_API_KEY` 或 `DASHSCOPE_API_KEY`，北京地域百炼通用按量 API；`QWEN_MODEL` 必须明确指定。Token Plan / Coding Plan 套餐端点不能作为本项目后端，代码不会读取独立编程入口的套餐密钥。
 - 智谱 GLM：`GLM_API_KEY` 或兼容变量 `ZHIPUAI_API_KEY`，默认模型 `glm-5.2`。
 
-每位 AI 成员可独立选择执行器与模型；模型栏留空时使用该执行器的默认模型。供应商状态接口只返回是否已配置、默认模型和是否被部署策略禁用，不返回密钥、密钥片段或认证请求头。代码策略无条件禁用 `openai`；`AI_STUDIO_DISABLED_PROVIDERS` 只能追加其他禁用项，请求也只能继续追加，不能用空环境变量或 `skip_providers=[]` 重新开启 OpenAI。
+每位 AI 成员可独立选择执行器与模型；模型栏留空时使用该执行器明确配置的默认模型；千问没有内置默认模型，缺少模型 ID 时在出网前拒绝。供应商状态接口只返回是否已配置、默认模型和是否被部署策略禁用，不返回密钥、密钥片段或认证请求头。代码策略无条件禁用 `openai`；`AI_STUDIO_DISABLED_PROVIDERS` 只能追加其他禁用项，请求也只能继续追加，不能用空环境变量或 `skip_providers=[]` 重新开启 OpenAI。
 
-新正式轮的成员发言使用纯 JSON `turn_envelope_v1`：顶层只允许 `version / turn_contract / visible_content`，其中机器合同仍是原有 `turn_contract_v1`，可见正文只从 `visible_content` 入库。Provider 能力按 `json_schema > json_object > prompt_json` 的固定优先级协商；当前 DeepSeek、豆包声明 `json_object`，GLM 使用严格 `prompt_json`，未声明能力的兼容适配器也只能使用 `prompt_json`。每位成员的选定模式、envelope 版本和 schema SHA-256 在启动计划与调用路由中封印。一次发言最多调用 Provider 一次；JSON、schema 或合同校验失败记为 `INVALID`，不修补、不重试、不切换模式，也不降级回旧 XML。
+新正式轮的成员发言使用纯 JSON `turn_envelope_v1`：顶层只允许 `version / turn_contract / visible_content`，其中机器合同仍是原有 `turn_contract_v1`，可见正文只从 `visible_content` 入库。Provider 能力按 `json_schema > json_object > prompt_json` 的固定优先级协商；当前 DeepSeek、豆包、千问声明 `json_object`，GLM 使用严格 `prompt_json`，未声明能力的兼容适配器也只能使用 `prompt_json`。每位成员的选定模式、envelope 版本和 schema SHA-256 在启动计划与调用路由中封印。一次发言最多调用 Provider 一次；JSON、schema 或合同校验失败记为 `INVALID`，不修补、不重试、不切换模式，也不降级回旧 XML。
 
-房间右栏会显示启用成员的 provider / model 分配，并支持把全部启用成员批量迁移到 DeepSeek 或豆包；批量迁移只修改模型路由，不改变成员身份、职责、边界、阶段、顺序或历史身份版本，仍可逐成员覆盖。右栏“本机配置检查”只读取 Registry 状态，固定为 0 次外部调用，也不创建调用账本。正式新轮由服务端 round stream 在用户确认计划与调用上限后，按冻结的唯一 `(provider, model)` 组合执行极小真实连通性检查；会前探测与后续成员调用都必须命中该轮封印的成员路由清单。缺少配置、认证失败、模型无权限或上游不可用时，在创建轮次、写入消息和冻结证据前失败关闭。预检结果只返回安全状态，不返回凭证、上游原文或响应正文。
+房间右栏会显示启用成员的 provider / model 分配，并支持把全部启用成员批量迁移到豆包、千问、智谱或 DeepSeek；批量迁移只修改模型路由，不改变成员身份、职责、边界、阶段、顺序或历史身份版本，仍可逐成员覆盖。右栏“本机配置检查”只读取 Registry 状态，固定为 0 次外部调用，也不创建调用账本。正式新轮由服务端 round stream 在用户确认计划与调用上限后，按冻结的唯一 `(provider, model)` 组合执行极小真实连通性检查；会前探测与后续成员调用都必须命中该轮封印的成员路由清单。缺少配置、认证失败、模型无权限或上游不可用时，在创建轮次、写入消息和冻结证据前失败关闭。预检结果只返回安全状态，不返回凭证、上游原文或响应正文。
 
 #### 正式新轮启动确认与 Provider 调用账本
 
@@ -237,7 +238,7 @@ python server.py
 - 豆包 / 火山方舟已配置，最小真实请求通过；当前模型为 `doubao-seed-2-0-lite-260215`。
 - 智谱 GLM 已配置，但真实请求返回密钥未授权或模型尚未开通；修复前不把成员路由到 GLM。
 - OpenAI 适配器仍保留，但当前部署在代码策略中无条件硬禁用 `openai`；环境变量只能继续增加禁用项，不能移除这条固定策略。Registry 执行查询、正式连通性检查、隐藏主持、成员发言、点名恢复和会议产物都会失败关闭。前端仍显式提交 `skip_providers=["openai"]`，服务端再与固定策略取并集并冻结进 round / 点名检查点；显式空数组或空环境变量都不能削弱它，也不会探测、调用、静默换供应商或回退到 OpenAI。
-- `AI_STUDIO_DEFAULT_PROVIDER` 控制新成员的后端默认执行器；未设置时默认使用 DeepSeek。
+- `AI_STUDIO_DEFAULT_PROVIDER` 控制新成员的后端默认执行器；未设置时默认使用豆包。界面优先顺序为豆包、千问、智谱、DeepSeek，既有成员的显式路由保持原样；这不是失败后自动切换顺序。
 - “已配置”只表示本机存在非空配置，不代表真实 API 可用；任何状态接口和错误事件都不得返回密钥、认证头或密钥片段。
 - `turn_envelope_v1`、Provider 输出能力协商、`round_launch_plan_v3`、`provider_call_budget_profile_v1`、`provider_member_routes_v2`、v9 检查点和 `round_turn_ledger_v2` 已完成离线实现与回归验证。新正式轮还会把计划给出的主持建议额度冻结为 `round_director` 硬子预算，并启用 `provider_operation_binding_v1`；历史 XML `turn_contract_v1` 暂停轮继续按原冻结协议恢复，不回填新政策或 operation 绑定。新轮收到旧 XML、纯文本或损坏 JSON 时只消费该次已预留调用并失败关闭。该升级没有发起任何真实 Provider 请求，正式账本仍受 `MAX_28_PROVIDER_CALLS` 硬上限约束。
 - `round_execution_trace_v1` 已提供按需读取的本轮执行轨迹，把 Provider 账本、主持尝试与决定、正式 turn、消息落库、候选/风控投影、产物治理和用户决定整理为稳定分页事件。它在单个 SQLite 只读事务内生成当前快照，不调用 Provider，也不拥有执行能力。新正式轮可校验 UUID4 operation 与精确目标绑定、主持决定封印，以及按服务端正常写入路径只追加的 `round_trace_anchor_v1`：轮次进入 `PAUSED / COMPLETED / PARTIAL / CANCELLED` 时持久化非敏感快照、来源水位、前一锚哈希，并原子推进轮次链头；同一快照重复封印幂等返回原锚。运行中或恢复后出现新记录时，在下一次封印前会诚实标记“快照已变化”。旧轮缺少 operation 绑定、决定封印或 `round_execution_audit_v1` 时不回填，继续显示 `partial`，不会凭时间戳猜测因果或把旧快照伪装成完整审计链。

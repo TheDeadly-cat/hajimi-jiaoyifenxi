@@ -20,7 +20,7 @@ class ControlledPilotTests(DocumentSelectionFixture):
         self.material = self.save()["material"]
         self.session = ManualChatGPTService(self.store).create(self.room_id, objective="Synthetic pilot fixture only.", mode="quick")
         self.owner = DatabaseInstanceOwner(self.store.path).acquire()
-        self.registry = ProviderRegistry(disabled_provider_ids={"openai", "doubao", "glm"}, api_keys={"deepseek": "fixture-key"})
+        self.registry = ProviderRegistry(disabled_provider_ids={"openai", "doubao", "qwen", "glm"}, api_keys={"deepseek": "fixture-key"})
         self.pilot = ControlledAPIPilot(self.store, self.registry, instance_owner=self.owner, clock=lambda: self.now)
         self.config = {"version": "api_controlled_pilot_v1", "pilot_id": "fixture-pilot", "candidate_sha": "a" * 40,
                        "database_path": str(self.store.path), "room_id": self.room_id, "session_id": self.session["id"],
@@ -114,11 +114,11 @@ class ControlledPilotTests(DocumentSelectionFixture):
             unrestricted = ControlledAPIPilot(self.store, ProviderRegistry(), instance_owner=self.owner)
             with self.assertRaises(PilotError):
                 unrestricted.prepare(self.config)
-            injected = ProviderRegistry({"deepseek": self.registry.get("deepseek")}, disabled_provider_ids={"openai", "doubao", "glm"})
+            injected = ProviderRegistry({"deepseek": self.registry.get("deepseek")}, disabled_provider_ids={"openai", "doubao", "qwen", "glm"})
             with self.assertRaises(PilotError):
                 ControlledAPIPilot(self.store, injected, instance_owner=self.owner).prepare(self.config)
             openai_config = {**self.config, "provider": "openai"}
-            openai_registry = ProviderRegistry(disabled_provider_ids={"deepseek", "doubao", "glm"}, api_keys={"openai": "fixture-key"})
+            openai_registry = ProviderRegistry(disabled_provider_ids={"deepseek", "doubao", "qwen", "glm"}, api_keys={"openai": "fixture-key"})
             with self.assertRaises(PilotError):
                 ControlledAPIPilot(self.store, openai_registry, instance_owner=self.owner).prepare(openai_config)
             with patch.object(self.registry.get("deepseek"), "_base_url", "https://unapproved.example"):
@@ -239,15 +239,15 @@ class ControlledPilotTests(DocumentSelectionFixture):
             self.assertNotIn("fixture-key", path.read_text(encoding="utf-8"))
 
     def test_other_enabled_builtin_routes_match_the_same_approved_wire_contract(self):
-        for provider_id, pricing_url in [("glm", "https://docs.bigmodel.cn/"), ("doubao", "https://www.volcengine.com/")]:
+        for provider_id, pricing_url in [("glm", "https://docs.bigmodel.cn/"), ("doubao", "https://www.volcengine.com/"), ("qwen", "https://help.aliyun.com/")]:
             with self.subTest(provider=provider_id):
                 config = copy.deepcopy(self.config)
                 config.update(provider=provider_id, pilot_id="fixture-" + provider_id)
                 config["rate_card"]["source_url"] = pricing_url
-                registry = ProviderRegistry(disabled_provider_ids={"openai", "deepseek", "glm", "doubao"} - {provider_id}, api_keys={provider_id: "fixture-key"})
+                registry = ProviderRegistry(disabled_provider_ids={"openai", "deepseek", "glm", "doubao", "qwen"} - {provider_id}, api_keys={provider_id: "fixture-key"})
                 pilot = ControlledAPIPilot(self.store, registry, instance_owner=self.owner, clock=lambda: self.now)
                 plan = pilot.prepare(config)
-                payload = (self.provider_payload() if provider_id == "glm" else
+                payload = (self.provider_payload() if provider_id in {"glm", "qwen"} else
                            {"id": "fixture-response", "model": "fixture-model", "status": "completed",
                             "output_text": json.dumps(self.answer()), "usage": {"input_tokens": 100, "output_tokens": 50}})
                 with patch("urllib.request.OpenerDirector.open", return_value=io.BytesIO(json.dumps(payload).encode())) as transport:
