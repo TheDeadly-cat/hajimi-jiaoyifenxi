@@ -28,7 +28,7 @@ def ask_api_key(plan: dict, status_directory: Path) -> str:
 
     root = tk.Tk()
     root.title(f"AI 共创室 · {name} · 本机密钥输入")
-    root.geometry("720x390")
+    root.geometry("720x430")
     root.resizable(False, False)
     root.attributes("-topmost", True)
     frame = ttk.Frame(root, padding=24)
@@ -77,6 +77,8 @@ def ask_api_key(plan: dict, status_directory: Path) -> str:
     entry.bind("<Return>", submit)
     root.after(200, lambda: (root.lift(), root.focus_force(), entry.focus_set()))
     root.after(max(1, config["expires_at_ms"] - int(time.time() * 1000)), cancel)
+    root.update_idletasks()
+    root.geometry(f"{max(720, root.winfo_reqwidth())}x{max(430, root.winfo_reqheight())}")
     try:
         record("opened")
         root.mainloop()
