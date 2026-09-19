@@ -482,7 +482,21 @@ class FutuReadOnlyBroker:
             self._process = None
         if holder is not None:
             try:
-                holder.cleanup()
+                cleanup_deadline = time.monotonic() + 2.0
+                while True:
+                    try:
+                        holder.cleanup()
+                        break
+                    except OSError as exc:
+                        # Windows can briefly retain the worker's cwd after
+                        # process exit and pipe closure. Retry only sharing
+                        # violations; keep ownership on persistent failure.
+                        if (
+                            getattr(exc, "winerror", None) != 32
+                            or time.monotonic() >= cleanup_deadline
+                        ):
+                            raise
+                        time.sleep(0.01)
             except OSError:
                 stopped = False
             else:
