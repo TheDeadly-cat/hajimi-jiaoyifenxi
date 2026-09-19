@@ -1306,6 +1306,10 @@ class ProviderPreflightHttpTests(unittest.TestCase):
         self.assertEqual(after["messages"], before["messages"])
 
     def test_storage_market_failure_precedes_provider_probe_and_has_no_side_effects(self) -> None:
+        for member in http_server.STORE.room_snapshot("room_storage")["members"]:
+            http_server.STORE.update_member("room_storage", member["id"], {
+                "provider": "deepseek", "model": "deepseek-test",
+            })
         deepseek = StubProvider("deepseek", model="deepseek-test")
         registry = ProviderRegistry({
             "openai": self.provider,
@@ -1328,7 +1332,7 @@ class ProviderPreflightHttpTests(unittest.TestCase):
         )
 
         after = http_server.STORE.room_snapshot("room_storage")
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 200, events)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["code"], "ROUND_MARKET_PREFLIGHT_FAILED")
         self.assertEqual(self.market_service.calls, 1)

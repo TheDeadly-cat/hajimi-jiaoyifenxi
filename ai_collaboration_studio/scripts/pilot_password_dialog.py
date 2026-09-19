@@ -16,6 +16,7 @@ def ask_api_key(plan: dict, status_directory: Path) -> str:
     from backend.api_pilot import write_record
 
     config = plan["config"]
+    max_calls = plan.get("max_calls", 1)
     if time.time() * 1000 >= config["expires_at_ms"]:
         raise ValueError("试验授权已经过期；未读取密钥")
     names = {"doubao": "豆包 / 火山方舟", "glm": "智谱官网", "deepseek": "DeepSeek 官网", "qwen": "百炼通用 API", "openai": "OpenAI 官网"}
@@ -40,7 +41,7 @@ def ask_api_key(plan: dict, status_directory: Path) -> str:
     entry.pack(fill="x")
     status = tk.StringVar(value="等待输入")
     ttk.Label(frame, textvariable=status, font=("Microsoft YaHei UI", 10)).pack(anchor="w", pady=(6, 12))
-    ttk.Label(frame, text=f"模型：{config['model']}\n最多一次请求；输出上限 {config['max_output_tokens']} Token；失败不重试。\n消费计划 ≤ {config['spend_plan_limit']} {config['rate_card']['currency']}（不是供应商账单硬上限）", font=("Microsoft YaHei UI", 10)).pack(anchor="w")
+    ttk.Label(frame, text=f"模型：{config['model']}\n最多 {max_calls} 次请求；每次输出上限 {config['max_output_tokens']} Token；失败立即停止，不重试。\n消费计划 ≤ {config['spend_plan_limit']} {config['rate_card']['currency']}（不是供应商账单硬上限）", font=("Microsoft YaHei UI", 10)).pack(anchor="w")
     actions = ttk.Frame(frame)
     actions.pack(fill="x", pady=(20, 0))
     chosen = []
@@ -70,7 +71,7 @@ def ask_api_key(plan: dict, status_directory: Path) -> str:
         root.destroy()
 
     ttk.Button(actions, text="取消，不调用", command=cancel).pack(side="left")
-    button = ttk.Button(actions, text="提交密钥并执行一次", command=submit, state="disabled")
+    button = ttk.Button(actions, text=f"提交密钥并执行已批准的 {max_calls} 次请求", command=submit, state="disabled")
     button.pack(side="right")
     trace_id = value.trace_add("write", lambda *_: button.configure(state="normal" if value.get() else "disabled"))
     root.protocol("WM_DELETE_WINDOW", cancel)

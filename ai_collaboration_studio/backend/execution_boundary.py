@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 
@@ -76,6 +76,7 @@ class AuthorizedTextRequest:
     max_body_bytes: int
     timeout_seconds: int
     attempted: bool = False
+    before_send: Callable[[], None] | None = None
 
     def check(self, request: urllib.request.Request) -> None:
         body = request.data or b""
@@ -114,6 +115,8 @@ def open_text_provider_request(request: urllib.request.Request, *, timeout: int)
         raise ExecutionBoundaryViolation("本次授权只允许一个 Provider HTTP 请求")
     if timeout != policy.timeout_seconds:
         raise ExecutionBoundaryViolation("实际 Provider 超时参数与授权不一致")
+    if policy.before_send is not None:
+        policy.before_send()
     policy.attempted = True
     return urllib.request.build_opener(_NoProviderRedirect()).open(request, timeout=timeout)
 

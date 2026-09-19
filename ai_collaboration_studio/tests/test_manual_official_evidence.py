@@ -6,6 +6,8 @@ import json
 import tempfile
 import threading
 import unittest
+from datetime import datetime
+from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
@@ -41,6 +43,10 @@ ALLOWED_ERROR = "EARNINGS_MATERIAL_ACCESS_TIMEOUT"
 
 class ManualOfficialEvidenceHttpTests(unittest.TestCase):
     def setUp(self) -> None:
+        # Success-path fixtures are explicitly inside the reviewed catalog's
+        # validity window. Production dates and the expiry check stay intact.
+        self.catalog_clock = self.enterContext(patch("backend.store.datetime", wraps=datetime))
+        self.catalog_clock.now.return_value = datetime(2026, 8, 2, 12)
         self.temp_dir = tempfile.TemporaryDirectory()
         self.store = StudioStore(Path(self.temp_dir.name) / "studio.sqlite3")
         self.original_store = http_server.STORE
@@ -232,6 +238,21 @@ class ManualOfficialEvidenceHttpTests(unittest.TestCase):
         self.assertEqual(duplicate_status, 200, duplicate)
         self.assertEqual(duplicate["official_attestation"]["id"], staged["id"])
         self.assertEqual(duplicate["official_attestation"]["confirmed_at"], confirmed["confirmed_at"])
+
+    def test_catalog_expiry_boundary_blocks_new_import_and_confirmation(self) -> None:
+        self.catalog_clock.now.return_value = datetime(2026, 9, 16, 23, 59, 59)
+        material, staged = self.stage()
+        self.catalog_clock.now.return_value = datetime(2026, 9, 17)
+        status, response = self.request(
+            "/api/rooms/room_storage/materials/import-file", self.import_payload(),
+        )
+        self.assertEqual(status, 400, response)
+        self.assertIn("已过期", response["error"])
+        status, response = self.confirm(material, staged)
+        self.assertEqual(status, 409, response)
+        snapshot = self.store.room_snapshot("room_storage")
+        self.assertEqual(len(snapshot["official_attestations"]), 1)
+        self.assertEqual(snapshot["official_attestations"][0]["status"], "STAGED")
 
     def test_staging_requires_explicit_user_confirmation_before_any_write(self) -> None:
         baseline = self.store.room_snapshot("room_storage")

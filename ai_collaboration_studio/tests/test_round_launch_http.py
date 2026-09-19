@@ -260,6 +260,11 @@ class RoundLaunchHttpTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.store = StudioStore(Path(self.temp_dir.name) / "round-launch-http.sqlite3")
+        members = self.store.room_snapshot("room_plan")["members"]
+        for member in members:
+            self.store.update_member("room_plan", member["id"], {
+                "provider": "deepseek", "model": "deepseek-test",
+            })
         self.providers = BudgetedLocalRegistry()
         self.orchestrator = LedgerRecordingOrchestrator(self.store, self.providers)
         self.artifacts = LedgerRecordingArtifacts(self.providers)
@@ -335,7 +340,7 @@ class RoundLaunchHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 200)
         self.assertTrue(body["ok"])
-        self.assertTrue(body["plan"]["ready_for_authorization"])
+        self.assertTrue(body["plan"]["ready_for_authorization"], body["plan"])
         return body["plan"]
 
     @staticmethod
@@ -381,11 +386,10 @@ class RoundLaunchHttpTests(unittest.TestCase):
 
         after = self.store.room_snapshot("room_plan")
         self.assertIn("openai", plan["skip_provider_ids"])
-        openai_projection = next(
-            item for item in plan["provider_call_projection"]
+        self.assertEqual(sum(
+            item["projected_provider_calls"] for item in plan["provider_call_projection"]
             if item["provider"] == "openai"
-        )
-        self.assertEqual(openai_projection["projected_provider_calls"], 0)
+        ), 0)
         self.assertEqual(self.providers.preflight_calls, [])
         self.assertEqual(self.orchestrator.market_calls, 0)
         self.assertEqual(self.orchestrator.run_ledgers, [])
