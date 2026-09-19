@@ -29,3 +29,11 @@
 所有离线入口和 CI 会清除千问的两个密钥别名，原来源试用入口仍禁用全部 Provider。API 接入不会自动开启官网轮询、Futu、正式轮次、交易或人工结果导入。2026-09-13 的 DeepSeek 单次授权已经过期，不能复用。
 
 官方接口核对日期：2026-09-17。[阿里云 Chat 参数](https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions)、[阿里云结构化输出](https://help.aliyun.com/zh/model-studio/qwen-structured-output)、[Token Plan 个人版规则](https://help.aliyun.com/zh/model-studio/token-plan-personal-overview)、[智谱对话接口](https://docs.bigmodel.cn/api-reference/模型-api/对话补全)、[火山方舟接入示例](https://www.volcengine.com/docs/82379/1795150)。
+
+## 2026-09-20 豆包首测准备
+
+账户截图确认 Doubao-Seed-2.1-pro 家族已开通且显示剩余 500,000 Token 体验额度；截图不能证明请求发生时的额度、计费结果或供应商硬消费上限。首测拟固定 `doubao-seed-2-1-pro-260915`，不使用滚动升级别名或 Smart Router。此记录是准备方案，不是调用授权或成功回执。
+
+当日[官方模型列表](https://docs.volcengine.com/docs/ark/model-list)列出该固定版本；[官方价格页](https://docs.volcengine.com/docs/ark/model-pricing)列出 Seed 2.1 Pro 常规文本输入 6 元/百万 Token、输出 30 元/百万 Token。[Responses 接口](https://ark.volcengine.com/region:cn-beijing/docs/ark/create-model-responses-api?lang=zh)仍明确支持 `thinking.type=disabled`、`text.format.type=json_object` 和 `max_output_tokens`；现有适配器参数不需要更改。价格来源允许列表仅增加迁移后的官方文档域名 `docs.volcengine.com`，不改变密钥发送端点。
+
+同一方舟控制台中的 GLM、DeepSeek 是方舟托管服务。上表 `glm` 和 `deepseek` 是各家官网直连接口，不得把方舟密钥或方舟模型 ID 直接填入这些路由。方舟托管 GLM/DeepSeek 的接入及真实验证尚未完成；首测仅调用豆包。

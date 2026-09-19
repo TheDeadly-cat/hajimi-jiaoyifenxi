@@ -213,7 +213,7 @@ class ControlledAPIPilot:
         _text(rate["source_url"], 500, "pricing source"); _text(rate["checked_at"], 80, "pricing date")
         pricing_url = urlparse(rate["source_url"])
         pricing_hosts = {"deepseek": {"api-docs.deepseek.com"}, "openai": {"developers.openai.com", "platform.openai.com", "openai.com"},
-                         "glm": {"docs.bigmodel.cn", "bigmodel.cn", "open.bigmodel.cn"}, "doubao": {"www.volcengine.com", "volcengine.com"},
+                         "glm": {"docs.bigmodel.cn", "bigmodel.cn", "open.bigmodel.cn"}, "doubao": {"www.volcengine.com", "volcengine.com", "docs.volcengine.com"},
                          "qwen": {"help.aliyun.com", "www.aliyun.com"}}
         if pricing_url.scheme != "https" or pricing_url.hostname not in pricing_hosts[provider_id] or pricing_url.username or pricing_url.password or pricing_url.query or pricing_url.fragment:
             raise PilotError("价格来源必须是选定供应商的官方页面")

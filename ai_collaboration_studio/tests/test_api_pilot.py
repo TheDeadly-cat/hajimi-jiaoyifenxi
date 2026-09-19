@@ -239,7 +239,7 @@ class ControlledPilotTests(DocumentSelectionFixture):
             self.assertNotIn("fixture-key", path.read_text(encoding="utf-8"))
 
     def test_other_enabled_builtin_routes_match_the_same_approved_wire_contract(self):
-        for provider_id, pricing_url in [("glm", "https://docs.bigmodel.cn/"), ("doubao", "https://www.volcengine.com/"), ("qwen", "https://help.aliyun.com/")]:
+        for provider_id, pricing_url in [("glm", "https://docs.bigmodel.cn/"), ("doubao", "https://docs.volcengine.com/docs/ark/model-pricing"), ("qwen", "https://help.aliyun.com/")]:
             with self.subTest(provider=provider_id):
                 config = copy.deepcopy(self.config)
                 config.update(provider=provider_id, pilot_id="fixture-" + provider_id)
@@ -255,6 +255,23 @@ class ControlledPilotTests(DocumentSelectionFixture):
                 self.assertEqual(result["response"]["status"], "RESPONDED")
                 self.assertEqual(json.loads(transport.call_args.args[0].data), plan["http_body"])
                 self.assertEqual(transport.call_count, 1)
+
+    def test_doubao_pricing_source_rejects_lookalike_hosts_and_url_credentials(self):
+        config = copy.deepcopy(self.config)
+        config["provider"] = "doubao"
+        registry = ProviderRegistry(disabled_provider_ids={"openai", "deepseek", "glm", "qwen"}, api_keys={"doubao": "fixture-key"})
+        pilot = ControlledAPIPilot(self.store, registry, instance_owner=self.owner, clock=lambda: self.now)
+        with patch("urllib.request.OpenerDirector.open") as transport:
+            for url in ("https://docs.volcengine.com.evil.example/pricing",
+                        "https://docs.volcengine.com@evil.example/pricing",
+                        "https://user@docs.volcengine.com/docs/ark/model-pricing",
+                        "http://docs.volcengine.com/docs/ark/model-pricing"):
+                with self.subTest(url=url):
+                    config["rate_card"]["source_url"] = url
+                    with self.assertRaisesRegex(PilotError, "价格来源"):
+                        pilot.prepare(config)
+        transport.assert_not_called()
+        self.assertEqual(self.count("provider_call_attempts"), 0)
 
     def test_database_ceiling_counts_failed_calls_across_distinct_plan_ids(self):
         for index in range(3):
