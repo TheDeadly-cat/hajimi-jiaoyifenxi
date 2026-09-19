@@ -57,12 +57,24 @@ $env:PYTHONUTF8='1'
 
 默认证据配置仅有 candidate_sha、database_path、room_id、session_id 四个字段。模型配置字段见 ControlledAPIPilot.prepare 的严格白名单，不含 Key。实际付费执行命令只在模型、官方价格、完整输入与消费计划获准后使用。
 
-## 后续仍须完成
+## 后续仍须完成（2026-09-13 时点记录）
 
 1. 用户选择已充值的服务商、具体模型及 Key 复用方式后，核对现行官方价格，形成可审阅的实际消费计划。Key 只经本机安全输入，不进入仓库、日志或聊天。
 2. 具体方案获准后执行一次有意义的证据回答，记录真实响应、Usage、耗时和费用估算/供应商核对状态。任何失败、超时或额外探测均扣次数，不自动重试或换模型。
 3. 当前尚无本轮真实人工返回；不能从 BUNDLE_READY 伪造 API_REVIEW。真实人工导入后，才在获准的总计最多三次范围内另做 quick 的两次审查；阶段 C 可按任务书延后。
 
-当前没有实际付费授权、请求记录或完成结论。OpenAI 服务端硬禁用未解除；若用户选择 OpenAI，需完成明确、默认关闭的受控试验策略。本任务不开启来源轮询、交易、正式库迁移或发布。
+截至上述 2026-09-13 时点，没有实际请求记录或完成结论。OpenAI 服务端硬禁用未解除；若用户选择 OpenAI，需完成明确、默认关闭的受控试验策略。本任务不开启来源轮询、交易、正式库迁移或发布。
 
 官方合同核对（2026-09-13）：[DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)、[OpenAI Responses](https://developers.openai.com/api/reference/cli/resources/responses/methods/create)。max_output_tokens 对 Responses 包括推理和可见输出，不能仅凭出现文本判定请求完整。
+
+## 2026-09-20 后续入口
+
+豆包已完成一项真实请求，详见 [本次记录](doubao_pilot_result_20260920.md)。此后用户明确：千问仍为编程套餐，不连接项目后端；智谱使用火山方舟；DeepSeek 使用官网 API；GPT 使用既有 ChatGPT 协作导出/真实返回导入流程，保持 OpenAI 直接 API 硬禁用。
+
+智谱模型配置可显式指定 `glm_platform: "volcengine_ark"`。注册表保留 `glm` 模型身份，只在明确选择时使用方舟官方 Responses 端点及 `ARK_API_KEY`；未指定时继续使用智谱官网及其密钥。默认服务不读取新的平台环境开关，也不会自动迁移既有成员。方舟 GLM 声明 prompt-JSON 模式，不发送未经声明的原生 JSON Object 参数，不发额外 probe。完整计划绑定平台、协议、端点、请求体和固定模型 ID，按 Responses 完成状态验收。
+
+新计划明确要求中文事实/推断，逐字引文保留原语言；输入增加按正文版本和段落 ID 去重的阅读范围。旧冻结包、旧输入和旧回执不会重新签名，也不把提示修改后的结果当成严格同条件模型比较。
+
+真实执行支持 `--password-dialog`，使用本机圆点密码框，支持 Ctrl+V；取消或过期不继续执行，控制字符及多行内容在本机拒绝。窗口只保存无密钥的阶段记录，密钥仅在当前进程中。默认仍支持控制台隐藏输入，两个入口都必须先通过候选、计划哈希和有效期检查。Windows 以桌面会话中的 PowerShell 7 启动；不要在不可见的沙箱窗口里要求用户粘贴，也不要把“按任意键关闭”当作密钥入口。
+
+新一轮 GLM/DeepSeek 的具体模型、完整输入、上限、价格和有效期仍需形成新的消费计划。单项最多一次，原独立库总上限仍为三次，已经完成的豆包调用计入总数。ChatGPT 人工协作使用另一份独立数据副本，避免手工导出状态改变尚待执行的 API 证据包；没有真实用户返回时，不能伪造 RESULT_IMPORTED 或 API_REVIEW。

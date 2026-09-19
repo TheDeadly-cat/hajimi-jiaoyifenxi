@@ -10,6 +10,7 @@ from .base import ChatProvider, ProviderProbeResult
 from .deepseek_provider import DeepSeekProvider
 from .doubao_provider import DoubaoProvider
 from .glm_provider import GLMProvider
+from .ark_glm_provider import ArkGLMProvider
 from .openai_provider import OpenAIProvider
 from .qwen_provider import QwenProvider
 from .output import provider_output_capability_dict
@@ -26,8 +27,11 @@ class ProviderRegistry:
         *,
         disabled_provider_ids: set[str] | frozenset[str] | None = None,
         api_keys: dict[str, str] | None = None,
+        glm_platform: str = "zhipu",
     ) -> None:
         uses_production_providers = providers is None
+        if not isinstance(glm_platform, str) or glm_platform not in {"zhipu", "volcengine_ark"} or (not uses_production_providers and glm_platform != "zhipu"):
+            raise ValueError("GLM platform requires an explicit known production route")
         self.uses_production_providers = uses_production_providers
         if api_keys is not None and (not uses_production_providers or not isinstance(api_keys, dict)
                 or set(api_keys) - {"openai", "deepseek", "doubao", "qwen", "glm"}
@@ -40,7 +44,7 @@ class ProviderRegistry:
             else {
                 "doubao": DoubaoProvider(**key_arguments("doubao")),
                 "qwen": QwenProvider(**key_arguments("qwen")),
-                "glm": GLMProvider(**key_arguments("glm")),
+                "glm": (ArkGLMProvider(**key_arguments("glm")) if glm_platform == "volcengine_ark" else GLMProvider(**key_arguments("glm"))),
                 "deepseek": DeepSeekProvider(**key_arguments("deepseek")),
                 "openai": OpenAIProvider(**key_arguments("openai")),
             }

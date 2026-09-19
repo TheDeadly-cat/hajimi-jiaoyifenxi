@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import warnings
 
 APP = Path(__file__).resolve().parents[1]
@@ -28,7 +29,10 @@ def main(argv=None) -> int:
     action.add_argument("--execute", action="store_true")
     parser.add_argument("--approve-plan-sha256", default="")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--password-dialog", action="store_true", help="Use local masked input instead of the console")
     args = parser.parse_args(argv)
+    if args.password_dialog and not args.execute:
+        raise PilotCLIError("密码框仅用于已批准的真实执行")
     for name in KEYS:
         os.environ.pop(name, None)
     os.environ["AI_STUDIO_SKIP_LOCAL_ENV"] = "1"
@@ -45,6 +49,7 @@ def main(argv=None) -> int:
     if not output.resolve().is_relative_to(root.resolve()) or output.resolve() == database.resolve():
         raise PilotCLIError("输出必须位于独立试验目录且不能覆盖数据库")
     provider_id = config.get("provider", "")
+    glm_platform = config.get("glm_platform", "zhipu")
     if (args.prepare or args.execute) and provider_id not in KEY_NAME:
         raise PilotCLIError("先明确选定 Provider 和模型")
     disabled = set(KEY_NAME).difference({provider_id}) if provider_id else set(KEY_NAME)
@@ -70,7 +75,7 @@ def main(argv=None) -> int:
                 result = {"version": "api_pilot_evidence_preparation_v1", "candidate_sha": head,
                           "configured_model": None, "paid_authorization": False, "source": evidence}
             else:
-                registry = ProviderRegistry(disabled_provider_ids=disabled)
+                registry = ProviderRegistry(disabled_provider_ids=disabled, glm_platform=glm_platform)
                 pilot = ControlledAPIPilot(store, registry, instance_owner=owner)
                 plan = pilot.prepare(config)
                 if args.prepare:
@@ -78,15 +83,22 @@ def main(argv=None) -> int:
                 else:
                     if not args.approve_plan_sha256 or args.approve_plan_sha256 != plan["plan_sha256"]:
                         raise PilotCLIError("执行前必须明确批准当前计划哈希；未读取密钥")
+                    if not config["not_before_ms"] <= int(time.time() * 1000) < config["expires_at_ms"]:
+                        raise PilotCLIError("试验授权尚未生效或已过期；未读取密钥")
                     if not sys.stdin.isatty():
                         raise PilotCLIError("密钥只接受可隐藏输入的交互终端")
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("error", getpass.GetPassWarning)
-                        key = getpass.getpass(f"{KEY_NAME[provider_id]}（输入隐藏，不写文件）: ").strip()
+                    selected_key_name = "ARK_API_KEY" if provider_id == "glm" and glm_platform == "volcengine_ark" else KEY_NAME[provider_id]
+                    if args.password_dialog:
+                        from scripts.pilot_password_dialog import ask_api_key
+                        key = ask_api_key(plan, root / "key-input-status").strip()
+                    else:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("error", getpass.GetPassWarning)
+                            key = getpass.getpass(f"{selected_key_name}（输入隐藏，不写文件）: ").strip()
                     if not key:
                         raise PilotCLIError("密钥为空；未调用")
-                    os.environ[KEY_NAME[provider_id]] = key
-                    registry = ProviderRegistry(disabled_provider_ids=disabled, api_keys={provider_id: key})
+                    os.environ[selected_key_name] = key
+                    registry = ProviderRegistry(disabled_provider_ids=disabled, api_keys={provider_id: key}, glm_platform=glm_platform)
                     key = ""
                     result = ControlledAPIPilot(store, registry, instance_owner=owner).run(config, approved_plan_sha256=args.approve_plan_sha256)
             if args.execute and result.get("replayed") and output.exists():
@@ -112,6 +124,9 @@ def main(argv=None) -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except KeyboardInterrupt:
+        print(json.dumps({"ok": False, "error_type": "InputCancelled", "message": "本机密钥输入或执行已取消；请核对调用账本，不会自动重试。"}, ensure_ascii=False))
+        raise SystemExit(130)
     except Exception as exc:
         # Never dump config, Provider internals, response bodies or credentials.
         safe_message = str(exc) if isinstance(exc, PilotCLIError) or type(exc).__module__ == "backend.api_pilot" else "试验未完成，请检查本地配置、授权或保留的回执；未自动重试。"

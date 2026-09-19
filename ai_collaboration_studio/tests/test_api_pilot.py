@@ -6,7 +6,7 @@ import json
 import urllib.error
 from unittest.mock import patch
 
-from backend.api_pilot import ControlledAPIPilot, PilotError, RESPONSE_VERSION, SCOPE
+from backend.api_pilot import ControlledAPIPilot, PilotError, RESPONSE_VERSION, SCOPE, reading_scope_summary
 from backend.instance_ownership import DatabaseInstanceOwner
 from backend.manual_chatgpt import ManualChatGPTService
 from backend.providers.registry import ProviderRegistry
@@ -272,6 +272,66 @@ class ControlledPilotTests(DocumentSelectionFixture):
                         pilot.prepare(config)
         transport.assert_not_called()
         self.assertEqual(self.count("provider_call_attempts"), 0)
+
+    def test_ark_glm_platform_and_approved_wire_body_are_bound(self):
+        config = copy.deepcopy(self.config)
+        config.update(provider="glm", glm_platform="volcengine_ark", model="glm-5-2-260617",
+                      accepted_response_models=["glm-5-2-260617"])
+        config["rate_card"]["source_url"] = "https://docs.volcengine.com/docs/ark/model-pricing"
+        disabled = {"openai", "deepseek", "doubao", "qwen"}
+        registry = ProviderRegistry(disabled_provider_ids=disabled, api_keys={"glm": "fixture-key"}, glm_platform="volcengine_ark")
+        pilot = ControlledAPIPilot(self.store, registry, instance_owner=self.owner, clock=lambda: self.now)
+        with patch("urllib.request.OpenerDirector.open") as transport:
+            plan = pilot.prepare(config)
+            with self.assertRaises(PilotError):
+                pilot.run(config)
+        transport.assert_not_called()
+        self.assertEqual(plan["method"], "generate")
+        self.assertEqual(plan["timeout_seconds"], 240)
+        self.assertNotIn("text", plan["http_body"])
+        payload = {"id": "fixture-ark-glm", "model": config["model"], "status": "completed",
+                   "output_text": json.dumps(self.answer()), "usage": {"input_tokens": 100, "output_tokens": 50}}
+        with patch("urllib.request.OpenerDirector.open", return_value=io.BytesIO(json.dumps(payload).encode())) as transport:
+            result = pilot.run(config, approved_plan_sha256=plan["plan_sha256"])
+        self.assertEqual(result["response"]["status"], "RESPONDED")
+        self.assertEqual(json.loads(transport.call_args.args[0].data), plan["http_body"])
+        self.assertEqual(transport.call_count, 1)
+        native = ProviderRegistry(disabled_provider_ids=disabled, api_keys={"glm": "fixture-key"})
+        with self.assertRaisesRegex(PilotError, "服务平台"):
+            ControlledAPIPilot(self.store, native, instance_owner=self.owner).prepare(config)
+        wrong = copy.deepcopy(config)
+        wrong["rate_card"]["source_url"] = "https://docs.bigmodel.cn/"
+        with self.assertRaisesRegex(PilotError, "价格来源"):
+            pilot.prepare(wrong)
+
+    def test_reading_scope_deduplicates_per_version_without_changing_frozen_evidence(self):
+        def item(version, ids, total):
+            return {"provenance": {"document_version_id": version, "paragraph_ids": ids, "total_paragraphs": total}}
+        evidence = [item("v1", ["v1:p1", "v1:p5"], 16), item("v1", ["v1:p1", "v1:p2"], 16), item("v2", ["v2:p1"], 4)]
+        before = copy.deepcopy(evidence)
+        summary = reading_scope_summary(evidence)
+        self.assertEqual(evidence, before)
+        self.assertEqual((summary[0]["read_count"], summary[0]["unread_count"]), (3, 13))
+        self.assertEqual((summary[1]["read_count"], summary[1]["unread_count"]), (1, 3))
+        evidence.append(item("v1", ["v1:p2"], 15))
+        with self.assertRaisesRegex(PilotError, "不一致"):
+            reading_scope_summary(evidence)
+
+    def test_ark_glm_requires_responses_completion_not_chat_finish_reason(self):
+        config = copy.deepcopy(self.config)
+        config.update(provider="glm", glm_platform="volcengine_ark", model="glm-5-2-260617",
+                      accepted_response_models=["glm-5-2-260617"])
+        config["rate_card"]["source_url"] = "https://docs.volcengine.com/docs/ark/model-pricing"
+        registry = ProviderRegistry(disabled_provider_ids={"openai", "deepseek", "doubao", "qwen"},
+                                    api_keys={"glm": "fixture-key"}, glm_platform="volcengine_ark")
+        pilot = ControlledAPIPilot(self.store, registry, instance_owner=self.owner, clock=lambda: self.now)
+        plan = pilot.prepare(config)
+        payload = self.provider_payload(model="glm-5-2-260617", output_text=json.dumps(self.answer()))
+        with patch("urllib.request.OpenerDirector.open", return_value=io.BytesIO(json.dumps(payload).encode())) as transport:
+            result = pilot.run(config, approved_plan_sha256=plan["plan_sha256"])
+        self.assertEqual(result["response"]["status"], "INVALID")
+        self.assertEqual(result["response"]["error_code"], "response_not_complete")
+        self.assertEqual(transport.call_count, 1)
 
     def test_database_ceiling_counts_failed_calls_across_distinct_plan_ids(self):
         for index in range(3):
