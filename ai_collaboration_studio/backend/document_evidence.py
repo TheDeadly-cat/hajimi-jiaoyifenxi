@@ -429,7 +429,9 @@ class DocumentEvidenceService:
             source = bound_source(record)
         except SourceInboxError:
             return {"format": FORMAT, "eligible": False, "status": "unsupported", "versions": [], "job": None}
-        with closing(self.store._connect()) as db:
+        # Coordinate WAL sidecar lifetime with the owner's immutable health
+        # snapshot copier, including simultaneous inbox/document/review reads.
+        with self.store._lock, closing(self.store._connect()) as db:
             rows = db.execute("SELECT * FROM source_document_versions WHERE item_id=? ORDER BY created_at,id", (item_id,)).fetchall()
             job = db.execute("SELECT * FROM source_document_jobs WHERE item_id=? ORDER BY requested_at DESC,rowid DESC LIMIT 1", (item_id,)).fetchone()
         versions = []
@@ -442,7 +444,7 @@ class DocumentEvidenceService:
                 "status": job["status"] if job else "not_fetched", "job": dict(job) if job else None,
                 "generation_method": "deterministic_original_excerpt", "direction": "unknown"}
 
-    def request(self, item_id, *, session_id, confirmation, refresh=False, expires_at=0):
+    def request(self, item_id, *, session_id, confirmation, refresh=False, expires_at=0, before_reserve=None):
         if confirmation is not True or type(refresh) is not bool:
             raise fail("请明确确认读取这一条官方 HTML。")
         record = self.item(item_id)
@@ -465,6 +467,8 @@ class DocumentEvidenceService:
             if now < embargo:
                 raise fail("该来源仍在 Retry-After 等待期，不能换事件绕过限流。", "DOCUMENT_RETRY_LATER")
             job_id = "document_job_" + uuid.uuid4().hex
+            if before_reserve is not None:
+                before_reserve(db, job_id)
             db.execute("INSERT INTO source_document_jobs(id,item_id,session_id,source_host,expires_at,status,requested_at) VALUES(?,?,?,?,?,'waiting',?)", (job_id, item_id, session_id, host, expires_at or now + 120_000, now))
             return dict(db.execute("SELECT * FROM source_document_jobs WHERE id=?", (job_id,)).fetchone())
 
@@ -535,6 +539,9 @@ class DocumentEvidenceService:
                 db.execute("BEGIN IMMEDIATE")
                 if self._cancel_inadmissible(db, job, cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms):
                     return False
+                if job["session_id"].startswith("news_review:"):
+                    from .news_review_service import check_document_send
+                    check_document_send(self.store, db, job, self.clock())
             ensure_source_poll_active(cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)
             resource = self.fetcher(source, cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)
             ensure_source_poll_active(cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)

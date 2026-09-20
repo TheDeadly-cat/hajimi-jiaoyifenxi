@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from contextlib import closing
 from pathlib import Path
 
@@ -635,6 +636,53 @@ class SourceMonitoringHealthServiceTests(unittest.TestCase):
             "SOURCE_MONITORING_HEALTH_SNAPSHOT_BUSY",
         )
         self.assertEqual(journal_path.read_bytes(), b"fixture-live-journal")
+
+    def test_last_reader_wal_close_during_copy_reacquires_checkpointed_snapshot(self) -> None:
+        from backend.source_monitoring import health_service
+        reader = self.store._connect()
+        self.addCleanup(reader.close)
+        reader.execute("SELECT COUNT(*) FROM rooms").fetchone()
+        wal_path = Path(f"{self.database_path}-wal")
+        self.assertTrue(wal_path.exists())
+        copyfile = health_service.shutil.copyfile
+        closed = False
+
+        def close_last_reader(source, destination):
+            nonlocal closed
+            if Path(source) == wal_path and not closed:
+                closed = True
+                reader.close()
+            return copyfile(source, destination)
+
+        with mock.patch.object(health_service.shutil, "copyfile", side_effect=close_last_reader):
+            result = self.service().snapshot()
+        self.assertTrue(closed)
+        self.assertTrue(result["persistence_available"])
+        self.assertFalse(wal_path.exists())
+
+    def test_transient_wal_permission_denial_retries_but_persistent_denial_fails(self) -> None:
+        from backend.source_monitoring import health_service
+        with closing(self.store._connect()) as reader:
+            reader.execute("SELECT COUNT(*) FROM rooms").fetchone()
+            wal_path = Path(f"{self.database_path}-wal")
+            before = {p.name: p.read_bytes() for p in (self.database_path, wal_path)}
+            copyfile = health_service.shutil.copyfile
+            failures = []
+
+            def deny_once(source, destination):
+                if Path(source) == wal_path and not failures:
+                    failures.append(True)
+                    raise PermissionError("synthetic Windows WAL close race")
+                return copyfile(source, destination)
+
+            with mock.patch.object(health_service.shutil, "copyfile", side_effect=deny_once):
+                self.assertTrue(self.service().snapshot()["persistence_available"])
+            with mock.patch.object(health_service.shutil, "copyfile", side_effect=PermissionError("synthetic persistent denial")) as blocked:
+                with self.assertRaises(SourceMonitoringHealthServiceError) as raised:
+                    self.service().snapshot()
+                self.assertEqual(blocked.call_count, 3)
+                self.assertEqual(raised.exception.code, "SOURCE_MONITORING_HEALTH_READ_FAILED")
+            self.assertEqual(before, {p.name: p.read_bytes() for p in (self.database_path, wal_path)})
 
     def test_sealed_state_corruption_preserves_state_error(self) -> None:
         initial = self.service().snapshot()

@@ -21,6 +21,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import dutyCatArt from "../assets/duty-cat.png";
 import { SourceInboxNotifications } from "./SourceInboxNotifications";
 import { DocumentEvidence, DocumentEvidenceControl } from "./DocumentEvidence";
+import { NewsReview, NewsReviewControl } from "./NewsReview";
 import { api } from "../api";
 import {
   EXTERNAL_UNVERIFIED,
@@ -487,6 +488,7 @@ function SourceInboxDetail({
       </section>
 
       <DeterministicImpactSection item={item} />
+      {item.valid && item.sourceChannel === "official_source_monitor" ? <NewsReview key={`review-${item.id}`} itemId={item.id} /> : null}
       {item.valid && item.sourceChannel === "official_source_monitor" ? <DocumentEvidence key={item.id} item={item} refreshToken={documentRefreshToken} authorizationUntil={documentAuthorizationUntil} rooms={rooms} roomId={roomId} onRoomChange={onRoomChange} /> : null}
 
       <section className="source-inbox-section">
@@ -2076,6 +2078,7 @@ export function SourceInboxPanel({
         />
 
         <DocumentEvidenceControl onStateChange={adoptDocumentControl} />
+        <NewsReviewControl />
         <div className="source-inbox-filter-groups">
           <fieldset className="source-inbox-filters">
             <legend>工作状态（全局计数）</legend>

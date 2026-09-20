@@ -1,0 +1,11 @@
+.news-review { overflow-wrap: anywhere; }
+.news-review-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.news-review-facts dt { font-weight: 600; margin-bottom: 4px; }
+.news-review-facts dd { margin: 0; }
+.news-review blockquote { margin: 10px 0; padding: 10px 14px; border-left: 3px solid currentColor; opacity: .9; }
+.news-review details { margin: 10px 0; }
+.news-review small { overflow-wrap: anywhere; }
+.news-review-control-heading { display: flex; align-items: center; gap: 10px 16px; flex-wrap: wrap; }
+.news-review-control-heading h3, .news-review-control-heading p { margin: 0; }
+.news-review-control-heading button { margin-left: auto; }
+@media (max-width: 560px) { .news-review-facts { grid-template-columns: 1fr; } }

@@ -7,7 +7,7 @@ import sqlite3
 import shutil
 import tempfile
 import time
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
@@ -284,6 +284,35 @@ def _file_signature(path: Path) -> tuple[int, int, int] | None:
 
 @contextmanager
 def source_monitoring_read_only_snapshot(path: Path):
+    """Retry a bounded snapshot acquisition when another reader closes its WAL.
+
+    SQLite can briefly deny a Windows file read while removing its last-reader
+    WAL. Each retry starts a fresh, signature-checked copy; consumers are never
+    replayed and a persistent error still fails closed. No source SQLite
+    connection or source-side checkpoint is opened by this reader.
+    """
+    for attempt in range(3):
+        stack = ExitStack()
+        try:
+            connection = stack.enter_context(_source_monitoring_snapshot_once(path))
+        except SourceMonitoringHealthServiceError as exc:
+            stack.close()
+            retryable = (
+                exc.code == "SOURCE_MONITORING_HEALTH_SNAPSHOT_BUSY"
+                or (exc.code == "SOURCE_MONITORING_HEALTH_READ_FAILED"
+                    and isinstance(exc.__cause__, (FileNotFoundError, PermissionError)))
+            )
+            if not retryable or attempt == 2:
+                raise
+            time.sleep(0.01)
+        else:
+            break
+    with stack:
+        yield connection
+
+
+@contextmanager
+def _source_monitoring_snapshot_once(path: Path):
     """Read a stable source snapshot without joining or mutating its WAL family."""
 
     journal_path = Path(f"{path}-journal")

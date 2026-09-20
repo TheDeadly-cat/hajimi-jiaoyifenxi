@@ -1,0 +1,195 @@
+# Native news-event review v1
+
+This feature connects newly discovered official events, immutable main-HTML
+evidence, mechanical priority, a persistent principal-review queue, the existing
+provider-call ledger, validated model output, and a read-only inbox projection.
+It is off in the ordinary application. It does not create a manual ChatGPT
+session, acknowledge a source, attach room material, start a round, or freeze a
+user decision. The named room is the ledger's explicit budget owner only.
+
+## Approved scope
+
+The operator prepares and approves a closed `news_event_review_v1` policy. The
+approval is its canonical SHA-256, binding the clean Git candidate, absolute
+`NewsReviewTrial*/data/studio.sqlite3` identity, room, strategy, two official
+sources, provider/model/endpoint, original start and expiry, quotas, rate card,
+spend estimate, concurrency, restart preference, and stop-on-unknown policy.
+
+The initial source profile remains `sec_micron_trial_v1`: NVIDIA 8-K main HTML
+and Micron recent-30 releases, target polling every 300 seconds, `seed_only`.
+Publisher backoff and Retry-After can delay a poll. Source activation is recorded
+in native policy grants and uses the existing repository enablement API. The
+normal supervisor acquires the first real baseline; native activation performs
+no request, fabricates no publication, and does not reset a checkpoint. An
+operator's later source disablement survives restart of the same policy.
+
+Only `doubao-seed-2-1-pro-260915` at the fixed Ark Responses endpoint is admitted.
+The registry must disable OpenAI, DeepSeek, Qwen and GLM for this entry point.
+There is one principal call per reviewable event/body/strategy, without retries,
+fallback, tools, or parallel model execution. This is not independent voting.
+
+The closed maximum policy window is 24 hours. It can authorize at most 144
+document reservations and 100 model reservations, with explicit lower quotas,
+request bytes, per-call output tokens, total tokens and CNY spend limits.
+The original document service's rolling six reservations per twenty minutes,
+five-minute refresh interval, shared publisher cooldown and no-redirect policy
+still apply. The old twenty-minute automatic-document UI and thirty-minute
+manual ChatGPT review entry points retain their own restrictions.
+
+## Evidence and charging identity
+
+The inbox remains a side-effect-free import/read workflow with respect to model
+calls. Explicitly started workers observe only rows after the policy's persisted
+initial cursor. Evidence enrichment and principal review run in two separate
+non-daemon threads, independent of the source polling worker.
+
+The event identity is the validated official source URL and source kind. The
+review identity adds normalized body text SHA-256 and the strategy SHA-256.
+Metadata revisions, unchanged content under a new raw-HTML hash, or a renewed
+policy cannot cause a second paid attempt for that identity. Substantive body
+changes can create new tasks. Immutable links keep older reviews and their
+original paragraph citations; no receipt is re-signed against a newer document.
+This identity is enforced across policies and restarts in the same database;
+it is not an account-wide index across unrelated fresh databases. Continue a
+trial in its original database to preserve its deduplication and spent budget.
+
+An incomplete or oversized body is a durable `MATERIAL_INSUFFICIENT` event, with
+no paid task or model reservation. A later complete body can become eligible.
+There is no silent text crop: the prompt includes every available paragraph
+once and retains all coverage warnings. Attachments are not read. Review of
+available main HTML does not imply review of attachments or external truth.
+
+Each paid task freezes its event, document version, strategy, full generation
+input, exact HTTP body hash, policy and conservative reservation. Reservation
+uses the complete serialized HTTP UTF-8 byte count plus 256 input tokens and
+the maximum output tokens. These estimates are conservative application
+constraints, not a verified supplier billing cap. Reservations are never
+refunded. Before sending, the candidate, owner, policy, expiry, pause, ledger
+attempt, document and exact HTTP request are checked again.
+
+Loss of a response, unknown usage, timeout, process interruption or excess
+reported usage produces `UNKNOWN` and stops further paid reviews. Invalid
+model identity, completion, schema or citation produces a stopped failed lane.
+Collection and document enrichment may continue within the same remaining
+authority. A global pause stops new work across the native lanes; an already
+sent request may finish and be recorded. No outcome is automatically retried.
+
+## Result and UI boundaries
+
+Mechanical priority explains matched event terms and affected securities; it is
+not a truth probability or market-direction score. No substantive supported
+official event is discarded merely for lacking a keyword match. High-priority
+tasks precede uncertain tasks within the authorized queue; the principal model
+supplies its separate assessment.
+
+Results must be closed JSON with an assessment, summary, importance reason,
+quoted source-supported statements, separately identified inferences and their
+limitations, counterevidence, open questions and explicit coverage limitations.
+Paragraph identities and exact quotes must match the frozen input. These checks
+establish engineering consistency, not that each model interpretation is true.
+All displayed opinions remain `unverified_model_output`, and source claims
+remain `external_unverified`.
+
+The inbox shows publication/discovery times, priority, body/attachment coverage,
+queue state, prior review versions and the principal's opinion. It distinguishes
+unreviewed, pending, running, material insufficient, reviewed, failed and unknown.
+The run summary is compact and offers a pause control. Reading it is local and
+grants no network authority. Native control HTTP supports pause only, behind the
+normal loopback/session-token/owner guards; it cannot approve a policy.
+
+## Operator entry point
+
+Use `scripts/run_news_review_trial.py` with the normal isolated interpreter.
+Initialization requires a new explicit root outside the repository whose name
+starts with `NewsReviewTrial`, and the exact clean candidate SHA. It creates an
+empty independent database and a named budget-owning research room, returning
+their identities in `initialized.json`. It never opens or migrates a formal or
+historical database.
+
+`--prepare --config <policy.json> --output <new-file.json>` validates the complete
+policy without source/provider requests or authorization writes. The rate card
+must contain explicit positive CNY input/output prices, an official Ark source
+URL and its checked date. No price is silently supplied by the launcher.
+
+`--run --config <policy.json> --approve-policy-sha256 <exact-hash>` requires a
+valid original window and a public SEC product/contact User-Agent. Use
+`--password-dialog` for masked local credential entry. Ambient model keys are
+cleared in the child process; the selected key is held only in that process.
+The independent host binds a random loopback port by default and records its
+local URL. Ports 8770 and 11111 are rejected. Source scope and authority are
+rechecked during polling, and the host stops at expiry or a failed worker.
+
+For an entire window starting after credential entry, use `--prepare-activation`
+and then `--activate --approve-activation-sha256 <exact-hash>`. The approved
+envelope fixes every scope/budget field, a launch admission window and a duration
+(24 hours by default). Only the two execution timestamps may be resolved from
+the first successful local key submission. Exclusive `activation-policy.json`
+and `activation-receipt.json` files bind that original approval to the resolved
+policy. They permanently consume the one activation, even after a crash.
+Reactivation cannot slide the window; restart must use the saved resolved policy.
+This avoids spending the observation window waiting for the operator's key.
+
+Restart can resume unsent work only within the original policy's explicit
+restart preference and window. Previously started work becomes unknown, never
+replayed. `--resume-paused` additionally requires the same approved policy hash;
+it cannot clear a paid-lane failure or unknown outcome. No key is persisted for
+unattended restart. Database ownership is retained on incomplete worker shutdown.
+
+Wall/monotonic drift beyond two seconds stops new work. At expiry the journal
+records the window boundary and starts no new requests. Already sent requests
+can finish during a bounded 255-second shutdown grace; failure to join still
+retains the owner. Window continuity and clean shutdown are reported separately.
+
+`--report` reads the owned trial through the normal startup preflight and writes
+a new report under the trial directory. Existing schemas needing migration are
+rejected; the launcher does not silently upgrade them.
+
+## Continuous-run evidence
+
+The journal records process sessions, monotonic/wall-clock samples, source-run
+identities and their hashes, and queue/reservation counts in an immutable hash
+chain. Reports separate per-source observed poll success, publication-to-discovery
+latency, body coverage, queued work, duplicate paid attempts, unknown outcomes,
+permanent call ledger and process continuity. Poll runs are not mislabeled as
+actual HTTP request counts. Price estimates are not supplier bills.
+
+The continuous-window indicator requires a complete 24-hour policy window,
+start/end samples, one process session, at least 2,880 samples, gaps no larger
+than thirty seconds and no detected wall/monotonic drift. It is only continuity
+evidence. Source health, complete natural-event processing, disconnection/restart
+recovery and factual quality remain separate acceptance checks. Multiple
+sessions and missing samples remain visible.
+
+No natural new announcement means `no_new_event_observed`. Do not alter source
+times, event identities or cursors to manufacture an online success. Offline
+fixtures and passing CI cannot establish a real 24-hour run or release approval.
+
+## Local implementation validation (2026-09-21)
+
+The isolated related backend regression passed 156 tests. After the final
+clock, activation, shutdown and health changes, the focused native/host/health
+suite passed 51 tests (five allowed loopback connections, zero external or child
+blocked attempts). These overlapping groups are not added together. The safe
+frontend runner passed all 664 tests across 119 files, and the production build
+passed. Required historical-reader validation is a separate clean-commit gate.
+
+Rendered QA used installed Chrome 153 with Playwright 1.62.1 because the Browser
+plugin was unavailable, on disposable synthetic data at a random loopback port.
+Desktop 1440x1000 and mobile 390x844 checks covered the reviewed/unverified,
+unknown, material-insufficient and persisted pause states. The final run had no
+console errors, failed responses, external requests, framework overlay or
+horizontal overflow. Twenty parallel health/bootstrap/review-read rounds also
+returned successful health responses. The fixture's paid-attempt count stayed
+at its two synthetic calls, with no manual session, discussion round or draft.
+
+Earlier browser runs exposed intermittent Windows WAL-file permission errors
+during health snapshot acquisition. Read-only snapshot acquisition now retries
+at most three times before yielding a snapshot. Deterministic regressions cover
+last-reader WAL removal, transient permission denial and persistent denial;
+source files remain untouched and persistent failure remains visible. Earlier
+failed preparation and browser results remain in local evidence. Raw logs,
+screenshots, databases and response fixtures are not part of this source commit.
+
+Real source connectivity, natural new-event processing, real model output,
+supplier bills, 24-hour continuity and release acceptance are not established by
+these local results. The new bounded trial requires its own concrete approval.

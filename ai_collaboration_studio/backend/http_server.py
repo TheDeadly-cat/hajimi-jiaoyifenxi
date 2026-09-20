@@ -79,6 +79,8 @@ from .source_inbox_contracts import MAX_SOURCE_IMPORT_BYTES, SourceInboxContract
 from .source_inbox_import_ux import build_source_monitoring_prompt_template
 from .source_inbox_service import SourceInboxError, SourceInboxService
 from .document_evidence import DocumentEvidenceController, DocumentEvidenceService
+from .news_review_contracts import NewsReviewError
+from .news_review_service import item_review_projection
 from .source_monitoring.health_service import (
     SourceMonitoringHealthService,
     SourceMonitoringHealthServiceError,
@@ -145,6 +147,7 @@ def _is_source_inbox_path(path: str) -> bool:
             "/api/monitoring/imports/chatgpt/prompt-template",
             "/api/monitoring/notifications",
             "/api/monitoring/documents/control",
+            "/api/monitoring/news-review/control",
             "/api/monitoring/adapters/control",
             "/api/monitoring/retention/attest",
             "/api/monitoring/retention/preview",
@@ -153,7 +156,7 @@ def _is_source_inbox_path(path: str) -> bool:
             r"/api/monitoring/adapters/[^/]+/(?:initialization-preview|enablement)",
             path,
         )
-        or re.fullmatch(r"/api/monitoring/events/[^/]+(?:/(?:acknowledge|attach|round-draft|document))?", path)
+        or re.fullmatch(r"/api/monitoring/events/[^/]+(?:/(?:acknowledge|attach|round-draft|document|news-review))?", path)
     )
 
 
@@ -875,6 +878,19 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "document": result})
             except SourceInboxError as exc:
                 self._send_json({"ok": False, "error": str(exc), "code": exc.code}, HTTPStatus(exc.status))
+            return
+        news_review_match = re.fullmatch(r"/api/monitoring/events/([^/]+)/news-review", parsed.path)
+        if news_review_match or parsed.path == "/api/monitoring/news-review/control":
+            if parsed.query:
+                self._send_json({"ok": False, "error": "审核接口不接受查询参数。"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                controller = getattr(self.server, "ai_studio_news_review", None)
+                result = item_review_projection(STORE, news_review_match.group(1)) if news_review_match else (
+                    controller.snapshot() if controller else {"enabled": False, "state": "DISABLED"})
+                self._send_json({"ok": True, "news_review": result})
+            except (NewsReviewError, SourceInboxError) as exc:
+                self._send_json({"ok": False, "error": str(exc), "code": exc.code}, HTTPStatus.CONFLICT)
             return
         source_inbox_item_match = re.fullmatch(
             r"/api/monitoring/events/([^/]+)",
@@ -1785,6 +1801,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             or monitoring_initial_preview_match
             or monitoring_enablement_match
             or parsed.path == "/api/monitoring/documents/control"
+            or parsed.path == "/api/monitoring/news-review/control"
             or re.fullmatch(
                 r"/api/monitoring/events/[^/]+/(?:acknowledge|attach|round-draft|document|document/selection(?:/preview)?)",
                 parsed.path,
@@ -1809,6 +1826,21 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             strict=is_source_inbox_request,
         )
         if payload is None:
+            return
+        if parsed.path == "/api/monitoring/news-review/control":
+            if parsed.query or payload != {"action": "pause"}:
+                self._send_json({"ok": False, "error": "本入口仅接受暂停操作。"}, HTTPStatus.BAD_REQUEST)
+                return
+            controller = getattr(self.server, "ai_studio_news_review", None)
+            owner = getattr(self.server, "ai_studio_instance_owner", None)
+            if controller is None or owner is None:
+                self._send_json({"ok": False, "error": "自动消息审核尚未启动。"}, HTTPStatus.CONFLICT)
+                return
+            try:
+                owner.assert_held_for(STORE.path)
+                self._send_json({"ok": True, "news_review": controller.pause()})
+            except NewsReviewError as exc:
+                self._send_json({"ok": False, "error": str(exc), "code": exc.code}, HTTPStatus.CONFLICT)
             return
         selection_match = re.fullmatch(r"/api/monitoring/events/([^/]+)/document/selection(/preview)?", parsed.path)
         if selection_match:
@@ -5870,7 +5902,13 @@ def run_server(
     *,
     instance_owner: DatabaseInstanceOwner,
     runtime_factory: Callable[[Any], Any] | None = None,
+    news_review_controller: Any = None,
+    stop_event: threading.Event | None = None,
+    ready_callback: Callable[[Any], Any] | None = None,
+    news_review_shutdown_seconds: int = 15,
 ) -> None:
+    if type(news_review_shutdown_seconds) is not int or not 1 <= news_review_shutdown_seconds <= 255:
+        raise ValueError("news review shutdown grace must be bounded")
     if not _is_loopback_address(host):
         raise ValueError("AI 共创室只能监听回环地址")
     configured_store_path = getattr(STORE, "configured_path", None)
@@ -5893,11 +5931,18 @@ def run_server(
     server.ai_studio_source_monitoring_runtime = None
     server.ai_studio_source_monitoring_start_result = None
     server.ai_studio_shutdown_event = threading.Event()
+    server.ai_studio_news_review = news_review_controller
     runtime = None
     documents = None
     started = False
     try:
         recovery = STORE.recover_orphaned_work(instance_owner=instance_owner)
+        if news_review_controller is not None:
+            if ((news_review_controller.service.store is not STORE
+                 and getattr(STORE, "_instance", None) is not news_review_controller.service.store)
+                    or news_review_controller.service.owner is not instance_owner):
+                raise ValueError("news review must share the owned host store")
+            news_review_controller.service.recover()
         if runtime_factory is not None:
             runtime = runtime_factory(STORE)
             server.ai_studio_source_monitoring_runtime = runtime
@@ -5945,8 +5990,12 @@ def run_server(
         ))
         server.ai_studio_document_evidence = documents
         documents.start()
+        if news_review_controller is not None:
+            news_review_controller.start(recover=False)
         server.ai_studio_startup_ready = True
         started = True
+        if ready_callback is not None:
+            ready_callback(server)
         emit_event(
             "server_started",
             fields={
@@ -5964,12 +6013,19 @@ def run_server(
         if any(recovery_counts.values()):
             emit_event("server_state_recovered", fields=recovery_counts)
         try:
-            server.serve_forever()
+            if stop_event is None:
+                server.serve_forever()
+            else:
+                server.timeout = 0.5
+                while not stop_event.is_set():
+                    server.handle_request()
         except KeyboardInterrupt:
             emit_event("server_interrupt_received")
     finally:
         server.ai_studio_startup_ready = False
         server.ai_studio_shutdown_event.set()
+        if news_review_controller is not None:
+            news_review_controller.request_stop()
         if documents is not None:
             documents.stop_event.set()
         if runtime is not None:
@@ -6042,4 +6098,11 @@ def run_server(
                 documents_stopped = False
             if not documents_stopped:
                 raise RuntimeShutdownIncomplete("document evidence worker did not stop; database owner retained")
+        if news_review_controller is not None:
+            try:
+                news_stopped = news_review_controller.stop(timeout=news_review_shutdown_seconds) is True
+            except BaseException:
+                news_stopped = False
+            if not news_stopped:
+                raise RuntimeShutdownIncomplete("news review worker did not stop; database owner retained")
         emit_event("server_stopped", fields={"started": started})

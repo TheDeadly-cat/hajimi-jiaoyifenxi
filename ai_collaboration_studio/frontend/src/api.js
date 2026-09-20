@@ -25,6 +25,9 @@ async function jsonRequest(path, options = {}) {
 }
 
 export const api = {
+  sourceNewsReview: (itemId, signal) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/news-review`, { signal }),
+  newsReviewControl: (signal) => jsonRequest("/api/monitoring/news-review/control", { signal }),
+  pauseNewsReview: () => jsonRequest("/api/monitoring/news-review/control", { method: "POST", body: JSON.stringify({ action: "pause" }) }),
   previewDocumentSelection: (itemId, payload, signal) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document/selection/preview`, { method: "POST", body: JSON.stringify(payload), signal }),
   saveDocumentSelection: (itemId, payload, signal) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document/selection`, { method: "POST", body: JSON.stringify(payload), signal }),
   manualEvidencePreview: (roomId, signal) => jsonRequest(`/api/rooms/${encodeURIComponent(roomId)}/chatgpt-collaborations/evidence-preview`, { signal }),
