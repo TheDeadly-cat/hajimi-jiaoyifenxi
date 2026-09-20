@@ -6,11 +6,13 @@ import urllib.request
 from typing import Any
 
 from ..config import ARK_API_KEY, ARK_BASE_URL, ARK_MODEL
-from ..execution_boundary import build_text_provider_request
+from ..execution_boundary import build_text_provider_request, open_text_provider_request, read_text_provider_response, text_generation_body
 from .base import (
     ProviderProbeResult,
     ProviderResponse,
     classify_provider_exception,
+    output_token_limit,
+    response_metadata,
     safe_provider_error_message,
 )
 from .compatible_chat_provider import provider_http_error
@@ -28,6 +30,10 @@ def _probe_response_text(payload: dict[str, Any]) -> str:
 
 class DoubaoProvider:
     provider_id = "doubao"
+    display_name = "豆包 / 火山方舟"
+    api_key_name = "ARK_API_KEY"
+    thinking_disabled = True
+    normal_timeout_seconds = 60
 
     def __init__(
         self,
@@ -43,7 +49,7 @@ class DoubaoProvider:
     def status(self) -> dict[str, Any]:
         return {
             "id": self.provider_id,
-            "name": "豆包 / 火山方舟",
+            "name": self.display_name,
             "configured": bool(self._api_key),
             "model": self._default_model,
             "api": "Responses API",
@@ -59,12 +65,12 @@ class DoubaoProvider:
             return unconfigured_probe(
                 provider_id=self.provider_id,
                 model=selected_model,
-                display_name="豆包 / 火山方舟",
+                display_name=self.display_name,
             )
         if not selected_model:
             return model_missing_probe(
                 provider_id=self.provider_id,
-                display_name="豆包 / 火山方舟",
+                display_name=self.display_name,
             )
         body = {
             "model": selected_model,
@@ -87,17 +93,17 @@ class DoubaoProvider:
             request,
             provider_id=self.provider_id,
             model=selected_model,
-            display_name="豆包 / 火山方舟",
+            display_name=self.display_name,
             response_text_extractor=_probe_response_text,
         )
 
-    def generate(self, *, instructions: str, input_text: str, model: str = "") -> ProviderResponse:
+    def generate(self, *, instructions: str, input_text: str, model: str = "", max_output_tokens: int | None = None) -> ProviderResponse:
         return self._generate(
             instructions=instructions,
             input_text=input_text,
             model=model,
-            max_output_tokens=4096,
-            timeout_seconds=60,
+            max_output_tokens=output_token_limit(max_output_tokens, default=4096),
+            timeout_seconds=self.normal_timeout_seconds,
         )
 
     def generate_json(
@@ -106,13 +112,14 @@ class DoubaoProvider:
         instructions: str,
         input_text: str,
         model: str = "",
+        max_output_tokens: int | None = None,
     ) -> ProviderResponse:
         """Generate a longer JSON artifact without changing normal chat limits."""
         return self._generate(
             instructions=instructions,
             input_text=input_text,
             model=model,
-            max_output_tokens=6400,
+            max_output_tokens=output_token_limit(max_output_tokens, default=6400),
             timeout_seconds=240,
             text_format={"type": "json_object"},
         )
@@ -133,17 +140,12 @@ class DoubaoProvider:
                 ok=False,
                 provider=self.provider_id,
                 model=selected_model,
-                error="ARK_API_KEY 未配置",
+                error=f"{self.api_key_name} 未配置",
                 error_code="provider_error",
             )
-        body = {
-            "model": selected_model,
-            "instructions": instructions,
-            "input": input_text,
-            "max_output_tokens": max(1, int(max_output_tokens)),
-            "thinking": {"type": "disabled"},
-            "store": False,
-        }
+        body = text_generation_body(api="responses", model=selected_model,
+                                    instructions=instructions, input_text=input_text,
+                                    max_output_tokens=max(1, int(max_output_tokens)), thinking_disabled=self.thinking_disabled)
         if text_format:
             body["text"] = {"format": text_format}
         request = build_text_provider_request(
@@ -157,18 +159,18 @@ class DoubaoProvider:
             },
         )
         try:
-            with urllib.request.urlopen(
+            with open_text_provider_request(
                 request,
                 timeout=max(1, int(timeout_seconds)),
             ) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+                payload = json.loads(read_text_provider_response(response))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")[:800]
             return ProviderResponse(
                 ok=False,
                 provider=self.provider_id,
                 model=selected_model,
-                error=provider_http_error(detail, exc.code, "豆包 / 火山方舟"),
+                error=provider_http_error(detail, exc.code, self.display_name),
                 error_code="http_status",
             )
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -176,7 +178,7 @@ class DoubaoProvider:
                 ok=False,
                 provider=self.provider_id,
                 model=selected_model,
-                error=safe_provider_error_message("豆包 / 火山方舟", "invalid_response"),
+                error=safe_provider_error_message(self.display_name, "invalid_response"),
                 error_code="invalid_response",
             )
         except Exception as exc:
@@ -185,7 +187,7 @@ class DoubaoProvider:
                 ok=False,
                 provider=self.provider_id,
                 model=selected_model,
-                error=safe_provider_error_message("豆包 / 火山方舟", error_code),
+                error=safe_provider_error_message(self.display_name, error_code),
                 error_code=error_code,
             )
         if not isinstance(payload, dict):
@@ -193,26 +195,29 @@ class DoubaoProvider:
                 ok=False,
                 provider=self.provider_id,
                 model=selected_model,
-                error=safe_provider_error_message("豆包 / 火山方舟", "invalid_response"),
+                error=safe_provider_error_message(self.display_name, "invalid_response"),
                 error_code="invalid_response",
             )
         response_status = str(payload.get("status") or "").strip().lower()
-        if response_status in {"incomplete", "failed", "cancelled"}:
+        content = _response_text(payload)
+        metadata = response_metadata(payload, visible_text=content)
+        if (response_status and response_status != "completed") or metadata["refused"] or metadata["incomplete_reason"] or payload.get("error"):
             return ProviderResponse(
                 ok=False,
                 provider=self.provider_id,
                 model=str(payload.get("model") or selected_model),
-                error=safe_provider_error_message("豆包 / 火山方舟", "invalid_response"),
+                error=safe_provider_error_message(self.display_name, "invalid_response"),
                 error_code="invalid_response",
                 usage=payload.get("usage") or {},
+                **metadata,
             )
-        content = _response_text(payload)
         return ProviderResponse(
             ok=bool(content),
             content=content,
             provider=self.provider_id,
             model=str(payload.get("model") or selected_model),
-            error="" if content else "豆包 / 火山方舟没有返回可显示文本",
+            error="" if content else f"{self.display_name}没有返回可显示文本",
             error_code="" if content else "empty_response",
             usage=payload.get("usage") or {},
+            **metadata,
         )

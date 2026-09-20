@@ -10,7 +10,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from backend.source_poll_control import SourcePollCancelled, SourcePollDeadlineExceeded
 from backend.source_monitoring import futu_readonly_broker as broker_module
@@ -337,6 +337,56 @@ class FutuReadOnlyBrokerTests(unittest.TestCase):
             self.assertEqual(snapshot["symbols"], list(FUTU_READONLY_BROKER_SYMBOLS))
             self.assertEqual(broker._request_count, 1)
             self.assertTrue(broker.stop())
+
+    def test_stop_retries_transient_windows_profile_sharing_violation(self) -> None:
+        sharing = PermissionError("synthetic profile still in use")
+        sharing.winerror = 32
+        holder = Mock()
+        holder.cleanup.side_effect = [sharing, None]
+        broker = FutuReadOnlyBroker(mode="managed")
+        broker._temporary_directory = holder
+
+        with patch.object(broker_module.time, "sleep"):
+            self.assertTrue(broker.stop())
+
+        self.assertEqual(holder.cleanup.call_count, 2)
+        self.assertIsNone(broker._temporary_directory)
+
+    def test_stop_bounds_persistent_sharing_violation_and_retains_profile(self) -> None:
+        sharing = PermissionError("synthetic profile still in use")
+        sharing.winerror = 32
+        holder = Mock()
+        holder.cleanup.side_effect = sharing
+        broker = FutuReadOnlyBroker(mode="managed")
+        broker._temporary_directory = holder
+
+        with (
+            patch.object(broker_module.time, "monotonic", side_effect=[0.0, 0.5, 2.0]),
+            patch.object(broker_module.time, "sleep") as sleep,
+        ):
+            self.assertFalse(broker.stop())
+
+        self.assertEqual(holder.cleanup.call_count, 2)
+        sleep.assert_called_once()
+        self.assertIs(broker._temporary_directory, holder)
+        holder.cleanup.side_effect = None
+        self.assertTrue(broker.stop())
+        self.assertIsNone(broker._temporary_directory)
+
+    def test_stop_does_not_retry_unrelated_profile_permission_error(self) -> None:
+        denied = PermissionError("synthetic access denied")
+        denied.winerror = 5
+        holder = Mock()
+        holder.cleanup.side_effect = denied
+        broker = FutuReadOnlyBroker(mode="managed")
+        broker._temporary_directory = holder
+
+        with patch.object(broker_module.time, "sleep") as sleep:
+            self.assertFalse(broker.stop())
+
+        holder.cleanup.assert_called_once()
+        sleep.assert_not_called()
+        self.assertIs(broker._temporary_directory, holder)
 
 
 if __name__ == "__main__":

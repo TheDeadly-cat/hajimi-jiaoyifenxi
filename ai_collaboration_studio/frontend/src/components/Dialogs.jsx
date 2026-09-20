@@ -17,6 +17,7 @@ import {
 import { applyMemberTemplate, groupMemberTemplates } from "../memberTemplates";
 import {
   normalizedProviderId,
+  PREFERRED_PROVIDER_IDS,
   providerIsAvailable,
   UNASSIGNED_PROVIDER_ID,
 } from "../providerRouting";
@@ -540,7 +541,7 @@ export function MemberDialog({ member, room, open, onClose, onSubmit, onDelete, 
     if (initializedMemberKey.current === memberInitializationKey) return;
     actionRequestRef.current += 1;
     initializedMemberKey.current = memberInitializationKey;
-    const preferredProviderIds = ["deepseek", "doubao", "glm"];
+    const preferredProviderIds = PREFERRED_PROVIDER_IDS;
     const preferredProvider = preferredProviderIds
       .map((providerId) => providerCatalog.find(
         (provider) => normalizedProviderId(provider.id) === providerId

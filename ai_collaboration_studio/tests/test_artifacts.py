@@ -1505,6 +1505,10 @@ class ArtifactWorkflowTests(unittest.TestCase):
 
     def test_frozen_synthesizer_route_tampering_fails_before_provider_or_ledger(self) -> None:
         approved = self.store.room_snapshot("room_plan")["members"][0]
+        approved = self.store.update_member(
+            "room_plan", approved["id"],
+            {"provider": "deepseek", "model": "frozen-tamper-test"},
+        )
         provider = MinutesProvider(self.message["id"], self.material["id"])
         registry = MappingMinutesRegistry({"openai": provider, "doubao": provider})
         ledger = self.create_ledger(max_calls=1)

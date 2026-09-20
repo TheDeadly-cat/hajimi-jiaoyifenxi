@@ -25,6 +25,8 @@ def main() -> int:
         for name in (
             "OPENAI_API_KEY",
             "DEEPSEEK_API_KEY",
+            "QWEN_API_KEY",
+            "DASHSCOPE_API_KEY",
             "ARK_API_KEY",
             "DOUBAO_API_KEY",
             "GLM_API_KEY",

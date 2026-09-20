@@ -36,6 +36,8 @@ _TEST_MODULE_PATTERN = re.compile(r"^tests\.test_[a-z0-9_]+$")
 _PROVIDER_KEY_NAMES = (
     "OPENAI_API_KEY",
     "DEEPSEEK_API_KEY",
+    "QWEN_API_KEY",
+    "DASHSCOPE_API_KEY",
     "ARK_API_KEY",
     "DOUBAO_API_KEY",
     "GLM_API_KEY",

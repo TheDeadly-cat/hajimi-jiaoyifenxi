@@ -64,10 +64,10 @@ class ProviderAdapterTests(unittest.TestCase):
         finally:
             failure.close()
 
-    def test_registry_exposes_four_providers_without_secrets(self) -> None:
+    def test_registry_exposes_five_providers_in_preferred_order_without_secrets(self) -> None:
         statuses = ProviderRegistry().status()
 
-        self.assertEqual([item["id"] for item in statuses], ["openai", "deepseek", "doubao", "glm"])
+        self.assertEqual([item["id"] for item in statuses], ["doubao", "qwen", "glm", "deepseek", "openai"])
         serialized = json.dumps(statuses, ensure_ascii=False).lower()
         self.assertNotIn("api_key", serialized)
         self.assertNotIn("authorization", serialized)

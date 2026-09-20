@@ -1,5 +1,6 @@
 export const UNASSIGNED_PROVIDER_ID = "unassigned";
-export const BULK_ROUTE_PROVIDER_IDS = Object.freeze(["deepseek", "doubao"]);
+export const PREFERRED_PROVIDER_IDS = Object.freeze(["doubao", "qwen", "glm", "deepseek"]);
+export const BULK_ROUTE_PROVIDER_IDS = PREFERRED_PROVIDER_IDS;
 
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};

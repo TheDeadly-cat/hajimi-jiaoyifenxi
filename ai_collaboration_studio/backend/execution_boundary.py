@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 import re
 import urllib.request
+import hashlib
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 
@@ -54,6 +58,7 @@ PROVIDER_ALLOWED_FIELDS = {
         "model",
         "messages",
         "max_tokens",
+        "max_completion_tokens",
         "stream",
         "response_format",
     },
@@ -62,6 +67,92 @@ PROVIDER_ALLOWED_FIELDS = {
 
 class ExecutionBoundaryViolation(ValueError):
     pass
+
+
+@dataclass(slots=True)
+class AuthorizedTextRequest:
+    endpoint: str
+    body_sha256: str
+    max_body_bytes: int
+    timeout_seconds: int
+    attempted: bool = False
+    before_send: Callable[[], None] | None = None
+
+    def check(self, request: urllib.request.Request) -> None:
+        body = request.data or b""
+        if (request.get_method() != "POST" or request.full_url != self.endpoint
+                or len(body) > self.max_body_bytes
+                or hashlib.sha256(body).hexdigest() != self.body_sha256):
+            raise ExecutionBoundaryViolation("实际 Provider 请求与获准端点或完整参数不一致")
+
+
+_authorized_text_request: ContextVar[AuthorizedTextRequest | None] = ContextVar("authorized_text_request", default=None)
+
+
+@contextmanager
+def authorized_text_request(policy: AuthorizedTextRequest):
+    """Limit one synchronous pilot operation without changing ordinary callers."""
+    if _authorized_text_request.get() is not None:
+        raise ExecutionBoundaryViolation("受控请求授权不能嵌套")
+    token = _authorized_text_request.set(policy)
+    try:
+        yield policy
+    finally:
+        _authorized_text_request.reset(token)
+
+
+class _NoProviderRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        raise ExecutionBoundaryViolation("受控 Provider 请求不跟随重定向")
+
+
+def open_text_provider_request(request: urllib.request.Request, *, timeout: int):
+    policy = _authorized_text_request.get()
+    if policy is None:
+        return urllib.request.urlopen(request, timeout=timeout)
+    policy.check(request)
+    if policy.attempted:
+        raise ExecutionBoundaryViolation("本次授权只允许一个 Provider HTTP 请求")
+    if timeout != policy.timeout_seconds:
+        raise ExecutionBoundaryViolation("实际 Provider 超时参数与授权不一致")
+    if policy.before_send is not None:
+        policy.before_send()
+    policy.attempted = True
+    return urllib.request.build_opener(_NoProviderRedirect()).open(request, timeout=timeout)
+
+
+def read_text_provider_response(response) -> str:
+    if _authorized_text_request.get() is None:
+        return response.read().decode("utf-8")
+    content = response.read(2_000_001)
+    if len(content) > 2_000_000:
+        raise ExecutionBoundaryViolation("受控 Provider 响应超过读取上限")
+    return content.decode("utf-8")
+
+
+def text_generation_body(*, api: str, model: str, instructions: str, input_text: str,
+                         max_output_tokens: int, json_output: bool = False,
+                         thinking_disabled: bool = False,
+                         completion_token_limit: bool = False) -> dict[str, Any]:
+    if api == "chat_completions":
+        body = {"model": model, "messages": [{"role": "system", "content": instructions},
+                                              {"role": "user", "content": input_text}],
+                "max_tokens": max_output_tokens, "stream": False}
+        if completion_token_limit:
+            body["max_completion_tokens"] = body.pop("max_tokens")
+        if json_output:
+            body["response_format"] = {"type": "json_object"}
+    elif api == "responses":
+        body = {"model": model, "instructions": instructions, "input": input_text,
+                "max_output_tokens": max_output_tokens}
+        if thinking_disabled:
+            body["thinking"] = {"type": "disabled"}
+        body["store"] = False
+        if json_output:
+            body["text"] = {"format": {"type": "json_object"}}
+    else:
+        raise ExecutionBoundaryViolation("不支持的文本生成协议")
+    return body
 
 
 def canonical_identifier(value: Any) -> str:
@@ -153,11 +244,13 @@ def _ensure_text_generation_schema(endpoint: str, payload: Mapping[str, Any]) ->
                 raise ExecutionBoundaryViolation("消息 role 不在文本对话白名单中")
             if not isinstance(message.get("content"), str):
                 raise ExecutionBoundaryViolation("消息 content 必须是文本")
-    token_field = "max_output_tokens" if endpoint == "responses" else "max_tokens"
-    if token_field in payload:
-        token_value = payload.get(token_field)
-        if isinstance(token_value, bool) or not isinstance(token_value, int) or token_value <= 0:
-            raise ExecutionBoundaryViolation(f"{token_field} 必须是正整数")
+    if "max_tokens" in payload and "max_completion_tokens" in payload:
+        raise ExecutionBoundaryViolation("输出上限不能同时使用两种计数参数")
+    for token_field in ("max_output_tokens", "max_tokens", "max_completion_tokens"):
+        if token_field in payload:
+            token_value = payload.get(token_field)
+            if isinstance(token_value, bool) or not isinstance(token_value, int) or token_value <= 0:
+                raise ExecutionBoundaryViolation(f"{token_field} 必须是正整数")
     for boolean_field in ("store", "stream"):
         if boolean_field in payload and not isinstance(payload.get(boolean_field), bool):
             raise ExecutionBoundaryViolation(f"{boolean_field} 必须是布尔值")
@@ -175,9 +268,13 @@ def build_text_provider_request(
     ensure_text_only_provider_payload(payload)
     _ensure_text_generation_schema(endpoint, payload)
     url = _validated_provider_url(base_url, endpoint)
-    return urllib.request.Request(
+    request = urllib.request.Request(
         url,
         data=json.dumps(dict(payload), ensure_ascii=False).encode("utf-8"),
         headers=dict(headers),
         method="POST",
     )
+    policy = _authorized_text_request.get()
+    if policy is not None:
+        policy.check(request)
+    return request

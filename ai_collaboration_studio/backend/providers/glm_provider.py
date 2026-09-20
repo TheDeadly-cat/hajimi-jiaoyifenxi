@@ -7,6 +7,7 @@ from .output import OUTPUT_MODE_PROMPT_JSON, ProviderOutputCapabilities
 
 class GLMProvider(CompatibleChatProvider):
     provider_id = "glm"
+    service_platform = "zhipu"
 
     def __init__(
         self,

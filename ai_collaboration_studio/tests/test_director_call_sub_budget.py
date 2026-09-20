@@ -828,6 +828,10 @@ class DirectorSubBudgetAuthorizationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(prefix="ai-studio-p17-http-")
         self.store = StudioStore(Path(self.temp_dir.name) / "p17-http.sqlite3")
+        for member in self.store.room_snapshot("room_plan")["members"]:
+            self.store.update_member("room_plan", member["id"], {
+                "provider": "deepseek", "model": "offline-model",
+            })
         self.providers = OfflineRegistry()
         self.orchestrator = LedgerRecordingOrchestrator(
             self.store,
@@ -853,7 +857,7 @@ class DirectorSubBudgetAuthorizationTests(unittest.TestCase):
             set(),
         )
         director_limit = int(plan["calls"]["recommended_director_calls"])
-        self.assertGreater(director_limit, 0)
+        self.assertGreater(director_limit, 0, plan)
         self.assertLess(director_limit, MAX_28_PROVIDER_CALLS)
 
         handler = object.__new__(http_server.StudioRequestHandler)

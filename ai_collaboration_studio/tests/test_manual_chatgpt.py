@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from contextlib import closing
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -77,12 +78,13 @@ class FakeReviewProvider:
     def probe(self, *, model: str = "") -> object:
         raise AssertionError("API review must not spend extra probe calls")
 
-    def generate(self, *, instructions: str, input_text: str, model: str = "") -> ProviderResponse:
+    def generate(self, *, instructions: str, input_text: str, model: str = "", max_output_tokens: int | None = None) -> ProviderResponse:
         request = json.loads(input_text)
         self.calls.append({
             "review_kind": request["review_kind"],
             "model": model,
             "instructions": instructions,
+            "max_output_tokens": max_output_tokens,
         })
         if self.invalid_at == len(self.calls):
             return ProviderResponse(
@@ -120,11 +122,12 @@ class ContextMutatingReviewProvider(FakeReviewProvider):
         self.mutation = mutation
         self.mutate_at_call = mutate_at_call
 
-    def generate(self, *, instructions: str, input_text: str, model: str = "") -> ProviderResponse:
+    def generate(self, *, instructions: str, input_text: str, model: str = "", max_output_tokens: int | None = None) -> ProviderResponse:
         response = super().generate(
             instructions=instructions,
             input_text=input_text,
             model=model,
+            max_output_tokens=max_output_tokens,
         )
         if len(self.calls) == self.mutate_at_call:
             assert callable(self.mutation)
@@ -558,6 +561,49 @@ class ManualChatGPTServiceTests(unittest.TestCase):
         legacy_prompt = task_prompt(legacy_bundle)
         self.assertIn("旧版 v1 导入契约不声明多回合 ChatGPT 协议", legacy_prompt)
         self.assertNotIn("恰好 2 次分别发送的回复", legacy_prompt)
+
+    def test_quick_review_passes_the_planned_limit_to_the_actual_transport(self) -> None:
+        from backend.providers.deepseek_provider import DeepSeekProvider
+        from tests.test_providers import FakeHTTPResponse
+
+        imported = self.imported_session("quick")
+        provider = DeepSeekProvider(api_key="fixture", base_url="https://example.deepseek.test", default_model="fixture-model")
+        service = ManualChatGPTService(self.store, review_rate_card={}, providers=ProviderRegistry({"deepseek": provider}))
+        sent = []
+
+        def transport(request, **kwargs):
+            body = json.loads(request.data)
+            sent.append(body)
+            review_input = json.loads(body["messages"][1]["content"])
+            review = {"version": MANUAL_CHATGPT_API_REVIEW_VERSION,
+                      "review_kind": review_input["review_kind"], "verdict": "pass",
+                      "summary": "Synthetic parameter check only.", "findings": [], "open_questions": []}
+            return FakeHTTPResponse({"id": "fixture-response", "model": "fixture-model",
+                                     "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(review)}}],
+                                     "usage": {"prompt_tokens": 100, "completion_tokens": 40}})
+
+        with patch("urllib.request.urlopen", side_effect=transport):
+            reviewed = service.run_api_review(self.room_id, imported["id"], provider_id="deepseek", model="fixture-model",
+                                              client_request_id="bounded-quick-review", expected_result_sha256=imported["result_sha256"])
+        self.assertEqual(reviewed["state"], "READY_FOR_DECISION")
+        self.assertEqual(len(sent), 2)
+        self.assertEqual([body["max_tokens"] for body in sent], [900, 900])
+        self.assertEqual(imported["bundle"]["planning"]["workload"]["api_review_output_token_budget"], 1800)
+        with closing(self.store._connect()) as connection:
+            run = connection.execute("SELECT plan_json,provider_execution_run_id FROM manual_chatgpt_review_runs WHERE session_id=?", (imported["id"],)).fetchone()
+            plan = json.loads(run["plan_json"])
+        self.assertEqual(plan["version"], "manual_chatgpt_review_plan_v2")
+        self.assertEqual(plan["output_tokens_per_call"], 900)
+        self.assertEqual(plan["total_output_token_limit"], 1800)
+        from backend.provider_call_ledger import ProviderCallLedger
+        attempts = ProviderCallLedger.resume(self.store, run["provider_execution_run_id"]).attempts()
+        self.assertEqual(len(attempts), 2)
+        for body, planned, attempt in zip(sent, plan["reviews"], attempts):
+            request = {"instructions": body["messages"][0]["content"], "input_text": body["messages"][1]["content"],
+                       "model": body["model"], "max_output_tokens": body["max_tokens"]}
+            self.assertEqual(planned["generation_request_sha256"], canonical_sha256(request))
+            self.assertEqual(planned["input_utf8_bytes"], sum(len(request[key].encode("utf-8")) for key in ("instructions", "input_text")))
+            self.assertEqual(attempt["usage"], {"input_tokens": 100, "output_tokens": 40})
 
     def test_review_modes_spend_exact_distinct_calls_then_user_freezes(self) -> None:
         for mode, expected_calls in (("quick", 2), ("standard", 3), ("deep", 4)):

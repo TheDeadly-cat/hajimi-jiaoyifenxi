@@ -1705,6 +1705,7 @@ def build_http_server(
     class Handler(BaseHTTPRequestHandler):
         server_version = "AIStudioReadonlyMCP/0.1"
         sys_version = ""
+        request_body_timeout = 5.0
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return
@@ -1748,6 +1749,37 @@ def build_http_server(
             if self.path != MCP_ENDPOINT_PATH:
                 self._send_empty(404)
                 return
+            if self.headers.get("Transfer-Encoding"):
+                self._reject(400, "Chunked MCP requests are not accepted.", "MCP_BODY_INVALID")
+                return
+            try:
+                content_length = int(self.headers.get("Content-Length") or "-1")
+            except ValueError:
+                content_length = -1
+            if not 0 <= content_length <= MAX_REQUEST_BYTES:
+                self._reject(413, "MCP request body is too large.", "MCP_REQUEST_LIMIT")
+                return
+            # Consume valid, bounded framing before header-based rejection.
+            # Closing with unread request bytes can reset the connection on
+            # Windows before the client receives the rejection response.
+            deadline = time.monotonic() + self.request_body_timeout
+            body = bytearray()
+            try:
+                while len(body) < content_length:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError
+                    self.connection.settimeout(remaining)
+                    chunk = self.rfile.read1(min(8192, content_length - len(body)))
+                    if not chunk:
+                        self._reject(400, "MCP request body is incomplete.", "MCP_BODY_INVALID")
+                        return
+                    body.extend(chunk)
+            except TimeoutError:
+                self.connection.settimeout(self.request_body_timeout)
+                self._reject(408, "MCP request body timed out.", "MCP_BODY_TIMEOUT")
+                return
+            self.connection.settimeout(self.request_body_timeout)
             if not _origin_allowed(self.headers.get("Origin"), origins):
                 self._reject(403, "Origin is not allowed.", "MCP_ORIGIN_FORBIDDEN")
                 return
@@ -1762,18 +1794,8 @@ def build_http_server(
             if content_type != "application/json":
                 self._reject(415, "MCP requests must use application/json.", "MCP_CONTENT_TYPE_INVALID")
                 return
-            if self.headers.get("Transfer-Encoding"):
-                self._reject(400, "Chunked MCP requests are not accepted.", "MCP_BODY_INVALID")
-                return
             try:
-                content_length = int(self.headers.get("Content-Length") or "-1")
-            except ValueError:
-                content_length = -1
-            if not 0 <= content_length <= MAX_REQUEST_BYTES:
-                self._reject(413, "MCP request body is too large.", "MCP_REQUEST_LIMIT")
-                return
-            try:
-                message = _strict_json_loads(self.rfile.read(content_length))
+                message = _strict_json_loads(bytes(body))
             except (UnicodeError, ValueError, json.JSONDecodeError):
                 self._send_json(400, ReadonlyMCPApplication._error(None, -32700, "Parse error"))
                 return

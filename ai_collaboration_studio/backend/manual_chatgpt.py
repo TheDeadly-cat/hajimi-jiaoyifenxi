@@ -38,6 +38,7 @@ MANUAL_CHATGPT_TOKEN_ESTIMATE_VERSION = "cjk_one_ascii_four_v1"
 MANUAL_CHATGPT_API_REVIEW_VERSION = "manual_chatgpt_api_review_v1"
 MANUAL_CHATGPT_API_REVIEW_RECORD_VERSION = "manual_chatgpt_api_review_record_v1"
 MANUAL_CHATGPT_REVIEW_PLAN_VERSION = "manual_chatgpt_review_plan_v1"
+MANUAL_CHATGPT_BOUNDED_REVIEW_PLAN_VERSION = "manual_chatgpt_review_plan_v2"
 MANUAL_CHATGPT_DECISION_CARD_VERSION = "manual_chatgpt_decision_card_v1"
 MANUAL_CHATGPT_CONFIRMATION_VERSION = "manual_chatgpt_confirmation_v1"
 MANUAL_CHATGPT_FREEZE_ACKNOWLEDGEMENT = "RESEARCH_ONLY_USER_DECISION"
@@ -2010,18 +2011,35 @@ class ManualChatGPTService:
             )
             for index, kind in enumerate(review_kinds, start=1)
         ]
+        planned_output = _json_object(_json_object(_json_object(session.get("bundle")).get("planning")).get("workload")).get("api_review_output_token_budget")
+        if type(planned_output) is not int or planned_output <= 0 or planned_output % expected_calls:
+            raise ManualChatGPTError(
+                "冻结任务包缺少可执行的逐次输出预算；请重新创建并预览任务包。",
+                code="MANUAL_CHATGPT_REVIEW_BUDGET_INVALID", status=409,
+            )
+        output_per_call = planned_output // expected_calls
+        review_requests = [{
+            "instructions": _review_instructions(kind),
+            "input_text": json.dumps(review_input, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            "model": resolved_model,
+            "max_output_tokens": output_per_call,
+        } for kind, review_input in zip(review_kinds, review_inputs)]
         plan = {
-            "version": MANUAL_CHATGPT_REVIEW_PLAN_VERSION,
+            "version": MANUAL_CHATGPT_BOUNDED_REVIEW_PLAN_VERSION,
             "session_id": session_id,
             "room_id": room_id,
             "result_sha256": clean_expected_hash,
             "provider": clean_provider_id,
             "model": resolved_model,
             "expected_calls": expected_calls,
+            "output_tokens_per_call": output_per_call,
+            "total_output_token_limit": planned_output,
             "reviews": [{
                 "review_index": index,
                 "review_kind": kind,
                 "request_sha256": canonical_sha256(review_inputs[index - 1]),
+                "generation_request_sha256": canonical_sha256(review_requests[index - 1]),
+                "input_utf8_bytes": sum(len(review_requests[index - 1][key].encode("utf-8")) for key in ("instructions", "input_text")),
             } for index, kind in enumerate(review_kinds, start=1)],
         }
         plan_sha256 = canonical_sha256(plan)
@@ -2220,16 +2238,7 @@ class ManualChatGPTService:
             normalized_review: dict[str, Any] | None = None
             response_model = ""
             try:
-                request = {
-                    "instructions": _review_instructions(kind),
-                    "input_text": json.dumps(
-                        review_input,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
-                    "model": resolved_model,
-                }
+                request = review_requests[index - 1]
                 generate_json = getattr(provider, "generate_json", None)
                 response = (
                     generate_json(**request)

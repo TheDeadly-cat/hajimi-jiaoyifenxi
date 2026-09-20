@@ -378,6 +378,43 @@ class ProviderCallLedgerTests(unittest.TestCase):
         self.assertEqual(third["sequence_no"], 3)
         self.assertEqual(resumed.snapshot()["reserved_calls"], 3)
 
+    def test_database_call_ceiling_is_atomic_across_store_instances(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        ledgers = [self.create_ledger(f"database-limit-{i}", max_calls=1, plan={"i": i}) for i in range(8)]
+        def reserve_one(original):
+            store = StudioStore._open_existing_schema(self.db_path)
+            ledger = ProviderCallLedger.resume(store, original.run_id)
+            try:
+                ledger.reserve(kind="evidence_answer", provider="deepseek", database_max_calls=3)
+                return True
+            except ProviderCallBudgetExceeded:
+                return False
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(reserve_one, ledgers))
+        self.assertEqual(sum(results), 3)
+        self.assertEqual(sum(len(ledger.attempts()) for ledger in ledgers), 3)
+
+    def test_chat_token_usage_survives_the_prompt_secret_filter_without_saving_text(self) -> None:
+        ledger = self.create_ledger("chat-usage", max_calls=1, plan={"fixture": True})
+        attempt = ledger.reserve(kind="evidence_answer", provider="deepseek", model="fixture-model")
+        finished = ledger.finish(attempt["id"], attempt["attempt_token"], status="RESPONDED",
+                                 usage={"prompt_tokens": 120, "completion_tokens": 30,
+                                        "prompt_cache_hit_tokens": 20, "prompt_cache_miss_tokens": 100,
+                                        "prompt": "never-store-this-text", "api_key": "never-store-this-key"})
+        self.assertEqual(finished["usage"], {"input_tokens": 120, "output_tokens": 30,
+                                            "cache_hit_input_tokens": 20, "cache_miss_input_tokens": 100})
+        self.assertEqual(ProviderCallLedger.resume(self.store, ledger.run_id).attempts()[0]["usage"], finished["usage"])
+
+    def test_conflicting_or_invalid_usage_is_not_replaced_with_zero(self) -> None:
+        from backend.provider_call_ledger import normalized_token_usage
+        conflicting = normalized_token_usage({"prompt_tokens": 20, "input_tokens": 30})
+        self.assertNotIn("input_tokens", conflicting)
+        self.assertEqual(conflicting["usage_conflicting_token_counters"], 1)
+        invalid = normalized_token_usage({"prompt_tokens": "20", "completion_tokens": True})
+        self.assertNotIn("input_tokens", invalid)
+        self.assertNotIn("output_tokens", invalid)
+        self.assertEqual(normalized_token_usage(None), None)
+
     def test_finish_is_token_guarded_idempotent_and_usage_is_numeric_only(self) -> None:
         ledger = self.create_ledger(
             "finish-safe",

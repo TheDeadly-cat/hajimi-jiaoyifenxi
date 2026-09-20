@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import hashlib
 import urllib.error
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
@@ -63,6 +64,43 @@ def safe_provider_error_message(
     return f"{display_name} 模型调用失败。"
 
 
+def output_token_limit(value: int | None, *, default: int) -> int:
+    """Use an explicit caller budget without coercing invalid authorization values."""
+    if value is None:
+        return default
+    if type(value) is not int or value <= 0:
+        raise ValueError("max_output_tokens must be a positive integer")
+    return value
+
+
+def response_metadata(payload: dict[str, Any], *, chat_completions: bool = False, visible_text: str = "") -> dict[str, Any]:
+    """Keep received identity and terminal markers separate from model fallbacks."""
+    def text(value: Any, limit: int = 160) -> str:
+        return value.strip() if isinstance(value, str) and len(value) <= limit else ""
+
+    choices = payload.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    reason = text(choice.get("finish_reason")) if chat_completions else ""
+    refused = bool(message.get("refusal")) or reason == "content_filter"
+    output = payload.get("output")
+    for item in output if isinstance(output, list) else []:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        refused = refused or any(isinstance(part, dict) and part.get("type") == "refusal" for part in (content if isinstance(content, list) else []))
+    incomplete = payload.get("incomplete_details")
+    return {
+        "response_id": text(payload.get("id"), 256),
+        "reported_model": text(payload.get("model")),
+        "response_status": text(payload.get("status")),
+        "finish_reason": reason,
+        "refused": refused,
+        "incomplete_reason": text(incomplete.get("reason")) if isinstance(incomplete, dict) else "",
+        "output_text_sha256": hashlib.sha256(visible_text.encode("utf-8", errors="surrogatepass")).hexdigest() if visible_text else "",
+    }
+
+
 @dataclass(slots=True)
 class ProviderResponse:
     ok: bool
@@ -72,6 +110,13 @@ class ProviderResponse:
     error: str = ""
     usage: dict[str, Any] = field(default_factory=dict)
     error_code: str = ""
+    response_id: str = ""
+    reported_model: str = ""
+    response_status: str = ""
+    finish_reason: str = ""
+    refused: bool = False
+    incomplete_reason: str = ""
+    output_text_sha256: str = ""
 
 
 @dataclass(slots=True)
@@ -110,7 +155,7 @@ class ChatProvider(Protocol):
 
     def probe(self, *, model: str = "") -> ProviderProbeResult: ...
 
-    def generate(self, *, instructions: str, input_text: str, model: str = "") -> ProviderResponse: ...
+    def generate(self, *, instructions: str, input_text: str, model: str = "", max_output_tokens: int | None = None) -> ProviderResponse: ...
 
 
 class OutputCapableChatProvider(ChatProvider, Protocol):
@@ -124,4 +169,5 @@ class OutputCapableChatProvider(ChatProvider, Protocol):
         instructions: str,
         input_text: str,
         model: str = "",
+        max_output_tokens: int | None = None,
     ) -> ProviderResponse: ...

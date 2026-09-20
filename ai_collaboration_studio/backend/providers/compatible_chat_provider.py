@@ -5,11 +5,13 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from ..execution_boundary import build_text_provider_request
+from ..execution_boundary import build_text_provider_request, open_text_provider_request, read_text_provider_response, text_generation_body
 from .base import (
     ProviderProbeResult,
     ProviderResponse,
     classify_provider_exception,
+    output_token_limit,
+    response_metadata,
     safe_provider_error_message,
 )
 from .probe import model_missing_probe, perform_http_probe, unconfigured_probe
@@ -85,6 +87,7 @@ def provider_http_error(raw: str, status_code: int, display_name: str) -> str:
 
 
 class CompatibleChatProvider:
+    completion_token_limit = False
     def __init__(
         self,
         *,
@@ -130,6 +133,8 @@ class CompatibleChatProvider:
             "max_tokens": 4,
             "stream": False,
         }
+        if self.completion_token_limit:
+            body["max_completion_tokens"] = body.pop("max_tokens")
         request = build_text_provider_request(
             self._base_url,
             "chat_completions",
@@ -148,12 +153,12 @@ class CompatibleChatProvider:
             response_text_extractor=chat_probe_response_text,
         )
 
-    def generate(self, *, instructions: str, input_text: str, model: str = "") -> ProviderResponse:
+    def generate(self, *, instructions: str, input_text: str, model: str = "", max_output_tokens: int | None = None) -> ProviderResponse:
         return self._generate(
             instructions=instructions,
             input_text=input_text,
             model=model,
-            max_tokens=4096,
+            max_tokens=output_token_limit(max_output_tokens, default=4096),
             timeout_seconds=60,
         )
 
@@ -176,15 +181,13 @@ class CompatibleChatProvider:
                 error=f"{self._api_key_name} 未配置",
                 error_code="provider_error",
             )
-        body = {
-            "model": selected_model,
-            "messages": [
-                {"role": "system", "content": instructions},
-                {"role": "user", "content": input_text},
-            ],
-            "max_tokens": max(1, int(max_tokens)),
-            "stream": False,
-        }
+        if not selected_model:
+            return ProviderResponse(ok=False, provider=self.provider_id, model="",
+                                    error="请先明确选择模型 ID", error_code="model_not_configured")
+        body = text_generation_body(api="chat_completions", model=selected_model,
+                                    instructions=instructions, input_text=input_text,
+                                    max_output_tokens=max(1, int(max_tokens)),
+                                    completion_token_limit=self.completion_token_limit)
         if response_format:
             body["response_format"] = response_format
         request = build_text_provider_request(
@@ -198,8 +201,8 @@ class CompatibleChatProvider:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds))) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            with open_text_provider_request(request, timeout=max(1, int(timeout_seconds))) as response:
+                payload = json.loads(read_text_provider_response(response))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")[:800]
             return ProviderResponse(
@@ -234,7 +237,9 @@ class CompatibleChatProvider:
                 error=safe_provider_error_message(self._display_name, "invalid_response"),
                 error_code="invalid_response",
             )
-        if chat_finish_reason(payload) == "length":
+        content = chat_response_text(payload)
+        metadata = response_metadata(payload, chat_completions=True, visible_text=content)
+        if (metadata["finish_reason"] and metadata["finish_reason"] != "stop") or metadata["refused"] or payload.get("error"):
             return ProviderResponse(
                 ok=False,
                 provider=self.provider_id,
@@ -242,8 +247,8 @@ class CompatibleChatProvider:
                 error=safe_provider_error_message(self._display_name, "invalid_response"),
                 error_code="invalid_response",
                 usage=payload.get("usage") or {},
+                **metadata,
             )
-        content = chat_response_text(payload)
         return ProviderResponse(
             ok=bool(content),
             content=content,
@@ -252,4 +257,5 @@ class CompatibleChatProvider:
             error="" if content else safe_provider_error_message(self._display_name, "empty_response"),
             error_code="" if content else "empty_response",
             usage=payload.get("usage") or {},
+            **metadata,
         )

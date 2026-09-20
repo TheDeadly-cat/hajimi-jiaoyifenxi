@@ -117,6 +117,27 @@ class RoundLaunchPlanTests(unittest.TestCase):
         self.assertIsNotNone(snapshot)
         return copy.deepcopy(snapshot)
 
+    def test_current_default_routes_require_matching_configured_provider(self) -> None:
+        # Exercise the real seeded routes separately from fixed-route tests.
+        before = self.real_store.room_snapshot("room_plan")
+        self.assertEqual({m["provider"] for m in before["members"]}, {"doubao"})
+        for configured in (False, True):
+            with self.subTest(configured=configured):
+                registry = LocalStatusOnlyRegistry([{
+                    "id": "doubao", "model": "doubao-default-fixture",
+                    "configured": configured, "policy_disabled": False,
+                }], disabled_provider_ids={"openai"})
+                plan = RoundLaunchPlanService(self.real_store, registry).build(
+                    "room_plan", "Validate default provider configuration", set(),
+                )
+                self.assertEqual(plan["ready_for_authorization"], configured, plan)
+                self.assertEqual(plan["moderator"]["model"], "doubao-default-fixture")
+                self.assertEqual(registry.calls, ["status"])
+                self.assertEqual(self.real_store.list_provider_execution_runs("room_plan"), [])
+                if not configured:
+                    self.assertIn("PROVIDER_NOT_CONFIGURED", {b["code"] for b in plan["blockers"]})
+        self.assertEqual(self.real_store.room_snapshot("room_plan")["members"], before["members"])
+
     def storage_snapshot(self) -> dict[str, Any]:
         snapshot = self.snapshot("room_storage")
         enabled = [member for member in snapshot["members"] if member["enabled"]]
