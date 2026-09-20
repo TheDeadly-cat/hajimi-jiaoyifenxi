@@ -10,6 +10,7 @@ import getpass
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -105,12 +106,26 @@ def main(argv=None):
     if args.initialize:
         verify_candidate(args.candidate_sha)
         with DatabaseInstanceOwner(database) as owner:
-            store = StudioStore(database)
-            room = store.create_room("自动消息审核试运行", "用于本次独立试运行的预算归属，不自动创建讨论轮次。")
+            # Schema initialization remains confined to system temp. Publish
+            # only this newly created, checkpointed image into an exclusive
+            # destination; never relax StudioStore's formal-DB migration gate.
+            with tempfile.TemporaryDirectory(prefix="news-review-initialize-") as temporary:
+                seed_path = Path(temporary)/"studio.sqlite3"
+                with DatabaseInstanceOwner(seed_path) as seed_owner:
+                    seed = StudioStore(seed_path)
+                    room = seed.create_room("自动消息审核试运行", "用于本次独立试运行的预算归属，不自动创建讨论轮次。")
+                    seed.checkpoint_after_shutdown(instance_owner=seed_owner)
+                    owner.assert_held_for(database)
+                    with database.open("xb") as output:
+                        output.write(seed_path.read_bytes())
+                        output.flush()
+                        os.fsync(output.fileno())
+            from backend.database_migration import assert_database_ready_for_startup
+            readiness = assert_database_ready_for_startup(database)
             result = {"database_path":str(database),"room_id":room["room"]["id"],
-                      "candidate_sha":args.candidate_sha,"network_started":False,"provider_calls":0}
+                      "candidate_sha":args.candidate_sha,"database_sha256":readiness["source_sha256"],
+                      "network_started":False,"provider_calls":0}
             write_record(root/"initialized.json",result)
-            store.checkpoint_after_shutdown(instance_owner=owner)
         print(json.dumps(result,ensure_ascii=False))
         return 0
     policy = validate_policy(policy)

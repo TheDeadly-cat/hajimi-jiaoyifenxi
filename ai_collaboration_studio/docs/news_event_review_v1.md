@@ -106,6 +106,12 @@ empty independent database and a named budget-owning research room, returning
 their identities in `initialized.json`. It never opens or migrates a formal or
 historical database.
 
+Schema creation runs only in system temp, retaining the store's existing
+initialization guard. A fully checkpointed new image is copied to the exclusively
+created trial destination under its owner, synced to disk, and checked by normal
+startup preflight. An interrupted initialization is preserved and cannot be
+overwritten by repeating `--initialize`.
+
 `--prepare --config <policy.json> --output <new-file.json>` validates the complete
 policy without source/provider requests or authorization writes. The rate card
 must contain explicit positive CNY input/output prices, an official Ark source
