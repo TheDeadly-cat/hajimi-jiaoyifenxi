@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import shutil
+import socket
 import sqlite3
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from contextlib import closing
 from pathlib import Path
 from urllib.error import HTTPError
@@ -322,8 +325,8 @@ class ReadonlyMCPGatewayTests(ReadonlyMCPFixture):
 class ReadonlyMCPHTTPTests(ReadonlyMCPFixture):
     def setUp(self) -> None:
         super().setUp()
-        application = ReadonlyMCPApplication(self.gateway, rate_limit_per_minute=30)
-        self.server = build_http_server(application, host="127.0.0.1", port=0)
+        self.application = ReadonlyMCPApplication(self.gateway, rate_limit_per_minute=30)
+        self.server = build_http_server(self.application, host="127.0.0.1", port=0)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         host, port = self.server.server_address[:2]
@@ -509,6 +512,55 @@ class ReadonlyMCPHTTPTests(ReadonlyMCPFixture):
         }, token=self.token, protocol_version=None)
         self.assertEqual(status, 400)
         self.assertEqual(invalid["error"]["code"], -32602)
+
+    def test_header_rejection_consumes_split_body_before_closing(self) -> None:
+        # A client may send its headers and body in different TCP packets.
+        # Closing with unread body bytes can erase the 403 response on Windows.
+        body = b'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+        headers = (
+            f"POST {MCP_ENDPOINT_PATH} HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\nOrigin: https://attacker.invalid\r\n"
+            "Accept: application/json, text/event-stream\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n"
+        ).encode("ascii")
+        with patch.object(self.application, "handle") as application_call:
+            with socket.create_connection(self.server.server_address, timeout=5) as client:
+                client.sendall(headers + body[:1])
+                client.settimeout(0.1)
+                with self.assertRaises(TimeoutError):
+                    client.recv(1)
+                client.settimeout(5)
+                client.sendall(body[1:])
+                response = http.client.HTTPResponse(client)
+                response.begin()
+                self.assertEqual(response.status, 403)
+                self.assertEqual(
+                    json.loads(response.read())["error"]["data"]["code"],
+                    "MCP_ORIGIN_FORBIDDEN",
+                )
+                response.close()
+            application_call.assert_not_called()
+
+    def test_incomplete_body_times_out_without_application_dispatch(self) -> None:
+        with patch.object(self.server.RequestHandlerClass, "request_body_timeout", 0.1):
+            with patch.object(self.application, "handle") as application_call:
+                with socket.create_connection(self.server.server_address, timeout=5) as client:
+                    client.sendall((
+                        f"POST {MCP_ENDPOINT_PATH} HTTP/1.1\r\n"
+                        "Host: 127.0.0.1\r\nContent-Length: 50\r\n"
+                        "Content-Type: application/json\r\n"
+                        "Accept: application/json, text/event-stream\r\n\r\n{"
+                    ).encode("ascii"))
+                    response = http.client.HTTPResponse(client)
+                    response.begin()
+                    self.assertEqual(response.status, 408)
+                    self.assertEqual(
+                        json.loads(response.read())["error"]["data"]["code"],
+                        "MCP_BODY_TIMEOUT",
+                    )
+                    response.close()
+                application_call.assert_not_called()
 
     def test_protected_ports_and_non_loopback_bind_fail_before_start(self) -> None:
         application = ReadonlyMCPApplication(self.gateway)
