@@ -517,7 +517,10 @@ class DocumentEvidenceService:
     def recover(self):
         # Host owner is held by caller; interrupted work never silently refetches.
         with self.store._lock, closing(self.store._connect()) as db, db:
-            db.execute("UPDATE source_document_jobs SET status='cancelled', error_code='DOCUMENT_INTERRUPTED', completed_at=? WHERE status IN ('waiting','fetching')", (self.clock(),))
+            # Native waiting jobs belong to the bounded policy controller. It
+            # checks expiry/revocation and reuses the existing reservation.
+            # Manual jobs retain their original no-resume behavior.
+            db.execute("UPDATE source_document_jobs SET status='cancelled', error_code='DOCUMENT_INTERRUPTED', completed_at=? WHERE status='fetching' OR (status='waiting' AND session_id NOT LIKE 'news_review:%')", (self.clock(),))
 
     def run(self, job_id, *, cancel_event, deadline_monotonic_ms):
         with self.store._lock, closing(self.store._connect()) as db, db:

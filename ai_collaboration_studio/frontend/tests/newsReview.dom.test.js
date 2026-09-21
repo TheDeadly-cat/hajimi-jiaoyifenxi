@@ -51,6 +51,17 @@ test("unknown response remains unknown and offers no retry or approval button", 
   assert.equal(host.querySelector("blockquote"), null);
 });
 
+for (const [state, text] of [["DOCUMENT_CANCELLED", "正文读取已取消"], ["WAITING_AUTHORIZATION", "等待新的授权"]]) {
+  test(`authorization interruption is visible: ${state}`, async () => {
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: true, news_review: fixture(state) }) });
+    const host = await mount(NewsReview, { itemId: "source_event_one" });
+    assert.ok(host.querySelector('[role="status"]').textContent.includes(text));
+    assert.equal(host.querySelector('[role="alert"]'), null);
+    assert.equal(host.querySelector('blockquote'), null);
+    assert.deepEqual([...host.querySelectorAll('button')].map((b) => b.textContent), ['刷新审核状态']);
+  });
+}
+
 test("missing evidence and request failure cannot render as no important messages", async () => {
   globalThis.fetch = async () => ({ ok: true, json: async () => ({ ok: true, news_review: fixture("UNREVIEWED") }) });
   const host = await mount(NewsReview, { itemId: "source_event_one" });

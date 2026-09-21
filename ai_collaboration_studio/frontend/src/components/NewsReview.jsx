@@ -7,6 +7,8 @@ const states = {
   QUEUED: "等待主审", RUNNING: "主审处理中", REVIEWED: "主审已返回 · 事实尚未独立核验",
   MATERIAL_INSUFFICIENT: "材料不足", FAILED: "审核失败 · 已停止后续调用",
   UNKNOWN: "结果未知 · 不会自动重发", CANCELLED: "审核已取消",
+  DOCUMENT_CANCELLED: "正文读取已取消 · 尚未判断材料是否充足",
+  WAITING_AUTHORIZATION: "旧授权已失效 · 未发送审核等待新的授权",
 };
 const importanceLabels = { high: "优先关注", normal: "普通关注", uncertain: "重要性待判断" };
 const reasons = {

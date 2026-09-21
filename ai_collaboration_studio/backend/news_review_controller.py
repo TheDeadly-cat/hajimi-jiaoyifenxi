@@ -24,7 +24,7 @@ class NewsReviewController:
             if self.threads:
                 raise RuntimeError("news review controller already started")
             if recover:
-                self.service.recover()
+                self.service.prepare_startup()
             self.threads = [threading.Thread(target=self._work,args=(lane,cycle),
                             name="news-review-"+lane,daemon=False) for lane,cycle in
                             (("evidence",self.enrich_cycle),("model",self.model_cycle))]
@@ -66,6 +66,8 @@ class NewsReviewController:
                 raise SourcePollCancelled("NEWS_REVIEW_STOPPED", "news review host stopped")
             with self.service.store._lock, closing(self.service.store._connect()) as db:
                 row, p = _policy(db,self.policy_id)
+                if self.service.clock() >= p['expires_at_ms']:
+                    raise SourcePollCancelled('NEWS_REVIEW_WINDOW_EXPIRED', 'news review window elapsed')
                 try:
                     _window(row,p,self.service.clock())
                 except NewsReviewError as exc:

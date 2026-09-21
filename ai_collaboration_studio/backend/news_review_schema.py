@@ -2,7 +2,7 @@
 
 
 def ensure_news_review_schema(connection, *, applied_at_ms):
-    connection.executescript("""
+    schema = """
         CREATE TABLE IF NOT EXISTS news_review_policies (
             id TEXT PRIMARY KEY, policy_json TEXT NOT NULL, policy_sha256 TEXT NOT NULL UNIQUE,
             provider_run_id TEXT NOT NULL REFERENCES provider_execution_runs(id), approved_at INTEGER NOT NULL,
@@ -98,6 +98,46 @@ def ensure_news_review_schema(connection, *, applied_at_ms):
         BEGIN SELECT RAISE(ABORT,'news source grant is immutable'); END;
         CREATE TRIGGER IF NOT EXISTS news_review_source_grant_no_delete BEFORE DELETE ON news_review_source_grants
         BEGIN SELECT RAISE(ABORT,'news source grant is permanent'); END;
+    """
+    connection.executescript(schema)
+    # Preserve the original tables, IDs, unique keys, links and receipts byte
+    # for byte. Successors are distinct execution records under new policies;
+    # the original logical-content identity remains the global charging key.
+    execution_schema = schema[schema.index('        CREATE TABLE IF NOT EXISTS news_review_jobs ('):
+                              schema.index('        CREATE TABLE IF NOT EXISTS news_review_observations (')]
+    execution_schema = execution_schema.replace('news_review_', 'news_review_successor_')
+    execution_schema = execution_schema.replace('REFERENCES news_review_successor_policies', 'REFERENCES news_review_policies')
+    execution_schema = execution_schema.replace('dedupe_key TEXT NOT NULL UNIQUE', 'dedupe_key TEXT NOT NULL')
+    connection.executescript(execution_schema)
+    connection.executescript("""
+        CREATE UNIQUE INDEX IF NOT EXISTS news_review_successor_policy_content
+            ON news_review_successor_jobs(dedupe_key,policy_id);
+        CREATE VIEW IF NOT EXISTS news_review_all_jobs AS
+            SELECT *, 'original' AS storage FROM news_review_jobs UNION ALL
+            SELECT *, 'successor' AS storage FROM news_review_successor_jobs;
+        CREATE VIEW IF NOT EXISTS news_review_all_receipts AS
+            SELECT * FROM news_review_receipts UNION ALL SELECT * FROM news_review_successor_receipts;
+        CREATE VIEW IF NOT EXISTS news_review_all_links AS
+            SELECT * FROM news_review_links UNION ALL SELECT * FROM news_review_successor_links;
+        CREATE TABLE IF NOT EXISTS news_review_content_claims (
+            dedupe_key TEXT PRIMARY KEY, job_id TEXT NOT NULL UNIQUE, claimed_at INTEGER NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS news_review_claim_no_update BEFORE UPDATE ON news_review_content_claims
+        BEGIN SELECT RAISE(ABORT,'news review content claim is immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS news_review_claim_no_delete BEFORE DELETE ON news_review_content_claims
+        BEGIN SELECT RAISE(ABORT,'news review content claim is permanent'); END;
     """)
+    # Older started records must also block future charging. Conflicting history
+    # rejects migration; it is never resolved by dropping evidence or a claim.
+    claimed = connection.execute("""SELECT dedupe_key,id,started_at FROM news_review_all_jobs
+        WHERE started_at!=0 OR attempt_id!='' OR http_attempted!=0
+        OR status NOT IN ('QUEUED','CANCELLED')""").fetchall()
+    for key, job_id, started_at in claimed:
+        connection.execute('INSERT OR IGNORE INTO news_review_content_claims VALUES(?,?,?)', (key,job_id,started_at))
+        saved = connection.execute('SELECT job_id FROM news_review_content_claims WHERE dedupe_key=?', (key,)).fetchone()
+        if saved is None or saved[0] != job_id:
+            raise ValueError('news_review_content_claim_conflict')
     connection.execute("INSERT OR IGNORE INTO schema_migrations(key,applied_at) VALUES(?,?)",
                        ("news_event_review_v1", applied_at_ms))
+    connection.execute("INSERT OR IGNORE INTO schema_migrations(key,applied_at) VALUES(?,?)",
+                       ("news_event_review_recovery_v2", applied_at_ms))

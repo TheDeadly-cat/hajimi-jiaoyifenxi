@@ -359,6 +359,7 @@ class SourceMonitoringRuntime:
                 return False
 
             self._stop_event.clear()
+            self._stop_reason_code = ''
             self._degraded_adapter_keys.clear()
             self._resource_stop_failed = False
             runtime_id = f"source_monitor_runtime_{uuid.uuid4().hex}"
@@ -456,7 +457,10 @@ class SourceMonitoringRuntime:
         with self._lifecycle_lock:
             worker = self._thread
             thread_alive = bool(worker is not None and worker.is_alive())
-        return self.state.snapshot(thread_alive=thread_alive)
+        result = self.state.snapshot(thread_alive=thread_alive)
+        if getattr(self, '_stop_reason_code', ''):
+            result['stop_reason_code'] = self._stop_reason_code
+        return result
 
     @staticmethod
     def _cycle_results(cycle: Any) -> list[dict[str, Any]]:
@@ -660,10 +664,12 @@ class SourceMonitoringRuntime:
                 )
                 if wait_ms:
                     self._stop_event.wait(wait_ms / 1_000)
-        except SourcePollCancelled:
-            if not self._stop_event.is_set():
+        except SourcePollCancelled as exc:
+            if not self._stop_event.is_set() and exc.code != 'NEWS_REVIEW_WINDOW_EXPIRED':
                 self._safe_mark_failed(SOURCE_MONITORING_RUNTIME_FATAL)
                 return
+            if exc.code == 'NEWS_REVIEW_WINDOW_EXPIRED':
+                self._stop_reason_code = exc.code
         except BaseException as exc:
             fatal_code = SOURCE_MONITORING_RUNTIME_FATAL
             if isinstance(exc, SourceMonitoringRuntimeError) and exc.code in {

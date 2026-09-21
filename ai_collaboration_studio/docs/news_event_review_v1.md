@@ -230,3 +230,55 @@ without restarting, renewing or adding requests. Raw runtime evidence remains
 local; the preserved report SHA-256 is
 `d5d00f6cef42c2ae10dc77c328f0ab6e3192b14bc9151dff332461c847c250cd`.
 This result is incomplete live acceptance, not release approval.
+
+## Recovery and stop provenance revision (2026-09-22)
+
+The review of `5c8e80b` found four real lifecycle gaps. Recovery now runs before
+the current service session's approval or explicit resume. The real host passes
+through the same startup gate without undoing that decision. A subsequent host
+session performs recovery again; `resume_within_window=false` still requires
+explicit confirmation after restart and never changes to `true` implicitly.
+
+Native document jobs still in `waiting` retain their original job ID, expiry and
+permanent reservation. Both native and generic document recovery leave that
+unsent work to the native controller, which rechecks authorization at send.
+`fetching` remains cancelled as potentially sent. Expired/revoked waiting work
+is cancelled with an authorization code; interruption is shown separately from
+material insufficiency. Manual document recovery retains its existing behavior.
+
+An additive, controlled schema migration introduces successor execution tables
+and a permanent content-claim table. Original job/receipt/link tables and their
+immutable identities remain in place. When an old authorization expires, its
+definitely unsent queued execution becomes cancelled/awaiting authorization.
+A newly discovered event with the same content can freeze a new execution under
+a separately approved policy, using that policy's own limits. Shared read views
+cover both generations. A content claim is consumed with the model reservation
+and is never refunded; sent, completed, failed or unknown attempts cannot be
+charged again under another policy. No historical task, dedupe key or receipt
+is deleted or reassigned. Existing databases require the normal explicit
+migration procedure; the trial launcher does not auto-upgrade them.
+
+The launcher now writes an immutable stop observation plus a separate local
+stop receipt containing the time, trigger, bounded error code, exception type,
+runtime status and whether the window was reached. The file receipt remains
+available if journal writes fail. Exception messages and credentials are not
+serialized. A fault or unexpected early host return produces exit code `2`;
+host exceptions retain their error exit and owner-retention behavior. Reports
+separate work completion, clean cleanup and acceptance. Planned expiry during
+a source request is recognized as window closure rather than a runtime fault.
+Source metrics additionally retain observed error-code counts, last success,
+consecutive failures and next due time; these are not HTTP request counts.
+
+New regressions use isolated databases and the actual HTTP host/runtime lifecycle
+at random loopback ports. Synthetic transports/schedulers cover first approval,
+explicit resume, queued document recovery without a second reservation,
+cross-policy continuation and unknown-result non-replay. Fresh child processes
+exercise the actual launcher for runtime faults, observer faults and normal
+deadline closure; the host itself is not replaced in those tests. An additional
+journal-failure test checks the independent bounded stop receipt. These tests
+do not establish live source stability, natural-event coverage or provider bills.
+
+The earlier trial remains closed and its early-exit cause remains unknown.
+These fixes are not retrospective proof of what stopped that process. A fresh
+bounded online acceptance requires a new candidate, isolated database, concrete
+approval and locally entered credential; no old activation or budget is reused.

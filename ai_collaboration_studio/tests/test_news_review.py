@@ -534,11 +534,14 @@ raise SystemExit(result)
         result,_ = run("--run","--config",str(config),"--sec-user-agent","Synthetic fixture@example.com",
                        "--approve-policy-sha256",prepared["policy_sha256"],"--password-dialog",
                        "--output",str(root/"run-result.json"),synthetic_host=True)
-        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertEqual(result.returncode,2,result.stdout+result.stderr)
         report = json.loads((root/"run-result.json").read_text(encoding="utf-8"))
         self.assertEqual(report["snapshot"]["observation"],"no_new_event_observed")
         self.assertEqual(report["snapshot"]["calls_reserved"],0)
         self.assertFalse(report["continuity"]["full_24h_window_elapsed"])
+        self.assertEqual(report['stop_events'][0]['stop_type'], 'unexpected_host_return')
+        self.assertFalse(report['outcome']['work_completed'])
+        self.assertTrue(report['outcome']['cleanup_clean'])
         activation_root = Path(self.temp.name)/"NewsReviewTrialActivation"
         result,created = run("--initialize","--root",str(activation_root),"--candidate-sha","a"*40)
         self.assertEqual(result.returncode,0,result.stdout+result.stderr)
@@ -551,7 +554,7 @@ raise SystemExit(result)
                            "--approve-activation-sha256",proposal["activation_sha256"],"--password-dialog",
                            "--sec-user-agent","Synthetic fixture@example.com")
         result,_ = run(*activation_args,synthetic_host=True)
-        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertEqual(result.returncode,2,result.stdout+result.stderr)
         activated = json.loads((activation_root/"activation-policy.json").read_text(encoding="utf-8"))
         self.assertEqual(activated["expires_at_ms"]-activated["not_before_ms"],3_600_000)
         self.assertEqual({k:v for k,v in activated.items() if k not in {"not_before_ms","expires_at_ms"}},

@@ -19,8 +19,9 @@ class NewsReviewJournal:
         self.service, self.policy_id = service, policy_id
         self.session_id = uuid.uuid4().hex
 
-    def record(self, kind, *, runtime_status="", source_run_id=""):
-        require(kind in {"session_started","heartbeat","session_stopped","source_poll","window_closed"}, "invalid_observation_kind")
+    def record(self, kind, *, runtime_status="", source_run_id="", stop=None):
+        require(kind in {"session_started","heartbeat","session_stopped","source_poll","window_closed","stop_requested"}, "invalid_observation_kind")
+        require((kind == 'stop_requested') == (stop is not None), 'invalid_stop_observation')
         require(type(runtime_status) is str and len(runtime_status) <= 80
                 and type(source_run_id) is str and len(source_run_id) <= 200, "invalid_observation")
         self.service.owner.assert_held_for(self.service.store.path)
@@ -40,6 +41,9 @@ class NewsReviewJournal:
                      "source_run_id":source_run_id,"source_run_sha256":canonical_sha256(run) if run else "",
                      "queue_counts":snapshot["job_counts"],"events_observed":snapshot["events_observed"],
                      "calls_reserved":snapshot["calls_reserved"],"documents_reserved":snapshot["documents_reserved"]}
+            if stop is not None:
+                require(stop['policy_id'] == self.policy_id and stop['session_id'] == self.session_id, 'stop_identity_mismatch')
+                value['stop'] = stop
             db.execute("INSERT INTO news_review_observations VALUES(?,?,?,?)",
                        (self.policy_id,value["sequence"],encoded(value),canonical_sha256(value)))
 
@@ -56,7 +60,10 @@ def build_news_review_report(service, policy_id):
         row, p = _policy(db,policy_id)
         observations = db.execute("SELECT * FROM news_review_observations WHERE policy_id=? ORDER BY sequence",(policy_id,)).fetchall()
         events = db.execute("SELECT * FROM news_review_events WHERE policy_id=?",(policy_id,)).fetchall()
-        jobs = db.execute("SELECT * FROM news_review_jobs WHERE policy_id=?",(policy_id,)).fetchall()
+        jobs = db.execute("SELECT * FROM news_review_all_jobs WHERE policy_id=?",(policy_id,)).fetchall()
+        duplicate_content = db.execute("""SELECT COALESCE(SUM(n-1),0) FROM (
+            SELECT COUNT(*) AS n FROM news_review_all_jobs WHERE started_at!=0
+            GROUP BY dedupe_key HAVING COUNT(*)>1)""").fetchone()[0]
         grants = db.execute("SELECT * FROM news_review_source_grants WHERE policy_id=?",(policy_id,)).fetchall()
         source_rows = db.execute("SELECT run_id,adapter_key,status FROM source_adapter_runs WHERE started_at_ms>=? AND started_at_ms<? AND adapter_key IN ('sec_filings','company_ir')",
                                  (p["not_before_ms"],p["expires_at_ms"])).fetchall()
@@ -86,10 +93,16 @@ def build_news_review_report(service, policy_id):
         status = Counter(r["status"] for r in selected)
         elapsed = max(0,min(service.clock(),p["expires_at_ms"])-p["not_before_ms"])
         last_completed = max((r["completed_at_ms"] for r in selected),default=0)
+        state = source_repository.get_state(adapter)
         source_metrics[adapter] = {"poll_runs_observed":len(selected),"statuses":dict(status),
                                   "success_rate":status["SUCCEEDED"]/len(selected) if selected else None,
                                   "nominal_poll_opportunities":(elapsed+299_999)//300_000,
                                   "last_completed_at_ms":last_completed or None,
+                                  "observed_error_codes":dict(Counter(r['error_code'] for r in selected if r.get('error_code'))),
+                                  "last_success_at_ms":state['last_success_at_ms'] if state else None,
+                                  "last_error_code":state['last_error_code'] if state else None,
+                                  "consecutive_failures":state['consecutive_failures'] if state else None,
+                                  "next_due_at_ms":state['next_due_at_ms'] if state else None,
                                   "actual_http_request_count":None}
     coverage = Counter()
     latencies = []
@@ -130,13 +143,21 @@ def build_news_review_report(service, policy_id):
         and heartbeat[-1]["wall_ms"] >= p["expires_at_ms"] and gaps and max(gaps) <= 30_000
         and min(gaps) >= 0 and not clock_anomalies)
     latencies.sort()
+    stops = [s['stop'] for s in samples if s['kind'] == 'stop_requested']
+    clean = bool(samples and samples[-1]['kind'] == 'session_stopped')
+    work_completed = bool(stops and stops[0]['stop_type'] == 'window_elapsed'
+        and stops[0]['window_reached'] and all(s['stop_type'] == 'window_elapsed' for s in stops))
     return {"version":VERSION,"policy_sha256":row["policy_sha256"],"snapshot":snapshot,
+            "stop_events":stops,
+            "outcome":{"work_completed":work_completed,"cleanup_clean":clean,
+                       "acceptance_passed":False,"stop_provenance_available":bool(stops)},
             "source_checks":source_metrics,"source_grants":source_grants,
             "source_runs_without_terminal_observation":[dict(r) for r in source_rows if r["run_id"] not in runs],
             "body_coverage":dict(coverage),
             "publish_to_discovery_ms":{"observed_count":len(latencies),
             "median":latencies[len(latencies)//2] if latencies else None,"maximum":max(latencies) if latencies else None},
             "queue_backlog":snapshot["job_counts"].get("QUEUED",0),"duplicate_review_attempts":duplicate_count,
+            "duplicate_content_reservations_all_policies":duplicate_content,
             "unknown_results":snapshot["job_counts"].get("UNKNOWN",0),"call_ledger":attempts,
             "reserved_without_ledger_attempt":max(0,row["calls_reserved"]-len(attempts)),
             "continuity":{"session_count":len(sessions),"heartbeat_count":len(heartbeat),

@@ -139,6 +139,8 @@ def main(argv=None):
     watcher = None
     stop = threading.Event()
     controller = None
+    exit_code = 0
+    checkpoint_done = False
     try:
         from backend.database_migration import assert_database_ready_for_startup
         readiness = assert_database_ready_for_startup(database)
@@ -206,12 +208,14 @@ def main(argv=None):
             require(current["state"] == "ACTIVE", "policy_not_active")
             from backend.news_review_controller import NewsReviewController
             from backend.news_review_report import NewsReviewJournal, build_news_review_report
+            from backend.news_review_stop import NewsReviewStop
             from backend.source_monitoring.settings import SourceMonitoringSettings
             from backend.source_monitoring.runtime import build_source_monitoring_runtime
             from backend.source_monitoring.profiles import require_profile_registry
             from backend.http_server import RuntimeShutdownIncomplete, run_server
             controller = NewsReviewController(service,policy["policy_id"])
             journal = NewsReviewJournal(service,policy["policy_id"])
+            termination = NewsReviewStop(service,policy,controller,journal,stop,root)
             holder = {}
             def factory(owned_store):
                 settings = SourceMonitoringSettings(enabled=True,auto_start=True,dry_run=False,
@@ -227,33 +231,17 @@ def main(argv=None):
                 write_record(root/("host-"+journal.session_id+".json"),{"url":f"http://127.0.0.1:{server.server_port}",
                              "policy_sha256":preview["policy_sha256"],"expires_at_ms":policy["expires_at_ms"]})
                 holder["ready"] = True
-            def watch():
-                try:
-                    last_sample = 0
-                    while not stop.wait(1):
-                        service.check_clock()
-                        runtime = holder.get("runtime")
-                        status = runtime.snapshot().get("status","") if runtime else "starting"
-                        if time.monotonic()-last_sample >= 10:
-                            journal.record("heartbeat",runtime_status=status)
-                            last_sample = time.monotonic()
-                        if service.clock() >= policy["expires_at_ms"]:
-                            journal.record("window_closed",runtime_status=status)
-                            stop.set()
-                        elif (controller.errors or holder.get("ready") and status in {"failed","stopped","stalled"}):
-                            stop.set()
-                except Exception:
-                    controller.errors["observer"] = "observer_failed"
-                    stop.set()
-                    controller.request_stop()
             journal.record("session_started",runtime_status="starting")
-            watcher = threading.Thread(target=watch,name="news-review-observer",daemon=False)
+            watcher = threading.Thread(target=termination.watch,args=(holder,),name="news-review-observer",daemon=False)
             watcher.start()
             try:
                 run_server(host="127.0.0.1",port=args.port,instance_owner=owner,runtime_factory=factory,
                            news_review_controller=controller,stop_event=stop,ready_callback=ready,
                            news_review_shutdown_seconds=255)
-            except BaseException:
+            except BaseException as exc:
+                termination.request('operator_interrupted' if isinstance(exc,KeyboardInterrupt) else 'host_failure',
+                    trigger='host',code=exc.code if isinstance(exc,NewsReviewError) else 'host_failed',
+                    runtime_status='unavailable',exception_type=type(exc).__name__)
                 # Unexpected host errors may interrupt handler/worker draining.
                 # Keep the owner for every uncertain exit, not only a known
                 # timeout exception; process exit releases it after threads end.
@@ -266,19 +254,45 @@ def main(argv=None):
                 if watcher.is_alive():
                     retain_owner = True
                     _RETAINED_OWNER = owner
+                    # The observer may itself be blocked writing a receipt.
+                    # Do not acquire its lock or claim clean shutdown here.
+                    write_record(root/('observer-drain-'+journal.session_id+'.json'),
+                        {'ok':False,'code':'observer_shutdown_incomplete','session_id':journal.session_id})
+            if not retain_owner and not termination.events:
+                termination.request('unexpected_host_return',trigger='host',code='host_returned_before_stop',runtime_status='stopped')
             if not retain_owner:
-                journal.record("session_stopped",runtime_status="stopped")
-                write_record(output,build_news_review_report(service,policy["policy_id"]))
-        print(json.dumps({"ok":True,"output":str(output),"policy_sha256":preview["policy_sha256"],
+                for lane,code in controller.errors.copy().items():
+                    if lane != 'observer':
+                        termination.request('worker_failure',trigger=lane,code=code,runtime_status='stopped')
+            exit_code = termination.summary()['exit_code'] if not retain_owner else 2
+            if not retain_owner:
+                stage = 'stop_journal_failed'
+                try:
+                    journal.record("session_stopped",runtime_status="stopped")
+                    stage = 'report_build_failed'
+                    report = build_news_review_report(service,policy["policy_id"])
+                    report['termination'] = termination.summary()
+                    stage = 'checkpoint_failed'
+                    store.checkpoint_after_shutdown(instance_owner=owner)
+                    checkpoint_done = True
+                    stage = 'report_write_failed'
+                    write_record(output,report)
+                except BaseException as exc:
+                    termination.request('finalization_failure',trigger='host',code=stage,
+                                        runtime_status='stopped',exception_type=type(exc).__name__)
+                    retain_owner = True
+                    _RETAINED_OWNER = owner
+                    raise
+        print(json.dumps({"ok":exit_code == 0,"exit_code":exit_code,"output":str(output),"report_written":output.is_file(),"policy_sha256":preview["policy_sha256"],
                           "activation_sha256":activation_sha if args.activate or args.prepare_activation else None,
                           "supplier_bill_verified":False},ensure_ascii=False))
-        return 0
+        return exit_code
     finally:
         stop.set()
         for key in KEYS:
             os.environ.pop(key,None)
         if not retain_owner:
-            if store is not None:
+            if store is not None and not checkpoint_done:
                 store.checkpoint_after_shutdown(instance_owner=owner)
             owner.release()
 

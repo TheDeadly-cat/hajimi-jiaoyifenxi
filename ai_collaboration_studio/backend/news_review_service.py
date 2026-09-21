@@ -39,6 +39,36 @@ def _window(row, p, now):
     require(row["status"] == "ACTIVE", "policy_not_active")
 
 
+def _execution_table(job, kind='jobs'):
+    require(job['storage'] in {'original', 'successor'} and kind in {'jobs', 'receipts', 'links'}, 'invalid_execution_storage')
+    return ('news_review_' if job['storage'] == 'original' else 'news_review_successor_') + kind
+
+
+def _retire_expired_jobs(db, now):
+    """Only definitely unsent executions can await a different authorization."""
+    for entry in db.execute('SELECT id FROM news_review_policies').fetchall():
+        row, p = _policy(db, entry['id'])
+        reason = ('authorization_expired' if now >= p['expires_at_ms'] else
+                  'authorization_revoked' if row['status'] == 'STOPPED' else '')
+        if not reason:
+            continue
+        for table in ('news_review_jobs', 'news_review_successor_jobs'):
+            db.execute(f"""UPDATE {table} SET status='CANCELLED',error_code=?,finished_at=?
+                WHERE policy_id=? AND status='QUEUED' AND started_at=0 AND attempt_id='' AND http_attempted=0""",
+                (reason, now, entry['id']))
+        db.execute("""UPDATE news_review_events SET status='WAITING_AUTHORIZATION',error_code=?
+            WHERE policy_id=? AND review_job_id IN (SELECT id FROM news_review_all_jobs
+                WHERE status='CANCELLED' AND error_code IN ('authorization_expired','authorization_revoked'))""",
+            (reason, entry['id']))
+        code = 'DOCUMENT_'+reason.upper()
+        db.execute("UPDATE source_document_jobs SET status='cancelled',error_code=?,completed_at=? WHERE session_id=? AND status='waiting'",
+                   (code, now, 'news_review:'+entry['id']))
+        db.execute("""UPDATE news_review_events SET status='DOCUMENT_CANCELLED',error_code=?
+            WHERE policy_id=? AND review_job_id='' AND document_job_id IN
+                (SELECT id FROM source_document_jobs WHERE status='cancelled' AND error_code=?)""",
+            (code,entry['id'],code))
+
+
 def check_document_send(store, db, job, now):
     """Mandatory for any runner executing a native-review document job."""
     row, p = _policy(db, job["session_id"][len("news_review:"):])
@@ -66,6 +96,29 @@ class NewsReviewService:
         self.monotonic_ms = monotonic_ms or (lambda: int(time.monotonic()*1000))
         self.clock_anchor = (self.clock(),self.monotonic_ms())
         self.documents = documents or DocumentEvidenceService(store, clock=self.clock)
+        self._startup_recovered = False
+
+    def prepare_startup(self):
+        """Recover inherited state before this service session's approval.
+
+        Construct a new service for each owned host session. Both the launcher
+        and host call this gate; the host must not revoke a decision just made
+        by approve/resume in the same startup.
+        """
+        self.owner.assert_held_for(self.store.path)
+        with self.store._lock:
+            if not self._startup_recovered:
+                self.recover()
+
+    def end_host_session(self):
+        """Called only after all host workers have drained."""
+        with self.store._lock:
+            self._startup_recovered = False
+
+    def close_expired_work(self):
+        self.owner.assert_held_for(self.store.path)
+        with self.store._lock, closing(self.store._connect()) as db, db:
+            _retire_expired_jobs(db, self.clock())
 
     def check_clock(self):
         wall,monotonic = self.clock(),self.monotonic_ms()
@@ -106,6 +159,7 @@ class NewsReviewService:
         require(approved_policy_sha256 == preview["policy_sha256"], "approval_mismatch")
         now = self.clock()
         require(p["not_before_ms"] <= now < p["expires_at_ms"], "policy_expired")
+        self.prepare_startup()
         # Keep the global store lock while moving between ledger and policy
         # transactions. A crash may leave an empty idempotent ledger, never calls.
         with self.store._lock:
@@ -195,6 +249,7 @@ class NewsReviewService:
 
     def resume(self, policy_id, *, approved_policy_sha256):
         self.owner.assert_held_for(self.store.path)
+        self.prepare_startup()
         with self.store._lock, closing(self.store._connect()) as db, db:
             row, p = _policy(db, policy_id)
             self._identity(p)
@@ -255,9 +310,10 @@ class NewsReviewService:
         view = self.documents.view(item_id)
         if not view["versions"]:
             if view["status"] in {"failed", "cancelled"}:
+                state = "DOCUMENT_CANCELLED" if view["status"] == "cancelled" else "MATERIAL_INSUFFICIENT"
                 with self.store._lock, closing(self.store._connect()) as db, db:
-                    db.execute("UPDATE news_review_events SET status='MATERIAL_INSUFFICIENT',error_code=? WHERE policy_id=? AND item_id=?",
-                               (view["job"]["error_code"], policy_id, item_id))
+                    db.execute("UPDATE news_review_events SET status=?,error_code=? WHERE policy_id=? AND item_id=?",
+                               (state, view["job"]["error_code"], policy_id, item_id))
             return None
         document = view["versions"][-1]
         source = bound_source(record)
@@ -268,9 +324,20 @@ class NewsReviewService:
             event = db.execute("SELECT * FROM news_review_events WHERE policy_id=? AND item_id=?", (policy_id, item_id)).fetchone()
             require(event and event["event_key"] == event_key(source), "event_not_discovered")
             key = job_key(source, document)
-            previous = db.execute("SELECT id FROM news_review_jobs WHERE dedupe_key=?", (key,)).fetchone()
-            if previous:
-                db.execute("INSERT OR IGNORE INTO news_review_links VALUES(?,?,?,?)", (policy_id,item_id,previous["id"],self.clock()))
+            _retire_expired_jobs(db, self.clock())
+            previous = db.execute("""SELECT * FROM news_review_all_jobs WHERE dedupe_key=?
+                ORDER BY (started_at!=0 OR attempt_id!='' OR http_attempted!=0) DESC,
+                         (policy_id=?) DESC,created_at DESC,id DESC LIMIT 1""", (key,policy_id)).fetchone()
+            claim = db.execute('SELECT job_id FROM news_review_content_claims WHERE dedupe_key=?', (key,)).fetchone()
+            if claim:
+                previous = db.execute('SELECT * FROM news_review_all_jobs WHERE id=?', (claim['job_id'],)).fetchone()
+                require(previous is not None and previous['dedupe_key'] == key, 'content_claim_integrity')
+            successor = bool(previous and not claim and previous['policy_id'] != policy_id
+                and previous['status'] == 'CANCELLED'
+                and previous['error_code'] in {'authorization_expired','authorization_revoked'}
+                and not previous['started_at'] and not previous['attempt_id'] and not previous['http_attempted'])
+            if previous and not successor:
+                db.execute(f"INSERT OR IGNORE INTO {_execution_table(previous, 'links')} VALUES(?,?,?,?)", (policy_id,item_id,previous["id"],self.clock()))
                 db.execute("UPDATE news_review_events SET review_job_id=?,status='LINKED_REVIEW' WHERE policy_id=? AND item_id=?",
                            (previous["id"], policy_id, item_id))
                 return previous["id"]
@@ -294,8 +361,10 @@ class NewsReviewService:
                 db.execute("UPDATE news_review_events SET status='MATERIAL_INSUFFICIENT',error_code='evidence_incomplete_or_too_large' WHERE policy_id=? AND item_id=?",
                            (policy_id,item_id))
                 return None
-            job_id = "news_review_"+key
-            db.execute("""INSERT INTO news_review_jobs(id,dedupe_key,policy_id,item_id,document_version_id,
+            job_id = ("news_review_successor_"+canonical_sha256({'content':key,'policy':row['policy_sha256']})
+                      if successor else "news_review_"+key)
+            storage = {'storage':'successor' if successor else 'original'}
+            db.execute(f"""INSERT INTO {_execution_table(storage)}(id,dedupe_key,policy_id,item_id,document_version_id,
                        strategy_sha256,input_json,input_sha256,request_sha256,request_bytes,tokens_reserved,
                        cost_reserved,created_at,priority,status,error_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                        (job_id,key,policy_id,item_id,document["id"],STRATEGY_SHA,encoded(generation),
@@ -303,11 +372,11 @@ class NewsReviewService:
                         0 if evidence["importance"]["level"] == "high" else 1,
                         "QUEUED", ""))
             db.execute("UPDATE news_review_events SET review_job_id=?,status='LINKED_REVIEW',error_code='' WHERE policy_id=? AND item_id=?", (job_id,policy_id,item_id))
-            db.execute("INSERT INTO news_review_links VALUES(?,?,?,?)", (policy_id,item_id,job_id,self.clock()))
+            db.execute(f"INSERT INTO {_execution_table(storage, 'links')} VALUES(?,?,?,?)", (policy_id,item_id,job_id,self.clock()))
         return job_id
 
     def _verified_job(self, db, job_id):
-        row = db.execute("SELECT * FROM news_review_jobs WHERE id=?", (job_id,)).fetchone()
+        row = db.execute("SELECT * FROM news_review_all_jobs WHERE id=?", (job_id,)).fetchone()
         require(row is not None, "job_not_found")
         generation = json.loads(row["input_json"])
         require(canonical_sha256(generation) == row["input_sha256"] and row["strategy_sha256"] == STRATEGY_SHA,
@@ -340,14 +409,14 @@ class NewsReviewService:
                 _window(row, p, self.clock())
                 if row["stop_reason"]:
                     return False  # paid lane stopped; collection/enrichment can continue
-                if db.execute("SELECT 1 FROM news_review_jobs WHERE status='RUNNING'").fetchone():
+                if db.execute("SELECT 1 FROM news_review_all_jobs WHERE status='RUNNING'").fetchone():
                     return False
-                next_job = db.execute("SELECT id FROM news_review_jobs WHERE policy_id=? AND status='QUEUED' ORDER BY priority,created_at,id LIMIT 1", (policy_id,)).fetchone()
+                next_job = db.execute("SELECT id FROM news_review_all_jobs WHERE policy_id=? AND status='QUEUED' ORDER BY priority,created_at,id LIMIT 1", (policy_id,)).fetchone()
                 if not next_job:
                     return False
                 job, row, p, generation, document = self._verified_job(db, next_job["id"])
                 require(not job["started_at"] and not job["attempt_id"] and not job["http_attempted"], "job_already_reserved")
-                claimed = db.execute("SELECT tokens_reserved,cost_reserved FROM news_review_jobs WHERE policy_id=? AND started_at>0",(policy_id,)).fetchall()
+                claimed = db.execute("SELECT tokens_reserved,cost_reserved FROM news_review_all_jobs WHERE policy_id=? AND started_at>0",(policy_id,)).fetchall()
                 require(row["calls_reserved"] == len(claimed)
                         and row["tokens_reserved"] == sum(j[0] for j in claimed)
                         and Decimal(row["cost_reserved"]) == sum((Decimal(j[1]) for j in claimed),Decimal(0)), "budget_integrity")
@@ -359,14 +428,18 @@ class NewsReviewService:
                     db.execute("UPDATE news_review_policies SET stop_reason='model_budget_exhausted' WHERE id=?", (policy_id,))
                     return False
                 require(provider._api_key not in job["input_json"], "credential_in_input")
+                require(not db.execute('SELECT 1 FROM news_review_content_claims WHERE dedupe_key=?', (job['dedupe_key'],)).fetchone(), 'content_already_claimed')
+                # One permanent content claim across every authorization. This
+                # transaction also consumes the new policy's own counters.
+                db.execute('INSERT INTO news_review_content_claims VALUES(?,?,?)', (job['dedupe_key'],job['id'],self.clock()))
                 db.execute("UPDATE news_review_policies SET calls_reserved=calls_reserved+1,tokens_reserved=tokens_reserved+?,cost_reserved=? WHERE id=?",
                            (job["tokens_reserved"],str(cost),policy_id))
-                db.execute("UPDATE news_review_jobs SET status='RUNNING',started_at=? WHERE id=?", (self.clock(),job["id"]))
+                db.execute(f"UPDATE {_execution_table(job)} SET status='RUNNING',started_at=? WHERE id=?", (self.clock(),job["id"]))
             ledger = ProviderCallLedger.resume(self.store, row["provider_run_id"])
             attempt = ledger.reserve(kind="news_event_review", provider="doubao", model=MODEL,
                                      target_type="news_event", target_id=job["id"])
             with closing(self.store._connect()) as db, db:
-                db.execute("UPDATE news_review_jobs SET attempt_id=? WHERE id=?", (attempt["id"],job["id"]))
+                db.execute(f"UPDATE {_execution_table(job)} SET attempt_id=? WHERE id=?", (attempt["id"],job["id"]))
 
         def before_send():
             self._identity(p)
@@ -381,7 +454,9 @@ class NewsReviewService:
                     a["id"] == attempt["id"] and a["status"] == "STARTED"
                     and a["operation_target_type"] == "news_event" and a["operation_target_id"] == job["id"]
                     and a["provider"] == "doubao" and a["model"] == MODEL for a in attempts), "ledger_binding_mismatch")
-                db.execute("UPDATE news_review_jobs SET http_attempted=1 WHERE id=?", (job["id"],))
+                claim = db.execute('SELECT job_id FROM news_review_content_claims WHERE dedupe_key=?', (job['dedupe_key'],)).fetchone()
+                require(claim is not None and claim['job_id'] == job['id'], 'content_claim_integrity')
+                db.execute(f"UPDATE {_execution_table(job)} SET http_attempted=1 WHERE id=?", (job["id"],))
 
         bound = AuthorizedTextRequest(ENDPOINT,job["request_sha256"],p["max_request_bytes"],240,before_send=before_send)
         result, usage, cost, error = None, {}, None, ""
@@ -422,8 +497,8 @@ class NewsReviewService:
                       error_code=error,usage=receipt["usage"])
         with self.store._lock, closing(self.store._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
-            db.execute("INSERT INTO news_review_receipts VALUES(?,?,?,?)", (job["id"],encoded(receipt),canonical_sha256(receipt),self.clock()))
-            db.execute("UPDATE news_review_jobs SET status=?,finished_at=?,error_code=? WHERE id=?",
+            db.execute(f"INSERT INTO {_execution_table(job, 'receipts')} VALUES(?,?,?,?)", (job["id"],encoded(receipt),canonical_sha256(receipt),self.clock()))
+            db.execute(f"UPDATE {_execution_table(job)} SET status=?,finished_at=?,error_code=? WHERE id=?",
                        (status,self.clock(),error,job["id"]))
             if error:
                 db.execute("UPDATE news_review_policies SET stop_reason=? WHERE id=?", ("unknown_result" if status == "UNKNOWN" else "review_failure",policy_id))
@@ -435,23 +510,33 @@ class NewsReviewService:
         with self.store._lock:
             with closing(self.store._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
-                interrupted = db.execute("SELECT DISTINCT policy_id FROM news_review_jobs WHERE status='RUNNING'").fetchall()
+                interrupted = db.execute("SELECT DISTINCT policy_id FROM news_review_all_jobs WHERE status='RUNNING'").fetchall()
                 for entry in interrupted:
                     db.execute("UPDATE news_review_policies SET stop_reason='unknown_result' WHERE id=?", (entry[0],))
-                db.execute("UPDATE news_review_jobs SET status='UNKNOWN',error_code='process_interrupted',finished_at=? WHERE status='RUNNING'", (self.clock(),))
+                for table in ('news_review_jobs', 'news_review_successor_jobs'):
+                    db.execute(f"UPDATE {table} SET status='UNKNOWN',error_code='process_interrupted',finished_at=? WHERE status='RUNNING'", (self.clock(),))
+                _retire_expired_jobs(db, self.clock())
                 policies = db.execute("SELECT id,provider_run_id FROM news_review_policies").fetchall()
                 for entry in policies:
                     row, p = _policy(db, entry["id"])
                     if row["status"] == "ACTIVE" and not p["resume_within_window"] and not row["stop_reason"]:
                         db.execute("UPDATE news_review_policies SET status='PAUSED',stop_reason='restart_confirmation_required' WHERE id=?", (entry["id"],))
-                db.execute("UPDATE source_document_jobs SET status='cancelled',error_code='DOCUMENT_INTERRUPTED',completed_at=? WHERE session_id LIKE 'news_review:%' AND status IN ('waiting','fetching')", (self.clock(),))
+                # 'waiting' has never entered the fetch lane. Keep its original
+                # reservation even when restart requires confirmation. Every
+                # send rechecks the original policy; fetching is never replayed.
+                db.execute("UPDATE source_document_jobs SET status='cancelled',error_code='DOCUMENT_INTERRUPTED',completed_at=? WHERE session_id LIKE 'news_review:%' AND status='fetching'", (self.clock(),))
+                db.execute("""UPDATE news_review_events SET status='DOCUMENT_CANCELLED',error_code=(
+                    SELECT error_code FROM source_document_jobs WHERE id=document_job_id)
+                    WHERE document_job_id IN (SELECT id FROM source_document_jobs WHERE status='cancelled')
+                    AND review_job_id=''""")
             for entry in policies:
                 ProviderCallLedger.resume(self.store,entry["provider_run_id"]).abandon_started(error_code="news_review_interrupted")
+            self._startup_recovered = True
 
     def snapshot(self, policy_id):
         with self.store._lock, closing(self.store._connect()) as db:
             row, p = _policy(db,policy_id)
-            counts = {r[0]: r[1] for r in db.execute("SELECT status,COUNT(*) FROM news_review_jobs WHERE policy_id=? GROUP BY status",(policy_id,))}
+            counts = {r[0]: r[1] for r in db.execute("SELECT status,COUNT(*) FROM news_review_all_jobs WHERE policy_id=? GROUP BY status",(policy_id,))}
             events = db.execute("SELECT COUNT(*) FROM news_review_events WHERE policy_id=?",(policy_id,)).fetchone()[0]
         return {"version":VERSION,"policy":p,"policy_sha256":row["policy_sha256"],"state":row["status"],
                 "expired":self.clock() >= p["expires_at_ms"],"paid_stop_reason":row["stop_reason"],
@@ -472,7 +557,7 @@ def item_review_projection(store, item_id, *, clock=None):
         events = db.execute("SELECT * FROM news_review_events WHERE item_id=? ORDER BY discovered_at,policy_id",(item_id,)).fetchall()
         policies = [_policy(db,row[0]) for row in db.execute("SELECT id FROM news_review_policies WHERE status='ACTIVE'")]
         observation_until = max((p["expires_at_ms"] for row,p in policies if now < p["expires_at_ms"]),default=0)
-        jobs = db.execute("SELECT DISTINCT j.* FROM news_review_jobs j JOIN news_review_links e ON j.id=e.job_id WHERE e.item_id=? ORDER BY j.created_at,j.id",(item_id,)).fetchall()
+        jobs = db.execute("SELECT DISTINCT j.* FROM news_review_all_jobs j JOIN news_review_all_links e ON j.id=e.job_id WHERE e.item_id=? ORDER BY j.created_at,j.id",(item_id,)).fetchall()
         reviews = []
         for job in jobs:
             generation = json.loads(job["input_json"])
@@ -481,7 +566,7 @@ def item_review_projection(store, item_id, *, clock=None):
             original_versions = documents.view(job["item_id"])["versions"]
             require(evidence["document"] in [review_document(v) for v in original_versions]
                     and event_key(bound_source(record)) == evidence["event_key"], "document_binding_mismatch")
-            receipt_row = db.execute("SELECT * FROM news_review_receipts WHERE job_id=?",(job["id"],)).fetchone()
+            receipt_row = db.execute("SELECT * FROM news_review_all_receipts WHERE job_id=?",(job["id"],)).fetchone()
             receipt = json.loads(receipt_row["receipt_json"]) if receipt_row else None
             if receipt:
                 require(canonical_sha256(receipt) == receipt_row["receipt_sha256"]
@@ -499,8 +584,8 @@ def item_review_projection(store, item_id, *, clock=None):
                          "attachment_reading":latest_document["attachment_reading"],
                          "paragraph_count":len(latest_document["paragraphs"])} if latest_document else None)
     current_state = reviews[-1]["state"] if reviews else (events[-1]["status"] if events else "UNREVIEWED")
-    if events and events[-1]["status"] == "MATERIAL_INSUFFICIENT":
-        current_state = "MATERIAL_INSUFFICIENT"
+    if events and events[-1]["status"] in {"MATERIAL_INSUFFICIENT", "DOCUMENT_CANCELLED", "WAITING_AUTHORIZATION"}:
+        current_state = events[-1]["status"]
     return {"version":VERSION,"item_id":item_id,"importance":importance(record,latest_document),"freshness":freshness(record,now),
             "coverage":current_coverage,
             "current_document_version_id":latest_document["id"] if latest_document else None,

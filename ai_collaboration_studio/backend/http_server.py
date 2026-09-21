@@ -5942,7 +5942,7 @@ def run_server(
                  and getattr(STORE, "_instance", None) is not news_review_controller.service.store)
                     or news_review_controller.service.owner is not instance_owner):
                 raise ValueError("news review must share the owned host store")
-            news_review_controller.service.recover()
+            news_review_controller.service.prepare_startup()
         if runtime_factory is not None:
             runtime = runtime_factory(STORE)
             server.ai_studio_source_monitoring_runtime = runtime
@@ -6105,4 +6105,5 @@ def run_server(
                 news_stopped = False
             if not news_stopped:
                 raise RuntimeShutdownIncomplete("news review worker did not stop; database owner retained")
+            news_review_controller.service.end_host_session()
         emit_event("server_stopped", fields={"started": started})
