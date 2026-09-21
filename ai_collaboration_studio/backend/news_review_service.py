@@ -26,6 +26,9 @@ from .providers.doubao_provider import DoubaoProvider
 from .source_inbox_service import SourceInboxError
 
 
+_PAID_STOPS = frozenset({'unknown_result', 'review_failure', 'model_budget_exhausted'})
+
+
 def _policy(db, policy_id):
     row = db.execute("SELECT * FROM news_review_policies WHERE id=?", (policy_id,)).fetchone()
     require(row is not None, "policy_not_found")
@@ -186,7 +189,9 @@ class NewsReviewService:
         self.owner.assert_held_for(self.store.path)
         with self.store._lock, closing(self.store._connect()) as db, db:
             _policy(db, policy_id)
-            db.execute("UPDATE news_review_policies SET status='PAUSED',stop_reason='operator_pause' WHERE id=? AND status='ACTIVE'", (policy_id,))
+            db.execute("""UPDATE news_review_policies SET status='PAUSED',
+                stop_reason=CASE WHEN stop_reason='' THEN 'operator_pause' ELSE stop_reason END
+                WHERE id=? AND status='ACTIVE'""", (policy_id,))
         return self.snapshot(policy_id)
 
     def prepare_sources(self, policy_id, runtime):
@@ -254,9 +259,12 @@ class NewsReviewService:
             row, p = _policy(db, policy_id)
             self._identity(p)
             require(row["policy_sha256"] == approved_policy_sha256 and row["status"] == "PAUSED"
-                    and row["stop_reason"] in {"operator_pause", "restart_confirmation_required"}, "resume_not_allowed")
+                    and row["stop_reason"] in ({"operator_pause", "restart_confirmation_required"} | _PAID_STOPS), "resume_not_allowed")
             require(p["not_before_ms"] <= self.clock() < p["expires_at_ms"], "policy_expired")
-            db.execute("UPDATE news_review_policies SET status='ACTIVE',stop_reason='' WHERE id=?", (policy_id,))
+            # Resuming collection is not authorization to clear a paid-lane
+            # stop. Unknown/failure/budget stops survive every operator pause.
+            paid_stop = row['stop_reason'] if row['stop_reason'] in _PAID_STOPS else ''
+            db.execute("UPDATE news_review_policies SET status='ACTIVE',stop_reason=? WHERE id=?", (paid_stop,policy_id))
         return self.snapshot(policy_id)
 
     def discover(self, policy_id):
@@ -519,8 +527,9 @@ class NewsReviewService:
                 policies = db.execute("SELECT id,provider_run_id FROM news_review_policies").fetchall()
                 for entry in policies:
                     row, p = _policy(db, entry["id"])
-                    if row["status"] == "ACTIVE" and not p["resume_within_window"] and not row["stop_reason"]:
-                        db.execute("UPDATE news_review_policies SET status='PAUSED',stop_reason='restart_confirmation_required' WHERE id=?", (entry["id"],))
+                    if row["status"] == "ACTIVE" and not p["resume_within_window"]:
+                        db.execute("UPDATE news_review_policies SET status='PAUSED',stop_reason=? WHERE id=?",
+                                   (row['stop_reason'] or 'restart_confirmation_required',entry['id']))
                 # 'waiting' has never entered the fetch lane. Keep its original
                 # reservation even when restart requires confirmation. Every
                 # send rechecks the original policy; fetching is never replayed.

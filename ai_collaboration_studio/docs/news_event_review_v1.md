@@ -238,6 +238,10 @@ the current service session's approval or explicit resume. The real host passes
 through the same startup gate without undoing that decision. A subsequent host
 session performs recovery again; `resume_within_window=false` still requires
 explicit confirmation after restart and never changes to `true` implicitly.
+Paid-lane stops (unknown result, validation failure or exhausted budget) survive
+operator pause and explicit resume. Resume can reopen collection in the original
+valid window but cannot reopen paid review. A false automatic-resume setting
+still pauses the restarted host even when a paid stop was already recorded.
 
 Native document jobs still in `waiting` retain their original job ID, expiry and
 permanent reservation. Both native and generic document recovery leave that

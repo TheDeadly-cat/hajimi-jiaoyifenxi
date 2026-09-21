@@ -147,6 +147,29 @@ class NewsReviewRecoveryTests(unittest.TestCase):
         self.assertEqual(f.count('provider_call_attempts'), 1)
         self.assertEqual(service.snapshot(f.policy['policy_id'])['calls_reserved'], 1)
 
+    def test_unknown_paid_stop_survives_pause_explicit_resume_and_real_host_restart(self):
+        f = self.f
+        f.policy['resume_within_window'] = False
+        f.prepare(1)
+        f.prepare(2)
+        approved_hash = f.service.snapshot(f.policy['policy_id'])['policy_sha256']
+        self.assertEqual(f.run_one(TimeoutError('synthetic unknown')).call_count, 1)
+        f.service.pause(f.policy['policy_id'])
+        f.service.resume(f.policy['policy_id'], approved_policy_sha256=approved_hash)
+        # A different queued event must not reopen the paid lane after pause.
+        self.assertEqual(f.run_one().call_count, 0)
+        service = self.restart_service()
+        service.prepare_startup()
+        self.assertEqual(service.snapshot(f.policy['policy_id'])['state'], 'PAUSED')
+        service.resume(f.policy['policy_id'], approved_policy_sha256=approved_hash)
+        with patch('urllib.request.OpenerDirector.open') as wire:
+            self.host(service, on_ready=lambda c:c.model_cycle())
+            wire.assert_not_called()
+        snapshot = service.snapshot(f.policy['policy_id'])
+        self.assertEqual(snapshot['paid_stop_reason'], 'unknown_result')
+        self.assertEqual(snapshot['calls_reserved'], 1)
+        self.assertEqual(snapshot['job_counts'], {'UNKNOWN':1, 'QUEUED':1})
+
     def test_expired_waiting_and_interrupted_fetching_are_explicitly_cancelled(self):
         f = self.f
         f.approve()
