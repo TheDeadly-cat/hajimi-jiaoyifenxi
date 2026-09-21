@@ -198,4 +198,35 @@ screenshots, databases and response fixtures are not part of this source commit.
 
 Real source connectivity, natural new-event processing, real model output,
 supplier bills, 24-hour continuity and release acceptance are not established by
-these local results. The new bounded trial requires its own concrete approval.
+these local results. Any new bounded trial requires its own concrete approval.
+
+## Real trial result (2026-09-21)
+
+Following explicit approval, candidate
+`eb91fc243da43d957a0e3003864724dc50107f8b` ran the fixed SEC/Micron profile in
+an independent trial database. The approved window was 2026-09-21 01:59:06 to
+2026-09-22 01:59:06, UTC+8. The launcher and known Python processes exited early;
+the report was written at 11:34:55 on September 21, about 9 hours 36 minutes after
+the window began. **The full 24-hour acceptance was not completed.**
+
+The report records clean shutdown, one process session, 3,420 heartbeat samples
+and an 11.321-second maximum sample gap. It contains no explicit stop-cause
+field, so clean shutdown does not explain the early exit. Source errors alone
+are not evidence of its cause. The persisted policy's `ACTIVE` label does not
+mean the process is still running.
+
+- Micron: 66 observed poll runs, comprising 41 succeeded, 24 degraded and one
+  failed; success rate 62.12%.
+- SEC/NVIDIA: 41 observed poll runs, comprising 27 succeeded and 14 degraded;
+  success rate 65.85%.
+- No natural new event, document reservation, model attempt, queue backlog or
+  unknown result was recorded. The call ledger was empty. Body coverage and
+  discovery latency have no new-event sample, rather than a passing score.
+
+These are poll-run counts, not actual HTTP request counts. Zero model attempts
+does not validate the credential, real model output or the natural-event review
+path; supplier billing remains unverified. The monitor was disabled after exit,
+without restarting, renewing or adding requests. Raw runtime evidence remains
+local; the preserved report SHA-256 is
+`d5d00f6cef42c2ae10dc77c328f0ab6e3192b14bc9151dff332461c847c250cd`.
+This result is incomplete live acceptance, not release approval.
