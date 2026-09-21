@@ -16,7 +16,8 @@ from tests import test_news_review as fixtures
 class NewsReviewRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.f = fixtures.NewsReviewTests()
-        self.addCleanup(self.f.doCleanups)
+        # Register on the executing case so cleanup exceptions reach its result.
+        self.f.addCleanup = self.addCleanup
         self.f.setUp()
 
     def restart_service(self):

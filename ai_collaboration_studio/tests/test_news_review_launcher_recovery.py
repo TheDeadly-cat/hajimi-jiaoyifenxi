@@ -72,7 +72,8 @@ with ExitStack() as stack:
 class NewsReviewLauncherRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.f = fixtures.NewsReviewTests()
-        self.addCleanup(self.f.doCleanups)
+        # Register on the executing case so cleanup exceptions reach its result.
+        self.f.addCleanup = self.addCleanup
         self.f.setUp()
 
     def child(self, scenario, *args):
