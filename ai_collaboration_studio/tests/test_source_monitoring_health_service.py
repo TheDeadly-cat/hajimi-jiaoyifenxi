@@ -639,26 +639,29 @@ class SourceMonitoringHealthServiceTests(unittest.TestCase):
 
     def test_last_reader_wal_close_during_copy_reacquires_checkpointed_snapshot(self) -> None:
         from backend.source_monitoring import health_service
-        reader = self.store._connect()
-        self.addCleanup(reader.close)
-        reader.execute("SELECT COUNT(*) FROM rooms").fetchone()
-        wal_path = Path(f"{self.database_path}-wal")
-        self.assertTrue(wal_path.exists())
-        copyfile = health_service.shutil.copyfile
-        closed = False
+        # The Windows CI temp directory can use an 8.3 spelling while the store
+        # resolves its long path. Exercise a lexical alias even on other hosts.
+        alias_parent = self.database_path.parent / 'alias-parent'
+        alias_parent.mkdir()
+        wal_path = alias_parent / '..' / f'{self.database_path.name}-wal'
+        with closing(self.store._connect()) as reader:
+            reader.execute("SELECT COUNT(*) FROM rooms").fetchone()
+            self.assertTrue(wal_path.exists())
+            copyfile = health_service.shutil.copyfile
+            closed = False
 
-        def close_last_reader(source, destination):
-            nonlocal closed
-            if Path(source) == wal_path and not closed:
-                closed = True
-                reader.close()
-            return copyfile(source, destination)
+            def close_last_reader(source, destination):
+                nonlocal closed
+                if Path(source).resolve() == wal_path.resolve() and not closed:
+                    closed = True
+                    reader.close()
+                return copyfile(source, destination)
 
-        with mock.patch.object(health_service.shutil, "copyfile", side_effect=close_last_reader):
-            result = self.service().snapshot()
-        self.assertTrue(closed)
-        self.assertTrue(result["persistence_available"])
-        self.assertFalse(wal_path.exists())
+            with mock.patch.object(health_service.shutil, "copyfile", side_effect=close_last_reader):
+                result = self.service().snapshot()
+            self.assertTrue(closed)
+            self.assertTrue(result["persistence_available"])
+            self.assertFalse(wal_path.exists())
 
     def test_transient_wal_permission_denial_retries_but_persistent_denial_fails(self) -> None:
         from backend.source_monitoring import health_service
@@ -670,13 +673,14 @@ class SourceMonitoringHealthServiceTests(unittest.TestCase):
             failures = []
 
             def deny_once(source, destination):
-                if Path(source) == wal_path and not failures:
+                if Path(source).resolve() == wal_path.resolve() and not failures:
                     failures.append(True)
                     raise PermissionError("synthetic Windows WAL close race")
                 return copyfile(source, destination)
 
             with mock.patch.object(health_service.shutil, "copyfile", side_effect=deny_once):
                 self.assertTrue(self.service().snapshot()["persistence_available"])
+            self.assertEqual(failures, [True])
             with mock.patch.object(health_service.shutil, "copyfile", side_effect=PermissionError("synthetic persistent denial")) as blocked:
                 with self.assertRaises(SourceMonitoringHealthServiceError) as raised:
                     self.service().snapshot()
