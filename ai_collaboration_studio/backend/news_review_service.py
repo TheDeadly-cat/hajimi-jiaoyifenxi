@@ -346,7 +346,7 @@ class NewsReviewService:
                 and not previous['started_at'] and not previous['attempt_id'] and not previous['http_attempted'])
             if previous and not successor:
                 db.execute(f"INSERT OR IGNORE INTO {_execution_table(previous, 'links')} VALUES(?,?,?,?)", (policy_id,item_id,previous["id"],self.clock()))
-                db.execute("UPDATE news_review_events SET review_job_id=?,status='LINKED_REVIEW' WHERE policy_id=? AND item_id=?",
+                db.execute("UPDATE news_review_events SET review_job_id=?,status='LINKED_REVIEW',error_code='' WHERE policy_id=? AND item_id=?",
                            (previous["id"], policy_id, item_id))
                 return previous["id"]
             evidence = {"event_id": item_id, "event_key": event_key(source), "headline": record["item"]["headline"],
@@ -609,8 +609,10 @@ def item_review_projection(store, item_id, *, clock=None):
     current_state = current_review["state"] if current_review else (events[-1]["status"] if events else "UNREVIEWED")
     if current_state == "LINKED_REVIEW":
         current_state = "UNREVIEWED"
-    if events and events[-1]["status"] in {"MATERIAL_INSUFFICIENT", "DOCUMENT_CANCELLED", "WAITING_AUTHORIZATION"}:
-        current_state = events[-1]["status"]
+    event_state = events[-1]["status"] if events else None
+    if event_state in {"DOCUMENT_CANCELLED", "WAITING_AUTHORIZATION"} or (
+            event_state == "MATERIAL_INSUFFICIENT" and current_review is None):
+        current_state = event_state
     return {"version":VERSION,"item_id":item_id,"importance":importance(record,latest_document),"freshness":freshness(record,now),
             "coverage":current_coverage,
             "current_document_version_id":latest_document["id"] if latest_document else None,

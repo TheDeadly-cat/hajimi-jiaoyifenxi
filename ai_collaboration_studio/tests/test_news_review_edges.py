@@ -259,9 +259,16 @@ class NewsReviewEdgeTests(unittest.TestCase):
         self.assertIsNone(f.service.queue(f.policy['policy_id'], item))
         self.assertEqual(build_report(f.service, f.policy['policy_id'])['body_coverage'].get('main_body_located', 0), 0)
         self.refresh_document(item, fixtures.SEC_HTML)
+        # Projection must recover A even before the next queue polling cycle
+        # clears the material-insufficient event disposition left by B.
+        self.assertEqual(f.view(item)['current_review_id'], job_a)
+        self.assertEqual(f.view(item)['state'], 'REVIEWED')
         self.assertEqual(f.service.queue(f.policy['policy_id'], item), job_a)
         self.assertEqual(f.view(item)['current_document_version_id'], doc_a['id'])
         self.assertEqual(f.view(item)['state'], 'REVIEWED')
         self.assertEqual(build_report(f.service, f.policy['policy_id'])['body_coverage']['main_body_located'], 1)
         self.assertEqual(f.run_one().call_count, 0)
         self.assertEqual(f.count('provider_call_attempts'), 1)
+        with closing(f.store._connect()) as db:
+            self.assertEqual(db.execute('SELECT error_code FROM news_review_events WHERE item_id=?',
+                                       (item,)).fetchone()[0], '')
