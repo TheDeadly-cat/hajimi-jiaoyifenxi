@@ -286,3 +286,47 @@ The earlier trial remains closed and its early-exit cause remains unknown.
 These fixes are not retrospective proof of what stopped that process. A fresh
 bounded online acceptance requires a new candidate, isolated database, concrete
 approval and locally entered credential; no old activation or budget is reused.
+
+## Send cancellation and current-body selection (2026-09-23)
+
+The controller and the last HTTP admission check now share a cancellation gate.
+The real host also binds its shutdown event before starting review workers.
+Cancellation is checked before claiming work and after all request construction,
+identity, policy and ledger checks, immediately at send admission. The gate's
+short lock orders admission against controller stop; it is never held while
+connecting, waiting for a response or persisting evidence. An attempt admitted
+first drains under its existing authorization; cancellation winning admission
+prevents the opener call.
+
+Definitely unsent reserved work finishes as `CANCELLED` with
+`host_stopped_before_send`. The original attempt, content claim, token/cost
+reservation and counters remain consumed. It is not converted into an unknown
+sent result or refunded. Admitted attempts with uncertain results remain
+`UNKNOWN` and cannot replay. A crash before the final receipt still has the
+durable `RUNNING` job, attempt and content claim and recovers conservatively.
+The finalized `http_attempted` flag records actual admission; an in-flight
+zero flag is not proof that a request was unsent.
+
+Stop requests publish cancellation and the host stop signal before taking the
+receipt lock or writing files/database events. Blocked or failed persistence
+cannot leave new sends enabled. Persistence faults remain visible and preserve
+fault exit behavior. The database owner is retained until workers drain.
+
+Document history keeps its original ordering and immutable records. The
+`current_version_id` and `current_observation` fields instead identify the most
+recent completed or partial successful read, ordered by completion time with a
+deterministic tie-break. Failed or cancelled reads do not replace that pointer.
+Queue selection, coverage reports and the review projection use the same
+selector; the UI defaults to that body while allowing explicit history choices.
+The projection's `current_review_id` uses the existing content/strategy dedupe
+identity, including reuse by another event. A to B to A selects A's original
+review without reordering history or reserving another model call.
+
+Regression coverage uses real services, SQLite, provider protocol and controller
+boundaries with synthetic transport: stop before claim, stop after preflight
+while receipt writing blocks, journal blocking, actual-host shutdown, admitted
+success/unknown completion, A to B to A, failed rereads and restored-body report
+coverage. DOM checks cover the current body and corresponding historical review.
+These checks do not establish a new full CI run or real continuous acceptance.
+The interrupted fixed-candidate trial is recorded separately in
+[the 20260922C result](news_review_trial_20260922c.md).

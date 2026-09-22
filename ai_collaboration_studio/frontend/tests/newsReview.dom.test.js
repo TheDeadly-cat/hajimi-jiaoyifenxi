@@ -10,7 +10,7 @@ for (const key of ["window", "document", "navigator", "HTMLElement", "Event", "M
   Object.defineProperty(globalThis, key, { configurable: true, value: key === "window" ? dom.window : dom.window[key] });
 }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-const vite = await createServer({ root: fileURLToPath(new URL("../", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true, hmr: false } });
+const vite = await createServer({ configLoader: "runner", root: fileURLToPath(new URL("../", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true, hmr: false } });
 const { createRoot } = await import("react-dom/client");
 const { NewsReview, NewsReviewControl } = await vite.ssrLoadModule("/src/components/NewsReview.jsx");
 let root;
@@ -32,6 +32,31 @@ async function mount(Component, props = {}) {
 }
 test.afterEach(async () => { if (root) await act(async () => root.unmount()); root = null; document.body.replaceChildren(); globalThis.fetch = originalFetch; });
 test.after(async () => { await vite.close(); dom.window.close(); });
+
+test("restored A selects its historical review while B stays in history", async () => {
+  const data = fixture();
+  const a = { ...data.reviews[0], id: "review_A", document_version_id: "document_A",
+    receipt: { result: { ...data.reviews[0].receipt.result, summary: "Restored A assessment" } } };
+  const b = { ...a, id: "review_B", document_version_id: "document_B",
+    receipt: { result: { ...a.receipt.result, summary: "Historical B assessment" } } };
+  data.reviews = [a, b];
+  data.current_document_version_id = "document_A";
+  data.current_review_id = "review_A";
+  data.coverage = { ...a.coverage, scope: "Current A scope" };
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push(options);
+    return { ok: true, json: async () => ({ ok: true, news_review: data }) };
+  };
+  const host = await mount(NewsReview, { itemId: "source_event_one" });
+  assert.match(host.textContent, /Current A scope/);
+  assert.doesNotMatch(host.textContent, /以下意见使用此前保存的正文版本/);
+  const history = [...host.querySelectorAll("details")].find((node) => node.querySelector("summary")?.textContent.includes("其他审核版本"));
+  assert.match(history.textContent, /Historical B assessment/);
+  assert.doesNotMatch(history.textContent, /Restored A assessment/);
+  assert.match(host.textContent, /Restored A assessment/);
+  assert.equal(calls.filter((options) => options.method === "POST").length, 0);
+});
 
 test("successful review keeps importance, missing attachments, quotes and factual limits separate", async () => {
   const calls = [];

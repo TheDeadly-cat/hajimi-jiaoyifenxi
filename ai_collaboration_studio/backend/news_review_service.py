@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .controlled_manual_review import verify_candidate
 from .decision_lineage import canonical_sha256
-from .document_evidence import DocumentEvidenceService, bound_source
+from .document_evidence import DocumentEvidenceService, bound_source, current_document
 from .execution_boundary import (AuthorizedTextRequest, authorized_text_request,
                                  build_text_provider_request, text_generation_body)
 from .news_review_contracts import (DISABLED, ENDPOINT, INSTRUCTIONS, MODEL, STRATEGY_SHA, VERSION,
@@ -316,14 +316,14 @@ class NewsReviewService:
         self.owner.assert_held_for(self.store.path)
         record = self.documents.item(item_id)
         view = self.documents.view(item_id)
-        if not view["versions"]:
+        document = current_document(view)
+        if document is None:
             if view["status"] in {"failed", "cancelled"}:
                 state = "DOCUMENT_CANCELLED" if view["status"] == "cancelled" else "MATERIAL_INSUFFICIENT"
                 with self.store._lock, closing(self.store._connect()) as db, db:
                     db.execute("UPDATE news_review_events SET status=?,error_code=? WHERE policy_id=? AND item_id=?",
                                (state, view["job"]["error_code"], policy_id, item_id))
             return None
-        document = view["versions"][-1]
         source = bound_source(record)
         with self.store._lock, closing(self.store._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
@@ -404,8 +404,10 @@ class NewsReviewService:
                 and len(http.data) == row["request_bytes"], "request_binding_mismatch")
         return dict(row), policy, p, generation, document
 
-    def run_one(self, policy_id):
+    def run_one(self, policy_id, *, send_gate=None):
         """One principal-model request, with no retry/fallback or held DB lock."""
+        if send_gate is not None and send_gate.cancelled:
+            return False
         self.owner.assert_held_for(self.store.path)
         provider = self._provider()
         if not provider.status().get("configured"):
@@ -437,6 +439,8 @@ class NewsReviewService:
                     return False
                 require(provider._api_key not in job["input_json"], "credential_in_input")
                 require(not db.execute('SELECT 1 FROM news_review_content_claims WHERE dedupe_key=?', (job['dedupe_key'],)).fetchone(), 'content_already_claimed')
+                if send_gate is not None and send_gate.cancelled:
+                    return False
                 # One permanent content claim across every authorization. This
                 # transaction also consumes the new policy's own counters.
                 db.execute('INSERT INTO news_review_content_claims VALUES(?,?,?)', (job['dedupe_key'],job['id'],self.clock()))
@@ -450,6 +454,7 @@ class NewsReviewService:
                 db.execute(f"UPDATE {_execution_table(job)} SET attempt_id=? WHERE id=?", (attempt["id"],job["id"]))
 
         def before_send():
+            require(send_gate is None or not send_gate.cancelled, 'host_stopped_before_send')
             self._identity(p)
             with self.store._lock, closing(self.store._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
@@ -464,9 +469,9 @@ class NewsReviewService:
                     and a["provider"] == "doubao" and a["model"] == MODEL for a in attempts), "ledger_binding_mismatch")
                 claim = db.execute('SELECT job_id FROM news_review_content_claims WHERE dedupe_key=?', (job['dedupe_key'],)).fetchone()
                 require(claim is not None and claim['job_id'] == job['id'], 'content_claim_integrity')
-                db.execute(f"UPDATE {_execution_table(job)} SET http_attempted=1 WHERE id=?", (job["id"],))
 
-        bound = AuthorizedTextRequest(ENDPOINT,job["request_sha256"],p["max_request_bytes"],240,before_send=before_send)
+        bound = AuthorizedTextRequest(ENDPOINT,job["request_sha256"],p["max_request_bytes"],240,
+                                      before_send=before_send,send_gate=send_gate)
         result, usage, cost, error = None, {}, None, ""
         status = "FAILED"
         response_digest = ""
@@ -492,7 +497,9 @@ class NewsReviewService:
             status = "MATERIAL_INSUFFICIENT" if result["assessment"] == "material_insufficient" else "REVIEWED"
         except Exception as exc:
             error = exc.code if isinstance(exc, NewsReviewError) else "review_failed"
-            if bound.attempted and (cost is None or error == "reported_usage_exceeds_reservation"):
+            if not bound.attempted and send_gate is not None and send_gate.cancelled:
+                status, error = "CANCELLED", "host_stopped_before_send"
+            elif bound.attempted and (cost is None or error == "reported_usage_exceeds_reservation"):
                 status = "UNKNOWN"
         receipt = {"version":VERSION,"job_id":job["id"],"policy_sha256":row["policy_sha256"],
                    "input_sha256":job["input_sha256"],"request_sha256":job["request_sha256"],
@@ -506,9 +513,12 @@ class NewsReviewService:
         with self.store._lock, closing(self.store._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             db.execute(f"INSERT INTO {_execution_table(job, 'receipts')} VALUES(?,?,?,?)", (job["id"],encoded(receipt),canonical_sha256(receipt),self.clock()))
-            db.execute(f"UPDATE {_execution_table(job)} SET status=?,finished_at=?,error_code=? WHERE id=?",
-                       (status,self.clock(),error,job["id"]))
-            if error:
+            # RUNNING + attempt_id + the permanent claim already make a crash
+            # conservative UNKNOWN. Persist actual admission only after it is
+            # known, so pre-send cancellation never needs to undo a send flag.
+            db.execute(f"UPDATE {_execution_table(job)} SET status=?,finished_at=?,error_code=?,http_attempted=? WHERE id=?",
+                       (status,self.clock(),error,int(bound.attempted),job["id"]))
+            if error and status != "CANCELLED":
                 db.execute("UPDATE news_review_policies SET stop_reason=? WHERE id=?", ("unknown_result" if status == "UNKNOWN" else "review_failure",policy_id))
         return True
 
@@ -560,7 +570,8 @@ def item_review_projection(store, item_id, *, clock=None):
     documents = DocumentEvidenceService(store)
     record = documents.item(item_id)
     view = documents.view(item_id)
-    latest_document = view["versions"][-1] if view["versions"] else None
+    latest_document = current_document(view)
+    current_key = job_key(bound_source(record), latest_document) if latest_document else None
     now = (clock or (lambda: int(time.time()*1000)))()
     with store._lock, closing(store._connect()) as db:
         events = db.execute("SELECT * FROM news_review_events WHERE item_id=? ORDER BY discovered_at,policy_id",(item_id,)).fetchall()
@@ -592,12 +603,18 @@ def item_review_projection(store, item_id, *, clock=None):
     current_coverage = ({"scope":latest_document["scope"],"warnings":latest_document["warnings"],
                          "attachment_reading":latest_document["attachment_reading"],
                          "paragraph_count":len(latest_document["paragraphs"])} if latest_document else None)
-    current_state = reviews[-1]["state"] if reviews else (events[-1]["status"] if events else "UNREVIEWED")
+    current_job_id = next((job["id"] for job in reversed(jobs)
+                           if current_key and job["dedupe_key"] == current_key), None)
+    current_review = next((r for r in reviews if r["id"] == current_job_id), None)
+    current_state = current_review["state"] if current_review else (events[-1]["status"] if events else "UNREVIEWED")
+    if current_state == "LINKED_REVIEW":
+        current_state = "UNREVIEWED"
     if events and events[-1]["status"] in {"MATERIAL_INSUFFICIENT", "DOCUMENT_CANCELLED", "WAITING_AUTHORIZATION"}:
         current_state = events[-1]["status"]
     return {"version":VERSION,"item_id":item_id,"importance":importance(record,latest_document),"freshness":freshness(record,now),
             "coverage":current_coverage,
             "current_document_version_id":latest_document["id"] if latest_document else None,
+            "current_review_id":current_review["id"] if current_review else None,
             "observation_until":observation_until,
             "state":current_state,
             "reviews":reviews,"claim_status":"external_unverified"}

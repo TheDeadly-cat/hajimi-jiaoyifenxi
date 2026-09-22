@@ -54,7 +54,7 @@ export function DocumentEvidence({ item, refreshToken = 0, authorizationUntil = 
   }, [item.id, item.serverFingerprint, refresh, refreshToken, authorizationUntil]);
   const pending = busy || ["waiting", "fetching"].includes(data?.status);
   const versions = Array.isArray(data?.versions) ? data.versions : [];
-  const version = selected ? versions.find((value) => value.id === selected) : versions.at(-1);
+  const version = versions.find((value) => value.id === (selected || data?.current_version_id));
   const request = async () => {
     setBusy(true);
     setCopied(false);

@@ -6,6 +6,7 @@ import time
 from contextlib import closing
 
 from .news_review_contracts import NewsReviewError
+from .execution_boundary import TextRequestSendGate
 from .source_inbox_service import SourceInboxError
 from .news_review_service import _policy, _window
 from .source_poll_control import source_poll_authorization, SourcePollCancelled
@@ -14,7 +15,8 @@ from .source_poll_control import source_poll_authorization, SourcePollCancelled
 class NewsReviewController:
     def __init__(self, service, policy_id):
         self.service, self.policy_id = service, policy_id
-        self.stop_event = threading.Event()
+        self.send_gate = TextRequestSendGate()
+        self.stop_event = self.send_gate.event
         self.threads = []
         self.errors = {}
         self.lock = threading.Lock()
@@ -32,7 +34,10 @@ class NewsReviewController:
                 thread.start()
 
     def request_stop(self):
-        self.stop_event.set()
+        self.send_gate.cancel()
+
+    def bind_host_stop_event(self, event):
+        self.send_gate.bind_host_stop_event(event)
 
     def stop(self, timeout=15):
         self.request_stop()
@@ -108,7 +113,7 @@ class NewsReviewController:
 
     def model_cycle(self):
         if not self.stop_event.is_set():
-            self.service.run_one(self.policy_id)
+            self.service.run_one(self.policy_id, send_gate=self.send_gate)
 
     def _work(self, lane, cycle):
         while not self.stop_event.wait(1):
@@ -120,7 +125,7 @@ class NewsReviewController:
                 if exc.code == "policy_expired":
                     return
                 self.errors[lane] = exc.code
-                self.stop_event.set()
+                self.request_stop()
             except Exception:
                 self.errors[lane] = "worker_failed"
-                self.stop_event.set()
+                self.request_stop()

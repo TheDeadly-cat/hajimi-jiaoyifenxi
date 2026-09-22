@@ -69,6 +69,17 @@ def _safe_retry_timestamp(value):
     return value if value <= MAX_RETRY_TIMESTAMP_MS else RETRY_MANUAL_HOLD
 
 
+def current_document(view):
+    """Select the latest successful observation, not the newest immutable blob."""
+    version_id = view.get("current_version_id")
+    if not version_id:
+        return None
+    version = next((v for v in view["versions"] if v["id"] == version_id), None)
+    if version is None:
+        raise fail("当前正文读取记录缺少对应证据。", "DOCUMENT_INTEGRITY_FAILED")
+    return version
+
+
 def ensure_document_evidence_schema(connection, *, applied_at_ms):
     # Called only by Studio's existing controlled initialization/migration path.
     connection.executescript("""
@@ -428,21 +439,29 @@ class DocumentEvidenceService:
         try:
             source = bound_source(record)
         except SourceInboxError:
-            return {"format": FORMAT, "eligible": False, "status": "unsupported", "versions": [], "job": None}
+            return {"format": FORMAT, "eligible": False, "status": "unsupported", "versions": [],
+                    "job": None, "current_version_id": None, "current_observation": None}
         # Coordinate WAL sidecar lifetime with the owner's immutable health
         # snapshot copier, including simultaneous inbox/document/review reads.
         with self.store._lock, closing(self.store._connect()) as db:
             rows = db.execute("SELECT * FROM source_document_versions WHERE item_id=? ORDER BY created_at,id", (item_id,)).fetchall()
             job = db.execute("SELECT * FROM source_document_jobs WHERE item_id=? ORDER BY requested_at DESC,rowid DESC LIMIT 1", (item_id,)).fetchone()
+            observation = db.execute("""SELECT id,version_id,completed_at FROM source_document_jobs
+                WHERE item_id=? AND status IN ('complete','partial') AND version_id!=''
+                ORDER BY completed_at DESC,requested_at DESC,rowid DESC LIMIT 1""", (item_id,)).fetchone()
         versions = []
         for row in rows:
             value = json.loads(row["record_json"])
-            if canonical_sha256(value) != row["record_sha256"] or value["item_fingerprint"] != record["server_fingerprint"] or value["request_url"] != source["url"]:
+            if value["id"] != row["id"] or canonical_sha256(value) != row["record_sha256"] or value["item_fingerprint"] != record["server_fingerprint"] or value["request_url"] != source["url"]:
                 raise fail("正文证据完整性校验失败。", "DOCUMENT_INTEGRITY_FAILED")
             versions.append(value)
-        return {"format": FORMAT, "eligible": True, "source": source, "versions": versions,
+        view = {"format": FORMAT, "eligible": True, "source": source, "versions": versions,
+                "current_version_id": observation["version_id"] if observation else None,
+                "current_observation": dict(observation) if observation else None,
                 "status": job["status"] if job else "not_fetched", "job": dict(job) if job else None,
                 "generation_method": "deterministic_original_excerpt", "direction": "unknown"}
+        current_document(view)  # Reject a broken observation link; never guess.
+        return view
 
     def request(self, item_id, *, session_id, confirmation, refresh=False, expires_at=0, before_reserve=None):
         if confirmation is not True or type(refresh) is not bool:

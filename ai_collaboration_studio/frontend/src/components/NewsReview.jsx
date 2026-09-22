@@ -48,10 +48,13 @@ export function NewsReview({ itemId }) {
     return () => { abort.abort(); clearTimeout(timer); };
   }, [itemId, refresh]);
   const current = data?.item_id === itemId ? data : null;
-  const review = current?.reviews.at(-1);
+  const review = current?.reviews.find((value) => value.id === current.current_review_id)
+    || current?.reviews.findLast((value) => value.document_version_id === current.current_document_version_id)
+    || current?.reviews.at(-1);
+  const history = current?.reviews.filter((value) => value.id !== review?.id) || [];
   const result = review?.receipt?.result;
-  const coverage = review?.coverage || current?.coverage;
-  const importance = review?.importance || current?.importance;
+  const coverage = current?.coverage || review?.coverage;
+  const importance = current?.importance || review?.importance;
   return <section className="source-inbox-section news-review" aria-label="自动消息审核">
     <h3>自动消息审核</h3>
     <p role="status">{states[current?.state] || "正在读取审核状态…"}</p>
@@ -92,8 +95,8 @@ export function NewsReview({ itemId }) {
         <ul>{result.limitations.map((value, index) => <li key={index}>{value}</li>)}</ul>
         <p>以上为未独立核验的模型意见。调用完成和引用匹配不等于事实确认。</p>
       </> : null}
-      {current.reviews.length > 1 ? <details><summary>此前审核版本（{current.reviews.length - 1}）</summary>
-        <ul>{current.reviews.slice(0, -1).map((value) => <li key={value.id}>{states[value.state]}<p>{value.receipt?.result?.summary || "无有效主审意见"}</p><small>{value.document_version_id}</small></li>)}</ul>
+      {history.length ? <details><summary>其他审核版本（{history.length}）</summary>
+        <ul>{history.map((value) => <li key={value.id}>{states[value.state]}<p>{value.receipt?.result?.summary || "无有效主审意见"}</p><small>{value.document_version_id}</small></li>)}</ul>
       </details> : null}
     </> : null}
   </section>;

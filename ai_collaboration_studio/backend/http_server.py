@@ -5991,6 +5991,9 @@ def run_server(
         server.ai_studio_document_evidence = documents
         documents.start()
         if news_review_controller is not None:
+            bind_host_stop = getattr(news_review_controller, "bind_host_stop_event", None)
+            if stop_event is not None and callable(bind_host_stop):
+                bind_host_stop(stop_event)
             news_review_controller.start(recover=False)
         server.ai_studio_startup_ready = True
         started = True

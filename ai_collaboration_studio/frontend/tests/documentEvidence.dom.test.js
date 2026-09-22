@@ -10,7 +10,7 @@ for (const key of ["window", "document", "navigator", "HTMLElement", "Event", "M
   Object.defineProperty(globalThis, key, { configurable: true, value: key === "window" ? dom.window : dom.window[key] });
 }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-const vite = await createServer({ root: fileURLToPath(new URL("../", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true, hmr: false } });
+const vite = await createServer({ configLoader: "runner", root: fileURLToPath(new URL("../", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true, hmr: false } });
 const { createRoot } = await import("react-dom/client");
 const { DocumentEvidence, DocumentEvidenceControl } = await vite.ssrLoadModule("/src/components/DocumentEvidence.jsx");
 let root;
@@ -21,7 +21,8 @@ const version = (id, text) => ({ format: "official_document_evidence_v1", item_i
   company: "NVIDIA (NVDA)", scope: "主文件已读取；附件尚未读取", warnings: ["当前证据不完整"], parser_version: "official_html_blocks_v1",
   paragraphs: [{ id: `${id}:p0001`, text }], raw_bytes_sha256: "b".repeat(64), body_text_sha256: "c".repeat(64) });
 const payload = (versions = []) => ({ ok: true, document: { format: "official_document_evidence_v1", eligible: true,
-  status: versions.length ? "partial" : "not_fetched", versions, job: versions.length ? { error_code: "", retry_at: 0 } : null } });
+  status: versions.length ? "partial" : "not_fetched", versions, current_version_id: versions.at(-1)?.id || null,
+  job: versions.length ? { error_code: "", retry_at: 0 } : null } });
 async function mount(Component, props) {
   const host = document.createElement("div"); document.body.append(host); root = createRoot(host);
   await act(async () => { root.render(React.createElement(Component, props)); });
@@ -53,6 +54,21 @@ async function withLocalTimers(check) {
 }
 test.afterEach(async () => { if (root) await act(async () => root.unmount()); root = null; document.body.replaceChildren(); globalThis.fetch = originalFetch; });
 test.after(async () => { await vite.close(); dom.window.close(); });
+
+test("restored A is the default current body without reordering immutable history", async () => {
+  const response = payload([version("document_A", "Body A restored"), version("document_B", "Body B historical")]);
+  response.document.current_version_id = "document_A";
+  const calls = [];
+  globalThis.fetch = async (path, options) => {
+    calls.push(options);
+    return { ok: true, json: async () => response };
+  };
+  const host = await mount(DocumentEvidence, { item });
+  assert.equal(host.querySelector('select[aria-label="正文证据版本"]').value, "document_A");
+  assert.match(host.querySelector("blockquote").textContent, /Body A restored/);
+  assert.deepEqual([...host.querySelectorAll("select option")].map((node) => node.value), ["document_A", "document_B"]);
+  assert.equal(calls.filter((options) => options.method === "POST").length, 0);
+});
 
 test("an open not_fetched detail adopts externally scheduled work through local refresh signals", async () => {
   const calls = [];

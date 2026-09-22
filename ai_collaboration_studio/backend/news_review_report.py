@@ -8,6 +8,7 @@ from collections import Counter
 from contextlib import closing
 
 from .decision_lineage import canonical_sha256
+from .document_evidence import current_document
 from .news_review_contracts import VERSION, encoded, freshness, require
 from .news_review_service import _policy
 from .provider_call_ledger import ProviderCallLedger
@@ -114,9 +115,10 @@ def build_news_review_report(service, policy_id):
             latencies.append(latency)
         view = service.documents.view(event["item_id"])
         coverage[view["status"]] += 1
-        if view["versions"]:
+        document = current_document(view)
+        if document:
             coverage["has_body_version"] += 1
-            if view["versions"][-1].get("body_located"):
+            if document.get("body_located"):
                 coverage["main_body_located"] += 1
     attempts = ProviderCallLedger.resume(service.store,row["provider_run_id"]).attempts()
     counts = Counter(a["operation_target_id"] for a in attempts)

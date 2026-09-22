@@ -22,6 +22,12 @@ class NewsReviewStop:
         self.lock = threading.Lock()
 
     def request(self, kind, *, trigger, code='', runtime_status='', exception_type=''):
+        # Cancellation must precede clocks, locks and every persistence sink.
+        # In particular, a concurrent request must not wait for another receipt.
+        try:
+            self.controller.request_stop()
+        finally:
+            self.event.set()
         with self.lock:
             value = {'version':'news_review_stop_v1', 'policy_id':self.policy['policy_id'],
                      'session_id':self.journal.session_id, 'stop_type':kind,
@@ -44,9 +50,6 @@ class NewsReviewStop:
                 self.journal.record('stop_requested', runtime_status=value['runtime_status'], stop=value)
             except Exception as exc:
                 self.persistence_errors.append({'sink':'journal','exception_type':bounded_code(type(exc).__name__)})
-            finally:
-                self.controller.request_stop()
-                self.event.set()
 
     def summary(self):
         fault = bool(self.persistence_errors or any(e['stop_type'] != 'window_elapsed' for e in self.events))
@@ -79,9 +82,9 @@ class NewsReviewStop:
                     self.journal.record('heartbeat', runtime_status=status)
                     last_sample = time.monotonic()
                 if expired:
+                    self.request('window_elapsed', trigger='observer', runtime_status=status)
                     self.service.close_expired_work()
                     self.journal.record('window_closed', runtime_status=status)
-                    self.request('window_elapsed', trigger='observer', runtime_status=status)
                     return
         except Exception as exc:
             self.controller.errors['observer'] = (exc.code if isinstance(exc, NewsReviewError) else 'observer_failed')
