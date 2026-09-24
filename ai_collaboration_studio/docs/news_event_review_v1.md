@@ -330,3 +330,21 @@ coverage. DOM checks cover the current body and corresponding historical review.
 These checks do not establish a new full CI run or real continuous acceptance.
 The interrupted fixed-candidate trial is recorded separately in
 [the 20260922C result](news_review_trial_20260922c.md).
+
+## Read-only status refresh recovery (2026-09-24)
+
+The detail and runtime-status panels retry transient status GET failures at
+2, 4, 8, 16 and 30 seconds, then stop until a manual read. A successful read
+resets that retry count and returns to ten-second polling. The first read is
+bounded to 90 seconds if no observation window has yet been confirmed. Once
+confirmed, its deadline bounds retries and cancels outstanding reads; automatic
+responses cannot extend it. A failed manual read cannot renew an expired retry
+window. Unmount, item replacement and cancellation also stop further reads.
+
+The panels show the most recent successful refresh time and keep the current
+state explicitly unconfirmed after an error. Invalid JSON, protocol/identity
+mismatch, application error codes and non-transient HTTP refusals stop automatic
+retry. A changed runtime policy identity is rejected until an explicit refresh.
+The feature-disabled response remains valid. The retry loop never invokes pause,
+approval, body fetch, review execution or budget-reservation actions. Pause stays
+a single explicit action and its failure is not automatically retried.

@@ -3,9 +3,11 @@
 The authorized trial did not establish a complete 24-hour acceptance window.
 The monitor observed the approved launcher process missing before expiry, with
 no stop receipt, observer-drain receipt or final window report. Its terminal
-classification is `PROCESS_ENDED_WITHOUT_FINAL_REPORT`. The cause, exit status,
-exact exit time and final usage remain unknown. This is an observation of the
-launcher identity; the child host's terminal state was not independently verified.
+classification is `PROCESS_ENDED_WITHOUT_FINAL_REPORT`. At that closeout, the
+cause, exit status, exact exit time, final usage and child-host terminal state
+were unknown. The September 24 read-only investigation below establishes the
+current process termination and preserved application ledger, while retaining
+the unresolved historical cause and supplier-billing boundary.
 
 ## Fixed candidate and authorization
 
@@ -47,7 +49,7 @@ All times in this table are UTC+8 on 2026-09-22.
 
 These observations do not establish continuous operation between samples, an
 exact termination time, or a six-hour successful acceptance run. The absence of
-a report also prevents a verified final ledger reconciliation.
+a report left the final ledger unreconciled at the original monitor closeout.
 
 At the **last successful snapshot**, events observed, document reservations,
 model-call reservations, token reservations and application cost reservations
@@ -83,11 +85,70 @@ completed, explain its exit, validate provider output or approve a release.
 This result summary does not validate any later runtime change. A follow-up fix
 requires engineering checks bound to its own commit.
 
-A follow-up investigation must establish process termination and reconcile the
-final ledger through an explicitly scoped procedure. This publication performs
-neither investigation nor another run. The old activation and reservations
-must not be reused. The monitor remains paused; no restart or renewed trial is
-authorized. The child host's termination remains unverified.
+A follow-up read-only investigation was explicitly requested and is recorded
+below. The old activation and reservations must not be reused. The monitor
+remains paused; no restart or renewed trial was performed.
+
+## September 24 read-only incident reconciliation
+
+The original launcher PID 20060 and the database-owner PID 936 are absent.
+Windows reports a later boot at **2026-09-24 22:48:53.500 UTC+8**, so the original
+process tree cannot still be running. The recorded loopback port 59570 has no
+listener. The retained owner file is stale metadata: a nonblocking read lock
+on its first byte succeeded and was released without changing the file.
+This proves current termination and an unheld owner lock, not the historical
+exit time, exit code or cause. No matching process-exit audit events were
+available in the failure interval, and the inspected System/Application events
+did not establish a launcher/host shutdown cause.
+
+The original database had no WAL, SHM or journal sidecar. A cold copy was made
+while holding that read lock; original/copy hashes matched, and the original
+database, owner file and launcher-log hashes remained unchanged afterward.
+Only the copy was opened with SQLite `mode=ro&immutable=1` and `query_only`.
+Integrity checking returned `ok`. No migrations, recovery, budget resets,
+provider requests or trial restart were performed. Logs remain preserved;
+their contents and any model output were not inspected.
+
+The preserved application ledger contains **zero** news events, original or
+successor review jobs, review receipts, content claims, document jobs/versions
+and provider-call attempts. The policy has zero document/call/token/cost
+reservations; its matching provider run has zero reserved/completed calls.
+The stale policy `ACTIVE` and provider-run `OPEN` values are retained historical
+rows, not evidence of a live or valid authorization. The authorization expired.
+There are no recorded unknown or duplicate attempts in this isolated database.
+These are reconciled persisted application counters, not supplier billing proof.
+
+All **2,179** journal entries pass their hash-chain/sequence/policy checks:
+one session start, 2,065 heartbeats and 113 source-poll records, with one session
+identity. The last persisted heartbeat is **2026-09-22 23:04:17.221 UTC+8**.
+The largest recorded heartbeat gap is 10.238 seconds within that recorded
+interval. No stop-request, session-stop or window-closed journal entry exists.
+This does not prove operation after the last durable heartbeat or a full window.
+
+| Source | Persisted successful runs / all runs | Last persisted condition |
+| --- | --- | --- |
+| SEC/NVIDIA | 30/48 (62.5%) | `SEC_SUBMISSIONS_ERROR`, four consecutive failures |
+| Micron | 20/65 (30.77%) | `IR_FEED_ERROR`, eight consecutive failures |
+
+These are adapter-run rates, not HTTP request counts or announcement capture
+rates. The later durable SEC state differs from the earlier healthy monitor
+snapshot; both original records are preserved. There is no natural end-to-end
+sample, discovery-delay sample or successful body/model coverage to claim.
+Historical exit cause/status and supplier billing remain unresolved. Source
+failures alone still do not identify the process-exit cause.
+
+Any later acceptance monitor must identify the launcher **and** actual owner/
+host process by PID and creation time, check descendants and listening-port
+ownership, and reconcile stop/drain/report evidence before calling a process
+tree stopped. Parent disappearance must trigger investigation, not an automatic
+restart or a claim that every child stopped.
+
+| Investigation artifact (local only) | SHA-256 |
+| --- | --- |
+| Cold-copy preservation receipt | `73a94cc6b0859a8bfba4a2e884333e05975591c22a43efdb0bfd463c5b59fd90` |
+| Application ledger reconciliation | `9cb9886a65714a8e92ee5df09024cecf00bc15b254e5010870c8dc4a3053e176` |
+| Source reconciliation | `c45a2358c08b76b880d82ee9ca2befa171cef8620a455fbd7b39f964b6fa4aea` |
+| Current termination verification | `57e56350e527a7e0b078a728e992472a7ce37eb97922b611797e017de3dfbc0d` |
 
 ## Local evidence anchors
 

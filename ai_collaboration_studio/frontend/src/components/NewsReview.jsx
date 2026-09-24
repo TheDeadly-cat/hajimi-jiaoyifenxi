@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api } from "../api";
+import { StatusProtocolError, useNewsReviewPolling } from "./newsReviewPolling";
 import "./NewsReview.css";
 
 const states = {
@@ -24,29 +25,48 @@ function date(value) {
   return Number.isNaN(parsed.getTime()) ? "未知" : parsed.toLocaleString("zh-CN");
 }
 
+const readReview = (itemId, signal) => api.sourceNewsReview(itemId, signal);
+const readControl = (_identity, signal) => api.newsReviewControl(signal);
+const reviewWindow = (next) => next.observation_until;
+const controlWindow = (next) => next.state === "ACTIVE" && !next.expired ? next.policy.expires_at_ms : 0;
+function validateReview(response, itemId) {
+  const next = response?.news_review;
+  if (next?.version !== "news_event_review_v1" || next.item_id !== itemId
+    || !Array.isArray(next.reviews) || !states[next.state]
+    || !Number.isFinite(next.observation_until) || next.observation_until < 0) {
+    throw new StatusProtocolError("消息审核记录不匹配，无法显示。");
+  }
+  return next;
+}
+function validateControl(response, _identity, previous) {
+  const next = response?.news_review;
+  if (next?.state === "DISABLED" && next.enabled === false) return next;
+  if (!next || !["ACTIVE", "PAUSED", "STOPPED"].includes(next.state)
+    || next.version !== "news_event_review_v1" || typeof next.expired !== "boolean"
+    || typeof next.policy?.policy_id !== "string" || !next.policy.policy_id
+    || !/^[a-f0-9]{64}$/.test(next.policy_sha256 || "")
+    || !Number.isFinite(next.policy.expires_at_ms) || next.policy.expires_at_ms <= 0) {
+    throw new StatusProtocolError("运行状态格式无效。");
+  }
+  if (previous?.policy && (next.policy_sha256 !== previous.policy_sha256
+    || next.policy.policy_id !== previous.policy.policy_id)) {
+    throw new StatusProtocolError("运行授权身份不匹配，已停止自动刷新。");
+  }
+  return next;
+}
+function RefreshStatus({ lastSuccessAt, phase }) {
+  return <div className="news-review-refresh">
+    <p>最近成功刷新：{lastSuccessAt ? <time dateTime={new Date(lastSuccessAt).toISOString()}>{date(lastSuccessAt)}</time> : "尚无成功记录"}。</p>
+    {phase === "retrying" ? <p>状态读取暂时失败，正在退避重试；仅刷新状态，不会重发审核。</p> : null}
+    {phase === "exhausted" ? <p>自动刷新重试已达上限，请手动刷新。</p> : null}
+    {phase === "expired" ? <p>观察窗口已到期，已停止自动刷新。</p> : null}
+    {phase === "error" ? <p>响应校验未通过或请求被拒绝，已停止自动刷新。</p> : null}
+  </div>;
+}
+
 export function NewsReview({ itemId }) {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState("");
   const [refresh, setRefresh] = useState(0);
-  useEffect(() => {
-    const abort = new AbortController();
-    let timer;
-    const read = async () => {
-      try {
-        const response = await api.sourceNewsReview(itemId, abort.signal);
-        if (abort.signal.aborted) return;
-        const next = response.news_review;
-        if (next?.version !== "news_event_review_v1" || next.item_id !== itemId
-          || !Array.isArray(next.reviews) || !states[next.state]) throw new Error("消息审核记录不匹配，无法显示。");
-        setData(next); setError("");
-        if (next.observation_until > Date.now()) timer = setTimeout(read, 10_000);
-      } catch (err) {
-        if (!abort.signal.aborted) setError(err.message || "审核状态读取失败。");
-      }
-    };
-    void read();
-    return () => { abort.abort(); clearTimeout(timer); };
-  }, [itemId, refresh]);
+  const { data, error, lastSuccessAt, phase } = useNewsReviewPolling(itemId, refresh, readReview, validateReview, reviewWindow);
   const current = data?.item_id === itemId ? data : null;
   const review = current?.reviews.find((value) => value.id === current.current_review_id)
     || current?.reviews.findLast((value) => value.document_version_id === current.current_document_version_id)
@@ -59,6 +79,7 @@ export function NewsReview({ itemId }) {
     <h3>自动消息审核</h3>
     <p role="status">{states[current?.state] || "正在读取审核状态…"}</p>
     {error ? <p role="alert">{error} 当前状态尚未确认。</p> : null}
+    <RefreshStatus lastSuccessAt={lastSuccessAt} phase={phase} />
     <button type="button" className="secondary compact" onClick={() => setRefresh((value) => value + 1)}>刷新审核状态</button>
     {current ? <>
       <dl className="news-review-facts">
@@ -103,32 +124,18 @@ export function NewsReview({ itemId }) {
 }
 
 export function NewsReviewControl() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState("");
+  const [actionError, setActionError] = useState("");
   const [busy, setBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
-  useEffect(() => {
-    const abort = new AbortController();
-    let timer;
-    const read = async () => {
-      try {
-        const response = await api.newsReviewControl(abort.signal);
-        if (abort.signal.aborted) return;
-        if (!response.news_review?.state) throw new Error("运行状态格式无效。");
-        setData(response.news_review); setError("");
-        if (response.news_review.state === "ACTIVE" && !response.news_review.expired) timer = setTimeout(read, 10_000);
-      } catch (err) { if (!abort.signal.aborted) setError(err.message); }
-    };
-    void read();
-    return () => { abort.abort(); clearTimeout(timer); };
-  }, [refresh]);
+  const { data, error, lastSuccessAt, phase } = useNewsReviewPolling("control", refresh, readControl, validateControl, controlWindow);
   const pause = async () => {
     setBusy(true);
-    try { const response = await api.pauseNewsReview(); setData(response.news_review); setRefresh((value) => value + 1); }
-    catch (err) { setError(err.message); }
+    setActionError("");
+    try { validateControl(await api.pauseNewsReview(), "control", data); setRefresh((value) => value + 1); }
+    catch (err) { setActionError(err.message); }
     finally { setBusy(false); }
   };
-  const stateLabel = data?.expired ? "本次运行授权已到期"
+  const stateLabel = data?.expired || phase === "expired" ? "本次运行授权已到期"
     : Object.keys(data?.worker_errors || {}).length ? "后台处理中断"
       : data?.stopping ? "后台正在停止"
         : data?.state === "ACTIVE" && data?.paid_stop_reason ? "授权窗口内 · 付费审核已停止"
@@ -136,9 +143,11 @@ export function NewsReviewControl() {
   return <section className="source-inbox-section news-review" aria-label="自动审核运行状态">
     <div className="news-review-control-heading">
       <h3>自动审核</h3><p role="status">{stateLabel}</p>
-      {data?.state === "ACTIVE" && !data.expired ? <button type="button" className="secondary compact" disabled={busy} onClick={pause}>暂停本次自动采集与审核</button> : null}
+      {data?.state === "ACTIVE" && !data.expired && phase !== "expired" ? <button type="button" className="secondary compact" disabled={busy} onClick={pause}>暂停本次自动采集与审核</button> : null}
     </div>
     {error ? <p role="alert">{error} 尚不能确认运行状态。</p> : null}
+    {actionError ? <p role="alert">{actionError} 暂停操作尚未确认，不会自动重发。</p> : null}
+    <RefreshStatus lastSuccessAt={lastSuccessAt} phase={phase} />
     <details><summary>查看本次范围与用量</summary>
     {data?.policy ? <>
       <p>NVDA 8-K 与 Micron 公告，目标每 5 分钟检查，来源限流时会延后。到期：{date(data.policy.expires_at_ms)}。</p>
