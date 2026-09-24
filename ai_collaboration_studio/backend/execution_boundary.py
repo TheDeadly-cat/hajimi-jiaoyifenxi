@@ -4,7 +4,8 @@ import json
 import re
 import urllib.request
 import hashlib
-from contextlib import contextmanager
+import threading
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
@@ -69,6 +70,37 @@ class ExecutionBoundaryViolation(ValueError):
     pass
 
 
+class TextRequestCancelled(ExecutionBoundaryViolation):
+    pass
+
+
+class TextRequestSendGate:
+    """Linearize stop and send admission without holding a lock during I/O."""
+    def __init__(self):
+        self.event = threading.Event()
+        self._lock = threading.Lock()
+        self._host_stop_events = ()
+
+    def bind_host_stop_event(self, event):
+        with self._lock:
+            self._host_stop_events += (event,)
+
+    def cancel(self):
+        with self._lock:
+            self.event.set()
+
+    @property
+    def cancelled(self):
+        return self.event.is_set() or any(event.is_set() for event in self._host_stop_events)
+
+    @contextmanager
+    def admission(self):
+        with self._lock:
+            if self.cancelled:
+                raise TextRequestCancelled("request cancelled before send admission")
+            yield
+
+
 @dataclass(slots=True)
 class AuthorizedTextRequest:
     endpoint: str
@@ -77,6 +109,7 @@ class AuthorizedTextRequest:
     timeout_seconds: int
     attempted: bool = False
     before_send: Callable[[], None] | None = None
+    send_gate: TextRequestSendGate | None = None
 
     def check(self, request: urllib.request.Request) -> None:
         body = request.data or b""
@@ -115,10 +148,18 @@ def open_text_provider_request(request: urllib.request.Request, *, timeout: int)
         raise ExecutionBoundaryViolation("本次授权只允许一个 Provider HTTP 请求")
     if timeout != policy.timeout_seconds:
         raise ExecutionBoundaryViolation("实际 Provider 超时参数与授权不一致")
+    opener = urllib.request.build_opener(_NoProviderRedirect())
     if policy.before_send is not None:
         policy.before_send()
-    policy.attempted = True
-    return urllib.request.build_opener(_NoProviderRedirect()).open(request, timeout=timeout)
+    # All possibly blocking preparation precedes this final, in-memory gate.
+    # Admission winning the lock starts this attempt; a later stop drains it.
+    # Stop winning the lock forbids the opener call. Never hold this lock while
+    # connecting, waiting for a response, or persisting a receipt.
+    with policy.send_gate.admission() if policy.send_gate else nullcontext():
+        if policy.attempted:
+            raise ExecutionBoundaryViolation("本次授权只允许一个 Provider HTTP 请求")
+        policy.attempted = True
+    return opener.open(request, timeout=timeout)
 
 
 def read_text_provider_response(response) -> str:

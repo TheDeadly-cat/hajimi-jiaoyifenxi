@@ -10,11 +10,27 @@ from __future__ import annotations
 import math
 import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Callable
 
 
 MAX_MONOTONIC_MILLISECONDS = (1 << 63) - 1
 _EVENT_TYPE = type(threading.Event())
+_source_authorization = ContextVar("source_poll_authorization", default=None)
+
+
+@contextmanager
+def source_poll_authorization(check):
+    """Host-owned dynamic policy, inherited by the synchronous HTTP read only."""
+    if _source_authorization.get() is not None or not callable(check):
+        raise ValueError("source poll authorization cannot be nested or malformed")
+    check()
+    token = _source_authorization.set(check)
+    try:
+        yield
+    finally:
+        _source_authorization.reset(token)
 
 
 class SourcePollControlError(ValueError):
@@ -72,6 +88,9 @@ def ensure_source_poll_active(
         deadline_monotonic_ms=deadline_monotonic_ms,
         cancel_event=cancel_event,
     )
+    authorization = _source_authorization.get()
+    if authorization is not None:
+        authorization()
     if event is not None and event.is_set():
         raise SourcePollCancelled(
             "SOURCE_MONITORING_POLL_CANCELLED",

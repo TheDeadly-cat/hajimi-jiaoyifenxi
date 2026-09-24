@@ -69,6 +69,17 @@ def _safe_retry_timestamp(value):
     return value if value <= MAX_RETRY_TIMESTAMP_MS else RETRY_MANUAL_HOLD
 
 
+def current_document(view):
+    """Select the latest successful observation, not the newest immutable blob."""
+    version_id = view.get("current_version_id")
+    if not version_id:
+        return None
+    version = next((v for v in view["versions"] if v["id"] == version_id), None)
+    if version is None:
+        raise fail("当前正文读取记录缺少对应证据。", "DOCUMENT_INTEGRITY_FAILED")
+    return version
+
+
 def ensure_document_evidence_schema(connection, *, applied_at_ms):
     # Called only by Studio's existing controlled initialization/migration path.
     connection.executescript("""
@@ -428,21 +439,31 @@ class DocumentEvidenceService:
         try:
             source = bound_source(record)
         except SourceInboxError:
-            return {"format": FORMAT, "eligible": False, "status": "unsupported", "versions": [], "job": None}
-        with closing(self.store._connect()) as db:
+            return {"format": FORMAT, "eligible": False, "status": "unsupported", "versions": [],
+                    "job": None, "current_version_id": None, "current_observation": None}
+        # Coordinate WAL sidecar lifetime with the owner's immutable health
+        # snapshot copier, including simultaneous inbox/document/review reads.
+        with self.store._lock, closing(self.store._connect()) as db:
             rows = db.execute("SELECT * FROM source_document_versions WHERE item_id=? ORDER BY created_at,id", (item_id,)).fetchall()
             job = db.execute("SELECT * FROM source_document_jobs WHERE item_id=? ORDER BY requested_at DESC,rowid DESC LIMIT 1", (item_id,)).fetchone()
+            observation = db.execute("""SELECT id,version_id,completed_at FROM source_document_jobs
+                WHERE item_id=? AND status IN ('complete','partial') AND version_id!=''
+                ORDER BY completed_at DESC,requested_at DESC,rowid DESC LIMIT 1""", (item_id,)).fetchone()
         versions = []
         for row in rows:
             value = json.loads(row["record_json"])
-            if canonical_sha256(value) != row["record_sha256"] or value["item_fingerprint"] != record["server_fingerprint"] or value["request_url"] != source["url"]:
+            if value["id"] != row["id"] or canonical_sha256(value) != row["record_sha256"] or value["item_fingerprint"] != record["server_fingerprint"] or value["request_url"] != source["url"]:
                 raise fail("正文证据完整性校验失败。", "DOCUMENT_INTEGRITY_FAILED")
             versions.append(value)
-        return {"format": FORMAT, "eligible": True, "source": source, "versions": versions,
+        view = {"format": FORMAT, "eligible": True, "source": source, "versions": versions,
+                "current_version_id": observation["version_id"] if observation else None,
+                "current_observation": dict(observation) if observation else None,
                 "status": job["status"] if job else "not_fetched", "job": dict(job) if job else None,
                 "generation_method": "deterministic_original_excerpt", "direction": "unknown"}
+        current_document(view)  # Reject a broken observation link; never guess.
+        return view
 
-    def request(self, item_id, *, session_id, confirmation, refresh=False, expires_at=0):
+    def request(self, item_id, *, session_id, confirmation, refresh=False, expires_at=0, before_reserve=None):
         if confirmation is not True or type(refresh) is not bool:
             raise fail("请明确确认读取这一条官方 HTML。")
         record = self.item(item_id)
@@ -465,6 +486,8 @@ class DocumentEvidenceService:
             if now < embargo:
                 raise fail("该来源仍在 Retry-After 等待期，不能换事件绕过限流。", "DOCUMENT_RETRY_LATER")
             job_id = "document_job_" + uuid.uuid4().hex
+            if before_reserve is not None:
+                before_reserve(db, job_id)
             db.execute("INSERT INTO source_document_jobs(id,item_id,session_id,source_host,expires_at,status,requested_at) VALUES(?,?,?,?,?,'waiting',?)", (job_id, item_id, session_id, host, expires_at or now + 120_000, now))
             return dict(db.execute("SELECT * FROM source_document_jobs WHERE id=?", (job_id,)).fetchone())
 
@@ -513,7 +536,10 @@ class DocumentEvidenceService:
     def recover(self):
         # Host owner is held by caller; interrupted work never silently refetches.
         with self.store._lock, closing(self.store._connect()) as db, db:
-            db.execute("UPDATE source_document_jobs SET status='cancelled', error_code='DOCUMENT_INTERRUPTED', completed_at=? WHERE status IN ('waiting','fetching')", (self.clock(),))
+            # Native waiting jobs belong to the bounded policy controller. It
+            # checks expiry/revocation and reuses the existing reservation.
+            # Manual jobs retain their original no-resume behavior.
+            db.execute("UPDATE source_document_jobs SET status='cancelled', error_code='DOCUMENT_INTERRUPTED', completed_at=? WHERE status='fetching' OR (status='waiting' AND session_id NOT LIKE 'news_review:%')", (self.clock(),))
 
     def run(self, job_id, *, cancel_event, deadline_monotonic_ms):
         with self.store._lock, closing(self.store._connect()) as db, db:
@@ -535,6 +561,9 @@ class DocumentEvidenceService:
                 db.execute("BEGIN IMMEDIATE")
                 if self._cancel_inadmissible(db, job, cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms):
                     return False
+                if job["session_id"].startswith("news_review:"):
+                    from .news_review_service import check_document_send
+                    check_document_send(self.store, db, job, self.clock())
             ensure_source_poll_active(cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)
             resource = self.fetcher(source, cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)
             ensure_source_poll_active(cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)

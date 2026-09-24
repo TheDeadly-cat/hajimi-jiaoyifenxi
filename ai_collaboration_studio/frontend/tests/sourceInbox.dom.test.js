@@ -742,6 +742,22 @@ async function settle() {
 }
 
 async function mountPanel(overrides = {}) {
+  // These fixtures exercise collection/room actions with native review disabled.
+  // Native review states and its only write (pause) have their own DOM coverage.
+  const sourceFetch = globalThis.fetch;
+  globalThis.fetch = (path, options = {}) => {
+    if (!options.method || options.method === "GET") {
+      if (path === "/api/monitoring/news-review/control") return Promise.resolve(response({
+        ok: true, news_review: { enabled: false, state: "DISABLED" },
+      }));
+      const match = path.match(/^\/api\/monitoring\/events\/([^/]+)\/news-review$/);
+      if (match) return Promise.resolve(response({ ok: true, news_review: {
+        version: "news_event_review_v1", item_id: decodeURIComponent(match[1]), state: "UNREVIEWED",
+        reviews: [], freshness: {}, importance: { level: "uncertain", reasons: [], targets: [] }, observation_until: 0,
+      } }));
+    }
+    return sourceFetch(path, options);
+  };
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);

@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from dataclasses import replace
+from contextlib import nullcontext
 from typing import Any, Callable
 
 from ..source_inbox_service import SourceInboxService
@@ -115,6 +116,7 @@ class SourceMonitoringRuntime:
         cycle_observer: Callable[[dict[str, Any]], Any] | None = None,
         start_gate: Callable[[], Any] | None = None,
         pipeline_schedulers: Any = None,
+        poll_authorization: Callable[[str], Any] | None = None,
     ) -> None:
         if type(scheduler) is not SourceMonitoringScheduler:
             raise SourceMonitoringRuntimeError(
@@ -264,6 +266,9 @@ class SourceMonitoringRuntime:
         self._resource_stop_failed = False
         self._cycle_observer = cycle_observer
         self._start_gate = start_gate
+        if poll_authorization is not None and not callable(poll_authorization):
+            raise ValueError("poll_authorization must be a context manager factory")
+        self._poll_authorization = poll_authorization
 
     def _now_ms(self) -> int:
         value = self._clock_ms()
@@ -354,6 +359,7 @@ class SourceMonitoringRuntime:
                 return False
 
             self._stop_event.clear()
+            self._stop_reason_code = ''
             self._degraded_adapter_keys.clear()
             self._resource_stop_failed = False
             runtime_id = f"source_monitor_runtime_{uuid.uuid4().hex}"
@@ -451,7 +457,10 @@ class SourceMonitoringRuntime:
         with self._lifecycle_lock:
             worker = self._thread
             thread_alive = bool(worker is not None and worker.is_alive())
-        return self.state.snapshot(thread_alive=thread_alive)
+        result = self.state.snapshot(thread_alive=thread_alive)
+        if getattr(self, '_stop_reason_code', ''):
+            result['stop_reason_code'] = self._stop_reason_code
+        return result
 
     @staticmethod
     def _cycle_results(cycle: Any) -> list[dict[str, Any]]:
@@ -623,14 +632,17 @@ class SourceMonitoringRuntime:
                         if self._stop_event.is_set():
                             break
                         active_scheduler = due_adapter[0]
-                        cycle = active_scheduler.run_one_due(
-                            active_adapter,
-                            selection=due_adapter[1],
-                            deadline_monotonic_ms=(
-                                self._poll_deadline_monotonic_ms()
-                            ),
-                            cancel_event=self._stop_event,
-                        )
+                        authorization = (self._poll_authorization(active_adapter)
+                                         if self._poll_authorization else nullcontext())
+                        with authorization:
+                            cycle = active_scheduler.run_one_due(
+                                active_adapter,
+                                selection=due_adapter[1],
+                                deadline_monotonic_ms=(
+                                    self._poll_deadline_monotonic_ms()
+                                ),
+                                cancel_event=self._stop_event,
+                            )
                         ran_count = self._record_cycle_results(
                             active_adapter,
                             cycle,
@@ -652,10 +664,12 @@ class SourceMonitoringRuntime:
                 )
                 if wait_ms:
                     self._stop_event.wait(wait_ms / 1_000)
-        except SourcePollCancelled:
-            if not self._stop_event.is_set():
+        except SourcePollCancelled as exc:
+            if not self._stop_event.is_set() and exc.code != 'NEWS_REVIEW_WINDOW_EXPIRED':
                 self._safe_mark_failed(SOURCE_MONITORING_RUNTIME_FATAL)
                 return
+            if exc.code == 'NEWS_REVIEW_WINDOW_EXPIRED':
+                self._stop_reason_code = exc.code
         except BaseException as exc:
             fatal_code = SOURCE_MONITORING_RUNTIME_FATAL
             if isinstance(exc, SourceMonitoringRuntimeError) and exc.code in {
@@ -684,6 +698,7 @@ def build_source_monitoring_runtime(
     stall_after_ms: Any = DEFAULT_RUNTIME_STALL_AFTER_MS,
     cycle_observer: Callable[[dict[str, Any]], Any] | None = None,
     start_gate: Callable[[], Any] | None = None,
+    poll_authorization: Callable[[str], Any] | None = None,
 ) -> SourceMonitoringRuntime:
     """Construct the production runtime graph without database or source I/O."""
 
@@ -695,6 +710,9 @@ def build_source_monitoring_runtime(
             "SOURCE_MONITORING_RUNTIME_SETTINGS_INVALID",
             "settings must be SourceMonitoringSettings",
         )
+
+    if poll_authorization is not None and (not resolved_settings.official_only or resolved_settings.allow_readonly_market):
+        raise ValueError("bounded poll authorization requires an official-only runtime")
 
     repository = SourceMonitoringStateRepository(store, clock_ms=clock_ms)
     source_inbox = (
@@ -790,6 +808,7 @@ def build_source_monitoring_runtime(
         stall_after_ms=stall_after_ms,
         cycle_observer=cycle_observer,
         start_gate=start_gate,
+        poll_authorization=poll_authorization,
     )
 
 

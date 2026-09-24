@@ -10,7 +10,7 @@ for (const key of ["window", "document", "navigator", "HTMLElement", "Event", "M
   Object.defineProperty(globalThis, key, { configurable: true, value: key === "window" ? dom.window : dom.window[key] });
 }
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-const vite = await createServer({ root: fileURLToPath(new URL("../", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true, hmr: false } });
+const vite = await createServer({ configLoader: "runner", root: fileURLToPath(new URL("../", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true, hmr: false } });
 const { createRoot } = await import("react-dom/client");
 const { DocumentSelection } = await vite.ssrLoadModule("/src/components/DocumentSelection.jsx");
 const { DocumentEvidence } = await vite.ssrLoadModule("/src/components/DocumentEvidence.jsx");
@@ -100,7 +100,8 @@ test("late preview from an old room is ignored and aborted", async () => {
 
 test("document selection pins the chosen version while background updates add a newer version", async () => {
   let versions = [version];
-  globalThis.fetch = async () => ({ ok: true, json: async () => ({ document: { format: "official_document_evidence_v1", eligible: true, versions, status: "partial" } }) });
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ document: { format: "official_document_evidence_v1", eligible: true,
+    versions, current_version_id: versions.at(-1)?.id || null, status: "partial" } }) });
   const render = await mount({}, DocumentEvidence);
   await click(button("选择段落加入研究房间"));
   versions = [version, { ...version, id: "document_new", paragraphs: [{ id: "document_new:p0001", text: "NEW REVISION ONLY" }] }];
