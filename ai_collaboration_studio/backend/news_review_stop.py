@@ -36,6 +36,7 @@ class NewsReviewStop:
                      'exception_type':bounded_code(exception_type) if exception_type else '',
                      'runtime_status':bounded_code(runtime_status, 'unavailable'),
                      'window_reached':self.service.clock() >= self.policy['expires_at_ms']}
+            value['clock_diagnostics'] = self.service.clock_diagnostics()
             if any(all(old[k] == value[k] for k in ('stop_type','trigger_thread','error_code')) for old in self.events):
                 self.event.set()
                 return

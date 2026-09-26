@@ -11,6 +11,7 @@ from .decision_lineage import canonical_sha256
 from .document_evidence import current_document
 from .news_review_contracts import VERSION, encoded, freshness, require
 from .news_review_service import _policy
+from .news_review_source_analysis import analyze_source_runs
 from .provider_call_ledger import ProviderCallLedger
 from .source_monitoring.state_repository import SourceMonitoringStateRepository
 
@@ -42,6 +43,7 @@ class NewsReviewJournal:
                      "source_run_id":source_run_id,"source_run_sha256":canonical_sha256(run) if run else "",
                      "queue_counts":snapshot["job_counts"],"events_observed":snapshot["events_observed"],
                      "calls_reserved":snapshot["calls_reserved"],"documents_reserved":snapshot["documents_reserved"]}
+            value['clock_diagnostics'] = self.service.clock_diagnostics()
             if stop is not None:
                 require(stop['policy_id'] == self.policy_id and stop['session_id'] == self.session_id, 'stop_identity_mismatch')
                 value['stop'] = stop
@@ -105,6 +107,12 @@ def build_news_review_report(service, policy_id):
                                   "consecutive_failures":state['consecutive_failures'] if state else None,
                                   "next_due_at_ms":state['next_due_at_ms'] if state else None,
                                   "actual_http_request_count":None}
+        try:
+            source_metrics[adapter]['diagnostics'] = analyze_source_runs(selected, observed_until_ms=service.clock())
+        except ValueError:
+            # Clock regressions or incomplete metadata must not prevent the
+            # existing stop/ledger report from being persisted.
+            source_metrics[adapter]['diagnostics'] = {'available':False,'error_code':'SOURCE_DIAGNOSTIC_UNCONFIRMED'}
     coverage = Counter()
     latencies = []
     for event in events:
@@ -166,6 +174,8 @@ def build_news_review_report(service, policy_id):
             "clean_shutdown_recorded":bool(samples and samples[-1]["kind"] == "session_stopped"),
             "maximum_sample_gap_ms":max(gaps) if gaps else None,"clock_anomalies":clock_anomalies,
             "full_24h_window_elapsed":full_window,"continuous_window_observed":coverage_observed},
+            "clock_guard_diagnostics":service.clock_diagnostics(),
+            "clock_anomalies_basis":"adjacent_heartbeat_samples",
             "chain_sha256":previous,"supplier_bill_verified":False,
             "event_end_to_end_recorded":any(j["status"] in {"REVIEWED","MATERIAL_INSUFFICIENT"}
                 and bool(j["attempt_id"]) for j in jobs),

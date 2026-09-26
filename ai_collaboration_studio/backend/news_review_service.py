@@ -97,7 +97,9 @@ class NewsReviewService:
         self.store, self.providers, self.owner = store, providers, instance_owner
         self.clock = clock or (lambda: int(time.time()*1000))
         self.monotonic_ms = monotonic_ms or (lambda: int(time.monotonic()*1000))
-        self.clock_anchor = (self.clock(),self.monotonic_ms())
+        from .news_review_clock import NewsReviewClock
+        self.clock_guard = NewsReviewClock(lambda: self.clock(), lambda: self.monotonic_ms())
+        self.clock_anchor = self.clock_guard.anchor
         self.documents = documents or DocumentEvidenceService(store, clock=self.clock)
         self._startup_recovered = False
 
@@ -124,10 +126,10 @@ class NewsReviewService:
             _retire_expired_jobs(db, self.clock())
 
     def check_clock(self):
-        wall,monotonic = self.clock(),self.monotonic_ms()
-        require(type(wall) is int and type(monotonic) is int
-                and abs((wall-self.clock_anchor[0])-(monotonic-self.clock_anchor[1])) <= 2000,
-                "clock_changed")
+        require(self.clock_guard.sample()['accepted'], "clock_changed")
+
+    def clock_diagnostics(self):
+        return self.clock_guard.snapshot()
 
     def _identity(self, p):
         self.owner.assert_held_for(self.store.path)
