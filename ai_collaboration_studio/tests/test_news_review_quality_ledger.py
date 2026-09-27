@@ -214,6 +214,46 @@ class QualityBatchLedgerTests(unittest.TestCase):
         self.assertEqual(batch.snapshot()["inflight_attempt_id"], attempt["id"])
         self.assertEqual(batch.snapshot()["calls_reserved"], 1)
 
+    def test_late_last_response_cannot_replace_an_existing_stop_reason(self):
+        batch = self.start()
+        for request in self.plan["prepared"]["requests"][:-1]:
+            self.responded(batch, batch.reserve(request["id"]))
+        attempt = batch.reserve(self.request_id(35))
+        batch.before_send(attempt["id"])
+        self.now += 10000
+        self.mono += 10000
+        with self.assertRaisesRegex(ValueError, "window_expired"):
+            batch.admission_check()
+        self.responded(batch, attempt)
+        self.assertEqual(batch.snapshot()["stop_code"], "quality_window_expired")
+        self.assertEqual(batch.snapshot()["calls_reserved"], 36)
+        self.assertEqual(batch.snapshot()["observed_stop_codes"], ["quality_window_expired", "quality_batch_completed"])
+
+    def test_late_unknown_cannot_replace_the_first_clock_failure(self):
+        batch = self.start()
+        attempt = batch.reserve(self.request_id())
+        self.now += 2001
+        with self.assertRaisesRegex(ValueError, "clock_changed"):
+            batch.admission_check()
+        receipt = batch.finish(attempt["id"], status="UNKNOWN", http_attempted=True)
+        self.assertEqual(receipt["status"], "UNKNOWN")
+        self.assertEqual(batch.snapshot()["stop_code"], "quality_clock_changed")
+        self.assertEqual(batch.snapshot()["observed_stop_codes"], ["quality_clock_changed", "quality_unknown"])
+
+    def test_persistence_failure_is_retained_without_replacing_first_stop(self):
+        batch = self.start()
+        attempt = batch.reserve(self.request_id())
+        self.now += 2001
+        with self.assertRaises(ValueError):
+            batch.admission_check()
+        with patch("backend.news_review_quality_ledger.publish_json_once", side_effect=OSError("synthetic disk failure")):
+            with self.assertRaises(OSError):
+                self.responded(batch, attempt)
+        state = batch.snapshot()
+        self.assertEqual(state["stop_code"], "quality_clock_changed")
+        self.assertIn("quality_outcome_persistence_failed", state["observed_stop_codes"])
+        self.assertEqual(state["calls_reserved"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

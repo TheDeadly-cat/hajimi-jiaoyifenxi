@@ -10,6 +10,7 @@ import copy
 from contextlib import closing
 from decimal import Decimal
 from pathlib import Path
+import threading
 import time
 
 from .controlled_manual_review import verify_candidate
@@ -71,6 +72,8 @@ class QualityBatchLedger:
         self._clock = NewsReviewClock(self.wall_ms, self.monotonic_ms)
         self._duration_limit_ms = expires_at_ms - self._clock.anchor[0]
         self._closed, self._stop_code = False, ""
+        self._state_lock = threading.Lock()
+        self._stop_codes = []
         self._requests = {r["id"]: copy.deepcopy(r) for r in self._plan["prepared"]["requests"]}
         self._inflight = None
         self._receipts = store.path.parent.parent / "quality-batch-receipts"
@@ -95,19 +98,33 @@ class QualityBatchLedger:
     def plan(self):
         return copy.deepcopy(self._plan)
 
+    def _stop_once(self, code):
+        # This lock never covers DB, file or network I/O. A late response or
+        # persistence fault records its own outcome without replacing the
+        # first reason that closed admission.
+        with self._state_lock:
+            if code not in self._stop_codes:
+                self._stop_codes.append(code)
+            if not self._closed:
+                self._closed, self._stop_code = True, code
+
+    def _require_open(self):
+        with self._state_lock:
+            require(not self._closed, self._stop_code or "quality_batch_closed")
+
     def admission_check(self):
         """Bounded in-memory final check, suitable for the existing send gate."""
-        require(not self._closed, self._stop_code or "quality_batch_closed")
+        self._require_open()
         sample = self._clock.sample()
         now = sample["wall_ms"]
         elapsed = sample["monotonic_since_anchor_ms"]
         if (not sample["accepted"] or elapsed is None or elapsed < 0):
-            self._closed, self._stop_code = True, "quality_clock_changed"
+            self._stop_once("quality_clock_changed")
         elif not self._plan["not_before_ms"] <= now < self._plan["expires_at_ms"]:
-            self._closed, self._stop_code = True, "quality_window_expired"
+            self._stop_once("quality_window_expired")
         elif elapsed >= self._duration_limit_ms:
-            self._closed, self._stop_code = True, "quality_duration_expired"
-        require(not self._closed, self._stop_code)
+            self._stop_once("quality_duration_expired")
+        self._require_open()
 
     def _preflight(self):
         self.owner.assert_held_for(self.store.path)
@@ -185,13 +202,13 @@ class QualityBatchLedger:
                                     error_code="quality_result_unknown" if status == "UNKNOWN" else "",
                                     usage=receipt["usage"])
             except BaseException:
-                self._closed, self._stop_code = True, "quality_outcome_persistence_failed"
+                self._stop_once("quality_outcome_persistence_failed")
                 raise
             self._inflight = None
             if status != "RESPONDED":
-                self._closed, self._stop_code = True, "quality_" + status.lower()
+                self._stop_once("quality_" + status.lower())
             elif len(self._ledger.attempts()) == MAX_CALLS:
-                self._closed, self._stop_code = True, "quality_batch_completed"
+                self._stop_once("quality_batch_completed")
             return copy.deepcopy(receipt)
 
     def snapshot(self):
@@ -199,10 +216,12 @@ class QualityBatchLedger:
             self.owner.assert_held_for(self.store.path)
             attempts = self._ledger.attempts()
             claimed = [self._requests[a["operation_target_id"]] for a in attempts]
+            with self._state_lock:
+                stop = {"closed": self._closed, "stop_code": self._stop_code, "observed_stop_codes": list(self._stop_codes)}
             return {"plan_sha256": self._plan["plan_sha256"], "calls_reserved": len(claimed),
                     "tokens_reserved": sum(r["reserved_input_tokens"] + r["reserved_output_tokens"] for r in claimed),
                     "cost_reserved_cny": str(sum((r["reserved_input_tokens"] * INPUT_RATE
                         + r["reserved_output_tokens"] * OUTPUT_RATE for r in claimed), Decimal(0)) / 1_000_000),
-                    "closed": self._closed, "stop_code": self._stop_code,
+                    **stop,
                     "inflight_attempt_id": self._inflight["id"] if self._inflight else None,
                     "real_execution_command_available": False}
