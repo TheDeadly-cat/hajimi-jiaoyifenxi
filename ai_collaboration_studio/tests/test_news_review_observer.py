@@ -319,7 +319,7 @@ class ObserverPreparationTests(unittest.TestCase):
 
 
 SERVER_CHILD = r'''
-import json,sys,threading,time
+import json,os,sys,threading,time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 root=Path(sys.argv[1])
@@ -334,7 +334,7 @@ class Handler(BaseHTTPRequestHandler):
 server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
 worker=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.05})
 worker.start()
-(root/'server-ready.json').write_text(json.dumps({'port':server.server_port}))
+(root/'server-ready.json').write_text(json.dumps({'port':server.server_port,'pid':os.getpid(),'parent_pid':os.getppid()}))
 while not (root/'stop-server').exists(): time.sleep(.02)
 server.shutdown();server.server_close();worker.join(3)
 (root/'server-exit.json').write_text(json.dumps({'worker_alive':worker.is_alive()}))
@@ -350,7 +350,9 @@ deadline=time.monotonic()+10
 while not (root/'server-ready.json').exists():
     if time.monotonic()>deadline: raise RuntimeError('fixture_start_timeout')
     time.sleep(.02)
-print(json.dumps({'pid':child.pid,**json.loads((root/'server-ready.json').read_text())}),flush=True)
+# Windows venv launchers may be redirector processes. The actual server
+# reports its own identity; the Popen PID remains an independently tracked pin.
+print(json.dumps({'spawned_pid':child.pid,**json.loads((root/'server-ready.json').read_text())}),flush=True)
 sys.stdin.readline()
 '''
 
@@ -365,12 +367,14 @@ class NativeObserverTests(unittest.TestCase):
             launch=subprocess.Popen([sys.executable,'-B','-c',LAUNCHER_CHILD,str(root),SERVER_CHILD],
                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW)
-            child_pid=None
+            child_pid=None;registered={}
             try:
                 hello=json.loads(launch.stdout.readline().decode())
                 child_pid=hello['pid']
                 launcher={'pid':launch.pid,'parent_pid':None,'start_utc':utc_ticks(native_creation_ticks(launch.pid))}
-                host={'pid':child_pid,'parent_pid':launch.pid,'start_utc':utc_ticks(native_creation_ticks(child_pid))}
+                host={'pid':child_pid,'parent_pid':hello['parent_pid'],'start_utc':utc_ticks(native_creation_ticks(child_pid))}
+                registered.update(observer.pin_key(pin) for pin in (launcher,host))
+                registered[hello['spawned_pid']]=native_creation_ticks(hello['spawned_pid'])
                 identity={'candidate_sha':'a'*40,'activation_sha256':'b'*64,'policy_sha256':'c'*64}
                 plan={'request':{'target':{'identity':identity,'host_url':f'http://127.0.0.1:{hello["port"]}'},
                     'launcher_pin':launcher,'host_pin':host,'pins':[launcher,host]},
@@ -384,10 +388,16 @@ class NativeObserverTests(unittest.TestCase):
                 waiting['request']['pins']=[launcher]
                 inspect=observer.NativeInspector(waiting,directory)
                 before_activation=inspect()
+                registered.update(observer.pin_key(pin) for pin in inspect.pins)
                 self.assertIsNone(before_activation['policy_sha256'])
                 self.assertEqual(before_activation['listeners'],[])
                 self.assertFalse(before_activation['safe_status_reads_allowed'])
                 self.assertIn(child_pid,[p['pid'] for p in inspect.pins])
+                self.assertIn(hello['spawned_pid'],[p['pid'] for p in inspect.pins])
+                self.assertEqual(next(p for p in inspect.pins if p['pid']==child_pid)['parent_pid'],hello['parent_pid'])
+                print(json.dumps({'native_fixture_identity':{'spawned_pid':hello['spawned_pid'],
+                    'host_pid':child_pid,'host_parent_pid':hello['parent_pid'],
+                    'redirector_observed':hello['spawned_pid']!=child_pid,'registered_pins':len(registered)}}))
                 plan['request']['pins']=copy.deepcopy(inspect.pins)
                 inspect.bind_active(plan)
                 live=inspect()
@@ -407,16 +417,21 @@ class NativeObserverTests(unittest.TestCase):
                 reused=observer.NativeInspector(changed,wrong_dir)()
                 self.assertTrue(reused['known_identity_inspection_incomplete'])
                 self.assertFalse(reused['safe_status_reads_allowed'])
-                self.assertTrue(next(p for p in reused['processes'] if p['pid']==child_pid)['pid_reused'])
+                wrong_key=observer.pin_key(changed['request']['host_pin'])
+                wrong_state=next(p for p in reused['processes'] if
+                    observer.pin_key({k:p[k] for k in ('pid','start_utc','parent_pid')})==wrong_key)
+                self.assertTrue(wrong_state['pid_reused'])
+                self.assertFalse(wrong_state['alive'])
             finally:
                 (root/'stop-server').touch()
                 if launch.poll() is None:
                     launch.stdin.write(b'exit\n');launch.stdin.flush();launch.wait(timeout=10)
                 launch.stdin.close();launch.stdout.close()
                 deadline=time.monotonic()+10
-                while child_pid and native_creation_ticks(child_pid) is not None and time.monotonic()<deadline:
+                while any(native_creation_ticks(pid)==ticks for pid,ticks in registered.items()) and time.monotonic()<deadline:
                     time.sleep(.05)
-                self.assertIsNone(native_creation_ticks(child_pid))
+                for pid,ticks in registered.items():
+                    self.assertNotEqual(native_creation_ticks(pid),ticks)
                 self.assertEqual(observer.read_json(root/'server-exit.json'),{'worker_alive':False})
 
 
