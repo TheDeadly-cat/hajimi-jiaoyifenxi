@@ -1,0 +1,363 @@
+"""Prepare or explicitly run one independent read-only Windows observer.
+
+Preparation does not start an observer or issue HTTP. Running needs the exact
+prepared plan hash and a new output directory. No resume/restart mode exists.
+"""
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+APP = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(APP))
+
+from backend.news_review_monitor import MonitorReceiptWriter, publish_json_once
+from backend.news_review_monitor_probe import NewsReviewStatusProbe, ProbeError, canonical, integer, native_ticks, require
+from scripts.news_review_watchdog import native_creation_ticks
+
+FILES = ('backend/news_review_monitor.py', 'backend/news_review_monitor_probe.py',
+    'scripts/news_review_watchdog.py', 'scripts/run_news_review_observer.py',
+    'scripts/inspect_news_review_process_tree.ps1')
+RECORDS = ('preparation-manifest.json', 'user-approval.json', 'ci-verification.json',
+    'launch-receipt.json', 'launcher-start.json', 'activation-receipt.json', 'activation-policy.json')
+
+
+def sha(path):
+    with Path(path).open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def safe_path(value):
+    require(type(value) is str and Path(value).is_absolute(), 'absolute_path_required')
+    path = Path(value)
+    for part in (path, *path.parents):
+        require(not part.is_symlink() and not part.is_junction(), 'linked_path_rejected')
+    return path.resolve()
+
+
+def read_json(path, limit=262144):
+    with Path(path).open('rb') as stream:
+        data = stream.read(limit+1)
+    require(len(data) <= limit, 'receipt_size_limit')
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            require(key not in result, 'duplicate_receipt_field')
+            result[key] = value
+        return result
+    def invalid(_value):
+        raise ProbeError('nonfinite_receipt_value')
+    return json.loads(data.decode('utf-8-sig'), object_pairs_hook=pairs, parse_constant=invalid)
+
+
+def pin_key(pin):
+    require(type(pin) is dict and set(pin) == {'pid', 'start_utc', 'parent_pid'}
+            and integer(pin['pid'], positive=True)
+            and (pin['parent_pid'] is None or integer(pin['parent_pid'])), 'process_pin_invalid')
+    return pin['pid'], native_ticks(pin['start_utc'])
+
+
+def verify_checkout(candidate):
+    for args, expected in ((['rev-parse', 'HEAD'], candidate), (['status', '--porcelain'], '')):
+        result = subprocess.run(['git', '-C', str(APP), *args], capture_output=True, timeout=15,
+                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        require(result.returncode == 0 and result.stdout.decode('ascii').strip() == expected,
+                'observer_candidate_unconfirmed')
+
+
+def verify_trial(request):
+    require(type(request) is dict and set(request) == {'version', 'root', 'target', 'host_receipt_name',
+        'launcher_pin', 'host_pin', 'pins'}, 'observer_request_invalid')
+    require(request['version'] == 'news_review_observer_request_v1', 'observer_request_invalid')
+    root = safe_path(request['root'])
+    require(root.name.startswith('NewsReviewTrial') and not root.is_relative_to(APP.parent), 'isolated_trial_required')
+    target = request['target']
+    NewsReviewStatusProbe(target, inspect_tree=lambda:None, wall_ms=lambda:0)
+    identity = target['identity']
+    require(type(request['pins']) is list and 1 <= len(request['pins']) <= 128, 'process_pins_invalid')
+    keys = [pin_key(pin) for pin in request['pins']]
+    require(len(keys) == len(set(keys)) and pin_key(request['launcher_pin']) in keys
+            and pin_key(request['host_pin']) in keys, 'process_pins_invalid')
+    by_pid = {pin['pid']:pin for pin in request['pins']}
+    require(len(by_pid) == len(keys), 'process_pins_invalid')
+    for pin in request['pins']:
+        seen, current = set(), pin
+        while pin_key(current) != pin_key(request['launcher_pin']):
+            require(current['pid'] not in seen and current['parent_pid'] in by_pid, 'process_ancestry_unconfirmed')
+            seen.add(current['pid'])
+            parent = by_pid[current['parent_pid']]
+            require(native_ticks(parent['start_utc']) <= native_ticks(current['start_utc']), 'process_ancestry_unconfirmed')
+            current = parent
+    require(type(request['host_receipt_name']) is str
+            and re.fullmatch(r'host-[A-Za-z0-9_-]+\.json', request['host_receipt_name']), 'host_receipt_invalid')
+    require([p.name for p in root.glob('host-*.json')] == [request['host_receipt_name']], 'host_receipt_ambiguous')
+    values, hashes = {}, {}
+    for name in (*RECORDS, request['host_receipt_name']):
+        path = safe_path(str(root/name))
+        hashes[name] = sha(path)
+        values[name] = read_json(path)
+    approval = values['user-approval.json']
+    manifest = values['preparation-manifest.json']
+    ci = values['ci-verification.json']
+    require(approval.get('approved') is True and approval.get('preparation_manifest_sha256') == hashes[RECORDS[0]],
+            'trial_approval_unconfirmed')
+    for value in (approval, manifest, ci, values['launch-receipt.json'], values['launcher-start.json']):
+        require(value.get('candidate_sha') == identity['candidate_sha'], 'trial_candidate_mismatch')
+    for value in (approval, manifest, values['launch-receipt.json'], values['launcher-start.json']):
+        require(value.get('activation_sha256') == identity['activation_sha256'], 'trial_activation_mismatch')
+    entries = manifest.get('files')
+    require(type(entries) is list and 1 <= len(entries) <= 128, 'preparation_manifest_invalid')
+    names = set()
+    for entry in entries:
+        name = entry.get('name') if type(entry) is dict else None
+        require(type(name) is str and Path(name).name == name and name not in names
+                and Path(name).suffix.lower() in {'.json', '.py', '.ps1', '.psm1', '.md'}
+                and not re.search(r'key|secret|credential|password|raw|log', name, re.I), 'manifest_file_rejected')
+        names.add(name)
+        require(sha(safe_path(str(root/name))) == entry.get('sha256'), 'prepared_file_changed')
+    runs = ci.get('workflow_runs')
+    require(ci.get('evidence_reviewed') is True and type(runs) is list and len(runs) >= 2
+            and all(type(v) is dict and v.get('head_sha') == identity['candidate_sha']
+                    and v.get('status') == 'completed' and v.get('conclusion') == 'success'
+                    and integer(v.get('id'), positive=True) for v in runs)
+            and len({v['id'] for v in runs}) == len(runs),
+            'trial_ci_unconfirmed')
+    launch, start = values['launch-receipt.json'], values['launcher-start.json']
+    launcher = request['launcher_pin']
+    require(launch.get('process_id') == start.get('launcher_pid') == launcher['pid']
+            and native_ticks(launch.get('process_start_utc')) == native_ticks(start.get('launcher_process_start_utc'))
+                == native_ticks(launcher['start_utc']), 'launcher_receipt_mismatch')
+    activation, policy = values['activation-receipt.json'], values['activation-policy.json']
+    require(safe_path(policy.get('database_path')) == root/'data'/'studio.sqlite3', 'trial_database_identity_mismatch')
+    proposal = activation.get('activation')
+    require(type(proposal) is dict and canonical(proposal) == identity['activation_sha256']
+            == activation.get('activation_sha256'), 'activation_receipt_mismatch')
+    require(activation.get('policy_sha256') == identity['policy_sha256'] == canonical(policy), 'policy_receipt_mismatch')
+    begin, end = target['activated_at_ms'], target['expires_at_ms']
+    require(activation.get('activated_at') == policy.get('not_before_ms') == begin
+            and activation.get('expires_at') == policy.get('expires_at_ms') == end
+            and policy.get('candidate_sha') == identity['candidate_sha'] and policy.get('policy_id') == target['policy_id'],
+            'activation_window_mismatch')
+    template = proposal.get('policy_template', {})
+    changes = proposal.get('permitted_changes')
+    require(changes in (['not_before_ms', 'expires_at_ms'], ['not_before_ms', 'expires_at_ms', 'clock_activation'])
+            and proposal.get('activations') == 1 and proposal.get('duration_ms') == end-begin
+            and template.get('not_before_ms', -1) <= begin < template.get('expires_at_ms', -1), 'activation_resolution_invalid')
+    require({k:v for k,v in policy.items() if k not in changes} == {k:v for k,v in template.items() if k not in changes},
+            'activation_resolution_invalid')
+    if 'clock_activation' in changes:
+        reading = policy.get('clock_activation', {})
+        require(reading.get('process_id') == request['host_pin']['pid']
+                and reading.get('process_creation_utc_ticks') == native_ticks(request['host_pin']['start_utc']),
+                'activation_host_pin_mismatch')
+    host = values[request['host_receipt_name']]
+    require(host.get('url') == target['host_url'] and host.get('policy_sha256') == identity['policy_sha256']
+            and host.get('expires_at_ms') == end, 'host_receipt_mismatch')
+    return root, hashes
+
+
+def prepare(request, powershell):
+    root, records = verify_trial(request)
+    verify_checkout(request['target']['identity']['candidate_sha'])
+    shell = safe_path(powershell)
+    require(shell.name.lower() == 'pwsh.exe' and shell.is_file(), 'powershell7_required')
+    plan = {'version': 'news_review_observer_plan_v1', 'request': copy.deepcopy(request),
+        'receipt_sha256': records, 'monitor_files': {name:sha(APP/name) for name in FILES},
+        'powershell': {'path':str(shell), 'sha256':sha(shell)},
+        'python': {'path':str(Path(sys.executable).resolve()), 'sha256':sha(sys.executable)},
+        'output_directory': str(root/'monitoring'), 'poll_interval_ms':300000,
+        'inspection_timeout_seconds':45, 'status_timeout_seconds':15, 'maximum_silence_ms':360000,
+        'observer_activations':1, 'request_authorized':False}
+    return {'plan':plan, 'plan_sha256':canonical(plan)}
+
+
+def verify_plan(wrapped, approved_hash):
+    require(type(wrapped) is dict and set(wrapped) == {'plan', 'plan_sha256'}, 'observer_plan_invalid')
+    plan = wrapped['plan']
+    require(wrapped['plan_sha256'] == canonical(plan) == approved_hash, 'observer_approval_mismatch')
+    require(plan == prepare(plan['request'], plan['powershell']['path'])['plan'], 'observer_preparation_changed')
+    require(os.name == 'nt', 'native_windows_required')
+    now = time.time_ns()//1_000_000
+    target = plan['request']['target']
+    require(target['activated_at_ms'] <= now < target['expires_at_ms']+255000, 'observer_window_closed')
+    return plan
+
+
+class NativeInspector:
+    def __init__(self, plan, directory, *, run=subprocess.run):
+        self.plan, self.directory, self.run = copy.deepcopy(plan), Path(directory), run
+        self.pins = copy.deepcopy(plan['request']['pins'])
+        self.sequence = 0
+        self.last = None
+
+    def __call__(self):
+        plan, request = self.plan, self.plan['request']
+        require(sha(plan['powershell']['path']) == plan['powershell']['sha256'], 'powershell_changed')
+        for name, expected in plan['monitor_files'].items():
+            require(sha(APP/name) == expected, 'monitor_source_changed')
+        self.sequence += 1
+        input_path = self.directory/f'process-tree-input-{self.sequence:06d}.json'
+        output_path = self.directory/f'process-tree-check-{self.sequence:06d}.json'
+        identity = request['target']['identity']
+        publish_json_once(input_path, {'version':'news_review_native_inspection_input_v1',
+            'identity':identity, 'host_url':request['target']['host_url'], 'launcher_pin':request['launcher_pin'],
+            'host_pin':request['host_pin'], 'pins':self.pins})
+        try:
+            result = self.run([plan['powershell']['path'], '-NoProfile', '-NonInteractive', '-File',
+                str(APP/'scripts/inspect_news_review_process_tree.ps1'), '-InputPath', str(input_path)],
+                capture_output=True, timeout=45, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            require(result.returncode == 0 and len(result.stdout) <= 65536, 'native_inspection_failed')
+            tree = json.loads(result.stdout.decode('utf-8-sig'))
+            require(type(tree) is dict and tree.get('version') == 'news_review_native_inspection_v1'
+                    and all(tree.get(k) == v for k,v in identity.items()), 'native_inspection_identity_mismatch')
+            require(type(tree.get('pins')) is list and len(tree['pins']) <= 128, 'native_inspection_pins_invalid')
+            new_keys = [pin_key(pin) for pin in tree['pins']]
+            require(len(set(new_keys)) == len(new_keys) and {pin_key(pin) for pin in self.pins} <= set(new_keys),
+                    'native_inspection_lost_registered_pin')
+            processes = tree.get('processes')
+            require(type(processes) is list and len(processes) == len(new_keys)
+                    and all(type(p) is dict and set(p) == {'pid','start_utc','parent_pid','alive','pid_reused'}
+                            and type(p['alive']) is bool and type(p['pid_reused']) is bool for p in processes),
+                    'native_inspection_processes_invalid')
+            require({pin_key({k:p[k] for k in ('pid','parent_pid','start_utc')}) for p in processes} == set(new_keys)
+                    and tree.get('owner_pid') == request['host_pin']['pid']
+                    and tree.get('launcher_pid') == request['launcher_pin']['pid'], 'native_inspection_processes_invalid')
+            require(set(tree) == {'version','checked_at_utc','candidate_sha','activation_sha256','policy_sha256',
+                'launcher_pid','pins','processes','enumeration_consistent','known_identity_inspection_incomplete',
+                'owner_pid','owner_identity_pinned','owner_alive','listeners','host_url','safe_status_reads_allowed',
+                'ownership_lock_verified','terminal_status_inferred','database_opened','http_requests'},
+                'native_inspection_shape_invalid')
+            native_ticks(tree['checked_at_utc'])
+            require(tree['host_url'] == request['target']['host_url']
+                    and all(type(tree[k]) is bool for k in ('enumeration_consistent','known_identity_inspection_incomplete',
+                        'owner_identity_pinned','owner_alive','safe_status_reads_allowed','ownership_lock_verified',
+                        'terminal_status_inferred','database_opened'))
+                    and tree['ownership_lock_verified'] is tree['terminal_status_inferred'] is tree['database_opened'] is False
+                    and type(tree['http_requests']) is int and tree['http_requests'] == 0, 'native_inspection_shape_invalid')
+            require(type(tree['listeners']) is list and len(tree['listeners']) <= 128, 'native_listener_shape_invalid')
+            for listener in tree['listeners']:
+                require(type(listener) is dict and set(listener) == {'LocalAddress','LocalPort','OwningProcess'}
+                        and type(listener['LocalAddress']) is str and len(listener['LocalAddress']) <= 64
+                        and integer(listener['LocalPort'], positive=True) and listener['LocalPort'] <= 65535
+                        and integer(listener['OwningProcess']), 'native_listener_shape_invalid')
+                ipaddress.ip_address(listener['LocalAddress'])
+            # Retain descendants even when a later protocol/HTTP check fails.
+            self.pins = tree['pins']
+            self.last = tree
+            publish_json_once(output_path, tree)
+            require(os.getpid() not in {pin['pid'] for pin in self.pins}, 'observer_not_independent')
+            return tree
+        except subprocess.TimeoutExpired:
+            publish_json_once(output_path, {'identity':identity, 'complete':False, 'code':'NATIVE_INSPECTION_TIMEOUT'})
+            raise ProbeError('native_inspection_timeout') from None
+        except Exception as exc:
+            if not output_path.exists():
+                publish_json_once(output_path, {'identity':identity, 'complete':False, 'code':'NATIVE_INSPECTION_UNCONFIRMED'})
+            if isinstance(exc, ProbeError) and str(exc) == 'observer_not_independent':
+                raise
+            raise ProbeError('native_inspection_unconfirmed') from None
+
+
+def terminal_tree(tree):
+    return (type(tree) is dict and tree.get('known_identity_inspection_incomplete') is False
+            and tree.get('enumeration_consistent') is True and tree.get('owner_identity_pinned') is True
+            and type(tree.get('processes')) is list and bool(tree['processes'])
+            and all(p.get('alive') is False and p.get('pid_reused') is False for p in tree['processes'])
+            and tree.get('listeners') == [])
+
+
+def run_observer(plan, plan_hash):
+    plan = verify_plan({'plan':plan, 'plan_sha256':canonical(plan)}, plan_hash)
+    directory = safe_path(plan['output_directory'])
+    directory.mkdir(exist_ok=False)
+    target = plan['request']['target']
+    identity = target['identity']
+    ticks = native_creation_ticks(os.getpid())
+    require(integer(ticks, positive=True), 'observer_native_identity_unconfirmed')
+    publish_json_once(directory/'observer-pin.json', {'identity':identity, 'plan_sha256':plan_hash,
+        'pid':os.getpid(), 'process_start_utc_ticks':ticks, 'started_at_ms':time.time_ns()//1_000_000})
+    stop = threading.Event()
+    inspector = NativeInspector(plan, directory)
+    ended = {'phase':'drain_deadline_unconfirmed_user_action_required', 'two_native_terminal_checks':False}
+    def inspect():
+        tree = inspector()
+        if terminal_tree(tree):
+            second = inspector()
+            if terminal_tree(second):
+                ended.update(phase='registered_tree_terminal', two_native_terminal_checks=True)
+                stop.set()
+            return second
+        return tree
+    probe = NewsReviewStatusProbe(target, inspect_tree=inspect, wall_ms=lambda:time.time_ns()//1_000_000)
+    fatal_codes = {'control_identity_mismatch','control_unconfirmed','source_scope_mismatch',
+                   'host_generation_changed','process_tree_identity_mismatch','monitor_window_closed_or_unconfirmed',
+                   'monitor_source_changed','powershell_changed','observer_not_independent'}
+    def observe():
+        try:
+            return probe()
+        except ProbeError as exc:
+            if str(exc) in fatal_codes:
+                ended.update(phase='inspection_failure_user_action_required', code=str(exc))
+                stop.set()
+            raise
+    writer = MonitorReceiptWriter(directory, identity, wall_ms=lambda:time.time_ns()//1_000_000,
+                                  monotonic_ms=lambda:time.monotonic_ns()//1_000_000)
+    try:
+        writer.run_schedule(probe=observe, stop_event=stop, expires_at_ms=target['expires_at_ms']+255000)
+    except BaseException:
+        ended.update(phase='observer_interrupted_or_failed', code='OBSERVER_INCOMPLETE')
+        raise
+    finally:
+        report = safe_path(str(Path(plan['request']['root'])/'window-report.json'))
+        ended.update(version='news_review_observer_exit_v1', identity=identity, plan_sha256=plan_hash,
+            ended_at_ms=time.time_ns()//1_000_000, completed_checks=writer.sequence,
+            original_report_exists=report.is_file(), final_acceptance_verified=False,
+            original_report_sha256=sha(report) if report.is_file() else None,
+            monitored_processes_stopped_by_observer=False, database_opened=False)
+        if ended['two_native_terminal_checks'] and not report.is_file():
+            ended.update(phase='terminal_report_missing_user_action_required')
+        publish_json_once(directory/'observer-exit.json', ended)
+    return 0 if ended['phase'] == 'registered_tree_terminal' else 2
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    action = parser.add_mutually_exclusive_group(required=True)
+    action.add_argument('--prepare', action='store_true')
+    action.add_argument('--run', action='store_true')
+    parser.add_argument('--request')
+    parser.add_argument('--powershell')
+    parser.add_argument('--output')
+    parser.add_argument('--plan')
+    parser.add_argument('--approve-plan-sha256')
+    args = parser.parse_args(argv)
+    if args.prepare:
+        require(bool(args.request and args.powershell and args.output) and not args.plan and not args.approve_plan_sha256,
+                'observer_prepare_arguments_invalid')
+        wrapped = prepare(read_json(safe_path(args.request)), args.powershell)
+        publish_json_once(safe_path(args.output), wrapped)
+        print(json.dumps({'plan_sha256':wrapped['plan_sha256'], 'request_authorized':False}))
+        return 0
+    require(bool(args.plan and args.approve_plan_sha256) and not any((args.request,args.powershell,args.output)),
+            'observer_run_arguments_invalid')
+    wrapped = read_json(safe_path(args.plan))
+    plan = verify_plan(wrapped, args.approve_plan_sha256)
+    return run_observer(plan, wrapped['plan_sha256'])
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main())
+    except Exception:
+        print(json.dumps({'ok':False, 'code':'OBSERVER_INCOMPLETE', 'automatic_restart_allowed':False}))
+        raise SystemExit(2)
