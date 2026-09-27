@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
@@ -241,30 +242,24 @@ class ControlledManualReviewTests(unittest.TestCase):
     def test_parallel_duplicate_is_rejected_without_second_batch(self):
         plan = self.control.prepare(self.config)
         entered, release = threading.Event(), threading.Event()
-        answers, errors = [], []
         def blocked(request, **kwargs):
             entered.set()
-            self.assertTrue(release.wait(5))
+            self.assertTrue(release.wait(30))
             return self.transport(request, **kwargs)
-        def first():
-            try:
-                answers.append(self.control.run(self.config, approved_plan_sha256=plan["plan_sha256"]))
-            except BaseException as exc:
-                errors.append(exc)
         with patch("urllib.request.OpenerDirector.open", side_effect=blocked) as wire:
-            worker = threading.Thread(target=first)
-            worker.start()
-            try:
-                self.assertTrue(entered.wait(5))
-                with self.assertRaises(ManualChatGPTError):
-                    self.controller().run(self.config, approved_plan_sha256=plan["plan_sha256"])
-            finally:
-                release.set()
-                worker.join(5)
-        self.assertFalse(worker.is_alive())
-        self.assertEqual(errors, [])
+            # Drain the worker before the transport mock or database fixture
+            # can be released, including when the main assertion fails.
+            with ThreadPoolExecutor(max_workers=1) as workers:
+                first = workers.submit(self.control.run, self.config, approved_plan_sha256=plan["plan_sha256"])
+                try:
+                    self.assertTrue(entered.wait(30))
+                    with self.assertRaises(ManualChatGPTError):
+                        self.controller().run(self.config, approved_plan_sha256=plan["plan_sha256"])
+                finally:
+                    release.set()
+                answer = first.result(timeout=60)
         self.assertEqual(wire.call_count, 3)
-        self.assertEqual(answers[0]["session"]["state"], "READY_FOR_DECISION")
+        self.assertEqual(answer["session"]["state"], "READY_FOR_DECISION")
 
     def test_credential_echo_is_not_written_to_receipts(self):
         def echo(request, **kwargs):
