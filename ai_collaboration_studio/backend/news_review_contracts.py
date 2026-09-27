@@ -11,6 +11,11 @@ from urllib.parse import urlsplit
 from .decision_lineage import canonical_sha256
 
 VERSION = "news_event_review_v1"
+DUAL_POLICY_VERSION = "news_event_review_dual_deadline_v1"
+DUAL_CLOCK_POLICY = {"version": "dual_deadline_windows_v1",
+                     "clock_basis": "windows_query_performance_counter_including_suspend",
+                     "max_step_ms": 2000, "max_observation_gap_ms": 30000,
+                     "max_sampling_span_ms": 50, "activations": 1}
 PROFILE = "sec_micron_trial_v1"
 MODEL = "doubao-seed-2-1-pro-260915"
 ENDPOINT = "https://ark.cn-beijing.volces.com/api/v3/responses"
@@ -63,16 +68,33 @@ def decimal(value):
     return result
 
 
-def validate_policy(value):
+def activation_reading(value):
+    from .news_review_clock_policy_review import Reading
+    fields = {"wall_ms", "monotonic_before_ms", "monotonic_after_ms", "process_id",
+              "process_creation_utc_ticks", "monotonic_before_ns", "monotonic_after_ns"}
+    require(type(value) is dict and set(value) == fields, "clock_activation_invalid")
+    reading = Reading(**value)
+    require(reading.valid() and type(reading.monotonic_before_ns) is int, "clock_activation_invalid")
+    return reading
+
+
+def is_dual_policy(value):
+    return value.get("version") == DUAL_POLICY_VERSION
+
+
+def validate_policy(value, *, allow_clock_template=False):
     fields = {"version", "policy_id", "candidate_sha", "database_path", "room_id",
               "profile", "sources", "poll_interval_ms", "initialization", "strategy_sha256",
               "provider", "model", "endpoint", "not_before_ms", "expires_at_ms",
               "max_document_requests", "max_model_calls", "max_request_bytes",
               "max_output_tokens", "max_total_tokens", "spend_limit_cny", "rate_card",
               "concurrency", "resume_within_window", "stop_on_unknown"}
-    require(type(value) is dict and set(value) == fields, "invalid_policy_fields")
+    require(type(value) is dict, "invalid_policy_fields")
+    if is_dual_policy(value):
+        fields |= {"clock_policy", "clock_activation"}
+    require(set(value) == fields, "invalid_policy_fields")
     p = copy.deepcopy(value)
-    require(p["version"] == VERSION and p["strategy_sha256"] == STRATEGY_SHA, "strategy_mismatch")
+    require(p["version"] in (VERSION, DUAL_POLICY_VERSION) and p["strategy_sha256"] == STRATEGY_SHA, "strategy_mismatch")
     for field, pattern in (("policy_id", r"[a-z0-9][a-z0-9_-]{0,79}"),
                            ("candidate_sha", r"[a-f0-9]{40}"), ("room_id", r"room_[a-z0-9_]{1,80}")):
         require(type(p[field]) is str and re.fullmatch(pattern, p[field]), "invalid_policy_identity")
@@ -84,6 +106,14 @@ def validate_policy(value):
     start, end = p["not_before_ms"], p["expires_at_ms"]
     require(type(start) is int and type(end) is int and start > 0 and 0 < end-start <= 86_400_000,
             "invalid_window")
+    if is_dual_policy(p):
+        require(encoded(p["clock_policy"]) == encoded(DUAL_CLOCK_POLICY), "clock_policy_mismatch")
+        require(p["resume_within_window"] is False, "dual_clock_resume_forbidden")
+        if p["clock_activation"] is None:
+            require(allow_clock_template, "clock_activation_required")
+        else:
+            reading = activation_reading(p["clock_activation"])
+            require(start <= reading.wall_ms < end, "clock_activation_outside_window")
     for name, lower, upper in (("max_document_requests", 1, 144), ("max_model_calls", 1, 100),
                                ("max_request_bytes", 1024, 65536), ("max_output_tokens", 512, 2400),
                                ("max_total_tokens", 1024, 1_000_000)):

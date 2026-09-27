@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import threading
 import time
-from contextlib import closing
+from contextlib import closing, nullcontext
 
-from .news_review_contracts import NewsReviewError
+from .news_review_contracts import NewsReviewError, is_dual_policy
 from .execution_boundary import TextRequestSendGate
 from .source_inbox_service import SourceInboxError
 from .news_review_service import _policy, _window
@@ -63,21 +63,37 @@ class NewsReviewController:
             raise NewsReviewError("source_scope_mismatch")
         with self.service.store._lock, closing(self.service.store._connect()) as db:
             _, policy = _policy(db,self.policy_id)
-        self.service._identity(policy)
+        try:
+            self.service._identity(policy)
+        except NewsReviewError as exc:
+            if exc.code == 'policy_expired':
+                raise SourcePollCancelled('NEWS_REVIEW_WINDOW_EXPIRED', 'news review window elapsed') from None
+            raise
         def check():
             self.service.owner.assert_held_for(self.service.store.path)
-            self.service.check_clock()
+            try:
+                self.service.check_clock()
+            except NewsReviewError as exc:
+                if exc.code == 'policy_expired':
+                    raise SourcePollCancelled('NEWS_REVIEW_WINDOW_EXPIRED', 'news review window elapsed') from None
+                raise
             if self.stop_event.is_set():
                 raise SourcePollCancelled("NEWS_REVIEW_STOPPED", "news review host stopped")
             with self.service.store._lock, closing(self.service.store._connect()) as db:
                 row, p = _policy(db,self.policy_id)
-                if self.service.clock() >= p['expires_at_ms']:
+                if self.service.window_reached(p):
                     raise SourcePollCancelled('NEWS_REVIEW_WINDOW_EXPIRED', 'news review window elapsed')
                 try:
-                    _window(row,p,self.service.clock())
+                    _window(row,p,self.service.clock(),self.service.store)
                 except NewsReviewError as exc:
+                    if exc.code == 'policy_expired':
+                        raise SourcePollCancelled('NEWS_REVIEW_WINDOW_EXPIRED', 'news review window elapsed') from None
                     raise SourcePollCancelled("NEWS_REVIEW_POLICY_INACTIVE", "news review policy inactive") from exc
-        return source_poll_authorization(check)
+        def deadline():
+            check()
+            return self.service._dual_clock.reference.snapshot()['effective_elapsed_deadline_ms']
+        return source_poll_authorization(check, deadline=deadline if is_dual_policy(policy) else None,
+                                         expiry_code='NEWS_REVIEW_WINDOW_EXPIRED')
 
     def enrich_cycle(self):
         if self.stop_event.is_set():
@@ -85,6 +101,7 @@ class NewsReviewController:
         self.service.check_clock()
         self.service.discover(self.policy_id)
         with self.service.store._lock, closing(self.service.store._connect()) as db:
+            _, policy = _policy(db, self.policy_id)
             events = db.execute("SELECT * FROM news_review_events WHERE policy_id=? ORDER BY discovered_at,item_id",(self.policy_id,)).fetchall()
         for event in events:
             if self.stop_event.is_set():
@@ -106,7 +123,9 @@ class NewsReviewController:
         with self.service.store._lock, closing(self.service.store._connect()) as db:
             job = db.execute("SELECT id,item_id FROM source_document_jobs WHERE session_id=? AND status='waiting' ORDER BY requested_at,rowid LIMIT 1",("news_review:"+self.policy_id,)).fetchone()
         if job and not self.stop_event.is_set():
-            with source_poll_authorization(self.service.check_clock):
+            # Dual-policy document jobs establish their mandatory context in
+            # DocumentEvidenceService, including when called independently.
+            with (nullcontext() if is_dual_policy(policy) else source_poll_authorization(self.service.check_clock)):
                 self.service.documents.run(job["id"],cancel_event=self.stop_event,
                                            deadline_monotonic_ms=int(time.monotonic()*1000)+12_000)
             self.service.queue(self.policy_id,job["item_id"])

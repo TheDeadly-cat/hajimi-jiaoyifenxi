@@ -18,19 +18,43 @@ from typing import Any, Callable
 MAX_MONOTONIC_MILLISECONDS = (1 << 63) - 1
 _EVENT_TYPE = type(threading.Event())
 _source_authorization = ContextVar("source_poll_authorization", default=None)
+_source_authorization_deadline = ContextVar("source_poll_authorization_deadline", default=None)
 
 
 @contextmanager
-def source_poll_authorization(check):
+def source_poll_authorization(check, *, deadline=None, expiry_code="SOURCE_MONITORING_AUTHORIZATION_EXPIRED"):
     """Host-owned dynamic policy, inherited by the synchronous HTTP read only."""
     if _source_authorization.get() is not None or not callable(check):
         raise ValueError("source poll authorization cannot be nested or malformed")
+    if deadline is not None and not callable(deadline):
+        raise ValueError("source authorization deadline must be callable")
+    if type(expiry_code) is not str or not expiry_code or len(expiry_code) > 80 or not all(c.isupper() or c.isdigit() or c == '_' for c in expiry_code):
+        raise ValueError("source authorization expiry code is invalid")
     check()
     token = _source_authorization.set(check)
+    deadline_token = _source_authorization_deadline.set((deadline, expiry_code) if deadline else None)
     try:
         yield
     finally:
+        _source_authorization_deadline.reset(deadline_token)
         _source_authorization.reset(token)
+
+
+def _effective_deadline(deadline):
+    binding = _source_authorization_deadline.get()
+    if binding is None:
+        return deadline, None
+    inherited = binding[0]()
+    if type(inherited) is not int or not 0 < inherited <= MAX_MONOTONIC_MILLISECONDS:
+        raise SourcePollControlError("SOURCE_MONITORING_AUTHORIZATION_DEADLINE_INVALID", "invalid authorization deadline")
+    return min(deadline, inherited) if deadline else inherited, (inherited, binding[1])
+
+
+def _check_deadline(deadline, inherited, now):
+    if inherited is not None and now >= inherited[0]:
+        raise SourcePollCancelled(inherited[1], "source authorization window ended")
+    if deadline and now >= deadline:
+        raise SourcePollDeadlineExceeded("SOURCE_MONITORING_POLL_DEADLINE_EXCEEDED", "source poll exceeded its absolute monotonic deadline")
 
 
 class SourcePollControlError(ValueError):
@@ -76,12 +100,12 @@ def validate_source_poll_control(
     return deadline_monotonic_ms, cancel_event
 
 
-def ensure_source_poll_active(
+def _source_poll_active_state(
     *,
     deadline_monotonic_ms: Any,
     cancel_event: Any,
     monotonic_ms: Callable[[], Any] | None = None,
-) -> int:
+) -> tuple[int, int]:
     """Fail closed when cancellation or the absolute deadline is observable."""
 
     deadline, event = validate_source_poll_control(
@@ -91,6 +115,7 @@ def ensure_source_poll_active(
     authorization = _source_authorization.get()
     if authorization is not None:
         authorization()
+    deadline, inherited = _effective_deadline(deadline)
     if event is not None and event.is_set():
         raise SourcePollCancelled(
             "SOURCE_MONITORING_POLL_CANCELLED",
@@ -108,11 +133,19 @@ def ensure_source_poll_active(
             "SOURCE_MONITORING_POLL_CLOCK_INVALID",
             "monotonic clock must return a non-negative native integer",
         )
-    if deadline and now >= deadline:
-        raise SourcePollDeadlineExceeded(
-            "SOURCE_MONITORING_POLL_DEADLINE_EXCEEDED",
-            "source poll exceeded its absolute monotonic deadline",
-        )
+    _check_deadline(deadline, inherited, now)
+    return now, deadline
+
+
+def ensure_source_poll_active(
+    *,
+    deadline_monotonic_ms: Any,
+    cancel_event: Any,
+    monotonic_ms: Callable[[], Any] | None = None,
+) -> int:
+    """Fail closed after checking authorization, cancellation and deadline."""
+    now, _ = _source_poll_active_state(deadline_monotonic_ms=deadline_monotonic_ms,
+        cancel_event=cancel_event, monotonic_ms=monotonic_ms)
     return now
 
 
@@ -136,7 +169,9 @@ def source_poll_timeout_seconds(
             "default source timeout must be a finite positive native number",
         )
     clock = monotonic_ms or (lambda: int(time.monotonic() * 1_000))
-    now = ensure_source_poll_active(
+    # Use one checked deadline and sample time only after the authorization
+    # callback finishes. Its database/read latency cannot become extra budget.
+    now, deadline_monotonic_ms = _source_poll_active_state(
         deadline_monotonic_ms=deadline_monotonic_ms,
         cancel_event=cancel_event,
         monotonic_ms=clock,
@@ -180,19 +215,8 @@ def wait_for_source_poll(
             monotonic_ms=clock,
         )
         return
-    if deadline_monotonic_ms:
-        timeout = source_poll_timeout_seconds(
-            timeout,
-            deadline_monotonic_ms=deadline_monotonic_ms,
-            cancel_event=cancel_event,
-            monotonic_ms=clock,
-        )
-    else:
-        ensure_source_poll_active(
-            deadline_monotonic_ms=0,
-            cancel_event=cancel_event,
-            monotonic_ms=clock,
-        )
+    timeout = source_poll_timeout_seconds(timeout, deadline_monotonic_ms=deadline_monotonic_ms,
+                                          cancel_event=cancel_event, monotonic_ms=clock)
     if cancel_event is None:
         time.sleep(timeout)
     elif cancel_event.wait(timeout):

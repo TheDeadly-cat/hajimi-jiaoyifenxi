@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from contextlib import closing
+from contextlib import closing, nullcontext
 from decimal import Decimal
 from pathlib import Path
 
@@ -19,7 +19,7 @@ from .execution_boundary import (AuthorizedTextRequest, authorized_text_request,
                                  build_text_provider_request, text_generation_body)
 from .news_review_contracts import (DISABLED, ENDPOINT, INSTRUCTIONS, MODEL, STRATEGY_SHA, VERSION,
                                     NewsReviewError, decimal, encoded, event_key, freshness,
-                                    importance, job_key, require, review_document, validate_policy, validate_result)
+                                    importance, is_dual_policy, job_key, require, review_document, validate_policy, validate_result)
 from .path_identity import first_reparse_component
 from .provider_call_ledger import ProviderCallLedger, normalized_token_usage
 from .providers.doubao_provider import DoubaoProvider
@@ -37,9 +37,13 @@ def _policy(db, policy_id):
     return dict(row), p
 
 
-def _window(row, p, now):
+def _window(row, p, now, store=None):
     require(type(now) is int and p["not_before_ms"] <= now < p["expires_at_ms"], "policy_expired")
     require(row["status"] == "ACTIVE", "policy_not_active")
+    if is_dual_policy(p):
+        from .news_review_runtime_clock import require_bound_clock
+        require(store is not None, "clock_activation_required")
+        require_bound_clock(store, p).check()
 
 
 def _execution_table(job, kind='jobs'):
@@ -47,11 +51,13 @@ def _execution_table(job, kind='jobs'):
     return ('news_review_' if job['storage'] == 'original' else 'news_review_successor_') + kind
 
 
-def _retire_expired_jobs(db, now):
+def _retire_expired_jobs(db, now, store=None):
     """Only definitely unsent executions can await a different authorization."""
     for entry in db.execute('SELECT id FROM news_review_policies').fetchall():
         row, p = _policy(db, entry['id'])
-        reason = ('authorization_expired' if now >= p['expires_at_ms'] else
+        binding = getattr(store, '_news_review_clock_bindings', {}).get(p['policy_id']) if store else None
+        elapsed = bool(is_dual_policy(p) and binding and binding.policy_sha256 == row['policy_sha256'] and binding.expired())
+        reason = ('authorization_expired' if now >= p['expires_at_ms'] or elapsed else
                   'authorization_revoked' if row['status'] == 'STOPPED' else '')
         if not reason:
             continue
@@ -75,7 +81,7 @@ def _retire_expired_jobs(db, now):
 def check_document_send(store, db, job, now):
     """Mandatory for any runner executing a native-review document job."""
     row, p = _policy(db, job["session_id"][len("news_review:"):])
-    _window(row, p, now)
+    _window(row, p, now, store)
     require(Path(p["database_path"]).resolve() == store.path.resolve(), "database_mismatch")
     event = db.execute("SELECT * FROM news_review_events WHERE policy_id=? AND item_id=?",
                        (row["id"], job["item_id"])).fetchone()
@@ -83,6 +89,34 @@ def check_document_send(store, db, job, now):
             and 0 < row["documents_reserved"] <= p["max_document_requests"]
             and job["expires_at"] == p["expires_at_ms"], "document_reservation_mismatch")
     verify_candidate(p["candidate_sha"])
+
+
+def document_time_authorization(store, job, clock):
+    """Mandatory dynamic window for any dual-policy document runner."""
+    if not job['session_id'].startswith('news_review:'):
+        return nullcontext()
+    policy_id = job['session_id'][len('news_review:'):]
+    with closing(store._connect()) as db:
+        _, policy = _policy(db, policy_id)
+    if not is_dual_policy(policy):
+        return nullcontext()
+    from .news_review_runtime_clock import require_bound_clock
+    from .source_poll_control import source_poll_authorization, SourcePollCancelled
+    binding = require_bound_clock(store, policy)
+    def check():
+        try:
+            with closing(store._connect()) as db:
+                row, current = _policy(db, policy_id)
+                require(canonical_sha256(current) == binding.policy_sha256, "policy_integrity")
+                _window(row, current, clock(), store)
+        except NewsReviewError as exc:
+            if exc.code == 'policy_expired':
+                raise SourcePollCancelled('NEWS_REVIEW_WINDOW_EXPIRED', 'news review window elapsed') from None
+            raise
+    def deadline():
+        check()
+        return binding.reference.snapshot()['effective_elapsed_deadline_ms']
+    return source_poll_authorization(check, deadline=deadline, expiry_code='NEWS_REVIEW_WINDOW_EXPIRED')
 
 
 def _request(generation, provider):
@@ -93,7 +127,7 @@ def _request(generation, provider):
 
 
 class NewsReviewService:
-    def __init__(self, store, providers, *, instance_owner, documents=None, clock=None, monotonic_ms=None):
+    def __init__(self, store, providers, *, instance_owner, documents=None, clock=None, monotonic_ms=None, clock_sampler=None):
         self.store, self.providers, self.owner = store, providers, instance_owner
         self.clock = clock or (lambda: int(time.time()*1000))
         self.monotonic_ms = monotonic_ms or (lambda: int(time.monotonic()*1000))
@@ -102,6 +136,8 @@ class NewsReviewService:
         self.clock_anchor = self.clock_guard.anchor
         self.documents = documents or DocumentEvidenceService(store, clock=self.clock)
         self._startup_recovered = False
+        self._dual_clock = None
+        self._clock_sampler = clock_sampler
 
     def prepare_startup(self):
         """Recover inherited state before this service session's approval.
@@ -118,22 +154,65 @@ class NewsReviewService:
     def end_host_session(self):
         """Called only after all host workers have drained."""
         with self.store._lock:
+            if self._dual_clock is not None:
+                bindings = getattr(self.store, '_news_review_clock_bindings', {})
+                for key, value in tuple(bindings.items()):
+                    if value is self._dual_clock:
+                        del bindings[key]
+                self._dual_clock.installed = False
             self._startup_recovered = False
 
     def close_expired_work(self):
         self.owner.assert_held_for(self.store.path)
         with self.store._lock, closing(self.store._connect()) as db, db:
-            _retire_expired_jobs(db, self.clock())
+            _retire_expired_jobs(db, self.clock(), self.store)
 
-    def check_clock(self):
+    def check_clock(self, *, allow_expiry=False):
+        if self._dual_clock is not None:
+            return self._dual_clock.check(allow_expiry=allow_expiry)
         require(self.clock_guard.sample()['accepted'], "clock_changed")
 
     def clock_diagnostics(self):
+        if self._dual_clock is not None:
+            return self._dual_clock.snapshot()
         return self.clock_guard.snapshot()
 
-    def _identity(self, p):
+    def window_reached(self, p):
+        matched = (self._dual_clock is not None and self._dual_clock.policy_sha256 == canonical_sha256(p))
+        return bool(self.clock() >= p['expires_at_ms'] or matched and self._dual_clock.expired())
+
+    def authorization_deadline(self, p):
+        if not is_dual_policy(p):
+            return 0
+        from .news_review_runtime_clock import require_bound_clock
+        binding = require_bound_clock(self.store, p)
+        require(binding is self._dual_clock, "clock_service_binding_mismatch")
+        return binding.deadline()
+
+    def _check_window(self, row, p):
+        if is_dual_policy(p):
+            from .news_review_runtime_clock import require_bound_clock
+            require(require_bound_clock(self.store, p) is self._dual_clock, "clock_service_binding_mismatch")
+        _window(row, p, self.clock(), self.store)
+
+    def _identity(self, p, *, preview=False):
         self.owner.assert_held_for(self.store.path)
-        self.check_clock()
+        if is_dual_policy(p):
+            from .news_review_runtime_clock import BoundRuntimeClock, require_bound_clock
+            if self._dual_clock is not None:
+                require(require_bound_clock(self.store, p) is self._dual_clock, "clock_service_binding_mismatch")
+                self.check_clock()
+            elif preview:
+                if p['clock_activation'] is not None:
+                    BoundRuntimeClock(p, sample=self._clock_sampler).check()
+                else:
+                    from .news_review_windows_clock import sample_windows_clock
+                    reading = (self._clock_sampler or sample_windows_clock)()
+                    require(reading.valid() and reading.monotonic_before_ns is not None, "clock_sample_unconfirmed")
+            else:
+                require(False, "clock_activation_required")
+        else:
+            require(self.clock_guard.sample()['accepted'], "clock_changed")
         path = Path(p["database_path"])
         require(path.is_absolute() and first_reparse_component(path) is None and path.resolve() == self.store.path.resolve(), "database_mismatch")
         require(path.name == "studio.sqlite3" and path.parent.name == "data"
@@ -148,9 +227,9 @@ class NewsReviewService:
                 "provider_route_mismatch")
         return provider
 
-    def preview(self, policy):
-        p = validate_policy(policy)
-        self._identity(p)
+    def preview(self, policy, *, allow_clock_template=False):
+        p = validate_policy(policy, allow_clock_template=allow_clock_template)
+        self._identity(p, preview=True)
         self._provider()
         with closing(self.store._connect()) as db:
             require(db.execute("SELECT 1 FROM rooms WHERE id=?", (p["room_id"],)).fetchone(), "room_not_found")
@@ -164,6 +243,12 @@ class NewsReviewService:
         require(approved_policy_sha256 == preview["policy_sha256"], "approval_mismatch")
         now = self.clock()
         require(p["not_before_ms"] <= now < p["expires_at_ms"], "policy_expired")
+        if is_dual_policy(p) and self._dual_clock is None:
+            # Reject a second service before recovery can alter the live
+            # session's jobs or counters. New dual policies require a fresh trial.
+            with self.store._lock, closing(self.store._connect()) as db:
+                require(not db.execute('SELECT 1 FROM news_review_policies LIMIT 1').fetchone(),
+                        'dual_clock_fresh_trial_required')
         self.prepare_startup()
         # Keep the global store lock while moving between ledger and policy
         # transactions. A crash may leave an empty idempotent ledger, never calls.
@@ -172,11 +257,20 @@ class NewsReviewService:
                 existing = db.execute("SELECT * FROM news_review_policies WHERE id=?", (p["policy_id"],)).fetchone()
                 if existing:
                     require(existing["policy_sha256"] == preview["policy_sha256"], "policy_id_conflict")
+                    if is_dual_policy(p):
+                        require(self._dual_clock is not None and self._dual_clock.installed, "dual_clock_restart_forbidden")
                     return self.snapshot(p["policy_id"])
                 active = db.execute("SELECT id FROM news_review_policies WHERE status IN ('ACTIVE','PAUSED')").fetchall()
                 for row in active:
                     _, old = _policy(db, row["id"])
                     require(now >= old["expires_at_ms"], "another_policy_active")
+            binding = None
+            if is_dual_policy(p):
+                from .news_review_runtime_clock import BoundRuntimeClock
+                require(self._dual_clock is None and not getattr(self.store, '_news_review_clock_bindings', {}),
+                        "dual_clock_reactivation_forbidden")
+                binding = BoundRuntimeClock(p, sample=self._clock_sampler)
+                binding.check()
             ledger = ProviderCallLedger.create(self.store, p["room_id"], scope="news_event_review",
                 client_request_id=p["policy_id"], plan_hash=preview["policy_sha256"],
                 max_calls=p["max_model_calls"], skip_provider_ids=sorted(DISABLED))
@@ -185,6 +279,11 @@ class NewsReviewService:
                 cursor = db.execute("SELECT COALESCE(MAX(rowid),0) FROM source_inbox_items").fetchone()[0]
                 db.execute("INSERT INTO news_review_policies(id,policy_json,policy_sha256,provider_run_id,approved_at,cursor) VALUES(?,?,?,?,?,?)",
                            (p["policy_id"], encoded(p), preview["policy_sha256"], ledger.run_id, now, cursor))
+            if binding is not None:
+                binding.owner = self.owner
+                binding.installed = True
+                self._dual_clock = binding
+                self.store._news_review_clock_bindings = {p['policy_id']: binding}
         return self.snapshot(p["policy_id"])
 
     def pause(self, policy_id):
@@ -209,7 +308,7 @@ class NewsReviewService:
         with self.store._lock:
             with closing(self.store._connect()) as db:
                 row,p = _policy(db,policy_id)
-                _window(row,p,self.clock())
+                self._check_window(row,p)
             self._identity(p)
             settings = runtime.settings
             require(settings.source_profile == p["profile"] and settings.enabled and settings.auto_start
@@ -225,7 +324,7 @@ class NewsReviewService:
                 with closing(self.store._connect()) as db,db:
                     db.execute("BEGIN IMMEDIATE")
                     current,current_p = _policy(db,policy_id)
-                    _window(current,current_p,self.clock())
+                    self._check_window(current,current_p)
                     existing = db.execute("SELECT * FROM news_review_source_grants WHERE policy_id=? AND adapter_key=?",(policy_id,key)).fetchone()
                     if existing:
                         grant = json.loads(existing["grant_json"])
@@ -259,6 +358,7 @@ class NewsReviewService:
         self.prepare_startup()
         with self.store._lock, closing(self.store._connect()) as db, db:
             row, p = _policy(db, policy_id)
+            require(not is_dual_policy(p), "dual_clock_resume_forbidden")
             self._identity(p)
             require(row["policy_sha256"] == approved_policy_sha256 and row["status"] == "PAUSED"
                     and row["stop_reason"] in ({"operator_pause", "restart_confirmation_required"} | _PAID_STOPS), "resume_not_allowed")
@@ -275,7 +375,7 @@ class NewsReviewService:
         with self.store._lock, closing(self.store._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             row, p = _policy(db, policy_id)
-            _window(row, p, self.clock())
+            self._check_window(row, p)
             rows = db.execute("SELECT rowid,id FROM source_inbox_items WHERE rowid>? ORDER BY rowid LIMIT 50", (row["cursor"],)).fetchall()
             for entry in rows:
                 record = self.documents.item(entry["id"])
@@ -294,7 +394,7 @@ class NewsReviewService:
         self.owner.assert_held_for(self.store.path)
         with self.store._lock, closing(self.store._connect()) as db:
             row, p = _policy(db, policy_id)
-            _window(row, p, self.clock())
+            self._check_window(row, p)
             event = db.execute("SELECT * FROM news_review_events WHERE policy_id=? AND item_id=?", (policy_id, item_id)).fetchone()
             require(event is not None, "event_not_discovered")
             if event["document_job_id"] or event["status"] != "WAITING_DOCUMENT":
@@ -302,7 +402,7 @@ class NewsReviewService:
         self._identity(p)
         def reserve(db, job_id):
             row, current = _policy(db, policy_id)
-            _window(row, current, self.clock())
+            self._check_window(row, current)
             event = db.execute("SELECT * FROM news_review_events WHERE policy_id=? AND item_id=?", (policy_id, item_id)).fetchone()
             require(event and not event["document_job_id"], "document_already_reserved")
             require(row["documents_reserved"] < current["max_document_requests"], "document_budget_exhausted")
@@ -330,11 +430,11 @@ class NewsReviewService:
         with self.store._lock, closing(self.store._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             row, p = _policy(db, policy_id)
-            _window(row, p, self.clock())
+            self._check_window(row, p)
             event = db.execute("SELECT * FROM news_review_events WHERE policy_id=? AND item_id=?", (policy_id, item_id)).fetchone()
             require(event and event["event_key"] == event_key(source), "event_not_discovered")
             key = job_key(source, document)
-            _retire_expired_jobs(db, self.clock())
+            _retire_expired_jobs(db, self.clock(), self.store)
             previous = db.execute("""SELECT * FROM news_review_all_jobs WHERE dedupe_key=?
                 ORDER BY (started_at!=0 OR attempt_id!='' OR http_attempted!=0) DESC,
                          (policy_id=?) DESC,created_at DESC,id DESC LIMIT 1""", (key,policy_id)).fetchone()
@@ -418,7 +518,7 @@ class NewsReviewService:
             with closing(self.store._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 row, p = _policy(db, policy_id)
-                _window(row, p, self.clock())
+                self._check_window(row, p)
                 if row["stop_reason"]:
                     return False  # paid lane stopped; collection/enrichment can continue
                 if db.execute("SELECT 1 FROM news_review_all_jobs WHERE status='RUNNING'").fetchone():
@@ -461,7 +561,7 @@ class NewsReviewService:
             with self.store._lock, closing(self.store._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 current, auth, current_p, _, _ = self._verified_job(db, job["id"])
-                _window(auth, current_p, self.clock())
+                self._check_window(auth, current_p)
                 require(current["status"] == "RUNNING" and current["attempt_id"] == attempt["id"]
                         and not current["http_attempted"] and not auth["stop_reason"], "send_reservation_mismatch")
                 attempts = ledger.attempts()
@@ -553,7 +653,7 @@ class NewsReviewService:
                     db.execute("UPDATE news_review_policies SET stop_reason='unknown_result' WHERE id=?", (entry[0],))
                 for table in ('news_review_jobs', 'news_review_successor_jobs'):
                     db.execute(f"UPDATE {table} SET status='UNKNOWN',error_code='process_interrupted',finished_at=? WHERE status='RUNNING'", (self.clock(),))
-                _retire_expired_jobs(db, self.clock())
+                _retire_expired_jobs(db, self.clock(), self.store)
                 policies = db.execute("SELECT id,provider_run_id FROM news_review_policies").fetchall()
                 for entry in policies:
                     row, p = _policy(db, entry["id"])
@@ -578,7 +678,7 @@ class NewsReviewService:
             counts = {r[0]: r[1] for r in db.execute("SELECT status,COUNT(*) FROM news_review_all_jobs WHERE policy_id=? GROUP BY status",(policy_id,))}
             events = db.execute("SELECT COUNT(*) FROM news_review_events WHERE policy_id=?",(policy_id,)).fetchone()[0]
         return {"version":VERSION,"policy":p,"policy_sha256":row["policy_sha256"],"state":row["status"],
-                "expired":self.clock() >= p["expires_at_ms"],"paid_stop_reason":row["stop_reason"],
+                "expired":self.window_reached(p),"paid_stop_reason":row["stop_reason"],
                 "documents_reserved":row["documents_reserved"],"calls_reserved":row["calls_reserved"],
                 "tokens_reserved":row["tokens_reserved"],"cost_reserved_cny":row["cost_reserved"],
                 "events_observed":events,"job_counts":counts,"supplier_bill_verified":False,
@@ -596,7 +696,15 @@ def item_review_projection(store, item_id, *, clock=None):
     with store._lock, closing(store._connect()) as db:
         events = db.execute("SELECT * FROM news_review_events WHERE item_id=? ORDER BY discovered_at,policy_id",(item_id,)).fetchall()
         policies = [_policy(db,row[0]) for row in db.execute("SELECT id FROM news_review_policies WHERE status='ACTIVE'")]
-        observation_until = max((p["expires_at_ms"] for row,p in policies if now < p["expires_at_ms"]),default=0)
+        def still_observing(p):
+            if now >= p['expires_at_ms']:
+                return False
+            if not is_dual_policy(p):
+                return True
+            binding = getattr(store, '_news_review_clock_bindings', {}).get(p['policy_id'])
+            return bool(binding and binding.installed and binding.policy_sha256 == canonical_sha256(p)
+                        and binding.reference.snapshot()['first_stop'] is None)
+        observation_until = max((p["expires_at_ms"] for row,p in policies if still_observing(p)),default=0)
         jobs = db.execute("SELECT DISTINCT j.* FROM news_review_all_jobs j JOIN news_review_all_links e ON j.id=e.job_id WHERE e.item_id=? ORDER BY j.created_at,j.id",(item_id,)).fetchall()
         reviews = []
         for job in jobs:

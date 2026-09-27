@@ -1,8 +1,8 @@
-"""Offline reference policy for independent review, NOT a runtime activation.
+"""Time-bound evaluator, with no standalone request or activation authority.
 
-No production service imports this module. A verdict does not authorize HTTP,
-documents, model calls or database changes. The existing cumulative guard stays
-in force until a separately reviewed integration and new policy are approved.
+The runtime adapter binds this evaluator to one explicitly versioned policy and
+owned service session. Legacy policies retain the cumulative two-second guard.
+The evaluator alone cannot activate, restart, reserve or send any request.
 """
 from __future__ import annotations
 
@@ -180,6 +180,7 @@ class DualDeadlineReference:
                        'effective_elapsed_deadline_ms': self._deadline,
                        'deadline_extended': self._deadline > self._initial_deadline,
                        'metrics': metrics, 'runtime_integrated': False,
+                       'reading': dict(vars(reading)) if type(reading) is Reading and reading.valid() else None,
                        'request_authorized': False, 'live_acceptance_proven': False}
             self._latest = verdict
             if reason:

@@ -77,7 +77,7 @@ def main(argv=None):
             parser.error("prepare/run/report requires --config")
         policy = json.loads(Path(args.config).read_text(encoding="utf-8-sig"))
         requested = Path(policy["database_path"])
-    from backend.news_review_contracts import DISABLED, NewsReviewError, require, validate_policy
+    from backend.news_review_contracts import DISABLED, NewsReviewError, is_dual_policy, require, validate_policy
     # These pure path/contract checks precede config.py, whose directory setup is
     # intentional only after this destination has been admitted.
     database = isolated_path(requested)
@@ -92,7 +92,10 @@ def main(argv=None):
         root.mkdir(parents=True,exist_ok=False)
         database.parent.mkdir()
     else:
-        policy = validate_policy(policy)
+        policy = validate_policy(policy, allow_clock_template=bool(args.prepare or args.prepare_activation or args.activate))
+        require(not (is_dual_policy(policy) and args.run), "dual_clock_activation_only")
+        if is_dual_policy(policy) and (args.activate or args.prepare_activation):
+            require(policy['clock_activation'] is None, "dual_clock_template_required")
         require(database.is_file(), "trial_not_initialized")
     # Bind captured backend configuration before importing store/provider modules.
     os.environ["AI_STUDIO_DATABASE_PATH"] = str(database)
@@ -128,7 +131,7 @@ def main(argv=None):
             write_record(root/"initialized.json",result)
         print(json.dumps(result,ensure_ascii=False))
         return 0
-    policy = validate_policy(policy)
+    policy = validate_policy(policy, allow_clock_template=bool(args.prepare or args.prepare_activation or args.activate))
     require(database.is_file(), "trial_not_initialized")
     verify_candidate(policy["candidate_sha"])
     output = Path(args.output).resolve() if args.output else root/("report-"+uuid.uuid4().hex+".json")
@@ -148,11 +151,15 @@ def main(argv=None):
         store = STORE._resolve()
         providers = ProviderRegistry(disabled_provider_ids=DISABLED,api_keys={"doubao":""})
         service = NewsReviewService(store,providers,instance_owner=owner)
-        preview = service.preview(policy)
         from backend.decision_lineage import canonical_sha256
+        preview = ({'policy': policy, 'policy_sha256': canonical_sha256(policy)} if args.report else
+                   service.preview(policy, allow_clock_template=bool(args.prepare or args.prepare_activation or args.activate)))
         activation = {"version":"news_review_activation_v1","policy_template":policy,
                       "duration_ms":args.duration_ms,"time_resolution":"first_local_key_submission",
                       "permitted_changes":["not_before_ms","expires_at_ms"],"activations":1}
+        if is_dual_policy(policy):
+            activation['version'] = 'news_review_dual_clock_activation_v1'
+            activation['permitted_changes'].append('clock_activation')
         activation_sha = canonical_sha256(activation)
         if args.prepare_activation:
             write_record(output,{"activation":activation,"activation_sha256":activation_sha,
@@ -191,14 +198,22 @@ def main(argv=None):
                 with store._lock,closing(store._connect()) as db:
                     require(not db.execute("SELECT 1 FROM news_review_policies WHERE id=?",(policy["policy_id"],)).fetchone(),
                             "activation_already_reserved")
-                activated_at = service.clock()
+                reading = None
+                if is_dual_policy(policy):
+                    from backend.news_review_windows_clock import sample_windows_clock
+                    reading = sample_windows_clock()
+                activated_at = reading.wall_ms if reading else service.clock()
                 require(policy["not_before_ms"] <= activated_at < policy["expires_at_ms"], "activation_expired")
-                policy = validate_policy({**policy,"not_before_ms":activated_at,"expires_at_ms":activated_at+args.duration_ms})
+                resolved = {**policy,"not_before_ms":activated_at,"expires_at_ms":activated_at+args.duration_ms}
+                if reading is not None:
+                    resolved['clock_activation'] = dict(vars(reading))
+                policy = validate_policy(resolved)
                 preview = service.preview(policy)
                 approved_hash = preview["policy_sha256"]
                 # Exclusive files consume this activation even if the process
-                # dies before its DB approval. Resume uses the resolved policy;
-                # activation can never slide the window or reset spent slots.
+                # dies before its DB approval. Legacy resume uses the resolved
+                # policy; dual-clock policies forbid resume altogether.
+                # Activation can never slide the window or reset spent slots.
                 write_record(root/"activation-policy.json",policy)
                 write_record(root/"activation-receipt.json",{"activation":activation,"activation_sha256":activation_sha,
                     "policy_sha256":approved_hash,"activated_at":activated_at,"expires_at":policy["expires_at_ms"]})

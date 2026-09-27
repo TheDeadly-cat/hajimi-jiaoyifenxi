@@ -9,7 +9,7 @@ from contextlib import closing
 
 from .decision_lineage import canonical_sha256
 from .document_evidence import current_document
-from .news_review_contracts import VERSION, encoded, freshness, require
+from .news_review_contracts import VERSION, encoded, freshness, is_dual_policy, require
 from .news_review_service import _policy
 from .news_review_source_analysis import analyze_source_runs
 from .provider_call_ledger import ProviderCallLedger
@@ -39,7 +39,7 @@ class NewsReviewJournal:
             value = {"version":VERSION,"policy_id":self.policy_id,"policy_sha256":snapshot["policy_sha256"],
                      "session_id":self.session_id,"sequence":previous[0]+1 if previous else 1,
                      "previous_sha256":previous[1] if previous else "","kind":kind,"wall_ms":self.service.clock(),
-                     "monotonic_ms":int(time.monotonic()*1000),"runtime_status":runtime_status,
+                     "monotonic_ms":(self.service.monotonic_ms() if is_dual_policy(snapshot['policy']) else int(time.monotonic()*1000)),"runtime_status":runtime_status,
                      "source_run_id":source_run_id,"source_run_sha256":canonical_sha256(run) if run else "",
                      "queue_counts":snapshot["job_counts"],"events_observed":snapshot["events_observed"],
                      "calls_reserved":snapshot["calls_reserved"],"documents_reserved":snapshot["documents_reserved"]}
@@ -145,13 +145,47 @@ def build_news_review_report(service, policy_id):
             monotonic_delta = right["monotonic_ms"]-left["monotonic_ms"]
             if monotonic_delta < 0 or abs(monotonic_delta-delta) > 2000:
                 clock_anomalies += 1
+    dual = is_dual_policy(p)
+    clock_data = service.clock_diagnostics()
+    if dual and clock_data.get('policy_sha256') != row['policy_sha256']:
+        clock_data = next((s['clock_diagnostics'] for s in reversed(samples)
+            if s.get('clock_diagnostics', {}).get('policy_sha256') == row['policy_sha256']),
+            {'available': False, 'error_code': 'CLOCK_BINDING_EVIDENCE_UNAVAILABLE'})
+    reference = clock_data.get('reference', {}) if dual else {}
+    final_clock = reference.get('first_stop') or reference.get('latest') or {}
+    end_reading = final_clock.get('reading') or {}
+    elapsed_lower = None
+    elapsed_upper = None
+    if dual and end_reading:
+        anchor = p['clock_activation']
+        end_limit = reference.get('effective_elapsed_deadline_ms', end_reading['monotonic_before_ms'])
+        elapsed_lower = max(0, min(end_reading['monotonic_before_ms'], end_limit)-anchor['monotonic_after_ms'])
+        elapsed_upper = max(0, min(end_reading['monotonic_after_ms'], end_limit)-anchor['monotonic_before_ms'])
+    expiry_reasons = {'absolute_deadline_reached', 'elapsed_deadline_reached'}
+    authorized_end = (final_clock.get('stop_reason') in expiry_reasons if dual else service.window_reached(p))
+    if dual:
+        from .news_review_runtime_clock import clock_faults
+        snapshot['expired'] = bool(snapshot['expired'] or authorized_end)
+        gaps = [right['monotonic_ms']-left['monotonic_ms'] for left, right in zip(heartbeat, heartbeat[1:])]
+        clock_anomalies = int(bool(reference.get('first_stop') and (
+            final_clock.get('stop_reason') not in expiry_reasons or clock_faults(final_clock))))
     full_window = (p["expires_at_ms"]-p["not_before_ms"] == 86_400_000
                    and service.clock() >= p["expires_at_ms"])
+    if dual:
+        full_window = bool(p['expires_at_ms']-p['not_before_ms'] == 86_400_000
+                           and elapsed_lower is not None and elapsed_lower >= 86_400_000)
     coverage_observed = bool(full_window and len(sessions) == 1 and len(heartbeat) >= 2880
         and heartbeat[0]["kind"] == "session_started" and heartbeat[-1]["kind"] == "window_closed"
         and heartbeat[0]["wall_ms"] <= p["not_before_ms"]+30_000
         and heartbeat[-1]["wall_ms"] >= p["expires_at_ms"] and gaps and max(gaps) <= 30_000
         and min(gaps) >= 0 and not clock_anomalies)
+    authorized_coverage = coverage_observed
+    if dual:
+        authorized_coverage = bool(authorized_end and len(sessions) == 1 and len(heartbeat) >= 2880
+            and heartbeat[0]['kind'] == 'session_started' and heartbeat[-1]['kind'] == 'window_closed'
+            and 0 <= heartbeat[0]['monotonic_ms']-p['clock_activation']['monotonic_before_ms'] <= 30000
+            and gaps and 0 <= min(gaps) and max(gaps) <= 30000 and not clock_anomalies)
+        coverage_observed = bool(full_window and authorized_coverage)
     latencies.sort()
     stops = [s['stop'] for s in samples if s['kind'] == 'stop_requested']
     clean = bool(samples and samples[-1]['kind'] == 'session_stopped')
@@ -173,9 +207,16 @@ def build_news_review_report(service, policy_id):
             "continuity":{"session_count":len(sessions),"heartbeat_count":len(heartbeat),
             "clean_shutdown_recorded":bool(samples and samples[-1]["kind"] == "session_stopped"),
             "maximum_sample_gap_ms":max(gaps) if gaps else None,"clock_anomalies":clock_anomalies,
-            "full_24h_window_elapsed":full_window,"continuous_window_observed":coverage_observed},
-            "clock_guard_diagnostics":service.clock_diagnostics(),
-            "clock_anomalies_basis":"adjacent_heartbeat_samples",
+            "full_24h_window_elapsed":full_window,"continuous_window_observed":coverage_observed,
+            "authorized_window_coverage_observed":authorized_coverage,
+            "sample_gap_clock_basis":"monotonic" if dual else "wall"},
+            "clock_guard_diagnostics":clock_data,
+            "clock_anomalies_basis":"bound_dual_clock" if dual else "adjacent_heartbeat_samples",
+            "authorization_time":{"strategy":"dual_deadline" if dual else "cumulative_two_seconds",
+                "authorized_window_end_observed":bool(authorized_end),
+                "stop_reason":final_clock.get('stop_reason') if dual else None,
+                "authorized_elapsed_lower_ms":elapsed_lower, "authorized_elapsed_upper_ms":elapsed_upper,
+                "actual_full_24h_proven":full_window if dual else None},
             "chain_sha256":previous,"supplier_bill_verified":False,
             "event_end_to_end_recorded":any(j["status"] in {"REVIEWED","MATERIAL_INSUFFICIENT"}
                 and bool(j["attempt_id"]) for j in jobs),
