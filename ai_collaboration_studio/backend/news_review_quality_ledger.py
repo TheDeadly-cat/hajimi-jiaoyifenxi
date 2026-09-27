@@ -1,8 +1,8 @@
 """Single-batch reservation and admission checks; no provider or source I/O.
 
-This internal component does not expose an execution command. A separately
-reviewed caller must bind each send to AuthorizedTextRequest and persist its
-actual provider response. Receipt statuses here are caller-reported outcomes.
+The executor binds each send to AuthorizedTextRequest and retains visible
+provider output separately. This component's receipts remain caller-reported;
+only the executor's correlated evidence supports observed admission claims.
 """
 from __future__ import annotations
 
@@ -111,6 +111,19 @@ class QualityBatchLedger:
     def _require_open(self):
         with self._state_lock:
             require(not self._closed, self._stop_code or "quality_batch_closed")
+
+    def admission_state(self):
+        """Nonblocking with respect to persistence; safe for the host watchdog."""
+        with self._state_lock:
+            return {"closed": self._closed, "stop_code": self._stop_code,
+                    "observed_stop_codes": list(self._stop_codes)}
+
+    def stop(self, code):
+        require(code in {"quality_operator_interrupted", "quality_worker_failed",
+                        "quality_request_timeout", "quality_shutdown_incomplete",
+                        "quality_response_persistence_failed", "quality_credential_echo"},
+                "quality_stop_code_invalid")
+        self._stop_once(code)
 
     def admission_check(self):
         """Bounded in-memory final check, suitable for the existing send gate."""
@@ -224,4 +237,4 @@ class QualityBatchLedger:
                         + r["reserved_output_tokens"] * OUTPUT_RATE for r in claimed), Decimal(0)) / 1_000_000),
                     **stop,
                     "inflight_attempt_id": self._inflight["id"] if self._inflight else None,
-                    "real_execution_command_available": False}
+                    "real_execution_command_available": True}
