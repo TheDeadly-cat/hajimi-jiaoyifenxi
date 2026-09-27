@@ -202,7 +202,9 @@ def main(argv=None):
                 if is_dual_policy(policy):
                     from backend.news_review_windows_clock import sample_windows_clock
                     reading = sample_windows_clock()
+                activation_mono_before = reading.monotonic_before_ns if reading else time.monotonic_ns()
                 activated_at = reading.wall_ms if reading else service.clock()
+                activation_mono_after = reading.monotonic_after_ns if reading else time.monotonic_ns()
                 require(policy["not_before_ms"] <= activated_at < policy["expires_at_ms"], "activation_expired")
                 resolved = {**policy,"not_before_ms":activated_at,"expires_at_ms":activated_at+args.duration_ms}
                 if reading is not None:
@@ -216,7 +218,10 @@ def main(argv=None):
                 # Activation can never slide the window or reset spent slots.
                 write_record(root/"activation-policy.json",policy)
                 write_record(root/"activation-receipt.json",{"activation":activation,"activation_sha256":activation_sha,
-                    "policy_sha256":approved_hash,"activated_at":activated_at,"expires_at":policy["expires_at_ms"]})
+                    "policy_sha256":approved_hash,"activated_at":activated_at,"expires_at":policy["expires_at_ms"],
+                    "activation_monotonic_before_ns":activation_mono_before,
+                    "activation_monotonic_after_ns":activation_mono_after,
+                    "activation_monotonic_implementation":time.get_clock_info('monotonic').implementation})
             current = service.approve(policy,approved_policy_sha256=approved_hash)
             if args.resume_paused:
                 current = service.resume(policy["policy_id"],approved_policy_sha256=args.approve_policy_sha256)
@@ -243,8 +248,16 @@ def main(argv=None):
                 holder["runtime"] = runtime
                 return runtime
             def ready(server):
+                # Safe native process identity lets a pre-armed independent
+                # observer bind the eventual host without reading credentials
+                # or treating owner-file metadata as proof of lock ownership.
+                process_id, creation_ticks = os.getpid(), None
+                if os.name == 'nt':
+                    from backend.news_review_windows_clock import _current_process_identity
+                    process_id, creation_ticks = _current_process_identity()
                 write_record(root/("host-"+journal.session_id+".json"),{"url":f"http://127.0.0.1:{server.server_port}",
-                             "policy_sha256":preview["policy_sha256"],"expires_at_ms":policy["expires_at_ms"]})
+                             "policy_sha256":preview["policy_sha256"],"expires_at_ms":policy["expires_at_ms"],
+                             "process_id":process_id,"process_start_utc_ticks":creation_ticks})
                 holder["ready"] = True
             journal.record("session_started",runtime_status="starting")
             watcher = threading.Thread(target=termination.watch,args=(holder,),name="news-review-observer",daemon=False)

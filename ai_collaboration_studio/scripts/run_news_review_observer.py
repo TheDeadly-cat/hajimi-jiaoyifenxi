@@ -27,7 +27,7 @@ from scripts.news_review_watchdog import native_creation_ticks
 
 FILES = ('backend/news_review_monitor.py', 'backend/news_review_monitor_probe.py',
     'scripts/news_review_watchdog.py', 'scripts/run_news_review_observer.py',
-    'scripts/inspect_news_review_process_tree.ps1')
+    'scripts/inspect_news_review_process_tree.ps1', 'scripts/news_review_observer_wait.py')
 RECORDS = ('preparation-manifest.json', 'user-approval.json', 'ci-verification.json',
     'launch-receipt.json', 'launcher-start.json', 'activation-receipt.json', 'activation-policy.json')
 
@@ -46,6 +46,10 @@ def safe_path(value):
 
 
 def read_json(path, limit=262144):
+    return read_record(path, limit)[0]
+
+
+def read_record(path, limit=262144):
     with Path(path).open('rb') as stream:
         data = stream.read(limit+1)
     require(len(data) <= limit, 'receipt_size_limit')
@@ -57,7 +61,8 @@ def read_json(path, limit=262144):
         return result
     def invalid(_value):
         raise ProbeError('nonfinite_receipt_value')
-    return json.loads(data.decode('utf-8-sig'), object_pairs_hook=pairs, parse_constant=invalid)
+    return (json.loads(data.decode('utf-8-sig'), object_pairs_hook=pairs, parse_constant=invalid),
+            hashlib.sha256(data).hexdigest())
 
 
 def pin_key(pin):
@@ -73,6 +78,31 @@ def verify_checkout(candidate):
                                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         require(result.returncode == 0 and result.stdout.decode('ascii').strip() == expected,
                 'observer_candidate_unconfirmed')
+
+
+def verify_preparation(root, identity, manifest, ci, *, approval=None, manifest_sha256=None):
+    require(manifest.get('candidate_sha') == ci.get('candidate_sha') == identity['candidate_sha']
+            and manifest.get('activation_sha256') == identity['activation_sha256'], 'trial_candidate_mismatch')
+    if approval is not None:
+        require(approval.get('approved') is True and approval.get('preparation_manifest_sha256') == manifest_sha256
+                and all(approval.get(k) == identity[k] for k in ('candidate_sha','activation_sha256')),
+                'trial_approval_unconfirmed')
+    entries = manifest.get('files')
+    require(type(entries) is list and 1 <= len(entries) <= 128, 'preparation_manifest_invalid')
+    names = set()
+    for entry in entries:
+        name = entry.get('name') if type(entry) is dict else None
+        require(type(name) is str and Path(name).name == name and name not in names
+                and Path(name).suffix.lower() in {'.json', '.py', '.ps1', '.psm1', '.md'}
+                and not re.search(r'key|secret|credential|password|raw|log', name, re.I), 'manifest_file_rejected')
+        names.add(name)
+        require(sha(safe_path(str(root/name))) == entry.get('sha256'), 'prepared_file_changed')
+    runs = ci.get('workflow_runs')
+    require(ci.get('evidence_reviewed') is True and type(runs) is list and len(runs) >= 2
+            and all(type(v) is dict and v.get('head_sha') == identity['candidate_sha']
+                    and v.get('status') == 'completed' and v.get('conclusion') == 'success'
+                    and integer(v.get('id'), positive=True) for v in runs)
+            and len({v['id'] for v in runs}) == len(runs), 'trial_ci_unconfirmed')
 
 
 def verify_trial(request):
@@ -104,34 +134,15 @@ def verify_trial(request):
     values, hashes = {}, {}
     for name in (*RECORDS, request['host_receipt_name']):
         path = safe_path(str(root/name))
-        hashes[name] = sha(path)
-        values[name] = read_json(path)
+        values[name], hashes[name] = read_record(path)
     approval = values['user-approval.json']
     manifest = values['preparation-manifest.json']
     ci = values['ci-verification.json']
-    require(approval.get('approved') is True and approval.get('preparation_manifest_sha256') == hashes[RECORDS[0]],
-            'trial_approval_unconfirmed')
+    verify_preparation(root, identity, manifest, ci, approval=approval, manifest_sha256=hashes[RECORDS[0]])
     for value in (approval, manifest, ci, values['launch-receipt.json'], values['launcher-start.json']):
         require(value.get('candidate_sha') == identity['candidate_sha'], 'trial_candidate_mismatch')
     for value in (approval, manifest, values['launch-receipt.json'], values['launcher-start.json']):
         require(value.get('activation_sha256') == identity['activation_sha256'], 'trial_activation_mismatch')
-    entries = manifest.get('files')
-    require(type(entries) is list and 1 <= len(entries) <= 128, 'preparation_manifest_invalid')
-    names = set()
-    for entry in entries:
-        name = entry.get('name') if type(entry) is dict else None
-        require(type(name) is str and Path(name).name == name and name not in names
-                and Path(name).suffix.lower() in {'.json', '.py', '.ps1', '.psm1', '.md'}
-                and not re.search(r'key|secret|credential|password|raw|log', name, re.I), 'manifest_file_rejected')
-        names.add(name)
-        require(sha(safe_path(str(root/name))) == entry.get('sha256'), 'prepared_file_changed')
-    runs = ci.get('workflow_runs')
-    require(ci.get('evidence_reviewed') is True and type(runs) is list and len(runs) >= 2
-            and all(type(v) is dict and v.get('head_sha') == identity['candidate_sha']
-                    and v.get('status') == 'completed' and v.get('conclusion') == 'success'
-                    and integer(v.get('id'), positive=True) for v in runs)
-            and len({v['id'] for v in runs}) == len(runs),
-            'trial_ci_unconfirmed')
     launch, start = values['launch-receipt.json'], values['launcher-start.json']
     launcher = request['launcher_pin']
     require(launch.get('process_id') == start.get('launcher_pid') == launcher['pid']
@@ -163,10 +174,18 @@ def verify_trial(request):
     host = values[request['host_receipt_name']]
     require(host.get('url') == target['host_url'] and host.get('policy_sha256') == identity['policy_sha256']
             and host.get('expires_at_ms') == end, 'host_receipt_mismatch')
+    if 'process_id' in host or 'process_start_utc_ticks' in host:
+        require(host.get('process_id') == request['host_pin']['pid']
+                and type(host.get('process_start_utc_ticks')) is int
+                and host['process_start_utc_ticks'] == native_ticks(request['host_pin']['start_utc']),
+                'host_native_pin_mismatch')
     return root, hashes
 
 
 def prepare(request, powershell):
+    if type(request) is dict and request.get('version') == 'news_review_observer_wait_request_v1':
+        from scripts.news_review_observer_wait import prepare_wait
+        return prepare_wait(request, powershell, core=sys.modules[__name__])
     root, records = verify_trial(request)
     verify_checkout(request['target']['identity']['candidate_sha'])
     shell = safe_path(powershell)
@@ -188,8 +207,11 @@ def verify_plan(wrapped, approved_hash):
     require(plan == prepare(plan['request'], plan['powershell']['path'])['plan'], 'observer_preparation_changed')
     require(os.name == 'nt', 'native_windows_required')
     now = time.time_ns()//1_000_000
-    target = plan['request']['target']
-    require(target['activated_at_ms'] <= now < target['expires_at_ms']+255000, 'observer_window_closed')
+    if plan['version'] == 'news_review_observer_wait_plan_v1':
+        require(now < plan['activation_eligibility_until_ms'], 'observer_window_closed')
+    else:
+        target = plan['request']['target']
+        require(target['activated_at_ms'] <= now < target['expires_at_ms']+255000, 'observer_window_closed')
     return plan
 
 
@@ -199,6 +221,22 @@ class NativeInspector:
         self.pins = copy.deepcopy(plan['request']['pins'])
         self.sequence = 0
         self.last = None
+        self.waiting = plan['request']['host_pin'] is None
+        keys=[pin_key(pin) for pin in self.pins]
+        require(1 <= len(keys) <= 128 and len(keys) == len(set(keys))
+                and pin_key(plan['request']['launcher_pin']) in keys, 'native_launcher_pin_missing')
+        if not self.waiting:
+            require(pin_key(plan['request']['host_pin']) in keys, 'native_host_pin_missing')
+
+    def bind_active(self, plan):
+        prior, current = self.plan['request']['target']['identity'], plan['request']['target']['identity']
+        require(self.waiting and prior['policy_sha256'] is None
+                and all(prior[k] == current[k] for k in ('candidate_sha','activation_sha256'))
+                and {pin_key(p) for p in self.pins} <= {pin_key(p) for p in plan['request']['pins']},
+                'observer_activation_rebinding_forbidden')
+        self.plan = copy.deepcopy(plan)
+        self.pins = copy.deepcopy(plan['request']['pins'])
+        self.waiting = False
 
     def __call__(self):
         plan, request = self.plan, self.plan['request']
@@ -218,7 +256,8 @@ class NativeInspector:
                 capture_output=True, timeout=45, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             require(result.returncode == 0 and len(result.stdout) <= 65536, 'native_inspection_failed')
             tree = json.loads(result.stdout.decode('utf-8-sig'))
-            require(type(tree) is dict and tree.get('version') == 'news_review_native_inspection_v1'
+            expected_version = 'news_review_native_wait_inspection_v1' if self.waiting else 'news_review_native_inspection_v1'
+            require(type(tree) is dict and tree.get('version') == expected_version
                     and all(tree.get(k) == v for k,v in identity.items()), 'native_inspection_identity_mismatch')
             require(type(tree.get('pins')) is list and len(tree['pins']) <= 128, 'native_inspection_pins_invalid')
             new_keys = [pin_key(pin) for pin in tree['pins']]
@@ -230,7 +269,7 @@ class NativeInspector:
                             and type(p['alive']) is bool and type(p['pid_reused']) is bool for p in processes),
                     'native_inspection_processes_invalid')
             require({pin_key({k:p[k] for k in ('pid','parent_pid','start_utc')}) for p in processes} == set(new_keys)
-                    and tree.get('owner_pid') == request['host_pin']['pid']
+                    and tree.get('owner_pid') == (None if self.waiting else request['host_pin']['pid'])
                     and tree.get('launcher_pid') == request['launcher_pin']['pid'], 'native_inspection_processes_invalid')
             require(set(tree) == {'version','checked_at_utc','candidate_sha','activation_sha256','policy_sha256',
                 'launcher_pid','pins','processes','enumeration_consistent','known_identity_inspection_incomplete',
@@ -251,6 +290,9 @@ class NativeInspector:
                         and integer(listener['LocalPort'], positive=True) and listener['LocalPort'] <= 65535
                         and integer(listener['OwningProcess']), 'native_listener_shape_invalid')
                 ipaddress.ip_address(listener['LocalAddress'])
+            if self.waiting:
+                require(tree['host_url'] is None and not tree['listeners'] and tree['safe_status_reads_allowed'] is False
+                        and tree['owner_identity_pinned'] is False and tree['owner_alive'] is False, 'waiting_inspection_invalid')
             # Retain descendants even when a later protocol/HTTP check fails.
             self.pins = tree['pins']
             self.last = tree
@@ -278,6 +320,9 @@ def terminal_tree(tree):
 
 def run_observer(plan, plan_hash):
     plan = verify_plan({'plan':plan, 'plan_sha256':canonical(plan)}, plan_hash)
+    if plan['version'] == 'news_review_observer_wait_plan_v1':
+        from scripts.news_review_observer_wait import run_waiting
+        return run_waiting(plan, plan_hash, core=sys.modules[__name__])
     directory = safe_path(plan['output_directory'])
     directory.mkdir(exist_ok=False)
     target = plan['request']['target']
@@ -286,8 +331,15 @@ def run_observer(plan, plan_hash):
     require(integer(ticks, positive=True), 'observer_native_identity_unconfirmed')
     publish_json_once(directory/'observer-pin.json', {'identity':identity, 'plan_sha256':plan_hash,
         'pid':os.getpid(), 'process_start_utc_ticks':ticks, 'started_at_ms':time.time_ns()//1_000_000})
+    return observe_active(plan, plan_hash, directory)
+
+
+def observe_active(plan, plan_hash, directory, *, inspector=None):
+    """Internal continuation of the same already-approved observer process."""
+    target = plan['request']['target']
+    identity = target['identity']
     stop = threading.Event()
-    inspector = NativeInspector(plan, directory)
+    inspector = inspector or NativeInspector(plan, directory)
     ended = {'phase':'drain_deadline_unconfirmed_user_action_required', 'two_native_terminal_checks':False}
     def inspect():
         tree = inspector()

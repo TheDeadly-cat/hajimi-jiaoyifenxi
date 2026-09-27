@@ -306,7 +306,19 @@ class NativeObserverTests(unittest.TestCase):
                     'powershell':{'path':shell,'sha256':observer.sha(shell)},
                     'monitor_files':{name:observer.sha(observer.APP/name) for name in observer.FILES}}
                 directory=root/'inspection';directory.mkdir()
-                inspect=observer.NativeInspector(plan,directory)
+                waiting=copy.deepcopy(plan)
+                waiting['request']['target']['identity']['policy_sha256']=None
+                waiting['request']['target']['host_url']=None
+                waiting['request']['host_pin']=None
+                waiting['request']['pins']=[launcher]
+                inspect=observer.NativeInspector(waiting,directory)
+                before_activation=inspect()
+                self.assertIsNone(before_activation['policy_sha256'])
+                self.assertEqual(before_activation['listeners'],[])
+                self.assertFalse(before_activation['safe_status_reads_allowed'])
+                self.assertIn(child_pid,[p['pid'] for p in inspect.pins])
+                plan['request']['pins']=copy.deepcopy(inspect.pins)
+                inspect.bind_active(plan)
                 live=inspect()
                 self.assertTrue(live['owner_alive'])
                 self.assertEqual(live['listeners'],[{'LocalAddress':'127.0.0.1','LocalPort':hello['port'],'OwningProcess':child_pid}])
@@ -318,7 +330,8 @@ class NativeObserverTests(unittest.TestCase):
                 self.assertFalse(observer.terminal_tree(orphan))
                 changed=copy.deepcopy(plan)
                 changed['request']['host_pin']['start_utc']=utc_ticks(native_creation_ticks(child_pid)+1)
-                changed['request']['pins'][1]=changed['request']['host_pin']
+                changed['request']['pins']=[changed['request']['host_pin'] if p['pid']==child_pid else p
+                                           for p in changed['request']['pins']]
                 wrong_dir=root/'wrong-pin';wrong_dir.mkdir()
                 reused=observer.NativeInspector(changed,wrong_dir)()
                 self.assertTrue(reused['known_identity_inspection_incomplete'])

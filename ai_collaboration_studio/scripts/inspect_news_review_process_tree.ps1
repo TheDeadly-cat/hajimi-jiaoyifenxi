@@ -55,10 +55,15 @@ $inputFile = [IO.Path]::GetFullPath($InputPath)
 if ((Get-Item -LiteralPath $inputFile).Length -gt 65536) { throw 'inspection_input_too_large' }
 $inputValue = Get-Content -LiteralPath $inputFile -Raw -Encoding utf8 | ConvertFrom-Json
 if ($inputValue.version -cne 'news_review_native_inspection_input_v1') { throw 'inspection_input_version' }
-$uri = [Uri]$inputValue.host_url
-if ($uri.Scheme -cne 'http' -or $uri.Host -cne '127.0.0.1' -or $uri.Port -lt 1024 -or
-    $uri.Port -in @(8770,11111) -or $uri.AbsolutePath -cne '/' -or $uri.Query -or $uri.Fragment -or $uri.UserInfo) {
-    throw 'inspection_host_url_invalid'
+$waiting = $null -eq $inputValue.host_pin
+if ($waiting) {
+    if ($null -ne $inputValue.host_url -or $null -ne $inputValue.identity.policy_sha256) { throw 'waiting_identity_invalid' }
+} else {
+    $uri = [Uri]$inputValue.host_url
+    if ($uri.Scheme -cne 'http' -or $uri.Host -cne '127.0.0.1' -or $uri.Port -lt 1024 -or
+        $uri.Port -in @(8770,11111) -or $uri.AbsolutePath -cne '/' -or $uri.Query -or $uri.Fragment -or $uri.UserInfo) {
+        throw 'inspection_host_url_invalid'
+    }
 }
 $pins = @($inputValue.pins)
 if ($pins.Count -lt 1 -or $pins.Count -gt 128) { throw 'inspection_pins_invalid' }
@@ -104,19 +109,23 @@ foreach ($pin in $pins) {
 if (@($tree.pins | Where-Object pid -in $unidentified).Count -gt 0 -or
     @($cimRows | Where-Object { $_.pid -in $unidentified -and $_.parent_pid -in @($tree.pins.pid) }).Count -gt 0 -or
     @($tree.processes | Where-Object pid_reused).Count -gt 0) { $incomplete = $true }
-$owners = @($tree.processes | Where-Object { $_.pid -eq $inputValue.host_pin.pid -and
-    (Get-NativeTicks $_.start_utc) -eq (Get-NativeTicks $inputValue.host_pin.start_utc) })
-$ownerAlive = $owners.Count -eq 1 -and $owners[0].alive
-$listeners = @(Get-NetTCPConnection -State Listen | Where-Object LocalPort -eq $uri.Port |
-    Select-Object LocalAddress,LocalPort,OwningProcess)
-$portBound = $listeners.Count -eq 1 -and $listeners[0].LocalAddress -ceq '127.0.0.1' -and
-    $listeners[0].OwningProcess -eq $inputValue.host_pin.pid
+$owners = @(); $ownerAlive = $false; $listeners = @(); $portBound = $false; $hostPid = $null
+if (-not $waiting) {
+    $hostPid = $inputValue.host_pin.pid
+    $owners = @($tree.processes | Where-Object { $_.pid -eq $hostPid -and
+        (Get-NativeTicks $_.start_utc) -eq (Get-NativeTicks $inputValue.host_pin.start_utc) })
+    $ownerAlive = $owners.Count -eq 1 -and $owners[0].alive
+    $listeners = @(Get-NetTCPConnection -State Listen | Where-Object LocalPort -eq $uri.Port |
+        Select-Object LocalAddress,LocalPort,OwningProcess)
+    $portBound = $listeners.Count -eq 1 -and $listeners[0].LocalAddress -ceq '127.0.0.1' -and
+        $listeners[0].OwningProcess -eq $hostPid
+}
 $result = [ordered]@{
-    version='news_review_native_inspection_v1';checked_at_utc=[DateTime]::UtcNow.ToString('o');
+    version=$(if ($waiting) {'news_review_native_wait_inspection_v1'} else {'news_review_native_inspection_v1'});checked_at_utc=[DateTime]::UtcNow.ToString('o');
     candidate_sha=$inputValue.identity.candidate_sha;activation_sha256=$inputValue.identity.activation_sha256;
     policy_sha256=$inputValue.identity.policy_sha256;launcher_pid=$inputValue.launcher_pin.pid;
     pins=$tree.pins;processes=$tree.processes;enumeration_consistent=$enumerationConsistent;
-    known_identity_inspection_incomplete=[bool]$incomplete;owner_pid=$inputValue.host_pin.pid;
+    known_identity_inspection_incomplete=[bool]$incomplete;owner_pid=$hostPid;
     owner_identity_pinned=($owners.Count -eq 1);owner_alive=[bool]$ownerAlive;
     listeners=$listeners;host_url=$inputValue.host_url;
     safe_status_reads_allowed=[bool]($ownerAlive -and $portBound -and -not $incomplete);
