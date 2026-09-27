@@ -167,6 +167,7 @@ class MicronJsonCompositionTests(unittest.TestCase):
                 self.assertEqual(project_adapter_health(state, now_ms=self.clock_ms)["state"], "degraded")
                 self.assertEqual(state["next_due_at_ms"] - self.clock_ms, adapter.poll_interval_ms)
         self.assertTrue(recovered, "all-success transport must recover on the same scheduler and client")
+        self.assertLessEqual(cycle, 5, "four transient failures must recover within four later bounded polls")
         self.assertEqual(sum(call[2] for call in calls), 4)
         self.assertEqual(self.items(), [])
 
@@ -192,13 +193,20 @@ class MicronJsonCompositionTests(unittest.TestCase):
         self.assertEqual(project_adapter_health(pending["state"], now_ms=self.clock_ms)["state"], "degraded")
 
     def pending_fixture_payload(self):
-        transport = MicronJsonFixtureTransport()
+        fixture = MicronJsonFixtureTransport()
+        fail = [False]
+        def transport(url, **controls):
+            if controls["head_only"] and fail[0]:
+                raise URLError("fixture transient four-head failure")
+            return fixture(url, **controls)
         adapter = self.adapter(transport)
         supervisor = self.supervisor(adapter)
         baseline = supervisor.run_once(adapter.adapter_key)
-        transport.missing_metadata_id = 1
+        fail[0] = True
         supervisor.run_once(adapter.adapter_key)
-        transport.missing_metadata_id = 0
+        fail[0] = False
+        # One failed identity is now retried immediately; the remaining three
+        # still provide authentic unattempted pending evidence for these gates.
         payload = adapter._adapter.monitoring_releases_batch(["US.MU"], force=True, require_complete_metadata=False)
         return adapter, supervisor, baseline, payload
 
@@ -217,7 +225,8 @@ class MicronJsonCompositionTests(unittest.TestCase):
                 payload["source_errors"][0]["code"] = "UNKNOWN_FAILURE"
                 payload["rows"][0]["metadata_progress"]["failed"][0]["code"] = "UNKNOWN_FAILURE"
             elif mutation == "attempted":
-                payload["rows"][0]["metadata_progress"]["requested_ids"].append(1)
+                progress = payload["rows"][0]["metadata_progress"]
+                progress["requested_ids"].append(progress["failed"][0]["press_release_id"])
             elif mutation == "bad_progress":
                 payload["rows"][0]["metadata_progress"]["failed"][0]["press_release_id"] = 999
             else:

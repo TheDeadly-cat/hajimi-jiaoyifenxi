@@ -118,6 +118,94 @@ class NewsReviewEdgeTests(unittest.TestCase):
         self.assertEqual(f.count('provider_call_attempts'), 0)
         self.assertEqual(f.service.snapshot(f.policy['policy_id'])['calls_reserved'], 0)
 
+    def delayed_clock_admission(self, *, change, gated=True):
+        f = self.f
+        item, job = f.prepare()
+        controller = NewsReviewController(f.service, f.policy['policy_id'])
+        def request(*args, **kwargs):
+            bound = AuthorizedTextRequest(*args, **kwargs)
+            check = bound.before_send
+            def preflight():
+                check()
+                change()
+            bound.before_send = preflight
+            return bound
+        with patch('backend.news_review_service.AuthorizedTextRequest', side_effect=request), \
+             patch('urllib.request.OpenerDirector.open', side_effect=f.transport) as wire:
+            f.service.run_one(f.policy['policy_id'], send_gate=controller.send_gate if gated else None)
+        return item, job, wire.call_count
+
+    def assert_unsent_clock_failure(self, item, expected_error):
+        f = self.f
+        review = f.view(item)['reviews'][0]
+        self.assertEqual(review['state'], 'FAILED')
+        self.assertEqual(review['error_code'], expected_error)
+        self.assertFalse(review['receipt']['http_attempted'])
+        self.assertEqual(f.count('news_review_content_claims'), 1)
+        self.assertEqual(f.count('provider_call_attempts'), 1)
+        spent = f.service.snapshot(f.policy['policy_id'])
+        self.assertEqual(spent['calls_reserved'], 1)
+        self.assertGreater(spent['tokens_reserved'], 0)
+        self.assertGreater(float(spent['cost_reserved_cny']), 0)
+        f.now = f.policy['not_before_ms']
+        f.service.monotonic_ms = lambda: f.now
+        self.assertEqual(f.run_one().call_count, 0)
+        after = f.service.snapshot(f.policy['policy_id'])
+        for field in ('calls_reserved', 'tokens_reserved', 'cost_reserved_cny', 'documents_reserved'):
+            self.assertEqual(after[field], spent[field])
+
+    def test_expiry_after_preflight_blocks_final_admission_and_preserves_reservations(self):
+        item, _, calls = self.delayed_clock_admission(
+            change=lambda: setattr(self.f, 'now', self.f.policy['expires_at_ms']))
+        self.assertEqual(calls, 0)
+        self.assert_unsent_clock_failure(item, 'policy_expired')
+
+    def test_clock_failure_after_preflight_blocks_final_admission(self):
+        item, _, calls = self.delayed_clock_admission(
+            change=lambda: setattr(self.f.service, 'monotonic_ms', lambda: self.f.now+2001))
+        self.assertEqual(calls, 0)
+        self.assert_unsent_clock_failure(item, 'clock_changed')
+
+    def test_direct_service_expiry_after_preflight_is_also_blocked(self):
+        item, _, calls = self.delayed_clock_admission(gated=False,
+            change=lambda: setattr(self.f, 'now', self.f.policy['expires_at_ms']))
+        self.assertEqual(calls, 0)
+        self.assert_unsent_clock_failure(item, 'policy_expired')
+
+    def test_final_admission_just_before_expiry_still_allows_one_request(self):
+        item, _, calls = self.delayed_clock_admission(
+            change=lambda: setattr(self.f, 'now', self.f.policy['expires_at_ms']-1))
+        self.assertEqual(calls, 1)
+        self.assertEqual(self.f.view(item)['state'], 'REVIEWED')
+
+    def test_expiry_while_waiting_for_admission_lock_is_rechecked_after_acquisition(self):
+        f = self.f
+        item, _ = f.prepare()
+        controller = NewsReviewController(f.service, f.policy['policy_id'])
+        prepared = threading.Event()
+        def request(*args, **kwargs):
+            bound = AuthorizedTextRequest(*args, **kwargs)
+            check = bound.before_send
+            def preflight():
+                check()
+                prepared.set()
+            bound.before_send = preflight
+            return bound
+        with patch('backend.news_review_service.AuthorizedTextRequest', side_effect=request), \
+             patch('urllib.request.OpenerDirector.open', side_effect=f.transport) as wire:
+            controller.send_gate._lock.acquire()
+            worker = None
+            try:
+                worker, errors = self.start_thread(controller.model_cycle)
+                self.assertTrue(prepared.wait(10))
+                f.now = f.policy['expires_at_ms']
+            finally:
+                controller.send_gate._lock.release()
+                if worker is not None:
+                    self.join_thread(worker, errors)
+            wire.assert_not_called()
+        self.assert_unsent_clock_failure(item, 'policy_expired')
+
     def test_real_host_stop_event_prevents_model_claim_before_host_drain(self):
         from backend import http_server
         from backend.source_monitoring.runtime import build_source_monitoring_runtime

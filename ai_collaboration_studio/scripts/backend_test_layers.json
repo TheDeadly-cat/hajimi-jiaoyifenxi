@@ -32,6 +32,7 @@
         "tests.test_manual_chatgpt",
         "tests.test_manual_chatgpt_operations",
         "tests.test_micron_ir_json",
+        "tests.test_micron_retry_rotation",
         "tests.test_monitoring_official_delivery",
         "tests.test_no_live_execution_capabilities",
         "tests.test_plugin_registry",

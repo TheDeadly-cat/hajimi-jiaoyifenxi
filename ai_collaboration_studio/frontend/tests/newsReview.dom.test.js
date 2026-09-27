@@ -134,6 +134,78 @@ for (const [label, Component, props, makeData] of [
   ["detail", NewsReview, { itemId: "source_event_one" }, (until) => ({ ...fixture(), observation_until: until })],
   ["control", NewsReviewControl, {}, controlFixture],
 ]) {
+  test(`${label}: a hanging GET aborts after fifteen seconds and retries without accepting late data`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: epoch });
+    const calls = [];
+    let late;
+    globalThis.fetch = async (_url, options) => {
+      calls.push(options);
+      if (calls.length === 2) return new Promise((resolve) => { late = resolve; });
+      return ok(makeData(epoch + 86_400_000));
+    };
+    const host = await mount(Component, props);
+    const firstSuccess = host.querySelector("time").dateTime;
+    await advance(t, 10_000);
+    await advance(t, 14_999);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].signal.aborted, false);
+    await advance(t, 1);
+    assert.equal(calls[1].signal.aborted, true);
+    assert.match(host.textContent, /状态读取超时/);
+    assert.equal(host.querySelector("time").dateTime, firstSuccess);
+    await advance(t, 2_000);
+    assert.equal(calls.length, 3);
+    assert.notEqual(calls[2].signal, calls[1].signal);
+    const recovered = host.querySelector("time").dateTime;
+    await act(async () => late(ok({ ...makeData(epoch + 172_800_000), version: "late-invalid" })));
+    assert.equal(host.querySelector("time").dateTime, recovered);
+    assert.equal(host.querySelector('[role="alert"]'), null);
+    assert.ok(calls.every((call) => !call.method || call.method === "GET"));
+  });
+  test(`${label}: repeated hanging GETs exhaust the existing retry bound`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: epoch });
+    const signals = [];
+    globalThis.fetch = async (_url, options) => {
+      signals.push(options.signal);
+      if (signals.length === 1) return ok(makeData(epoch + 86_400_000));
+      return new Promise(() => {});
+    };
+    const host = await mount(Component, props);
+    await advance(t, 10_000);
+    for (const backoff of [2_000, 4_000, 8_000, 16_000, 30_000]) {
+      await advance(t, 15_000);
+      assert.equal(signals.at(-1).aborted, true);
+      await advance(t, backoff);
+    }
+    await advance(t, 15_000);
+    assert.equal(signals.length, 7);
+    assert.match(host.textContent, /重试已达上限/);
+    await advance(t, 300_000);
+    assert.equal(signals.length, 7);
+    assert.ok(signals.slice(1).every((signal) => signal.aborted));
+  });
+  test(`${label}: response-body hang times out and unmount cancels an in-flight retry`, async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: epoch });
+    const signals = [];
+    let lateBody;
+    globalThis.fetch = async (_url, options) => {
+      signals.push(options.signal);
+      if (signals.length === 1) return ok(makeData(epoch + 86_400_000));
+      return { ok: true, json: () => new Promise((resolve) => { lateBody = resolve; }) };
+    };
+    const host = await mount(Component, props);
+    await advance(t, 10_000);
+    await advance(t, 15_000);
+    assert.equal(signals[1].aborted, true);
+    assert.match(host.textContent, /状态读取超时/);
+    await act(async () => lateBody({ ok: true, news_review: makeData(epoch + 172_800_000) }));
+    await advance(t, 2_000);
+    assert.equal(signals.length, 3);
+    await act(async () => root.unmount()); root = null;
+    assert.equal(signals[2].aborted, true);
+    await advance(t, 300_000);
+    assert.equal(signals.length, 3);
+  });
   test(`${label}: transient GET failure recovers, preserves last success and never posts`, async (t) => {
     t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: epoch });
     const calls = [];

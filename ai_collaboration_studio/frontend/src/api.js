@@ -1,6 +1,6 @@
 let sessionToken = "";
 
-async function jsonRequest(path, options = {}) {
+async function jsonRequest(path, options = {}, checkCurrent = () => {}) {
   const response = await fetch(path, {
     ...options,
     headers: {
@@ -9,7 +9,9 @@ async function jsonRequest(path, options = {}) {
       ...(options.headers || {}),
     },
   });
+  checkCurrent();
   const data = await response.json();
+  checkCurrent();
   if (typeof data.session_token === "string" && data.session_token) {
     sessionToken = data.session_token;
   }
@@ -24,9 +26,42 @@ async function jsonRequest(path, options = {}) {
   return data;
 }
 
+// Only news status GETs use this timeout. Mutations keep their existing behavior.
+async function newsStatusRequest(path, signal) {
+  const controller = new AbortController();
+  const cancelled = () => new DOMException("状态读取已取消。", "AbortError");
+  if (signal?.aborted) throw cancelled();
+  let rejectCancellation;
+  const cancellation = new Promise((_, reject) => { rejectCancellation = reject; });
+  const cancel = (error) => {
+    rejectCancellation(error);
+    controller.abort();
+  };
+  const onAbort = () => cancel(cancelled());
+  signal?.addEventListener("abort", onAbort, { once: true });
+  const timeout = setTimeout(() => {
+    const error = new Error("状态读取超时，当前状态尚未确认。");
+    error.name = "StatusRequestTimeout";
+    error.status = 408;
+    cancel(error);
+  }, 15_000);
+  try {
+    return await Promise.race([
+      jsonRequest(path, { signal: controller.signal }, () => {
+        if (controller.signal.aborted) throw cancelled();
+      }),
+      cancellation,
+    ]);
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", onAbort);
+    controller.abort();
+  }
+}
+
 export const api = {
-  sourceNewsReview: (itemId, signal) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/news-review`, { signal }),
-  newsReviewControl: (signal) => jsonRequest("/api/monitoring/news-review/control", { signal }),
+  sourceNewsReview: (itemId, signal) => newsStatusRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/news-review`, signal),
+  newsReviewControl: (signal) => newsStatusRequest("/api/monitoring/news-review/control", signal),
   pauseNewsReview: () => jsonRequest("/api/monitoring/news-review/control", { method: "POST", body: JSON.stringify({ action: "pause" }) }),
   previewDocumentSelection: (itemId, payload, signal) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document/selection/preview`, { method: "POST", body: JSON.stringify(payload), signal }),
   saveDocumentSelection: (itemId, payload, signal) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document/selection`, { method: "POST", body: JSON.stringify(payload), signal }),
