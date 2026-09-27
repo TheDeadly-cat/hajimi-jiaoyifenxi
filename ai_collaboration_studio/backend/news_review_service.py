@@ -355,6 +355,11 @@ class NewsReviewService:
 
     def resume(self, policy_id, *, approved_policy_sha256):
         self.owner.assert_held_for(self.store.path)
+        # A prohibited resume must not first run startup recovery, which can
+        # pause a live policy or abandon a still-running provider attempt.
+        with self.store._lock, closing(self.store._connect()) as db:
+            _, requested = _policy(db, policy_id)
+            require(not is_dual_policy(requested), "dual_clock_resume_forbidden")
         self.prepare_startup()
         with self.store._lock, closing(self.store._connect()) as db, db:
             row, p = _policy(db, policy_id)
@@ -646,6 +651,11 @@ class NewsReviewService:
         """Call once before starting workers, with the same database owner held."""
         self.owner.assert_held_for(self.store.path)
         with self.store._lock:
+            # Installed bindings are owned by the live service session. Only
+            # end_host_session(), after confirmed worker drain, removes them.
+            # Startup on a second service must fail before any recovery write.
+            require(not getattr(self.store, '_news_review_clock_bindings', {}),
+                    'dual_clock_recovery_forbidden')
             with closing(self.store._connect()) as db, db:
                 db.execute("BEGIN IMMEDIATE")
                 interrupted = db.execute("SELECT DISTINCT policy_id FROM news_review_all_jobs WHERE status='RUNNING'").fetchall()

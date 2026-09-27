@@ -108,6 +108,66 @@ class RuntimeClockTests(unittest.TestCase):
         self.assert_code('dual_clock_fresh_trial_required', lambda:self.new_service().approve(
             f.policy, approved_policy_sha256=canonical_sha256(f.policy)))
 
+    def test_second_service_resume_rejects_before_changing_live_policy(self):
+        f = self.f
+        f.approve()
+        before = f.service.snapshot(f.policy['policy_id'])
+        self.assert_code('dual_clock_resume_forbidden', lambda:self.new_service().resume(
+            f.policy['policy_id'],approved_policy_sha256=canonical_sha256(f.policy)))
+        self.assertEqual(f.service.snapshot(f.policy['policy_id']),before)
+
+    def test_recovery_entrypoints_reject_while_dual_binding_is_installed(self):
+        f = self.f
+        f.prepare()
+        before = f.service.snapshot(f.policy['policy_id'])
+        other = self.new_service()
+        controller = NewsReviewController(other,f.policy['policy_id'])
+        for action in (f.service.recover,other.recover,other.prepare_startup,controller.start):
+            self.assert_code('dual_clock_recovery_forbidden',action)
+            self.assertEqual(f.service.snapshot(f.policy['policy_id']),before)
+            self.assertEqual(controller.threads,[])
+        f.service.prepare_startup()  # Existing session's startup remains idempotent.
+        self.assertEqual(f.service.snapshot(f.policy['policy_id']),before)
+        f.service.end_host_session()
+        other.prepare_startup()  # Drained/cold recovery still marks the old window non-resumable.
+        self.assertEqual(other.snapshot(f.policy['policy_id'])['state'],'PAUSED')
+        self.assert_code('dual_clock_resume_forbidden',lambda:other.resume(
+            f.policy['policy_id'],approved_policy_sha256=canonical_sha256(f.policy)))
+
+    def test_rejected_recovery_does_not_abandon_an_inflight_provider_attempt(self):
+        f = self.f
+        item,_ = f.prepare()
+        started,release = threading.Event(),threading.Event()
+        errors = []
+        def transport(request,**kwargs):
+            started.set()
+            if not release.wait(10):
+                raise AssertionError('synthetic provider was not released')
+            return f.transport(request,**kwargs)
+        def work():
+            try:
+                f.service.run_one(f.policy['policy_id'])
+            except BaseException as exc:
+                errors.append(exc)
+        with patch('urllib.request.OpenerDirector.open',side_effect=transport) as wire:
+            worker = threading.Thread(target=work)
+            worker.start()
+            try:
+                self.assertTrue(started.wait(10))
+                before = f.service.snapshot(f.policy['policy_id'])
+                self.assertEqual(before['job_counts'].get('RUNNING'),1)
+                self.assert_code('dual_clock_recovery_forbidden',self.new_service().recover)
+                self.assertEqual(f.service.snapshot(f.policy['policy_id']),before)
+            finally:
+                release.set()
+                worker.join(10)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors,[])
+        self.assertEqual(wire.call_count,1)
+        self.assertEqual(f.view(item)['state'],'REVIEWED')
+        with closing(f.store._connect()) as db:
+            self.assertEqual(db.execute('SELECT status FROM provider_call_attempts').fetchone()[0],'RESPONDED')
+
     def test_elapsed_expiry_blocks_all_new_admissions_and_keeps_reservations(self):
         f = self.f
         item, _ = f.prepare()
