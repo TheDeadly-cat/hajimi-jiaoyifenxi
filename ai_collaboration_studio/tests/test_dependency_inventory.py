@@ -85,17 +85,19 @@ class DependencyInventoryTests(unittest.TestCase):
         rendered = json.dumps(first, ensure_ascii=False)
         self.assertNotIn(str(self.project_root), rendered)
 
-    def test_authoritative_locks_are_checked_out_with_exact_lf_bytes(self) -> None:
+    def test_authoritative_locks_and_corpus_are_checked_out_with_exact_lf_bytes(self) -> None:
         attributes = (self.project_root / ".gitattributes").read_text(
             encoding="ascii"
         ).splitlines()
         self.assertEqual(attributes, [
             "/requirements-lock-win-py314.txt text eol=lf",
             "/frontend/package-lock.json text eol=lf",
+            "/tests/fixtures/news_review_quality_v1.json text eol=lf",
         ])
         for relative_path in (
             "requirements-lock-win-py314.txt",
             "frontend/package-lock.json",
+            "tests/fixtures/news_review_quality_v1.json",
         ):
             with self.subTest(relative_path=relative_path):
                 self.assertNotIn(
