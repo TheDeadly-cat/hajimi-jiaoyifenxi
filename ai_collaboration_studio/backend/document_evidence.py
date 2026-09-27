@@ -13,7 +13,7 @@ import socket
 import threading
 import time
 import uuid
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
@@ -564,9 +564,14 @@ class DocumentEvidenceService:
                 if job["session_id"].startswith("news_review:"):
                     from .news_review_service import check_document_send
                     check_document_send(self.store, db, job, self.clock())
-            ensure_source_poll_active(cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)
-            resource = self.fetcher(source, cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)
-            ensure_source_poll_active(cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)
+            authorization = nullcontext()
+            if job['session_id'].startswith('news_review:'):
+                from .news_review_service import document_time_authorization
+                authorization = document_time_authorization(self.store, job, self.clock)
+            with authorization:
+                ensure_source_poll_active(cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)
+                resource = self.fetcher(source, cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)
+                ensure_source_poll_active(cancel_event=cancel_event, deadline_monotonic_ms=deadline_monotonic_ms)
             if resource.final_url != source["url"]:
                 raise DocumentFetchError("DOCUMENT_REDIRECT_REJECTED")
             parsed = extract_document(resource.raw, resource.content_type, source)

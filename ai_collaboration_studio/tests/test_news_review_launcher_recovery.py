@@ -145,3 +145,79 @@ class NewsReviewLauncherRecoveryTests(unittest.TestCase):
         stops = [json.loads(p.read_text(encoding='utf-8')) for p in root.glob('stop-*.json')]
         self.assertTrue(any(s['stop_type'] == 'finalization_failure' and s['error_code'] == 'checkpoint_failed' for s in stops))
         self.assertNotIn('synthetic checkpoint detail', json.dumps(stops)+result.stdout+result.stderr)
+
+
+# Cross-platform synthetic sampler: production Windows sampling is tested
+# separately. No source becomes due and the isolated child forbids external I/O.
+DUAL_CHILD = CHILD.replace("if '--run' in sys.argv:", "if '--run' in sys.argv or '--activate' in sys.argv:").replace(
+    "with ExitStack() as stack:", """with ExitStack() as stack:
+    from backend.news_review_clock_policy_review import Reading
+    def sample():
+        ns = time.monotonic_ns()
+        return Reading(int(time.time()*1000),ns//1000000,(ns+999999)//1000000,os.getpid(),638000000000000001,ns,ns)
+    stack.enter_context(patch('backend.news_review_windows_clock.sample_windows_clock',side_effect=sample))
+""")
+
+
+class DualClockLauncherTests(unittest.TestCase):
+    def setUp(self):
+        self.f = fixtures.NewsReviewTests()
+        self.f.addCleanup = self.addCleanup
+        self.f.setUp()
+
+    def child(self, *args):
+        result = subprocess.run([sys.executable,'-X','utf8','-B','-c',DUAL_CHILD,*args],
+            cwd=Path(__file__).resolve().parents[1],capture_output=True,text=True,timeout=40,
+            env={**os.environ,'NEWS_RECOVERY_SCENARIO':'completed'})
+        self.assertTrue(result.stdout.strip(),result.stderr)
+        return result,json.loads(result.stdout.strip().splitlines()[-1])
+
+    def test_fresh_activation_is_bound_once_and_report_is_readable_from_new_process(self):
+        from backend.news_review_contracts import DUAL_CLOCK_POLICY, DUAL_POLICY_VERSION
+        root = Path(self.f.temp.name)/'NewsReviewTrialDualLauncher'
+        init,created = self.child('--initialize','--root',str(root),'--candidate-sha','a'*40)
+        self.assertEqual(init.returncode,0,init.stdout+init.stderr)
+        now = int(time.time()*1000)
+        policy = {**self.f.policy,'version':DUAL_POLICY_VERSION,'clock_policy':DUAL_CLOCK_POLICY,
+            'clock_activation':None,'resume_within_window':False,'database_path':created['database_path'],
+            'room_id':created['room_id'],'not_before_ms':now-1000,'expires_at_ms':now+60000}
+        config = root/'policy.json'
+        config.write_text(json.dumps(policy),encoding='utf-8')
+        preparation = root/'activation-plan.json'
+        args = ('--config',str(config),'--duration-ms','3000')
+        result,_ = self.child('--prepare-activation',*args,'--output',str(preparation))
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        plan = json.loads(preparation.read_text(encoding='utf-8'))
+        self.assertEqual(plan['activation']['version'],'news_review_dual_clock_activation_v1')
+        self.assertEqual(plan['activation']['permitted_changes'],['not_before_ms','expires_at_ms','clock_activation'])
+        output = root/'window-report.json'
+        runargs = ('--activate',*args,'--approve-activation-sha256',plan['activation_sha256'],
+            '--password-dialog','--sec-user-agent','Synthetic fixture@example.com','--output',str(output))
+        result,status = self.child(*runargs)
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertTrue(status['ok'])
+        activated = json.loads((root/'activation-policy.json').read_text(encoding='utf-8'))
+        receipt = json.loads((root/'activation-receipt.json').read_text(encoding='utf-8'))
+        self.assertEqual(receipt['policy_sha256'],canonical_sha256(activated))
+        self.assertEqual(activated['clock_activation']['wall_ms'],receipt['activated_at'])
+        self.assertEqual(receipt['expires_at']-receipt['activated_at'],3000)
+        report = json.loads(output.read_text(encoding='utf-8'))
+        self.assertTrue(report['outcome']['work_completed'])
+        self.assertFalse(report['authorization_time']['actual_full_24h_proven'])
+        self.assertEqual(report['snapshot']['calls_reserved'],0)
+        self.assertEqual(report['snapshot']['documents_reserved'],0)
+        original_receipt = (root/'activation-receipt.json').read_bytes()
+        result,rejected = self.child(*runargs[:-1],str(root/'second-report.json'))
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(rejected['code'],'activation_already_reserved')
+        self.assertEqual((root/'activation-receipt.json').read_bytes(),original_receipt)
+        resolved = root/'activation-policy.json'
+        result,rejected = self.child('--run','--config',str(resolved),'--password-dialog',
+            '--approve-policy-sha256',receipt['policy_sha256'],'--sec-user-agent','Synthetic fixture@example.com')
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(rejected['code'],'dual_clock_activation_only')
+        cold = root/'cold-report.json'
+        result,_ = self.child('--report','--config',str(resolved),'--output',str(cold))
+        self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+        self.assertEqual(json.loads(cold.read_text(encoding='utf-8'))['authorization_time'],report['authorization_time'])
+        self.assertNotIn('synthetic-credential',output.read_text(encoding='utf-8')+result.stdout+result.stderr)

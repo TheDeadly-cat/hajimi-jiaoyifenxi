@@ -6,7 +6,7 @@ import threading
 import time
 
 from .api_pilot import write_record
-from .news_review_contracts import NewsReviewError
+from .news_review_contracts import NewsReviewError, is_dual_policy
 
 
 def bounded_code(value, fallback='unclassified_error'):
@@ -35,7 +35,7 @@ class NewsReviewStop:
                      'error_code':bounded_code(code) if code else '',
                      'exception_type':bounded_code(exception_type) if exception_type else '',
                      'runtime_status':bounded_code(runtime_status, 'unavailable'),
-                     'window_reached':self.service.clock() >= self.policy['expires_at_ms']}
+                     'window_reached':self.service.window_reached(self.policy)}
             value['clock_diagnostics'] = self.service.clock_diagnostics()
             if any(all(old[k] == value[k] for k in ('stop_type','trigger_thread','error_code')) for old in self.events):
                 self.event.set()
@@ -64,7 +64,10 @@ class NewsReviewStop:
         status = 'starting'
         try:
             while not self.event.wait(interval_seconds):
-                self.service.check_clock()
+                if is_dual_policy(self.policy):
+                    self.service.check_clock(allow_expiry=True)
+                else:
+                    self.service.check_clock()
                 runtime = holder.get('runtime')
                 snapshot = runtime.snapshot() if runtime else {}
                 status = snapshot.get('status', 'starting')
@@ -73,7 +76,7 @@ class NewsReviewStop:
                     for lane, code in sorted(self.controller.errors.copy().items()):
                         self.request('worker_failure', trigger=lane, code=code, runtime_status=status)
                     return
-                expired = self.service.clock() >= self.policy['expires_at_ms']
+                expired = self.service.window_reached(self.policy)
                 window_stop = expired and snapshot.get('stop_reason_code') == 'NEWS_REVIEW_WINDOW_EXPIRED'
                 if holder.get('ready') and (status in {'failed','stalled'} or status == 'stopped' and not window_stop):
                     self.request('runtime_failure', trigger='source_runtime', runtime_status=status,
