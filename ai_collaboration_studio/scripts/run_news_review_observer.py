@@ -387,16 +387,18 @@ def observe_active(plan, plan_hash, directory, *, inspector=None):
     writer = MonitorReceiptWriter(directory, identity, wall_ms=lambda:time.time_ns()//1_000_000,
                                   monotonic_ms=lambda:time.monotonic_ns()//1_000_000)
     try:
-        writer.run_schedule(probe=observe, stop_event=stop, expires_at_ms=target['expires_at_ms'],
-                            interval_ms=plan['poll_interval_ms'])
+        schedule_end = writer.run_schedule(probe=observe, stop_event=stop, expires_at_ms=target['expires_at_ms'],
+                                          interval_ms=plan['poll_interval_ms'])
+        hard_mono = min(hard_mono,schedule_end['deadline_monotonic_ms']+plan['drain_grace_ms'])
         # Ordinary GET cadence must not skip the shorter final drain window.
         # Native-only checks continue under the original absolute AND elapsed
         # hard bounds; no extra status/source/model requests are issued.
         if not stop.is_set() and wall() < hard_end and mono() < hard_mono:
             publish_json_once(directory/'observer-drain-start.json',{
-                'version':'news_review_observer_drain_start_v1','identity':identity,'plan_sha256':plan_hash,
-                'started_at_ms':wall(),'original_expires_at_ms':target['expires_at_ms'],
-                'deadline_at_ms':hard_end,'http_get_requests':0})
+                'version':'news_review_observer_drain_start_v2','identity':identity,'plan_sha256':plan_hash,
+                'started_at_ms':wall(),'started_monotonic_ms':mono(),
+                'original_expires_at_ms':target['expires_at_ms'],'schedule_end':schedule_end,
+                'deadline_at_ms':hard_end,'deadline_monotonic_ms':hard_mono,'http_get_requests':0})
             sequence,previous = 0,''
             while not stop.is_set() and wall() < hard_end and mono() < hard_mono:
                 started,started_mono = wall(),mono()

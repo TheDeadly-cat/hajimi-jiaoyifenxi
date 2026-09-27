@@ -120,6 +120,23 @@ def _bounded_record(path):
     return json.loads(data.decode('utf-8'))
 
 
+def _drain_schedule_expired(start, expiry):
+    schedule=start.get('schedule_end')
+    if (type(schedule) is not dict or schedule.get('version')!='news_review_monitor_schedule_end_v1'
+            or schedule.get('stop_requested') is not False
+            or any(type(schedule.get(k)) is not int or schedule[k]<0 for k in
+                   ('started_at_ms','started_monotonic_ms','expires_at_ms','deadline_monotonic_ms',
+                    'ended_at_ms','ended_monotonic_ms'))
+            or any(type(start.get(k)) is not int or start[k]<0 for k in
+                   ('started_monotonic_ms','deadline_monotonic_ms'))):
+        return False
+    deadline=schedule['started_monotonic_ms']+max(0,expiry-schedule['started_at_ms'])
+    return (schedule['expires_at_ms']==expiry and schedule['deadline_monotonic_ms']==deadline
+        and schedule['started_monotonic_ms']<=schedule['ended_monotonic_ms']<=start['started_monotonic_ms']
+        and (schedule['ended_at_ms']>=expiry or schedule['ended_monotonic_ms']>=deadline)
+        and start['started_monotonic_ms']<start['deadline_monotonic_ms']<=deadline+255000)
+
+
 def _evaluate_drain(root, active, binding, previous, verdict, receipt, now_ms):
     path=root/'observer-drain-start.json'
     if not path.exists():
@@ -131,10 +148,11 @@ def _evaluate_drain(root, active, binding, previous, verdict, receipt, now_ms):
     plan=binding['resolved_plan'];expiry=plan['request']['target'].get('expires_at_ms')
     began=start.get('started_at_ms')
     if (type(expiry) is not int or plan.get('drain_grace_ms')!=255000
-            or start.get('version')!='news_review_observer_drain_start_v1'
+            or start.get('version')!='news_review_observer_drain_start_v2'
             or start.get('identity')!=active['identity'] or start.get('plan_sha256')!=active['plan_sha256']
             or start.get('original_expires_at_ms')!=expiry or start.get('deadline_at_ms')!=expiry+255000
-            or type(began) is not int or not expiry<=began<expiry+255000 or now_ms<began
+            or type(began) is not int or not 0<=began<expiry+255000 or now_ms<began
+            or not _drain_schedule_expired(start,expiry)
             or start.get('http_get_requests')!=0
             or previous.get('drain_start_sha256') not in (None,digest)):
         raise ValueError('observer_drain_identity_unconfirmed')

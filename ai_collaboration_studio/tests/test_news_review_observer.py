@@ -256,14 +256,16 @@ class ObserverPreparationTests(unittest.TestCase):
         tree['known_identity_inspection_incomplete']=True
         self.assertFalse(observer.terminal_tree(tree))
 
-    def drain_fixture(self, exit_delay):
+    def drain_fixture(self, exit_delay, *, rollback_ms=0):
         wrapped=self.prepared()
+        self.drain_plan=wrapped
         expiry=self.request['target']['expires_at_ms']
         clock={'wall':expiry-10000,'mono':100000}
         checks=[];status_reads=[]
         case=self
         class Event:
             stopped=False
+            corrected=False
             def is_set(self): return self.stopped
             def set(self): self.stopped=True
             def wait(self, seconds):
@@ -271,6 +273,9 @@ class ObserverPreparationTests(unittest.TestCase):
                 advance=int(round(seconds*1000))
                 case.assertGreater(advance,0)
                 clock['wall']+=advance;clock['mono']+=advance
+                if not self.corrected:
+                    clock['wall']-=rollback_ms
+                    self.corrected=True
                 if exit_delay is not None and clock['wall']>=expiry+exit_delay and not (case.root/'window-report.json').exists():
                     write(case.root/'window-report.json',{'synthetic_host_report':True})
                 return False
@@ -316,6 +321,23 @@ class ObserverPreparationTests(unittest.TestCase):
         self.assertEqual(ended['phase'],'drain_deadline_unconfirmed_user_action_required')
         self.assertFalse(ended['two_native_terminal_checks'])
         self.assertFalse(ended['original_report_exists'])
+
+    def test_rollback_elapsed_drain_routes_normal_exit_to_final_review(self):
+        from scripts.news_review_watchdog import check
+        result,ended,clock,_,expiry=self.drain_fixture(120000,rollback_ms=1000)
+        self.assertEqual(result,0)
+        directory=self.root/'monitoring'
+        start=observer.read_json(directory/'observer-drain-start.json')
+        self.assertEqual(start['started_at_ms'],expiry-1000)
+        self.assertEqual(start['schedule_end']['ended_monotonic_ms'],start['schedule_end']['deadline_monotonic_ms'])
+        pin={'version':'news_review_direct_observer_pin_v1','identity':self.request['target']['identity'],
+             **self.drain_plan,'pid':123,'process_start_utc_ticks':638000000000000000,
+             'started_at_ms':expiry-10000}
+        verdict=check(directory,pin,[],now_ms=clock['wall'],inspect=lambda _:None)
+        self.assertEqual(verdict['monitoring_phase'],'terminal_review')
+        self.assertTrue(verdict['final_verification_required'])
+        self.assertEqual(verdict['alerts'],[])
+        self.assertFalse(verdict['live_acceptance_proven'])
 
 
 SERVER_CHILD = r'''

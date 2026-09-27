@@ -268,6 +268,20 @@ class MonitorTests(unittest.TestCase):
             calls.append(self.wall)
             self.wall-=10000
             return self.healthy()
-        self.writer.run_schedule(probe=probe,stop_event=Stop(),expires_at_ms=self.wall+500,interval_ms=300)
+        ended=self.writer.run_schedule(probe=probe,stop_event=Stop(),expires_at_ms=self.wall+500,interval_ms=300)
         self.assertEqual(len(calls),1)
         self.assertEqual(self.mono,1500)
+        self.assertLess(ended['ended_at_ms'],ended['expires_at_ms'])
+        self.assertEqual(ended['ended_monotonic_ms'],ended['deadline_monotonic_ms'])
+        self.assertFalse(ended['stop_requested'])
+
+    def test_scheduler_retains_stop_wait_signal_without_expiry_or_replay(self):
+        class Stop:
+            def is_set(self): return False
+            def wait(self,seconds): return True
+        ended=self.writer.run_schedule(probe=self.healthy,stop_event=Stop(),
+                                       expires_at_ms=self.wall+500,interval_ms=300)
+        self.assertEqual(self.writer.sequence,1)
+        self.assertTrue(ended['stop_requested'])
+        self.assertLess(ended['ended_at_ms'],ended['expires_at_ms'])
+        self.assertLess(ended['ended_monotonic_ms'],ended['deadline_monotonic_ms'])

@@ -296,8 +296,12 @@ class WaitingWatchdogTests(unittest.TestCase):
         previous=self.check()
         expiry=self.now+250000
         publish_json_once(self.root/'observer-drain-start.json',{
-            'version':'news_review_observer_drain_start_v1','identity':identity,'plan_sha256':self.pin['plan_sha256'],
-            'started_at_ms':expiry,'original_expires_at_ms':expiry,'deadline_at_ms':expiry+255000,'http_get_requests':0})
+            'version':'news_review_observer_drain_start_v2','identity':identity,'plan_sha256':self.pin['plan_sha256'],
+            'started_at_ms':expiry,'started_monotonic_ms':250001,'original_expires_at_ms':expiry,
+            'deadline_at_ms':expiry+255000,'deadline_monotonic_ms':505001,'http_get_requests':0,
+            'schedule_end':{'version':'news_review_monitor_schedule_end_v1','started_at_ms':self.now,
+                'started_monotonic_ms':1,'expires_at_ms':expiry,'deadline_monotonic_ms':250001,
+                'ended_at_ms':expiry,'ended_monotonic_ms':250001,'stop_requested':False}})
         digest=''
         for index,offset in enumerate(range(0,last_offset+1,10000),1):
             self.now=expiry+offset
@@ -327,6 +331,31 @@ class WaitingWatchdogTests(unittest.TestCase):
         self.assertFalse(active['changes']['notify'])
         (self.root/'observer-drain-start.json').unlink()
         self.assertIn('OBSERVER_SESSION_EVIDENCE_UNCONFIRMED',self.check(active)['alerts'])
+
+    def test_elapsed_drain_before_wall_expiry_needs_original_exhausted_deadline(self):
+        previous,expiry=self.drain_receipts()
+        path=self.root/'observer-drain-start.json'
+        valid=core.read_json(path)
+        valid['started_at_ms']=expiry-1000
+        valid['schedule_end']['ended_at_ms']=expiry-1000
+        write(path,valid)
+        verdict=self.check(previous)
+        self.assertEqual(verdict['monitoring_phase'],'draining')
+        self.assertFalse(verdict['changes']['notify'])
+        mutations=[
+            lambda r:r['schedule_end'].update(ended_monotonic_ms=250000),
+            lambda r:r['schedule_end'].update(deadline_monotonic_ms=250002),
+            lambda r:r['schedule_end'].update(stop_requested=True),
+            lambda r:r.update(started_monotonic_ms=250000),
+            lambda r:r.update(deadline_monotonic_ms=505002),
+            lambda r:r.pop('schedule_end'),
+            lambda r:r.update(version='news_review_observer_drain_start_v1')]
+        for index,mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                invalid=copy.deepcopy(valid);mutate(invalid);write(path,invalid)
+                rejected=self.check(previous)
+                self.assertIn('OBSERVER_SESSION_EVIDENCE_UNCONFIRMED',rejected['alerts'])
+                self.assertNotEqual(rejected['monitoring_phase'],'draining')
 
     def test_late_exit_does_not_claim_timely_terminal_review(self):
         previous,expiry=self.drain_receipts()

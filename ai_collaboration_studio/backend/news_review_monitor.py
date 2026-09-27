@@ -138,16 +138,25 @@ class MonitorReceiptWriter:
         if not _integer(expires_at_ms) or not _integer(interval_ms) or interval_ms<=0:
             raise ValueError('invalid_monitor_schedule')
         scheduled=self.wall_ms()
-        deadline_mono=self.monotonic_ms()+max(0,expires_at_ms-scheduled)
-        while not stop_event.is_set() and self.wall_ms()<expires_at_ms and self.monotonic_ms()<deadline_mono:
+        started,started_mono=scheduled,self.monotonic_ms()
+        deadline_mono=started_mono+max(0,expires_at_ms-started)
+        requested=False
+        while True:
+            now,now_mono=self.wall_ms(),self.monotonic_ms()
+            requested=requested or stop_event.is_set()
+            if requested or now>=expires_at_ms or now_mono>=deadline_mono:
+                return {'version':'news_review_monitor_schedule_end_v1',
+                    'started_at_ms':started,'started_monotonic_ms':started_mono,
+                    'expires_at_ms':expires_at_ms,'deadline_monotonic_ms':deadline_mono,
+                    'ended_at_ms':now,'ended_monotonic_ms':now_mono,
+                    'stop_requested':requested}
             self.execute(scheduled_at_ms=scheduled,probe=probe)
             scheduled+=interval_ms
             now=self.wall_ms()
             if scheduled<=now:
                 scheduled=now+interval_ms
             wait_ms=max(0,min(scheduled-now,expires_at_ms-now,deadline_mono-self.monotonic_ms()))
-            if stop_event.wait(wait_ms/1000):
-                break
+            requested=bool(stop_event.wait(wait_ms/1000))
 
 
 def evaluate_watchdog(receipt, *, identity, now_ms, observer_identity_alive, maximum_silence_ms=360000):
