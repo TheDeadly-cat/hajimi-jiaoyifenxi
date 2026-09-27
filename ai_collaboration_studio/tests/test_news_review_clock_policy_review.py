@@ -71,6 +71,32 @@ class DualDeadlineReferenceTests(unittest.TestCase):
         self.assertTrue(result['within_proposed_time_bounds'])
         self.assertEqual(self.advance(20000, 4001)['stop_reason'], 'wall_clock_step_exceeded')
 
+    def test_sampling_uncertainty_cannot_widen_clock_step_limit(self):
+        activation = dataclasses.replace(self.window.activation_reading,
+            monotonic_after_ms=self.mono+50)
+        for wall_delta, expected_bounds in ((12000, (2000, 2050)), (7975, (-2025, -1975))):
+            with self.subTest(wall_delta=wall_delta):
+                guard = DualDeadlineReference(dataclasses.replace(self.window,
+                    activation_reading=activation), lambda: self.current)
+                self.current = Reading(self.start+wall_delta, self.mono+10000,
+                    self.mono+10000, *self.pin)
+                result = guard.check()
+                self.assertEqual(result['stop_reason'], 'wall_clock_step_limit_unconfirmed')
+                self.assertEqual((result['metrics']['clock_step_min_ms'], result['metrics']['clock_step_max_ms']), expected_bounds)
+                self.assertFalse(result['metrics']['clock_step_exceeded'])
+                self.assertTrue(result['metrics']['clock_step_limit_unconfirmed'])
+
+    def test_entire_uncertainty_interval_within_step_limit_remains_eligible(self):
+        activation = dataclasses.replace(self.window.activation_reading,
+            monotonic_after_ms=self.mono+50)
+        for wall_delta in (11950, 8000):
+            with self.subTest(wall_delta=wall_delta):
+                guard = DualDeadlineReference(dataclasses.replace(self.window,
+                    activation_reading=activation), lambda: self.current)
+                self.current = Reading(self.start+wall_delta, self.mono+10000,
+                    self.mono+10000, *self.pin)
+                self.assertTrue(guard.check()['within_proposed_time_bounds'])
+
     def test_repeated_small_rollbacks_are_compared_with_high_water(self):
         self.advance(10000)
         self.assertTrue(self.advance(10001, -1001)['within_proposed_time_bounds'])

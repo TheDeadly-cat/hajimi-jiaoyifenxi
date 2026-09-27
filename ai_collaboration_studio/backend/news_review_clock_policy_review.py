@@ -30,9 +30,16 @@ class Reading:
     monotonic_after_ms: int
     process_id: int
     process_creation_utc_ticks: int
+    monotonic_before_ns: int | None = None
+    monotonic_after_ns: int | None = None
 
     def valid(self):
-        return (all(_integer(v) for v in (self.wall_ms, self.monotonic_before_ms,
+        native = (self.monotonic_before_ns, self.monotonic_after_ns)
+        native_valid = (native == (None, None) or
+            all(_integer(v) for v in native) and native[0] <= native[1]
+            and native[0]//1_000_000 == self.monotonic_before_ms
+            and (native[1]+999_999)//1_000_000 == self.monotonic_after_ms)
+        return (native_valid and all(_integer(v) for v in (self.wall_ms, self.monotonic_before_ms,
                 self.monotonic_after_ms, self.process_id, self.process_creation_utc_ticks))
                 and self.process_id > 0 and self.process_creation_utc_ticks > 0
                 and 0 <= self.monotonic_after_ms-self.monotonic_before_ms <= MAX_SAMPLING_SPAN_MS)
@@ -98,16 +105,39 @@ class DualDeadlineReference:
                     self._window.activation_reading.process_id,
                     self._window.activation_reading.process_creation_utc_ticks):
                 reason = 'process_identity_changed'
-            elif reading.monotonic_before_ms < self._last.monotonic_after_ms:
+            elif (reading.monotonic_before_ns is None) != (self._last.monotonic_before_ns is None):
+                reason = 'clock_precision_changed'
+            elif (reading.monotonic_before_ns < self._last.monotonic_after_ns
+                  if reading.monotonic_before_ns is not None else
+                  reading.monotonic_before_ms < self._last.monotonic_after_ms):
                 reason = 'monotonic_clock_regressed'
             else:
                 previous = self._last
                 interval_min = reading.monotonic_before_ms-previous.monotonic_after_ms
                 interval_max = reading.monotonic_after_ms-previous.monotonic_before_ms
+                if reading.monotonic_before_ns is not None:
+                    # Native nanoseconds prove order even when conservatively
+                    # rounded millisecond brackets overlap during rapid checks.
+                    interval_min = (reading.monotonic_before_ns-previous.monotonic_after_ns)//1_000_000
+                    interval_max = (reading.monotonic_after_ns-previous.monotonic_before_ns+999_999)//1_000_000
                 wall_delta = reading.wall_ms-previous.wall_ms
+                # Native wall timestamps are floored to milliseconds. Include
+                # the difference's submillisecond uncertainty in both limits.
+                uncertainty = 1 if reading.monotonic_before_ns is not None else 0
+                step_min, step_max = wall_delta-interval_max-uncertainty, wall_delta-interval_min+uncertainty
+                step_exceeded = step_min > MAX_STEP_MS or step_max < -MAX_STEP_MS
+                step_unconfirmed = not step_exceeded and (step_min < -MAX_STEP_MS or step_max > MAX_STEP_MS)
+                rollback = max(0, self._high_wall-reading.wall_ms)
+                rollback_exceeded = rollback-uncertainty > MAX_STEP_MS
+                rollback_unconfirmed = not rollback_exceeded and rollback+uncertainty > MAX_STEP_MS
                 metrics = {'wall_delta_ms': wall_delta, 'elapsed_interval_min_ms': interval_min,
                            'elapsed_interval_max_ms': interval_max,
-                           'wall_rollback_from_high_water_ms': max(0, self._high_wall-reading.wall_ms),
+                           'clock_step_min_ms': step_min, 'clock_step_max_ms': step_max,
+                           'clock_step_exceeded': step_exceeded,
+                           'clock_step_limit_unconfirmed': step_unconfirmed,
+                           'wall_quantization_uncertainty_ms': uncertainty,
+                           'wall_rollback_from_high_water_ms': rollback,
+                           'wall_rollback_limit_unconfirmed': rollback_unconfirmed,
                            'observation_gap_exceeded': interval_min > MAX_OBSERVATION_GAP_MS,
                            'observation_gap_limit_unconfirmed':
                                interval_min <= MAX_OBSERVATION_GAP_MS < interval_max}
@@ -125,10 +155,14 @@ class DualDeadlineReference:
                     # Sampling uncertainty must not silently widen the gap
                     # limit. Distinguish an uncertain interval from a proven gap.
                     reason = 'observation_gap_limit_unconfirmed'
-                elif self._high_wall-reading.wall_ms > MAX_STEP_MS:
+                elif rollback_exceeded:
                     reason = 'wall_clock_rollback'
-                elif wall_delta-interval_max > MAX_STEP_MS or interval_min-wall_delta > MAX_STEP_MS:
+                elif rollback_unconfirmed:
+                    reason = 'wall_clock_rollback_limit_unconfirmed'
+                elif step_exceeded:
                     reason = 'wall_clock_step_exceeded'
+                elif step_unconfirmed:
+                    reason = 'wall_clock_step_limit_unconfirmed'
                 else:
                     # A forward correction may only shorten the deadline.
                     # A later rollback cannot return any time already removed.
