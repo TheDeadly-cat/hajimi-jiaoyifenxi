@@ -110,6 +110,10 @@ class AuthorizedTextRequest:
     attempted: bool = False
     before_send: Callable[[], None] | None = None
     send_gate: TextRequestSendGate | None = None
+    # Only bounded in-memory checks belong here; no DB, network or stop calls.
+    # Runs after acquiring the final admission lock, immediately before marking
+    # the request admitted. Potentially blocking preparation stays before_send.
+    admission_check: Callable[[], None] | None = None
 
     def check(self, request: urllib.request.Request) -> None:
         body = request.data or b""
@@ -158,6 +162,8 @@ def open_text_provider_request(request: urllib.request.Request, *, timeout: int)
     with policy.send_gate.admission() if policy.send_gate else nullcontext():
         if policy.attempted:
             raise ExecutionBoundaryViolation("本次授权只允许一个 Provider HTTP 请求")
+        if policy.admission_check is not None:
+            policy.admission_check()
         policy.attempted = True
     return opener.open(request, timeout=timeout)
 

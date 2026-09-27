@@ -472,15 +472,33 @@ class NewsReviewService:
                 claim = db.execute('SELECT job_id FROM news_review_content_claims WHERE dedupe_key=?', (job['dedupe_key'],)).fetchone()
                 require(claim is not None and claim['job_id'] == job['id'], 'content_claim_integrity')
 
+        admission_error = ""
+        def admission_check():
+            # The preflight can finish before expiry, then wait on preparation
+            # or the send gate. Recheck time inside final admission, without
+            # store/owner locks or persistence that could delay host stop.
+            nonlocal admission_error
+            try:
+                self.check_clock()
+                now = self.clock()
+                require(type(now) is int and p["not_before_ms"] <= now < p["expires_at_ms"],
+                        "policy_expired")
+            except NewsReviewError as exc:
+                # Providers normalize exceptions. Retain only these local
+                # bounded codes so that normalization cannot erase the cause.
+                admission_error = exc.code if exc.code in {"clock_changed", "policy_expired"} else "clock_unconfirmed"
+                raise
+
         bound = AuthorizedTextRequest(ENDPOINT,job["request_sha256"],p["max_request_bytes"],240,
-                                      before_send=before_send,send_gate=send_gate)
+                                      before_send=before_send,send_gate=send_gate,
+                                      admission_check=admission_check)
         result, usage, cost, error = None, {}, None, ""
         status = "FAILED"
         response_digest = ""
         try:
             with authorized_text_request(bound):
                 response = provider.generate_json(**generation)
-            require(bound.attempted, "http_not_attempted")
+            require(bound.attempted, admission_error or "http_not_attempted")
             require(provider._api_key not in encoded({"content":response.content,"usage":response.usage}), "credential_echo")
             response_digest = hashlib.sha256(response.content.encode()).hexdigest()
             usage = normalized_token_usage(response.usage)
