@@ -44,7 +44,7 @@ def native_creation_ticks(pid):
 
 
 def read_receipt_chain(directory, identity, *, prefix='monitor-execution'):
-    if prefix not in ('monitor-execution','monitor-wait-execution'):
+    if prefix not in ('monitor-execution','monitor-wait-execution','observer-drain-execution'):
         raise ValueError('receipt_prefix_invalid')
     previous=''
     latest=None
@@ -64,7 +64,7 @@ def read_receipt_chain(directory, identity, *, prefix='monitor-execution'):
     return latest
 
 
-def check(directory, pin, previous_alerts, *, now_ms, inspect=native_creation_ticks):
+def check(directory, pin, previous_alerts, *, now_ms, inspect=native_creation_ticks, previous=None):
     identity=pin['identity']
     expected=pin.get('process_start_utc_ticks')
     first,second=inspect(pin.get('pid')),inspect(pin.get('pid'))
@@ -78,11 +78,37 @@ def check(directory, pin, previous_alerts, *, now_ms, inspect=native_creation_ti
     verdict=evaluate_watchdog(receipt,identity=identity,now_ms=now_ms,observer_identity_alive=alive)
     if first!=second or first is not None and first!=expected:
         verdict['alerts'].append('OBSERVER_IDENTITY_UNCONFIRMED')
+    events=[]
+    if pin.get('version')=='news_review_direct_observer_pin_v1':
+        previous=previous or {}
+        verdict.update(plan_sha256=pin.get('plan_sha256'),monitoring_phase='active',
+                       resolved_policy_sha256=identity['policy_sha256'])
+        for key in ('drain_start_sha256','drain_receipt_seen'):
+            if key in previous: verdict[key]=previous[key]
+        try:
+            plan=pin['plan']
+            digest=hashlib.sha256(json.dumps(plan,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+            if (digest!=pin['plan_sha256'] or plan.get('version')!='news_review_observer_plan_v1'
+                    or plan['request']['target']['identity']!=identity
+                    or previous and (previous.get('identity')!=identity or previous.get('plan_sha256')!=digest)):
+                raise ValueError('direct_observer_plan_unconfirmed')
+            root=Path(directory)
+            _evaluate_drain(root,pin,{'resolved_plan':plan},previous,verdict,receipt,now_ms)
+            _evaluate_exit(root,pin,identity,identity['policy_sha256'],
+                           plan['request']['target'].get('expires_at_ms'),verdict,now_ms)
+            if verdict.get('final_verification_required') and not previous.get('final_verification_required'):
+                events.append('FINAL_VERIFICATION_REQUIRED')
+        except (ValueError,KeyError,OSError,TypeError):
+            verdict['alerts'].append('OBSERVER_SESSION_EVIDENCE_UNCONFIRMED')
+            verdict['health_recovery_confirmed']={k:False for k in verdict['health_recovery_confirmed']}
     verdict['notification_required']=bool(verdict['alerts'])
     verdict['receipt_chain_verified']=integrity
     verdict['changes']=notification_changes(previous_alerts,verdict)
+    if events:
+        verdict['changes']['events']=events
+        verdict['changes']['notify']=True
     verdict['alerts']=verdict['changes']['active_alerts']
-    verdict['notification_required']=bool(verdict['alerts'])
+    verdict['notification_required']=bool(verdict['alerts']) or bool(events)
     return verdict
 
 
@@ -92,6 +118,87 @@ def _bounded_record(path):
     if len(data)>131072:
         raise ValueError('watchdog_record_size_limit')
     return json.loads(data.decode('utf-8'))
+
+
+def _evaluate_drain(root, active, binding, previous, verdict, receipt, now_ms):
+    path=root/'observer-drain-start.json'
+    if not path.exists():
+        if previous.get('drain_start_sha256') is not None:
+            raise ValueError('observer_drain_evidence_disappeared')
+        return
+    start=_bounded_record(path)
+    digest=hashlib.sha256(json.dumps(start,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+    plan=binding['resolved_plan'];expiry=plan['request']['target'].get('expires_at_ms')
+    began=start.get('started_at_ms')
+    if (type(expiry) is not int or plan.get('drain_grace_ms')!=255000
+            or start.get('version')!='news_review_observer_drain_start_v1'
+            or start.get('identity')!=active['identity'] or start.get('plan_sha256')!=active['plan_sha256']
+            or start.get('original_expires_at_ms')!=expiry or start.get('deadline_at_ms')!=expiry+255000
+            or type(began) is not int or not expiry<=began<expiry+255000 or now_ms<began
+            or start.get('http_get_requests')!=0
+            or previous.get('drain_start_sha256') not in (None,digest)):
+        raise ValueError('observer_drain_identity_unconfirmed')
+    verdict['drain_start_sha256']=digest
+    verdict['monitoring_phase']='draining'
+    verdict['health_recovery_confirmed']={k:False for k in verdict['health_recovery_confirmed']}
+    verdict['drain_receipt_seen']=bool(previous.get('drain_receipt_seen') or list(root.glob('observer-drain-execution-*.json')))
+    latest=read_receipt_chain(root,active['identity'],prefix='observer-drain-execution')
+    if latest is None and verdict['drain_receipt_seen']:
+        raise ValueError('observer_drain_receipt_disappeared')
+    completed=began
+    if latest:
+        completed=latest.get('completed_at_ms')
+        if (latest.get('version')!='news_review_observer_drain_execution_v1'
+                or latest.get('plan_sha256')!=active['plan_sha256']
+                or latest.get('http_get_requests')!=0 or type(latest.get('inspection_complete')) is not bool
+                or type(completed) is not int or completed<began or completed>now_ms):
+            raise ValueError('observer_drain_receipt_unconfirmed')
+        if not latest['inspection_complete']:
+            verdict['alerts'].append('TRIAL_PROCESS_INSPECTION_UNCONFIRMED')
+    if now_ms>=expiry+255000:
+        verdict['monitoring_phase']='drain_deadline_unconfirmed'
+        verdict['alerts'].append('OBSERVER_DRAIN_DEADLINE_UNCONFIRMED')
+    elif now_ms-completed>90000:
+        verdict['alerts'].append('MONITOR_DRAIN_EXECUTION_OVERDUE')
+    elif latest is None or latest['inspection_complete']:
+        # GETs deliberately end at expiry. Only suppress newly stale ages
+        # caused by this native-only drain, never a failed active read or an
+        # earlier incident, and never declare source/worker recovery from it.
+        for code,field in (('MONITOR_EXECUTION_OVERDUE','completed_at_ms'),
+                           ('MONITOR_SUCCESSFUL_READ_OVERDUE','last_successful_read_at_ms')):
+            value=receipt.get(field) if receipt else None
+            if (code not in previous.get('alerts',[]) and type(value) is int
+                    and 0<=expiry-value<=360000):
+                verdict['alerts']=[v for v in verdict['alerts'] if v!=code]
+
+
+def _evaluate_exit(root, pin, identity, policy, expiry, verdict, now_ms):
+    exit_path=root/'observer-exit.json'
+    if not exit_path.exists(): return
+    ended=_bounded_record(exit_path)
+    if (ended.get('plan_sha256')!=pin['plan_sha256']
+            or any(ended.get('identity',{}).get(k)!=identity[k] for k in ('candidate_sha','activation_sha256'))):
+        raise ValueError('observer_exit_identity_unconfirmed')
+    if policy is not None:
+        if (ended.get('version')!='news_review_observer_exit_v1'
+                or ended.get('identity')!={**identity,'policy_sha256':policy}):
+            raise ValueError('observer_exit_policy_unconfirmed')
+        if (type(expiry) is not int or type(ended.get('ended_at_ms')) is not int
+                or not pin['started_at_ms']<=ended['ended_at_ms']<=now_ms
+                or ended['ended_at_ms']>=expiry+255000):
+            raise ValueError('observer_exit_time_unconfirmed')
+    if (policy is not None and ended.get('phase')=='registered_tree_terminal'
+            and ended.get('two_native_terminal_checks') is True and ended.get('original_report_exists') is True
+            and type(ended.get('original_report_sha256')) is str
+            and re.fullmatch('[0-9a-f]{64}',ended['original_report_sha256'])):
+        verdict['monitoring_phase']='terminal_review'
+        verdict['final_verification_required']=True
+        # Routing only; no ownership, ledger or acceptance assertion.
+        verdict['alerts']=[v for v in verdict['alerts'] if v not in ('OBSERVER_LIVENESS_UNCONFIRMED',
+            'MONITOR_READ_UNCONFIRMED','MONITOR_SUCCESSFUL_READ_OVERDUE','MONITOR_EXECUTION_OVERDUE',
+            'OBSERVER_DRAIN_DEADLINE_UNCONFIRMED','MONITOR_DRAIN_EXECUTION_OVERDUE')]
+    else:
+        verdict['alerts'].append('OBSERVER_EXIT_REQUIRES_USER_ACTION')
 
 
 def check_waiting_session(directory, pin, previous, *, now_ms, inspect=native_creation_ticks):
@@ -129,7 +236,8 @@ def check_waiting_session(directory, pin, previous, *, now_ms, inspect=native_cr
         'receipt_chain_verified':False,'live_acceptance_proven':False}
     # Once bound, missing/corrupt files cannot reset the session to waiting or
     # grant a fresh first-read grace period on a later watchdog invocation.
-    for key in ('resolved_policy_sha256','resolved_binding_sha256','active_pin_sha256','active_receipt_seen'):
+    for key in ('resolved_policy_sha256','resolved_binding_sha256','active_pin_sha256','active_receipt_seen',
+                'drain_start_sha256','drain_receipt_seen'):
         if key in previous:
             verdict[key]=previous[key]
     try:
@@ -179,6 +287,7 @@ def check_waiting_session(directory, pin, previous, *, now_ms, inspect=native_cr
                 verdict['alerts'].append('OBSERVATION_STARTED_AFTER_ACTIVATION')
             elif order!='before_activation_verified':
                 verdict['alerts'].append('OBSERVATION_ORDER_UNCONFIRMED')
+            _evaluate_drain(root,active,binding,previous,verdict,receipt,now_ms)
         else:
             if previous.get('resolved_policy_sha256') is not None or previous.get('actual_activation_confirmed'):
                 raise ValueError('observer_activation_binding_disappeared')
@@ -196,29 +305,9 @@ def check_waiting_session(directory, pin, previous, *, now_ms, inspect=native_cr
                 verdict['receipt_chain_verified']=True
                 if waiting.get('inspection_complete') is False:
                     alerts.append('TRIAL_PROCESS_INSPECTION_UNCONFIRMED')
-        exit_path=root/'observer-exit.json'
-        if exit_path.exists():
-            ended=_bounded_record(exit_path)
-            if (ended.get('plan_sha256')!=pin['plan_sha256']
-                    or any(ended.get('identity',{}).get(k)!=identity[k] for k in ('candidate_sha','activation_sha256'))):
-                raise ValueError('observer_exit_identity_unconfirmed')
-            if (verdict.get('resolved_policy_sha256') is not None
-                    and (ended.get('version')!='news_review_observer_exit_v1'
-                         or ended.get('identity')!={**identity,'policy_sha256':verdict['resolved_policy_sha256']})):
-                raise ValueError('observer_exit_policy_unconfirmed')
-            if (ended.get('phase')=='registered_tree_terminal' and ended.get('two_native_terminal_checks') is True
-                    and verdict.get('resolved_policy_sha256') is not None
-                    and ended.get('original_report_exists') is True
-                    and type(ended.get('original_report_sha256')) is str
-                    and re.fullmatch('[0-9a-f]{64}',ended['original_report_sha256'])):
-                verdict['monitoring_phase']='terminal_review'
-                verdict['final_verification_required']=True
-                # The exit receipt routes to final verification; it does not
-                # assert current ownership, a final ledger or accepted quality.
-                verdict['alerts']=[v for v in verdict['alerts'] if v not in ('OBSERVER_LIVENESS_UNCONFIRMED',
-                    'MONITOR_READ_UNCONFIRMED','MONITOR_SUCCESSFUL_READ_OVERDUE','MONITOR_EXECUTION_OVERDUE')]
-            else:
-                verdict['alerts'].append('OBSERVER_EXIT_REQUIRES_USER_ACTION')
+        policy=verdict.get('resolved_policy_sha256')
+        expiry=binding['resolved_plan']['request']['target'].get('expires_at_ms') if policy else None
+        _evaluate_exit(root,pin,identity,policy,expiry,verdict,now_ms)
     except (ValueError,KeyError,OSError,TypeError):
         verdict['alerts'].append('OBSERVER_SESSION_EVIDENCE_UNCONFIRMED')
     if verdict['monitoring_phase']!='terminal_review':
@@ -254,7 +343,8 @@ def main():
         raise ValueError('previous_watchdog_identity_mismatch')
     verdict=(check_waiting_session(args.receipts,pin,previous,now_ms=time.time_ns()//1_000_000)
              if pin.get('version')=='news_review_waiting_observer_pin_v1' else
-             check(args.receipts,pin,previous['alerts'] if previous else [],now_ms=time.time_ns()//1_000_000))
+             check(args.receipts,pin,previous['alerts'] if previous else [],now_ms=time.time_ns()//1_000_000,
+                   previous=previous))
     publish_json_once(args.output, verdict)
     print(json.dumps({'output':args.output,'notify':verdict['changes']['notify'],'alerts':verdict['alerts']}))
     return 2 if verdict['changes']['notify'] else 0

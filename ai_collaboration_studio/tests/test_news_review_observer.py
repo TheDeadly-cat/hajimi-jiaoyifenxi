@@ -194,6 +194,16 @@ class ObserverPreparationTests(unittest.TestCase):
         self.assertEqual(observer.read_json(directory/'process-tree-check-000001.json')['code'],'NATIVE_INSPECTION_TIMEOUT')
         self.assertFalse(observer.terminal_tree(inspect.last))
 
+    def test_native_drain_timeout_uses_remaining_hard_budget(self):
+        tree=self.tree()
+        def result(*args,**kwargs):
+            return subprocess.CompletedProcess(args[0],0,json.dumps(tree).encode(),b'')
+        inspect,run,_=self.inspector(result)
+        with patch.object(observer.time,'time_ns',return_value=1000000*1_000_000), \
+                patch.object(observer.time,'monotonic_ns',return_value=100000*1_000_000):
+            inspect(deadline_monotonic_ms=101500,expires_at_ms=1001200)
+        self.assertEqual(run.call_args.kwargs['timeout'],1.2)
+
     def test_partial_process_list_or_extra_payload_is_not_persisted(self):
         tree=self.tree()
         tree['processes'].pop()
@@ -245,6 +255,67 @@ class ObserverPreparationTests(unittest.TestCase):
         self.assertTrue(observer.terminal_tree(tree))
         tree['known_identity_inspection_incomplete']=True
         self.assertFalse(observer.terminal_tree(tree))
+
+    def drain_fixture(self, exit_delay):
+        wrapped=self.prepared()
+        expiry=self.request['target']['expires_at_ms']
+        clock={'wall':expiry-10000,'mono':100000}
+        checks=[];status_reads=[]
+        case=self
+        class Event:
+            stopped=False
+            def is_set(self): return self.stopped
+            def set(self): self.stopped=True
+            def wait(self, seconds):
+                if self.stopped: return True
+                advance=int(round(seconds*1000))
+                case.assertGreater(advance,0)
+                clock['wall']+=advance;clock['mono']+=advance
+                if exit_delay is not None and clock['wall']>=expiry+exit_delay and not (case.root/'window-report.json').exists():
+                    write(case.root/'window-report.json',{'synthetic_host_report':True})
+                return False
+        def native_check(**_kwargs):
+            checks.append(clock['wall'])
+            tree=self.tree()
+            if exit_delay is not None and clock['wall']>=expiry+exit_delay:
+                tree.update(owner_alive=False,safe_status_reads_allowed=False,listeners=[])
+                for process in tree['processes']: process['alive']=False
+            return tree
+        def probe_factory(target, *, inspect_tree, wall_ms):
+            def probe():
+                inspect_tree()
+                status_reads.append(wall_ms())
+                self.assertLess(wall_ms(),expiry)
+                return {'identity':target['identity'],'process_identity_verified':True,
+                    'port_ownership_verified':True,'health':{'host_alive':True,'workers_alive':True,'source_stale_keys':[]}}
+            return probe
+        directory=self.root/'monitoring';directory.mkdir()
+        with patch.object(observer.time,'time_ns',side_effect=lambda:clock['wall']*1_000_000), \
+                patch.object(observer.time,'monotonic_ns',side_effect=lambda:clock['mono']*1_000_000), \
+                patch.object(observer.threading,'Event',Event), \
+                patch.object(observer,'NewsReviewStatusProbe',side_effect=probe_factory),patch('socket.socket') as wire:
+            result=observer.observe_active(wrapped['plan'],wrapped['plan_sha256'],directory,inspector=native_check)
+        self.assertEqual(status_reads,[expiry-10000])
+        ended=observer.read_json(directory/'observer-exit.json')
+        wire.assert_not_called()
+        return result,ended,clock,checks,expiry
+
+    def test_normal_drain_is_checked_before_255_seconds_without_extra_status_gets(self):
+        result,ended,clock,checks,expiry=self.drain_fixture(120000)
+        self.assertEqual(result,0)
+        self.assertLess(clock['wall'],expiry+255000)
+        self.assertGreaterEqual(sum(t>=expiry+120000 for t in checks),2)
+        self.assertEqual(ended['phase'],'registered_tree_terminal')
+        self.assertTrue(ended['two_native_terminal_checks'])
+
+    def test_live_tree_at_drain_deadline_is_unconfirmed_and_never_extended(self):
+        result,ended,clock,checks,expiry=self.drain_fixture(None)
+        self.assertEqual(result,2)
+        self.assertEqual(clock['wall'],expiry+255000)
+        self.assertTrue(all(t<expiry+255000 for t in checks))
+        self.assertEqual(ended['phase'],'drain_deadline_unconfirmed_user_action_required')
+        self.assertFalse(ended['two_native_terminal_checks'])
+        self.assertFalse(ended['original_report_exists'])
 
 
 SERVER_CHILD = r'''

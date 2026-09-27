@@ -11,7 +11,7 @@ from backend.news_review_monitor import MonitorReceiptWriter, publish_json_once
 from backend.news_review_monitor_probe import ProbeError, canonical, native_ticks
 from scripts import run_news_review_observer as core
 from scripts import news_review_observer_wait as waiting
-from scripts.news_review_watchdog import check_waiting_session
+from scripts.news_review_watchdog import check_waiting_session, check as check_direct
 from tests import test_news_review_observer as fixtures
 
 write=fixtures.write
@@ -183,9 +183,9 @@ class WaitingWatchdogTests(unittest.TestCase):
         return check_waiting_session(self.root,self.pin,previous,now_ms=self.now,
             inspect=lambda _:self.pin['process_start_utc_ticks'] if alive else None)
 
-    def bind(self, *, ready=True):
+    def bind(self, *, ready=True, expires_in_ms=1000):
         identity={**self.identity,'policy_sha256':'c'*64}
-        plan={'request':{'target':{'identity':identity}}}
+        plan={'request':{'target':{'identity':identity,'expires_at_ms':self.now+expires_in_ms}},'drain_grace_ms':255000}
         binding={'original_plan_sha256':self.pin['plan_sha256'],'resolved_plan_sha256':canonical(plan),
             'resolved_plan':plan,'observer_pid':123,'observer_process_start_utc_ticks':self.pin['process_start_utc_ticks'],
             'waiting_checks':1,'waiting_last_sha256':self.wait_hash,'observer_ready_before_activation':ready}
@@ -242,7 +242,7 @@ class WaitingWatchdogTests(unittest.TestCase):
         self.bind()
         publish_json_once(self.root/'observer-exit.json',{'version':'news_review_observer_exit_v1','plan_sha256':self.pin['plan_sha256'],
             'identity':{**self.identity,'policy_sha256':'c'*64},'phase':'registered_tree_terminal',
-            'two_native_terminal_checks':True,'original_report_exists':True,'original_report_sha256':'e'*64})
+            'ended_at_ms':self.now,'two_native_terminal_checks':True,'original_report_exists':True,'original_report_sha256':'e'*64})
         verdict=self.check(alive=False)
         self.assertEqual(verdict['monitoring_phase'],'terminal_review')
         self.assertEqual(verdict['changes']['events'],['FINAL_VERIFICATION_REQUIRED'])
@@ -281,11 +281,128 @@ class WaitingWatchdogTests(unittest.TestCase):
         publish_json_once(self.root/'observer-exit.json',{'version':'news_review_observer_exit_v1',
             'plan_sha256':self.pin['plan_sha256'],'identity':{**self.identity,'policy_sha256':'f'*64},
             'phase':'registered_tree_terminal','two_native_terminal_checks':True,
-            'original_report_exists':True,'original_report_sha256':'e'*64})
+            'ended_at_ms':self.now,'original_report_exists':True,'original_report_sha256':'e'*64})
         verdict=self.check(alive=False)
         self.assertNotEqual(verdict['monitoring_phase'],'terminal_review')
         self.assertIn('OBSERVER_LIVENESS_UNCONFIRMED',verdict['alerts'])
         self.assertIn('OBSERVER_SESSION_EVIDENCE_UNCONFIRMED',verdict['alerts'])
+
+    def drain_receipts(self, *, stale_source=False, last_offset=200000):
+        identity=self.bind(expires_in_ms=250000)
+        writer=MonitorReceiptWriter(self.root,identity,wall_ms=lambda:self.now,monotonic_ms=lambda:1)
+        writer.execute(scheduled_at_ms=self.now,probe=lambda:{'identity':identity,'process_identity_verified':True,
+            'port_ownership_verified':True,'health':{'host_alive':True,'workers_alive':True,
+                'source_stale_keys':['company_ir'] if stale_source else []}})
+        previous=self.check()
+        expiry=self.now+250000
+        publish_json_once(self.root/'observer-drain-start.json',{
+            'version':'news_review_observer_drain_start_v1','identity':identity,'plan_sha256':self.pin['plan_sha256'],
+            'started_at_ms':expiry,'original_expires_at_ms':expiry,'deadline_at_ms':expiry+255000,'http_get_requests':0})
+        digest=''
+        for index,offset in enumerate(range(0,last_offset+1,10000),1):
+            self.now=expiry+offset
+            receipt={'version':'news_review_observer_drain_execution_v1','identity':identity,
+                'plan_sha256':self.pin['plan_sha256'],'sequence':index,'previous_sha256':digest,
+                'completed_at_ms':self.now,'inspection_complete':True,'http_get_requests':0}
+            digest=canonical(receipt)
+            publish_json_once(self.root/f'observer-drain-execution-{index:06d}.json',{'receipt':receipt,'sha256':digest})
+        return previous,expiry
+
+    def test_fresh_native_drain_is_quiet_without_fabricated_health_recovery(self):
+        previous,expiry=self.drain_receipts(stale_source=True)
+        verdict=self.check(previous)
+        self.assertEqual(verdict['monitoring_phase'],'draining')
+        self.assertEqual(verdict['alerts'],['SOURCE_FULL_SUCCESS_STALE'])
+        self.assertEqual(verdict['changes']['resolved'],[])
+        self.assertFalse(verdict['changes']['notify'])
+        self.assertFalse(any(verdict['health_recovery_confirmed'].values()))
+        self.now=expiry+255000
+        overdue=self.check(verdict)
+        self.assertIn('OBSERVER_DRAIN_DEADLINE_UNCONFIRMED',overdue['alerts'])
+        self.assertTrue(overdue['changes']['notify'])
+
+    def test_missing_drain_evidence_cannot_become_normal_startup_grace(self):
+        previous,_=self.drain_receipts()
+        active=self.check(previous)
+        self.assertFalse(active['changes']['notify'])
+        (self.root/'observer-drain-start.json').unlink()
+        self.assertIn('OBSERVER_SESSION_EVIDENCE_UNCONFIRMED',self.check(active)['alerts'])
+
+    def test_late_exit_does_not_claim_timely_terminal_review(self):
+        previous,expiry=self.drain_receipts()
+        self.now=expiry+255001
+        publish_json_once(self.root/'observer-exit.json',{'version':'news_review_observer_exit_v1',
+            'plan_sha256':self.pin['plan_sha256'],'identity':{**self.identity,'policy_sha256':'c'*64},
+            'phase':'registered_tree_terminal','two_native_terminal_checks':True,'ended_at_ms':self.now,
+            'original_report_exists':True,'original_report_sha256':'e'*64})
+        verdict=self.check(previous,alive=False)
+        self.assertNotEqual(verdict['monitoring_phase'],'terminal_review')
+        self.assertIn('OBSERVER_SESSION_EVIDENCE_UNCONFIRMED',verdict['alerts'])
+        self.assertIn('OBSERVER_LIVENESS_UNCONFIRMED',verdict['alerts'])
+
+    def test_missing_drain_execution_stays_visible(self):
+        previous,expiry=self.drain_receipts()
+        active=self.check(previous)
+        self.now=expiry+200001
+        for path in self.root.glob('observer-drain-execution-*.json'):
+            path.unlink()  # Only this test's owned temporary receipts.
+        missing=self.check(active)
+        self.assertIn('OBSERVER_SESSION_EVIDENCE_UNCONFIRMED',missing['alerts'])
+
+    def test_missed_native_drain_check_is_separate_from_observer_liveness(self):
+        previous,expiry=self.drain_receipts(last_offset=0)
+        self.now=expiry+90001
+        verdict=self.check(previous)
+        self.assertIn('MONITOR_DRAIN_EXECUTION_OVERDUE',verdict['alerts'])
+        self.assertNotIn('OBSERVER_LIVENESS_UNCONFIRMED',verdict['alerts'])
+
+    def test_normal_terminal_receipt_read_later_is_not_a_new_deadline_fault(self):
+        previous,expiry=self.drain_receipts(stale_source=True)
+        ended_at=self.now
+        publish_json_once(self.root/'observer-exit.json',{'version':'news_review_observer_exit_v1',
+            'plan_sha256':self.pin['plan_sha256'],'identity':{**self.identity,'policy_sha256':'c'*64},
+            'phase':'registered_tree_terminal','two_native_terminal_checks':True,'ended_at_ms':ended_at,
+            'original_report_exists':True,'original_report_sha256':'e'*64})
+        self.now=expiry+360000
+        verdict=self.check(previous,alive=False)
+        self.assertEqual(verdict['monitoring_phase'],'terminal_review')
+        self.assertNotIn('OBSERVER_DRAIN_DEADLINE_UNCONFIRMED',verdict['alerts'])
+        self.assertNotIn('OBSERVER_LIVENESS_UNCONFIRMED',verdict['alerts'])
+        self.assertIn('SOURCE_FULL_SUCCESS_STALE',verdict['alerts'])
+        self.assertFalse(verdict['live_acceptance_proven'])
+
+    def test_direct_observer_uses_same_bounded_drain_and_terminal_rules(self):
+        _,expiry=self.drain_receipts()
+        active=core.read_json(self.root/'observer-active-pin.json')
+        binding=core.read_json(self.root/'observer-activation-binding.json')
+        plan={**binding['resolved_plan'],'version':'news_review_observer_plan_v1'}
+        plan_hash=canonical(plan)
+        pin={**self.pin,'version':'news_review_direct_observer_pin_v1',
+             'identity':active['identity'],'plan':plan,'plan_sha256':plan_hash}
+        start=core.read_json(self.root/'observer-drain-start.json')
+        start['plan_sha256']=plan_hash
+        write(self.root/'observer-drain-start.json',start)
+        previous_hash=''
+        for path in sorted(self.root.glob('observer-drain-execution-*.json')):
+            receipt=core.read_json(path)['receipt']
+            receipt.update(plan_sha256=plan_hash,previous_sha256=previous_hash)
+            previous_hash=canonical(receipt)
+            write(path,{'receipt':receipt,'sha256':previous_hash})
+        verdict=check_direct(self.root,pin,[],now_ms=self.now,
+            inspect=lambda _:pin['process_start_utc_ticks'])
+        self.assertEqual(verdict['monitoring_phase'],'draining')
+        self.assertFalse(verdict['changes']['notify'])
+        publish_json_once(self.root/'observer-exit.json',{'version':'news_review_observer_exit_v1',
+            'plan_sha256':plan_hash,'identity':pin['identity'],'phase':'registered_tree_terminal',
+            'two_native_terminal_checks':True,'ended_at_ms':self.now,
+            'original_report_exists':True,'original_report_sha256':'e'*64})
+        self.now=expiry+360000
+        final=check_direct(self.root,pin,verdict['alerts'],previous=verdict,now_ms=self.now,inspect=lambda _:None)
+        self.assertEqual(final['monitoring_phase'],'terminal_review')
+        self.assertEqual(final['changes']['events'],['FINAL_VERIFICATION_REQUIRED'])
+        self.assertFalse(final['live_acceptance_proven'])
+        self.assertFalse(check_direct(self.root,pin,final['alerts'],previous=final,
+                                     now_ms=self.now,inspect=lambda _:None)['changes']['notify'])
 
 
 if __name__=='__main__':

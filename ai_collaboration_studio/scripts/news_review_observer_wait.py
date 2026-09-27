@@ -72,6 +72,7 @@ def prepare_wait(request, powershell, *, core):
         'python':{'path':str(Path(sys.executable).resolve()),'sha256':core.sha(sys.executable)},
         'output_directory':str(root/'monitoring'),'poll_interval_ms':300000,'waiting_interval_ms':30000,
         'inspection_timeout_seconds':45,'status_timeout_seconds':15,'maximum_silence_ms':360000,
+        'drain_native_interval_ms':10000,'drain_grace_ms':255000,
         'receipt_publication_grace_ms':45000,'activation_eligibility_until_ms':template['expires_at_ms'],
         'observer_activations':1,'request_authorized':False,
         'permitted_binding':'existing_approved_launch_activation_and_native_host_receipts_only'}

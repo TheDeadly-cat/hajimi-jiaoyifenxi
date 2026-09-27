@@ -196,6 +196,7 @@ def prepare(request, powershell):
         'python': {'path':str(Path(sys.executable).resolve()), 'sha256':sha(sys.executable)},
         'output_directory': str(root/'monitoring'), 'poll_interval_ms':300000,
         'inspection_timeout_seconds':45, 'status_timeout_seconds':15, 'maximum_silence_ms':360000,
+        'drain_native_interval_ms':10000, 'drain_grace_ms':255000,
         'observer_activations':1, 'request_authorized':False}
     return {'plan':plan, 'plan_sha256':canonical(plan)}
 
@@ -238,8 +239,12 @@ class NativeInspector:
         self.pins = copy.deepcopy(plan['request']['pins'])
         self.waiting = False
 
-    def __call__(self):
+    def __call__(self, *, deadline_monotonic_ms=None, expires_at_ms=None):
         plan, request = self.plan, self.plan['request']
+        require((deadline_monotonic_ms is None) == (expires_at_ms is None)
+                and (deadline_monotonic_ms is None or
+                     integer(deadline_monotonic_ms,positive=True) and integer(expires_at_ms,positive=True)),
+                'native_inspection_deadline_invalid')
         require(sha(plan['powershell']['path']) == plan['powershell']['sha256'], 'powershell_changed')
         for name, expected in plan['monitor_files'].items():
             require(sha(APP/name) == expected, 'monitor_source_changed')
@@ -251,9 +256,14 @@ class NativeInspector:
             'identity':identity, 'host_url':request['target']['host_url'], 'launcher_pin':request['launcher_pin'],
             'host_pin':request['host_pin'], 'pins':self.pins})
         try:
+            timeout = 45
+            if deadline_monotonic_ms is not None:
+                timeout = min(timeout,(deadline_monotonic_ms-time.monotonic_ns()//1_000_000)/1000,
+                              (expires_at_ms-time.time_ns()//1_000_000)/1000)
+                require(timeout > 0, 'observer_window_closed')
             result = self.run([plan['powershell']['path'], '-NoProfile', '-NonInteractive', '-File',
                 str(APP/'scripts/inspect_news_review_process_tree.ps1'), '-InputPath', str(input_path)],
-                capture_output=True, timeout=45, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                capture_output=True, timeout=timeout, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             require(result.returncode == 0 and len(result.stdout) <= 65536, 'native_inspection_failed')
             tree = json.loads(result.stdout.decode('utf-8-sig'))
             expected_version = 'news_review_native_wait_inspection_v1' if self.waiting else 'news_review_native_inspection_v1'
@@ -329,7 +339,8 @@ def run_observer(plan, plan_hash):
     identity = target['identity']
     ticks = native_creation_ticks(os.getpid())
     require(integer(ticks, positive=True), 'observer_native_identity_unconfirmed')
-    publish_json_once(directory/'observer-pin.json', {'identity':identity, 'plan_sha256':plan_hash,
+    publish_json_once(directory/'observer-pin.json', {'version':'news_review_direct_observer_pin_v1',
+        'identity':identity, 'plan_sha256':plan_hash, 'plan':plan,
         'pid':os.getpid(), 'process_start_utc_ticks':ticks, 'started_at_ms':time.time_ns()//1_000_000})
     return observe_active(plan, plan_hash, directory)
 
@@ -341,10 +352,21 @@ def observe_active(plan, plan_hash, directory, *, inspector=None):
     stop = threading.Event()
     inspector = inspector or NativeInspector(plan, directory)
     ended = {'phase':'drain_deadline_unconfirmed_user_action_required', 'two_native_terminal_checks':False}
-    def inspect():
-        tree = inspector()
+    wall = lambda:time.time_ns()//1_000_000
+    mono = lambda:time.monotonic_ns()//1_000_000
+    hard_end = target['expires_at_ms']+plan['drain_grace_ms']
+    hard_mono = mono()+max(0,hard_end-wall())
+    def inspect(*, draining=False):
+        def native():
+            if not draining:
+                return inspector()
+            require(wall() < hard_end and mono() < hard_mono, 'observer_window_closed')
+            value = inspector(deadline_monotonic_ms=hard_mono,expires_at_ms=hard_end)
+            require(wall() < hard_end and mono() < hard_mono, 'observer_window_closed')
+            return value
+        tree = native()
         if terminal_tree(tree):
-            second = inspector()
+            second = native()
             if terminal_tree(second):
                 ended.update(phase='registered_tree_terminal', two_native_terminal_checks=True)
                 stop.set()
@@ -365,7 +387,41 @@ def observe_active(plan, plan_hash, directory, *, inspector=None):
     writer = MonitorReceiptWriter(directory, identity, wall_ms=lambda:time.time_ns()//1_000_000,
                                   monotonic_ms=lambda:time.monotonic_ns()//1_000_000)
     try:
-        writer.run_schedule(probe=observe, stop_event=stop, expires_at_ms=target['expires_at_ms']+255000)
+        writer.run_schedule(probe=observe, stop_event=stop, expires_at_ms=target['expires_at_ms'],
+                            interval_ms=plan['poll_interval_ms'])
+        # Ordinary GET cadence must not skip the shorter final drain window.
+        # Native-only checks continue under the original absolute AND elapsed
+        # hard bounds; no extra status/source/model requests are issued.
+        if not stop.is_set() and wall() < hard_end and mono() < hard_mono:
+            publish_json_once(directory/'observer-drain-start.json',{
+                'version':'news_review_observer_drain_start_v1','identity':identity,'plan_sha256':plan_hash,
+                'started_at_ms':wall(),'original_expires_at_ms':target['expires_at_ms'],
+                'deadline_at_ms':hard_end,'http_get_requests':0})
+            sequence,previous = 0,''
+            while not stop.is_set() and wall() < hard_end and mono() < hard_mono:
+                started,started_mono = wall(),mono()
+                tree,code = None,''
+                try:
+                    tree = inspect(draining=True)
+                except ProbeError as exc:
+                    code = str(exc)
+                    if code in fatal_codes:
+                        ended.update(phase='inspection_failure_user_action_required',code=code)
+                        stop.set()
+                sequence += 1
+                receipt = {'version':'news_review_observer_drain_execution_v1','identity':identity,
+                    'plan_sha256':plan_hash,'sequence':sequence,'previous_sha256':previous,
+                    'started_at_ms':started,'completed_at_ms':wall(),'elapsed_monotonic_ms':mono()-started_mono,
+                    'inspection_complete':bool(tree and tree.get('known_identity_inspection_incomplete') is False
+                                               and tree.get('enumeration_consistent') is True),
+                    'two_native_terminal_checks':ended['two_native_terminal_checks'],'error_code':code,
+                    'http_get_requests':0}
+                previous = canonical(receipt)
+                publish_json_once(directory/f'observer-drain-execution-{sequence:06d}.json',
+                                  {'receipt':receipt,'sha256':previous})
+                if not stop.is_set():
+                    delay = min(plan['drain_native_interval_ms'],hard_end-wall(),hard_mono-mono())
+                    if delay > 0: stop.wait(delay/1000)
     except BaseException:
         ended.update(phase='observer_interrupted_or_failed', code='OBSERVER_INCOMPLETE')
         raise
