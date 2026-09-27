@@ -94,6 +94,31 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(recovered['notify'])
         self.assertEqual(recovered['automatic_actions'],[])
 
+    def test_failed_observation_does_not_claim_source_or_parent_recovery(self):
+        def impaired():
+            value=self.healthy()
+            value['health']['source_stale_keys']=['company_ir']
+            value['health']['parent_launcher_alive']=False
+            return value
+        pin={'identity':self.identity,'pid':123,'process_start_utc_ticks':638000000000000000}
+        self.writer.execute(scheduled_at_ms=self.wall,probe=impaired)
+        first=check(self.temp.name,pin,[],now_ms=self.wall,inspect=lambda _:pin['process_start_utc_ticks'])
+        self.assertEqual(set(first['alerts']),{'SOURCE_FULL_SUCCESS_STALE','LAUNCHER_EXITED_CHILD_ALIVE'})
+        def timeout():
+            raise TimeoutError()
+        self.writer.execute(scheduled_at_ms=self.wall,probe=timeout)
+        uncertain=check(self.temp.name,pin,first['alerts'],now_ms=self.wall,inspect=lambda _:pin['process_start_utc_ticks'])
+        self.assertEqual(uncertain['changes']['resolved'],[])
+        self.assertTrue(set(first['alerts']) <= set(uncertain['alerts']))
+        self.assertIn('MONITOR_READ_UNCONFIRMED',uncertain['alerts'])
+        self.writer.execute(scheduled_at_ms=self.wall,probe=impaired)
+        observed=check(self.temp.name,pin,uncertain['alerts'],now_ms=self.wall,inspect=lambda _:pin['process_start_utc_ticks'])
+        self.assertEqual(observed['changes']['resolved'],['MONITOR_READ_UNCONFIRMED'])
+        self.writer.execute(scheduled_at_ms=self.wall,probe=self.healthy)
+        source_recovered=check(self.temp.name,pin,observed['alerts'],now_ms=self.wall,inspect=lambda _:pin['process_start_utc_ticks'])
+        self.assertEqual(source_recovered['changes']['resolved'],['SOURCE_FULL_SUCCESS_STALE'])
+        self.assertIn('LAUNCHER_EXITED_CHILD_ALIVE',source_recovered['alerts'])
+
     def test_independent_watchdog_checks_native_identity_and_chain(self):
         self.writer.execute(scheduled_at_ms=self.wall,probe=self.healthy)
         pin={'identity':self.identity,'pid':123,'process_start_utc_ticks':638000000000000000}

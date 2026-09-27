@@ -78,6 +78,8 @@ def check(directory, pin, previous_alerts, *, now_ms, inspect=native_creation_ti
     verdict['notification_required']=bool(verdict['alerts'])
     verdict['receipt_chain_verified']=integrity
     verdict['changes']=notification_changes(previous_alerts,verdict)
+    verdict['alerts']=verdict['changes']['active_alerts']
+    verdict['notification_required']=bool(verdict['alerts'])
     return verdict
 
 

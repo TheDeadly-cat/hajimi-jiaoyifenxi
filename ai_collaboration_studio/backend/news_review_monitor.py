@@ -96,11 +96,14 @@ class MonitorReceiptWriter:
             # Persist only already validated counts/codes/liveness; never raw
             # responses, documents, exception text or process environments.
             health=observation['health']
-            if type(health) is not dict or set(health)!={'host_alive','workers_alive','source_stale_keys'}:
+            required={'host_alive','workers_alive','source_stale_keys'}
+            if (type(health) is not dict or not required <= set(health)
+                    or set(health)-required-{'parent_launcher_alive'}):
                 raise ValueError('probe_health_invalid')
             if (type(health['host_alive']) is not bool or type(health['workers_alive']) is not bool
                     or type(health['source_stale_keys']) is not list or len(health['source_stale_keys'])>32
-                    or any(type(k) is not str or re.fullmatch('[a-z][a-z0-9_]{0,63}',k) is None for k in health['source_stale_keys'])):
+                    or any(type(k) is not str or re.fullmatch('[a-z][a-z0-9_]{0,63}',k) is None for k in health['source_stale_keys'])
+                    or 'parent_launcher_alive' in health and type(health['parent_launcher_alive']) is not bool):
                 raise ValueError('probe_health_invalid')
             result['health']=copy.deepcopy(health)
             result['read_succeeded']=True
@@ -152,6 +155,8 @@ def evaluate_watchdog(receipt, *, identity, now_ms, observer_identity_alive, max
     if not _identity(identity) or not _integer(now_ms) or not _integer(maximum_silence_ms) or maximum_silence_ms==0:
         raise ValueError('invalid_watchdog_input')
     alerts=[]
+    recovery={code:False for code in ('HOST_NOT_ALIVE','WORKER_NOT_ALIVE',
+        'SOURCE_FULL_SUCCESS_STALE','LAUNCHER_EXITED_CHILD_ALIVE')}
     if not observer_identity_alive:
         alerts.append('OBSERVER_LIVENESS_UNCONFIRMED')
     if type(receipt) is not dict or receipt.get('identity')!=identity:
@@ -172,19 +177,35 @@ def evaluate_watchdog(receipt, *, identity, now_ms, observer_identity_alive, max
         if last is None or not _integer(last) or last>now_ms or now_ms-last>maximum_silence_ms:
             alerts.append('MONITOR_SUCCESSFUL_READ_OVERDUE')
         health=receipt.get('health',{})
+        verified_health=(receipt.get('read_succeeded') is True and _integer(completed)
+                         and 0<=now_ms-completed<=maximum_silence_ms)
+        recovery.update({
+            'HOST_NOT_ALIVE':verified_health and health.get('host_alive') is True,
+            'WORKER_NOT_ALIVE':verified_health and health.get('workers_alive') is True,
+            'SOURCE_FULL_SUCCESS_STALE':verified_health and health.get('source_stale_keys') == [],
+            'LAUNCHER_EXITED_CHILD_ALIVE':verified_health and health.get('parent_launcher_alive') is True,
+        })
         if health.get('host_alive') is False:
             alerts.append('HOST_NOT_ALIVE')
+        if health.get('host_alive') is True and health.get('parent_launcher_alive') is False:
+            alerts.append('LAUNCHER_EXITED_CHILD_ALIVE')
         if health.get('workers_alive') is False:
             alerts.append('WORKER_NOT_ALIVE')
         if health.get('source_stale_keys'):
             alerts.append('SOURCE_FULL_SUCCESS_STALE')
     return {'version':'news_review_watchdog_v1','identity':copy.deepcopy(identity),'checked_at_ms':now_ms,
         'alerts':alerts,'notification_required':bool(alerts),'automatic_actions':[],
+        'health_recovery_confirmed':recovery,
         'independent_watchdog_required':True,'live_acceptance_proven':False}
 
 
 def notification_changes(previous_alerts, verdict):
     previous,current=set(previous_alerts),set(verdict['alerts'])
+    # Missing/failed observations add uncertainty; they cannot close a prior
+    # host, worker, source or parent incident without affirmative new evidence.
+    for code,confirmed in verdict.get('health_recovery_confirmed',{}).items():
+        if code in previous and confirmed is not True:
+            current.add(code)
     opened,resolved=sorted(current-previous),sorted(previous-current)
     return {'opened':opened,'resolved':resolved,'notify':bool(opened or resolved),
             'active_alerts':sorted(current),'automatic_actions':[]}
