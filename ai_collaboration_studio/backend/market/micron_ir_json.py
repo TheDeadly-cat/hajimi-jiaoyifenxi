@@ -3,7 +3,8 @@
 ``complete`` means every row in this fixed recent-30 query has admitted time
 metadata. Initial reads fetch every head. Ordinary reads may reuse independently
 verified metadata for at most one hour, with four old identities revalidated per
-poll. Progress distinguishes fetched, cached and withheld identities. It does
+poll. One of those slots prioritizes a failed identity; the other slots retain
+fair rotation. Progress distinguishes fetched, cached and withheld identities. It does
 not claim full publisher history, continuous freshness or pagination coverage.
 """
 
@@ -38,6 +39,7 @@ MICRON_HEAD_MAX_BYTES = 128 * 1024
 MICRON_HEAD_MAX_WORKERS = 4
 MICRON_METADATA_CACHE_CAPACITY = 30
 MICRON_METADATA_REVALIDATE_PER_POLL = 4
+MICRON_METADATA_PRIORITY_RETRIES_PER_POLL = 1
 MICRON_METADATA_MAX_AGE_MS = 3_600_000
 MICRON_METADATA_REVALIDATION_TIMEOUT_MS = 2_000
 MICRON_METADATA_COMMIT_RESERVE_MS = 500
@@ -65,12 +67,13 @@ def _sha256(value: Any) -> str:
 def micron_metadata_cache_policy() -> dict[str, Any]:
     """Fixed in-process policy; no cache data is a persisted checkpoint."""
     return {
-        "version": "micron_metadata_cache_policy_v1",
+        "version": "micron_metadata_cache_policy_v2",
         "parser_version": "micron_newsarticle_head_parser_v1",
         "time_hash_semantics": MICRON_TIME_METADATA_HASH_SEMANTICS,
         "list_binding": "entire_normalized_q4_row_v1",
         "capacity": MICRON_METADATA_CACHE_CAPACITY,
         "revalidate_per_poll": MICRON_METADATA_REVALIDATE_PER_POLL,
+        "priority_retries_per_poll": MICRON_METADATA_PRIORITY_RETRIES_PER_POLL,
         "maximum_age_ms": MICRON_METADATA_MAX_AGE_MS,
         "revalidation_timeout_ms": MICRON_METADATA_REVALIDATION_TIMEOUT_MS,
         "commit_reserve_ms": MICRON_METADATA_COMMIT_RESERVE_MS,
@@ -494,6 +497,18 @@ class MicronIrJsonClient:
         entry["entry_sha256"] = _sha256(entry)
         self._metadata_cache[row["q4_press_release_id"]] = entry
 
+    def _revalidation_order(self, identities) -> list[int]:
+        ordered = sorted(identities, key=lambda identity: (
+            self._attempts.get(identity, {}).get("poll", 0), identity,
+        ))
+        # Reuse one existing slot, rather than adding requests or retrying in
+        # the same poll. Keep three fair slots so a persistent failure cannot
+        # monopolize revalidation or prevent other cache evidence refreshing.
+        retry = [identity for identity in ordered
+                 if self._attempts.get(identity, {}).get("code")][
+                     :MICRON_METADATA_PRIORITY_RETRIES_PER_POLL]
+        return retry + [identity for identity in ordered if identity not in retry]
+
     @staticmethod
     def _default_fetch_bytes(
         url: str,
@@ -579,8 +594,9 @@ class MicronIrJsonClient:
             # changed identities. Every retained old identity has a separate,
             # bounded revalidation queue and never precedes these new reads.
             primary.sort(key=lambda row: (bool(self._attempts.get(row["q4_press_release_id"], {}).get("code")),))
-        old_rows = [row for row in rows if row["q4_press_release_id"] in existing]
-        old_rows.sort(key=lambda row: (self._attempts.get(row["q4_press_release_id"], {}).get("poll", 0), row["q4_press_release_id"]))
+        old_by_id = {row["q4_press_release_id"]: row for row in rows
+                     if row["q4_press_release_id"] in existing}
+        old_rows = [old_by_id[identity] for identity in self._revalidation_order(old_by_id)]
         revalidate = [] if require_complete else old_rows[:MICRON_METADATA_REVALIDATE_PER_POLL]
         projected, errors, requested_ids = {}, {}, []
         request_lock = threading.Lock()
@@ -682,7 +698,7 @@ class MicronIrJsonClient:
             else:
                 projected[identity] = {**row, **{key: entry[key] for key in ("published_at", "metadata_date_modified", "time_metadata_sha256")}}
                 cached_ids.append(identity)
-        retry_queue = sorted(existing, key=lambda identity: (self._attempts.get(identity, {}).get("poll", 0), identity))
+        retry_queue = self._revalidation_order(existing)
         failures, source_errors = [], []
         for row in rows:
             identity = row["q4_press_release_id"]

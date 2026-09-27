@@ -42,6 +42,22 @@ class ClockEvidenceTests(unittest.TestCase):
                 self.assertFalse(guard.sample()['accepted'])
                 self.assertEqual(guard.snapshot()['first_failure']['cumulative_difference_ms'],shift)
 
+    def test_trial27_step_then_gradual_drift_stops_without_resetting_the_anchor(self):
+        # The observed pattern was a 1245 ms step, then smaller increments.
+        # A small adjacent change must not mask the cumulative two-second gate.
+        start_wall, start_mono = self.wall, self.mono
+        for elapsed, drift in ((3_600_000, 0), (12_790_000, 1245),
+                               (28_800_000, 1245), (35_070_000, 1999),
+                               (35_080_000, 2000), (35_090_000, 2001)):
+            self.wall, self.mono = start_wall + elapsed + drift, start_mono + elapsed
+            sample = self.guard.sample()
+            self.assertEqual(sample['accepted'], drift <= 2000)
+        value = self.guard.snapshot()
+        self.assertEqual(value['anchor_wall_ms'], start_wall)
+        self.assertEqual(value['anchor_monotonic_ms'], start_mono)
+        self.assertEqual(value['first_failure']['cumulative_difference_ms'], 2001)
+        self.assertEqual(value['first_failure']['adjacent_difference_ms'], 1)
+
     def test_first_failure_is_preserved_after_further_samples_and_not_mutable_by_reader(self):
         self.wall+=2001
         self.guard.sample()
