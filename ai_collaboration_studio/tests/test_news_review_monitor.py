@@ -3,10 +3,12 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from backend.news_review_monitor import MonitorReceiptWriter,evaluate_watchdog,source_freshness,notification_changes
+from backend.news_review_monitor import MonitorReceiptWriter,evaluate_watchdog,source_freshness,notification_changes,publish_json_once
 from scripts.news_review_watchdog import check, read_receipt_chain, native_creation_ticks
 
 
@@ -124,6 +126,89 @@ class MonitorTests(unittest.TestCase):
         path.write_text(json.dumps(value))
         with self.assertRaises(ValueError):
             read_receipt_chain(self.temp.name,self.identity)
+
+    def test_pending_publication_is_invisible_and_cannot_hide_expired_previous_receipt(self):
+        first=self.writer.execute(scheduled_at_ms=self.wall,probe=self.healthy)
+        root=Path(self.temp.name)
+        pin={'identity':self.identity,'pid':123,'process_start_utc_ticks':638000000000000000}
+        ready,release=threading.Event(),threading.Event()
+        original_link=os.link
+        errors=[]
+        def publish(source,target):
+            if Path(target).name=='monitor-execution-000002.json':
+                # Production writer has flushed and closed complete temp bytes.
+                self.assertEqual(json.loads(Path(source).read_text(encoding='utf-8'))['receipt']['sequence'],2)
+                ready.set()
+                if not release.wait(5):
+                    raise TimeoutError('test publication barrier')
+            return original_link(source,target)
+        def write():
+            try:
+                self.writer.execute(scheduled_at_ms=self.wall,probe=self.healthy)
+            except BaseException as exc:
+                errors.append(exc)
+        with patch('backend.news_review_monitor.os.link',side_effect=publish):
+            thread=threading.Thread(target=write)
+            thread.start()
+            try:
+                self.assertTrue(ready.wait(5))
+                self.assertFalse((root/'monitor-execution-000002.json').exists())
+                fresh=check(root,pin,[],now_ms=self.wall,inspect=lambda _:pin['process_start_utc_ticks'])
+                self.assertTrue(fresh['receipt_chain_verified'])
+                self.assertFalse(fresh['changes']['notify'])
+                stale=check(root,pin,[],now_ms=first['completed_at_ms']+360001,inspect=lambda _:pin['process_start_utc_ticks'])
+                self.assertIn('MONITOR_EXECUTION_OVERDUE',stale['alerts'])
+                self.assertNotIn('MONITOR_RECEIPT_IDENTITY_UNCONFIRMED',stale['alerts'])
+            finally:
+                release.set()
+                thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors,[])
+        completed=check(root,pin,fresh['alerts'],now_ms=self.wall,inspect=lambda _:pin['process_start_utc_ticks'])
+        self.assertFalse(completed['changes']['notify'])
+        self.assertEqual(read_receipt_chain(root,self.identity)['sequence'],2)
+        self.assertEqual(list(root.glob('*.pending')),[])
+
+    def test_atomic_publication_flushes_before_link_and_refuses_overwrite(self):
+        path=Path(self.temp.name)/'evidence.json'
+        original_fsync,original_link=os.fsync,os.link
+        flushed=[]
+        def sync(fd):
+            original_fsync(fd)
+            flushed.append(True)
+        def link(source,target):
+            self.assertTrue(flushed)
+            self.assertEqual(json.loads(Path(source).read_text(encoding='utf-8')),{'stage':'complete'})
+            original_link(source,target)
+        with patch('backend.news_review_monitor.os.fsync',side_effect=sync),patch('backend.news_review_monitor.os.link',side_effect=link):
+            publish_json_once(path,{'stage':'complete'})
+        original=path.read_bytes()
+        with self.assertRaises(FileExistsError):
+            publish_json_once(path,{'stage':'replacement'})
+        self.assertEqual(path.read_bytes(),original)
+        self.assertEqual(list(Path(self.temp.name).glob('*.pending')),[])
+
+    def test_corrupt_published_receipt_is_not_skipped_even_with_fresh_prior_success(self):
+        self.writer.execute(scheduled_at_ms=self.wall,probe=self.healthy)
+        (Path(self.temp.name)/'monitor-execution-000002.json').write_bytes(b'{')
+        pin={'identity':self.identity,'pid':123,'process_start_utc_ticks':638000000000000000}
+        verdict=check(self.temp.name,pin,[],now_ms=self.wall,inspect=lambda _:pin['process_start_utc_ticks'])
+        self.assertIn('MONITOR_RECEIPT_IDENTITY_UNCONFIRMED',verdict['alerts'])
+        self.assertFalse(verdict['receipt_chain_verified'])
+
+    def test_failed_publication_leaves_start_evidence_and_cannot_restart_sequence(self):
+        original=os.link
+        def link(source,target):
+            if Path(target).name.startswith('monitor-execution-'):
+                raise OSError('fixture unsupported publication')
+            original(source,target)
+        with patch('backend.news_review_monitor.os.link',side_effect=link),self.assertRaises(OSError):
+            self.writer.execute(scheduled_at_ms=self.wall,probe=self.healthy)
+        self.assertEqual(self.writer.sequence,0)
+        self.assertIsNone(read_receipt_chain(self.temp.name,self.identity))
+        self.assertTrue((Path(self.temp.name)/'monitor-start-000001.json').exists())
+        with self.assertRaises(FileExistsError):
+            self.writer.execute(scheduled_at_ms=self.wall,probe=self.healthy)
 
     @unittest.skipUnless(os.name=='nt','Native Windows identity check')
     def test_separate_watchdog_process_detects_missed_checks_despite_live_observer(self):

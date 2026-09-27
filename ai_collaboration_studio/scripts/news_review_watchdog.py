@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from backend.news_review_monitor import evaluate_watchdog, notification_changes
+from backend.news_review_monitor import evaluate_watchdog, notification_changes, publish_json_once
 
 
 def native_creation_ticks(pid):
@@ -93,8 +93,7 @@ def main():
     if previous and previous['identity']!=pin['identity']:
         raise ValueError('previous_watchdog_identity_mismatch')
     verdict=check(args.receipts,pin,previous['alerts'] if previous else [],now_ms=time.time_ns()//1_000_000)
-    with Path(args.output).open('x',encoding='utf-8') as f:
-        json.dump(verdict,f,ensure_ascii=False,indent=2)
+    publish_json_once(args.output, verdict)
     print(json.dumps({'output':args.output,'notify':verdict['changes']['notify'],'alerts':verdict['alerts']}))
     return 2 if verdict['changes']['notify'] else 0
 

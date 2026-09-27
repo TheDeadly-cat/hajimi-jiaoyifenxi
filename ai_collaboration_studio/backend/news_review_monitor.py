@@ -9,8 +9,30 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
+
+
+def publish_json_once(path, value):
+    """Publish complete bytes atomically, without replacing prior evidence.
+
+    A same-directory hard link exposes only a flushed, closed file. Creating
+    the destination fails if it already exists on both Windows and POSIX.
+    Unsupported filesystems fail closed; no overwrite-capable fallback is used.
+    """
+    path = Path(path)
+    payload = (json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + '\n').encode('utf-8')
+    fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '.', suffix='.pending', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _integer(value):
@@ -64,8 +86,7 @@ class MonitorReceiptWriter:
         self.directory.mkdir(parents=True,exist_ok=True)
         # Durable evidence exists even if the bounded probe or its process
         # never returns. A second writer cannot reuse this run's sequence.
-        with (self.directory/f'monitor-start-{self.sequence+1:06d}.json').open('x',encoding='utf-8') as f:
-            json.dump(result,f,ensure_ascii=False,indent=2)
+        publish_json_once(self.directory/f'monitor-start-{self.sequence+1:06d}.json', result)
         try:
             observation=probe()
             if (type(observation) is not dict or observation.get('identity')!=self.identity
@@ -100,8 +121,7 @@ class MonitorReceiptWriter:
         digest=hashlib.sha256(json.dumps(result,sort_keys=True,separators=(',',':')).encode()).hexdigest()
         self.directory.mkdir(parents=True,exist_ok=True)
         path=self.directory/f'monitor-execution-{result["sequence"]:06d}.json'
-        with path.open('x',encoding='utf-8') as f:
-            json.dump({'receipt':result,'sha256':digest},f,ensure_ascii=False,indent=2)
+        publish_json_once(path, {'receipt':result,'sha256':digest})
         self.previous=digest
         self.sequence+=1
         return result
