@@ -108,7 +108,9 @@ class DualDeadlineReference:
                 metrics = {'wall_delta_ms': wall_delta, 'elapsed_interval_min_ms': interval_min,
                            'elapsed_interval_max_ms': interval_max,
                            'wall_rollback_from_high_water_ms': max(0, self._high_wall-reading.wall_ms),
-                           'observation_gap_exceeded': interval_min > MAX_OBSERVATION_GAP_MS}
+                           'observation_gap_exceeded': interval_min > MAX_OBSERVATION_GAP_MS,
+                           'observation_gap_limit_unconfirmed':
+                               interval_min <= MAX_OBSERVATION_GAP_MS < interval_max}
                 # Check expiry before any possible later clock correction.
                 # Once stopped, subsequent samples cannot reopen the window.
                 if reading.wall_ms >= self._window.expires_at_ms:
@@ -119,6 +121,10 @@ class DualDeadlineReference:
                     reason = 'wall_clock_before_authorization'
                 elif interval_min > MAX_OBSERVATION_GAP_MS:
                     reason = 'observation_gap_exceeded'
+                elif interval_max > MAX_OBSERVATION_GAP_MS:
+                    # Sampling uncertainty must not silently widen the gap
+                    # limit. Distinguish an uncertain interval from a proven gap.
+                    reason = 'observation_gap_limit_unconfirmed'
                 elif self._high_wall-reading.wall_ms > MAX_STEP_MS:
                     reason = 'wall_clock_rollback'
                 elif wall_delta-interval_max > MAX_STEP_MS or interval_min-wall_delta > MAX_STEP_MS:

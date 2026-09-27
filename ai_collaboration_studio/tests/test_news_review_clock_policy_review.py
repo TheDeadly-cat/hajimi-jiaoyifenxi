@@ -82,6 +82,21 @@ class DualDeadlineReferenceTests(unittest.TestCase):
         self.assertEqual(result['stop_reason'], 'observation_gap_exceeded')
         self.assertTrue(result['metrics']['observation_gap_exceeded'])
 
+    def test_sampling_uncertainty_cannot_widen_observation_gap_limit(self):
+        activation = dataclasses.replace(self.window.activation_reading,
+            monotonic_after_ms=self.mono+50)
+        guard = DualDeadlineReference(dataclasses.replace(self.window,
+            activation_reading=activation), lambda: self.current)
+        self.current = Reading(self.start+30025, self.mono+30025,
+            self.mono+30025, *self.pin)
+        result = guard.check()
+        self.assertEqual(result['stop_reason'], 'observation_gap_limit_unconfirmed')
+        self.assertEqual(result['metrics']['elapsed_interval_min_ms'], 29975)
+        self.assertEqual(result['metrics']['elapsed_interval_max_ms'], 30025)
+        self.assertFalse(result['metrics']['observation_gap_exceeded'])
+        self.assertTrue(result['metrics']['observation_gap_limit_unconfirmed'])
+        self.assertTrue(self.advance(30000)['within_proposed_time_bounds'])
+
     def test_sleep_past_expiry_stops_even_if_wall_clock_is_slow(self):
         result = self.advance(MAX_DURATION_MS+1000, -100000)
         self.assertEqual(result['stop_reason'], 'elapsed_deadline_reached')
