@@ -1030,13 +1030,19 @@ class SourceInboxService:
         row: sqlite3.Row | dict[str, Any],
         *,
         include_events: bool,
+        verified_imports: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         data = _row_dict(row)
         item_id = str(data.get("id") or "")
-        import_record = self._verify_import_record(
-            connection,
-            str(data.get("origin_import_id") or ""),
-        )
+        import_id = str(data.get("origin_import_id") or "")
+        # Reuse immutable import validation only inside the caller's current
+        # transaction. Per-item hashes, mirrors and mutable state are still
+        # checked below; nothing survives into the next request.
+        import_record = verified_imports.get(import_id) if verified_imports is not None else None
+        if import_record is None:
+            import_record = self._verify_import_record(connection, import_id)
+            if verified_imports is not None:
+                verified_imports[import_id] = import_record
         item = _load_object(data.get("item_json"), "来源条目")
         item_sha256 = str(data.get("item_sha256") or "")
         created_at = _stored_int(data, "created_at")
@@ -1400,6 +1406,7 @@ class SourceInboxService:
 
         with self.store._lock, closing(self.store._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
+            verified_imports: dict[str, dict[str, Any]] = {}
             existing = connection.execute(
                 "SELECT * FROM source_inbox_imports WHERE import_key_sha256=?",
                 (import_key_sha256,),
@@ -1409,6 +1416,7 @@ class SourceInboxService:
                     connection,
                     str(existing["id"]),
                 )
+                verified_imports[str(existing["id"])] = verified_import
                 if str(verified_import["row"]["normalized_packet_sha256"]) != normalized_sha256:
                     raise SourceInboxError(
                         "同一 source/run 标识已对应不同内容，拒绝语义漂移。",
@@ -1421,7 +1429,8 @@ class SourceInboxService:
                 ]
                 _require_record(all(item_row is not None for item_row in item_rows))
                 projected_items = [
-                    self._item_projection(connection, row, include_events=False)
+                    self._item_projection(connection, row, include_events=False,
+                                          verified_imports=verified_imports)
                     for row in item_rows
                 ]
                 result = {
@@ -1474,6 +1483,7 @@ class SourceInboxService:
                         connection,
                         existing_item_row,
                         include_events=False,
+                        verified_imports=verified_imports,
                     )
                     if str(existing_projection["item_sha256"]) != item_sha256:
                         raise SourceInboxError(
@@ -1649,7 +1659,7 @@ class SourceInboxService:
                             created_at_ms=received_at,
                         )
                     )
-            self._verify_import_record(connection, import_id)
+            verified_imports[import_id] = self._verify_import_record(connection, import_id)
             projected_items = []
             for item_id in item_ids:
                 row = self._select_item(connection, item_id)
@@ -1660,7 +1670,8 @@ class SourceInboxService:
                         status=500,
                     )
                 projected_items.append(
-                    self._item_projection(connection, row, include_events=False)
+                    self._item_projection(connection, row, include_events=False,
+                                          verified_imports=verified_imports)
                 )
             result = {
                 "version": SOURCE_INBOX_IMPORT_RESULT_VERSION,
@@ -1743,8 +1754,10 @@ class SourceInboxService:
                      ORDER BY item.updated_at DESC,item.id DESC LIMIT ?""",
                 [*parameters, limit],
             ).fetchall()
+            verified_imports: dict[str, dict[str, Any]] = {}
             items = [
-                self._item_projection(connection, row, include_events=False)
+                self._item_projection(connection, row, include_events=False,
+                                      verified_imports=verified_imports)
                 for row in rows
             ]
             matched_row = connection.execute(
@@ -1918,8 +1931,10 @@ class SourceInboxService:
             has_more = len(rows) > limit
             page_rows = rows[:limit]
             notifications = []
+            verified_imports: dict[str, dict[str, Any]] = {}
             for row in page_rows:
-                item = self._item_projection(connection, row, include_events=False)
+                item = self._item_projection(connection, row, include_events=False,
+                                             verified_imports=verified_imports)
                 source_item = item["item"]
                 notifications.append({
                     "version": SOURCE_INBOX_NOTIFICATION_VERSION,
