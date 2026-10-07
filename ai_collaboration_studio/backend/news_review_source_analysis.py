@@ -2,6 +2,27 @@
 from collections import Counter
 
 
+SOURCE_TIMING_STANDARD_VERSION = 'sec_micron_source_timing_diagnostics_v1'
+
+
+def source_timing_standards(value=None):
+    """Diagnostic defaults from the handoff's SEC 15 min / Micron 30 min criteria.
+
+    This is not a monitoring approval or an acceptance gate. A caller with a
+    separately bound observation plan can supply its exact standards instead;
+    the report records which values were used. Every call returns a fresh copy.
+    """
+    if value is None:
+        value = {'sec_filings': {'first_success_ms': 900_000, 'maximum_gap_ms': 900_000},
+                 'company_ir': {'first_success_ms': 1_800_000, 'maximum_gap_ms': 1_800_000}}
+    if (type(value) is not dict or set(value) != {'sec_filings', 'company_ir'}
+            or any(type(standard) is not dict or set(standard) != {'first_success_ms', 'maximum_gap_ms'}
+                   or any(type(limit) is not int or not 0 < limit <= 2**63-1 for limit in standard.values())
+                   for standard in value.values())):
+        raise ValueError('invalid_source_timing_standards')
+    return {adapter: dict(standard) for adapter, standard in value.items()}
+
+
 def error_stage(code):
     if code in {'SEC_SUBMISSIONS_ERROR','SEC_TICKER_MAP_ERROR','IR_FEED_ERROR'}:
         return 'list_or_transport_unclassified'
@@ -35,7 +56,7 @@ def analyze_source_runs(runs, *, observed_until_ms, maximum_success_gap_ms=None,
         raise ValueError('duplicate_run_id')
     completed=[]
     for r in ordered:
-        if r['status'] not in {'SUCCEEDED','DEGRADED','FAILED','CANCELLED','RUNNING'}:
+        if r['status'] not in {'SUCCEEDED','DEGRADED','FAILED','CANCELLED','RUNNING','ABANDONED','DRY_RUN'}:
             raise ValueError('unknown_run_status')
         if any(type(r[k]) is not int or r[k]<0 for k in ('started_at_ms','completed_at_ms','observed_count','accepted_count','duplicate_count')):
             raise ValueError('invalid_run_counters')

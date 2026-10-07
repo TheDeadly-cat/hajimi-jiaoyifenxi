@@ -11,7 +11,8 @@ from .decision_lineage import canonical_sha256
 from .document_evidence import current_document
 from .news_review_contracts import VERSION, encoded, freshness, is_dual_policy, require
 from .news_review_service import _policy
-from .news_review_source_analysis import analyze_source_runs
+from .news_review_source_analysis import (analyze_source_runs, source_timing_standards,
+                                         SOURCE_TIMING_STANDARD_VERSION)
 from .provider_call_ledger import ProviderCallLedger
 from .source_monitoring.state_repository import SourceMonitoringStateRepository
 
@@ -56,7 +57,8 @@ class NewsReviewJournal:
         self.record("source_poll",runtime_status="running",source_run_id=observation["run_id"])
 
 
-def build_news_review_report(service, policy_id):
+def build_news_review_report(service, policy_id, *, source_standards=None):
+    standards = source_timing_standards(source_standards)
     snapshot = service.snapshot(policy_id)
     source_repository = SourceMonitoringStateRepository(service.store)
     with service.store._lock, closing(service.store._connect()) as db:
@@ -94,11 +96,15 @@ def build_news_review_report(service, policy_id):
     for adapter in ("sec_filings","company_ir"):
         selected = [r for r in runs.values() if r["adapter_key"] == adapter]
         status = Counter(r["status"] for r in selected)
+        completed = len(selected)-status['RUNNING']
         elapsed = max(0,min(service.clock(),p["expires_at_ms"])-p["not_before_ms"])
         last_completed = max((r["completed_at_ms"] for r in selected),default=0)
         state = source_repository.get_state(adapter)
         source_metrics[adapter] = {"poll_runs_observed":len(selected),"statuses":dict(status),
-                                  "success_rate":status["SUCCEEDED"]/len(selected) if selected else None,
+                                  "success_rate":status["SUCCEEDED"]/completed if completed else None,
+                                  "completed_poll_runs_observed":completed,
+                                  "in_flight_excluded":status['RUNNING'],
+                                  "success_rate_basis":"completed_adapter_polls_not_http_requests_or_announcement_capture",
                                   "nominal_poll_opportunities":(elapsed+299_999)//300_000,
                                   "last_completed_at_ms":last_completed or None,
                                   "observed_error_codes":dict(Counter(r['error_code'] for r in selected if r.get('error_code'))),
@@ -108,7 +114,11 @@ def build_news_review_report(service, policy_id):
                                   "next_due_at_ms":state['next_due_at_ms'] if state else None,
                                   "actual_http_request_count":None}
         try:
-            source_metrics[adapter]['diagnostics'] = analyze_source_runs(selected, observed_until_ms=service.clock())
+            observation_start = (p['clock_activation']['wall_ms'] if is_dual_policy(p) else p['not_before_ms'])
+            source_metrics[adapter]['diagnostics'] = analyze_source_runs(selected,
+                observed_until_ms=service.clock(), observed_since_ms=observation_start,
+                maximum_initial_success_delay_ms=standards[adapter]['first_success_ms'],
+                maximum_success_gap_ms=standards[adapter]['maximum_gap_ms'])
         except ValueError:
             # Clock regressions or incomplete metadata must not prevent the
             # existing stop/ledger report from being persisted.
@@ -196,6 +206,10 @@ def build_news_review_report(service, policy_id):
             "outcome":{"work_completed":work_completed,"cleanup_clean":clean,
                        "acceptance_passed":False,"stop_provenance_available":bool(stops)},
             "source_checks":source_metrics,"source_grants":source_grants,
+            "source_timing_standards":{"version":SOURCE_TIMING_STANDARD_VERSION,
+                "basis":"caller_supplied" if source_standards is not None else "profile_diagnostic_defaults",
+                "standards":standards,"sha256":canonical_sha256(standards),
+                "monitoring_approval_verified":False,"acceptance_authority":False},
             "source_runs_without_terminal_observation":[dict(r) for r in source_rows if r["run_id"] not in runs],
             "body_coverage":dict(coverage),
             "publish_to_discovery_ms":{"observed_count":len(latencies),
