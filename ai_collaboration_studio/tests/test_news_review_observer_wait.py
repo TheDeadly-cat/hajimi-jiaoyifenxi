@@ -140,8 +140,8 @@ class WaitingObserverTests(unittest.TestCase):
             self.wall+=int(seconds*1000);self.mono+=int(seconds*1000)
             self.activate()
             return False
-        def active(plan,authority,directory,*,inspector):
-            handoffs.append((plan,authority,directory,inspector))
+        def active(plan,authority,directory,*,inspector,observer_identity):
+            handoffs.append((plan,authority,directory,inspector,observer_identity))
             publish_json_once(directory/'observer-exit.json',{'phase':'synthetic_handoff_only'})
             return 0
         event=Mock();event.wait.side_effect=pause
@@ -157,6 +157,7 @@ class WaitingObserverTests(unittest.TestCase):
         binding=core.read_json(self.directory/'observer-activation-binding.json')
         self.assertEqual(pin['pid'],active_pin['pid'])
         self.assertEqual(pin['process_start_utc_ticks'],active_pin['process_start_utc_ticks'])
+        self.assertEqual(handoffs[0][4], (pin['pid'], pin['process_start_utc_ticks']))
         self.assertIsNone(pin['identity']['policy_sha256'])
         self.assertTrue(binding['observer_ready_before_activation'])
         self.assertFalse(binding['activation_created'])
@@ -164,6 +165,156 @@ class WaitingObserverTests(unittest.TestCase):
         self.assertFalse(handoffs[0][3].waiting)
         self.assertEqual(handoffs[0][3].sequence,2)
         wire.assert_not_called()
+
+    def _run_to_transition(self, active_side_effect):
+        """Drive run_waiting to the active handoff with a fake observe_active."""
+        def pause(seconds):
+            self.wall += int(seconds*1000); self.mono += int(seconds*1000)
+            self.activate()
+            return False
+        event = Mock(); event.wait.side_effect = pause
+        with patch.object(core,'verify_checkout'), \
+                patch.object(core,'native_creation_ticks',return_value=638000000000000000), \
+                patch.object(core,'NativeInspector',self.inspector_class()), \
+                patch.object(core,'observe_active',side_effect=active_side_effect), \
+                patch.object(waiting.time,'time_ns',side_effect=lambda:self.wall*1000000), \
+                patch.object(waiting.time,'monotonic_ns',side_effect=lambda:self.mono*1000000), \
+                patch.object(waiting.threading,'Event',return_value=event), \
+                patch('socket.socket'):
+            return waiting.run_waiting(self.wrapped['plan'],self.wrapped['plan_sha256'],core=core)
+
+    def test_T2w2_active_terminal_receipt_is_not_overwritten_by_waiting_layer(self):
+        # Report 8.7: once transitioned, the waiting layer's finally must NOT
+        # write a waiting-state primary receipt over the active layer's outcome.
+        sentinel = {'version':'news_review_observer_exit_v1','phase':'ACTIVE_SENTINEL',
+                    'identity':{'candidate_sha':'a'*40,'activation_sha256':'b'*64,'policy_sha256':'c'*64}}
+        def active(plan,authority,directory,*,inspector,observer_identity):
+            publish_json_once(directory/'observer-exit.json',sentinel)
+            return 2
+        result = self._run_to_transition(active)
+        self.assertEqual(result, 2)  # active return code passes through
+        on_disk = core.read_json(self.directory/'observer-exit.json')
+        self.assertEqual(on_disk['phase'], 'ACTIVE_SENTINEL')  # not waiting_window_closed
+        self.assertEqual(on_disk['identity']['policy_sha256'], 'c'*64)  # active identity preserved
+
+    def test_T2w3_active_fallback_only_is_not_masked_as_normal_closeout(self):
+        # Active layer wrote ONLY a fallback (primary failed) and returned 2.
+        # The waiting layer must not create a waiting-state primary that would
+        # make this look like a normal closeout.
+        def active(plan,authority,directory,*,inspector,observer_identity):
+            publish_json_once(directory/'observer-exit-fallback-123-638000000000000000.json',
+                {'version':'news_review_observer_exit_fallback_v1','phase':'registered_tree_terminal',
+                 'failure_codes':['exit_receipt_publish_failed:OSError']})
+            return 2
+        result = self._run_to_transition(active)
+        self.assertEqual(result, 2)
+        self.assertTrue((self.directory/'observer-exit-fallback-123-638000000000000000.json').exists())
+        # No waiting-state primary receipt masking the active-layer failure.
+        self.assertFalse((self.directory/'observer-exit.json').exists())
+
+    def test_T2w4_active_both_failed_passes_through_nonzero(self):
+        def active(plan,authority,directory,*,inspector,observer_identity):
+            return 2  # wrote nothing: primary and fallback both failed
+        result = self._run_to_transition(active)
+        self.assertEqual(result, 2)
+        self.assertFalse((self.directory/'observer-exit.json').exists())
+        self.assertFalse(list(self.directory.glob('observer-exit-fallback-*.json')))
+
+    def test_T2w1_unactivated_waiting_publish_failure_is_protected(self):
+        # Pre-activation waiting that never hands off owns its receipt.  When the
+        # primary publish fails, publish_exit_receipt must degrade to a fallback
+        # without raising, and the waiting identity keeps policy_sha256 = None.
+        real_publish = core.publish_json_once
+        def fake_publish(path, value):
+            if Path(path).name == 'observer-exit.json':
+                raise OSError('SECRET waiting failure')
+            return real_publish(path, value)
+        with patch.object(core,'verify_checkout'), \
+                patch.object(core,'native_creation_ticks',return_value=638000000000000000), \
+                patch.object(core,'NativeInspector',self.inspector_class()), \
+                patch.object(core,'publish_json_once',side_effect=fake_publish), \
+                patch.object(waiting.WaitingSession,'step',side_effect=ProbeError('synthetic_wait_failure')), \
+                patch.object(waiting.time,'time_ns',side_effect=lambda:self.wall*1000000), \
+                patch.object(waiting.time,'monotonic_ns',side_effect=lambda:self.mono*1000000), \
+                patch('socket.socket'):
+            with self.assertRaises(ProbeError):
+                waiting.run_waiting(self.wrapped['plan'],self.wrapped['plan_sha256'],core=core)
+        fallbacks = list(self.directory.glob('observer-exit-fallback-*.json'))
+        self.assertEqual(len(fallbacks), 1)
+        text = fallbacks[0].read_text(encoding='utf-8')
+        self.assertNotIn('SECRET waiting failure', text)  # no free-text leak
+        payload = json.loads(text)
+        self.assertIsNone(payload['identity']['policy_sha256'])  # waiting mode: unresolved, not a placeholder
+        self.assertEqual(payload['version'], 'news_review_observer_wait_exit_fallback_v1')
+
+    def test_T2w5_preexisting_same_name_fallback_is_not_overwritten(self):
+        # Report 8.7 rule 4 + review R-04: when the fallback name this process
+        # would use already exists, publication must be REFUSED (os.link never
+        # overwrites) and the pre-existing bytes must survive untouched.
+        #
+        # Honest scope note: run_waiting discards publish_exit_receipt's return
+        # value, so the 'fallback_present_content_unverified' status is NOT
+        # observable from this layer -- it is asserted directly against
+        # core.publish_exit_receipt in test_news_review_observer.py.  What IS
+        # observable here is that nothing was overwritten, no second fallback
+        # appeared, and the original failure still propagates unmasked.
+        ticks = 638000000000000000
+        # run_waiting creates the monitoring directory itself with mkdir() (no
+        # exist_ok), so it cannot be pre-created here.  Instead the pre-existing
+        # receipt is laid down at the moment the fallback path is about to be
+        # written, which deterministically produces the same-name collision.
+        expected = f'observer-exit-fallback-{os.getpid()}-{ticks}.json'
+        preexisting = self.directory/expected
+        seeded = []
+
+        real_publish = core.publish_json_once
+        def fake_publish(path, value):
+            if Path(path).name == 'observer-exit.json':
+                raise OSError('primary waiting failure')
+            if Path(path).name == expected and not seeded:
+                preexisting.write_text('PRE-EXISTING-FALLBACK-BYTES', encoding='utf-8')
+                seeded.append(str(path))
+            return real_publish(path, value)
+
+        with patch.object(core,'verify_checkout'), \
+                patch.object(core,'native_creation_ticks',return_value=ticks), \
+                patch.object(core,'NativeInspector',self.inspector_class()), \
+                patch.object(core,'publish_json_once',side_effect=fake_publish), \
+                patch.object(waiting.WaitingSession,'step',side_effect=ProbeError('synthetic_wait_failure')), \
+                patch.object(waiting.time,'time_ns',side_effect=lambda:self.wall*1000000), \
+                patch.object(waiting.time,'monotonic_ns',side_effect=lambda:self.mono*1000000), \
+                patch('socket.socket'):
+            with self.assertRaises(ProbeError):
+                waiting.run_waiting(self.wrapped['plan'],self.wrapped['plan_sha256'],core=core)
+
+        # The collision path was actually reached.
+        self.assertTrue(seeded)
+        # Overwrite refused: the pre-existing receipt survived untouched.
+        self.assertEqual(preexisting.read_text(encoding='utf-8'), 'PRE-EXISTING-FALLBACK-BYTES')
+        # Exactly one fallback exists -- no second, renamed or unidentified one.
+        self.assertEqual(len(list(self.directory.glob('observer-exit-fallback-*.json'))), 1)
+        # The primary was not published either, so no waiting-state receipt
+        # pretends the run closed out normally.
+        self.assertFalse((self.directory/'observer-exit.json').exists())
+
+
+    def test_T2w6_waiting_and_active_identity_differ_and_are_both_preserved(self):
+        # Report 8.3.1: the waiting pin carries policy_sha256=None; the active pin
+        # carries the resolved policy hash.  They must NOT be forced equal.
+        captured = {}
+        def active(plan,authority,directory,*,inspector,observer_identity):
+            captured['active_identity'] = plan['request']['target']['identity']
+            publish_json_once(directory/'observer-exit.json',{'phase':'ACTIVE'})
+            return 0
+        self._run_to_transition(active)
+        pin = core.read_json(self.directory/'observer-pin.json')
+        active_pin = core.read_json(self.directory/'observer-active-pin.json')
+        self.assertIsNone(pin['identity']['policy_sha256'])
+        self.assertIsNotNone(active_pin['identity']['policy_sha256'])
+        self.assertEqual(active_pin['identity']['policy_sha256'], captured['active_identity']['policy_sha256'])
+        # PID and ticks are identical across waiting and active pins (same process).
+        self.assertEqual(pin['pid'], active_pin['pid'])
+        self.assertEqual(pin['process_start_utc_ticks'], active_pin['process_start_utc_ticks'])
 
 
 class WaitingWatchdogTests(unittest.TestCase):
