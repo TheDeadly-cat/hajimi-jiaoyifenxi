@@ -26,8 +26,9 @@ async function jsonRequest(path, options = {}, checkCurrent = () => {}) {
   return data;
 }
 
-// Only news status GETs use this timeout. Mutations keep their existing behavior.
-async function newsStatusRequest(path, signal) {
+// Bound read-only monitoring requests so a hung response cannot stop polling
+// or leave inbox controls loading indefinitely. Mutations are never replayed.
+async function monitoringReadRequest(path, signal) {
   const controller = new AbortController();
   const cancelled = () => new DOMException("状态读取已取消。", "AbortError");
   if (signal?.aborted) throw cancelled();
@@ -60,15 +61,15 @@ async function newsStatusRequest(path, signal) {
 }
 
 export const api = {
-  sourceNewsReview: (itemId, signal) => newsStatusRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/news-review`, signal),
-  newsReviewControl: (signal) => newsStatusRequest("/api/monitoring/news-review/control", signal),
+  sourceNewsReview: (itemId, signal) => monitoringReadRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/news-review`, signal),
+  newsReviewControl: (signal) => monitoringReadRequest("/api/monitoring/news-review/control", signal),
   pauseNewsReview: () => jsonRequest("/api/monitoring/news-review/control", { method: "POST", body: JSON.stringify({ action: "pause" }) }),
   previewDocumentSelection: (itemId, payload, signal) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document/selection/preview`, { method: "POST", body: JSON.stringify(payload), signal }),
   saveDocumentSelection: (itemId, payload, signal) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document/selection`, { method: "POST", body: JSON.stringify(payload), signal }),
   manualEvidencePreview: (roomId, signal) => jsonRequest(`/api/rooms/${encodeURIComponent(roomId)}/chatgpt-collaborations/evidence-preview`, { signal }),
-  sourceDocument: (itemId, signal) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document`, { signal }),
+  sourceDocument: (itemId, signal) => monitoringReadRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document`, signal),
   requestSourceDocument: (itemId, payload) => jsonRequest(`/api/monitoring/events/${encodeURIComponent(itemId)}/document`, { method: "POST", body: JSON.stringify(payload) }),
-  sourceDocumentControl: (signal) => jsonRequest("/api/monitoring/documents/control", { signal }),
+  sourceDocumentControl: (signal) => monitoringReadRequest("/api/monitoring/documents/control", signal),
   enableSourceDocuments: (payload) => jsonRequest("/api/monitoring/documents/control", { method: "POST", body: JSON.stringify(payload) }),
   bootstrap: (roomId = "") => jsonRequest(`/api/bootstrap${roomId ? `?room=${encodeURIComponent(roomId)}` : ""}`),
   room: (roomId) => jsonRequest(`/api/rooms/${encodeURIComponent(roomId)}`),
@@ -85,15 +86,15 @@ export const api = {
     if (query) parameters.set("q", query);
     if (source) parameters.set("source", source);
     if (unread === true) parameters.set("unread", "true");
-    return jsonRequest(`/api/monitoring/inbox?${parameters.toString()}`, { signal });
+    return monitoringReadRequest(`/api/monitoring/inbox?${parameters.toString()}`, signal);
   },
-  sourceMonitoringHealth: (signal) => jsonRequest(
+  sourceMonitoringHealth: (signal) => monitoringReadRequest(
     "/api/monitoring/health",
-    { signal },
+    signal,
   ),
-  sourceMonitoringOperatorControl: (signal) => jsonRequest(
+  sourceMonitoringOperatorControl: (signal) => monitoringReadRequest(
     "/api/monitoring/adapters/control",
-    { signal },
+    signal,
   ),
   previewSourceMonitoringAdapterInitialization: (adapterKey, payload, signal) => jsonRequest(
     `/api/monitoring/adapters/${encodeURIComponent(adapterKey)}/initialization-preview`,
@@ -106,11 +107,11 @@ export const api = {
   sourceInboxNotifications: ({ after = "", limit = 50, signal } = {}) => {
     const parameters = new URLSearchParams({ limit: String(limit) });
     if (after) parameters.set("after", after);
-    return jsonRequest(`/api/monitoring/notifications?${parameters.toString()}`, { signal });
+    return monitoringReadRequest(`/api/monitoring/notifications?${parameters.toString()}`, signal);
   },
-  sourceInboxItem: (itemId, signal) => jsonRequest(
+  sourceInboxItem: (itemId, signal) => monitoringReadRequest(
     `/api/monitoring/events/${encodeURIComponent(itemId)}`,
-    { signal },
+    signal,
   ),
   importSourceInbox: (content, signal) => jsonRequest(
     "/api/monitoring/imports/chatgpt",
@@ -120,9 +121,9 @@ export const api = {
     "/api/monitoring/imports/chatgpt/preview",
     { method: "POST", body: JSON.stringify({ content }), signal },
   ),
-  sourceMonitoringPromptTemplate: (signal) => jsonRequest(
+  sourceMonitoringPromptTemplate: (signal) => monitoringReadRequest(
     "/api/monitoring/imports/chatgpt/prompt-template",
-    { signal },
+    signal,
   ),
   acknowledgeSourceInboxItem: (itemId, expectedStateVersion, signal) => jsonRequest(
     `/api/monitoring/events/${encodeURIComponent(itemId)}/acknowledge`,

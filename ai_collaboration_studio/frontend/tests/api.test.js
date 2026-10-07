@@ -162,7 +162,8 @@ test("source inbox API keeps reads and explicit CAS mutations on isolated monito
     requests[0].path,
     "/api/monitoring/inbox?limit=12&state=AWAITING_USER&q=CI+%E5%A4%B1%E8%B4%A5&source=official_source_monitor%3Asec_filings&unread=true",
   );
-  assert.equal(requests[0].options.signal, controller.signal);
+  assert.ok(requests[0].options.signal instanceof AbortSignal);
+  assert.equal(controller.signal.aborted, false);
   assert.equal(requests[1].path, "/api/monitoring/health");
   assert.equal(requests[2].path, "/api/monitoring/adapters/control");
   assert.equal(requests[2].options.method, undefined);
@@ -212,7 +213,9 @@ test("source inbox API keeps reads and explicit CAS mutations on isolated monito
     objective: "仅形成待审阅草稿",
   });
   assert.equal(requests.filter((request) => request.options.method === "POST").length, 7);
-  assert.equal(requests.every((request) => request.options.signal === controller.signal), true);
+  assert.equal(requests.every((request) => request.options.signal instanceof AbortSignal), true);
+  assert.equal(requests.filter((request) => request.options.method === "POST")
+    .every((request) => request.options.signal === controller.signal), true);
 });
 
 test("source import errors retain bounded field issues for repair UI", async () => {
