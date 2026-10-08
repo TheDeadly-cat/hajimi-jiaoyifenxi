@@ -246,6 +246,9 @@ class EnrichmentBatchNativeIntegrationTests(unittest.TestCase):
         return current_document(fixture.documents.view(item))
 
     def test_B1_large_history_a_b_a_reuses_old_version_within_bounded_rotation(self):
+        self._exercise_B1_large_history_a_b_a()
+
+    def _exercise_B1_large_history_a_b_a(self):
         import math
         from contextlib import closing
         from tests.test_document_evidence import import_event, SEC_HTML
@@ -278,6 +281,8 @@ class EnrichmentBatchNativeIntegrationTests(unittest.TestCase):
         self.assertEqual(f.count('provider_call_attempts'), 2)
         versions_after_b = f.count('source_document_versions')
         self.assertEqual(versions_after_b, 2)
+        reserved_after_b = f.service.snapshot(pid)['calls_reserved']
+        self.assertEqual(reserved_after_b, 2)
 
         controller = NewsReviewController(f.service, pid)
         controller.enrich_cycle()  # Native discovery consumes the filler inbox.
@@ -295,23 +300,65 @@ class EnrichmentBatchNativeIntegrationTests(unittest.TestCase):
 
         # Bounded historical rotation reaches the item again without replaying it.
         visited = set()
+        first_visit = {}
         real_queue = f.service.queue
-        f.service.queue = lambda pol, it: (visited.add(it), real_queue(pol, it))[1]
+        def observe_queue(pol, it):
+            visited.add(it)
+            first_visit.setdefault(it, cycle)
+            return real_queue(pol, it)
+
         bound = math.ceil(total_events / controller.HISTORY_BATCH) + 1
-        for cycle in range(bound):
-            controller.enrich_cycle()
-            if cycle == 0:
-                self.assertNotIn(item, visited, 'first rotation starts strictly after the target')
+        with patch.object(f.service, 'queue', side_effect=observe_queue):
+            for cycle in range(1, bound + 1):
+                controller.enrich_cycle()
+                if cycle == 1:
+                    self.assertNotIn(item, visited, 'first rotation starts strictly after the target')
+            # Freeze only calls made by the controller. Assert reachability before
+            # any manual queue call can put the target in the observation set.
+            rotation_visits = frozenset(visited)
+            rotation_first_visit = dict(first_visit)
+            self.assertIn(item, rotation_visits, 'B1 history rotation never queued target')
+            self.assertGreater(rotation_first_visit[item], 1)
+            self.assertLessEqual(rotation_first_visit[item], bound)
         self.assertEqual(controller._event_cursor, event_cursor)
         self.assertEqual(controller._document_cursor, document_cursor)
-        self.assertEqual(f.service.queue(pid, item), job_a)
-        f.service.queue = real_queue
-        self.assertIn(item, visited)                          # reachable within bound
+        self.assertEqual(real_queue(pid, item), job_a)
         self.assertEqual(f.count('provider_call_attempts'), 2)  # no re-reservation
+        self.assertEqual(f.service.snapshot(pid)['calls_reserved'], reserved_after_b)
         self.assertEqual(f.count('news_review_all_jobs'), 2)      # no new job
         self.assertEqual(f.count('source_document_versions'), versions_after_b)
         self.assertEqual(f.view(item)['reviews'][0]['receipt'], receipt_a)
         self.assertEqual(f.view(item)['state'], 'REVIEWED')
+        return {'target': item, 'first_visit_cycle': rotation_first_visit[item],
+                'bound': bound, 'rotation_visits': rotation_visits}
+
+    def test_B1_reachability_assertion_rejects_omission_then_native_selector_passes(self):
+        native_batch = NewsReviewController._event_batch
+        targets, removed = {}, []
+
+        def omit_history_target(controller):
+            # The scenario consumes append lanes, then starts history strictly
+            # after its target. Initial discovery starts with an empty cursor.
+            if controller._history_after and controller not in targets:
+                targets[controller] = controller._history_after
+            events = native_batch(controller)
+            target = targets.get(controller)
+            removed.extend(row['item_id'] for row in events if row['item_id'] == target)
+            return [row for row in events if row['item_id'] != target]
+
+        with patch.object(NewsReviewController, '_event_batch', omit_history_target):
+            with self.assertRaisesRegex(AssertionError, 'B1 history rotation never queued target'):
+                self._exercise_B1_large_history_a_b_a()
+        self.assertEqual(len(targets), 1)
+        self.assertTrue(removed, 'the fault must actually omit a native target selection')
+        self.assertEqual(set(removed), set(targets.values()))
+        self.assertIs(NewsReviewController._event_batch, native_batch)
+        # A fresh independent fixture repeats the complete A->B->A scenario
+        # with the original selector and all ledger/receipt assertions intact.
+        proof = self._exercise_B1_large_history_a_b_a()
+        self.assertIn(proof['target'], proof['rotation_visits'])
+        self.assertGreater(proof['first_visit_cycle'], 1)
+        self.assertLessEqual(proof['first_visit_cycle'], proof['bound'])
 
     def test_B2_new_event_and_new_body_same_cycle_keep_independent_allowances(self):
         from contextlib import closing
