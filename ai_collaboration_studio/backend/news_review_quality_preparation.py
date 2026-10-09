@@ -31,6 +31,20 @@ MAX_CALLS, MAX_BYTES, MAX_OUTPUT = 36, 4096, 1400
 MAX_TOKENS, MAX_COST = 207072, Decimal("2.50")
 INPUT_RATE, OUTPUT_RATE = Decimal("6"), Decimal("30")
 
+# Only the fixed synthetic benchmark uses this task scope. Natural-event
+# instructions and their strategy identity remain owned by the native review.
+QUALITY_INSTRUCTIONS = (
+    "你审核固定合成案例的已读取主HTML，输出中文JSON对象。\n"
+    + INSTRUCTIONS.split("\n", 1)[1]
+    + "\n本批仅评估材料内内容，不能当作真实发行人事件。合成标记和通用范围警告必须保留为局限，"
+      "但本身不决定重要性或assessment。reviewed仅表示输入支持的主要内容已审核，"
+      "不表示真实性或附件完整已确认。主要结论确需未读内容仍必须material_insufficient；"
+      "重要性按材料内事件意义独立判断，不照抄路由。\n"
+)
+QUALITY_STRATEGY = {"version": "synthetic_material_review_v2", "intended_use": INTENDED_USE,
+                    "base_review_strategy_sha256": STRATEGY_SHA, "instructions": QUALITY_INSTRUCTIONS}
+QUALITY_STRATEGY_SHA = canonical_sha256(QUALITY_STRATEGY)
+
 
 def require(condition, code):
     if not condition:
@@ -172,7 +186,7 @@ def prepare(corpus_raw, *, candidate_sha, reference_raw=None, observed_at_ms=OBS
                 observed.append({"document_sha256": version_sha, "action": "do_not_send",
                                  "reason": "evidence_incomplete", "request_id": None})
                 continue
-            generation = {"instructions": INSTRUCTIONS, "input_text": encoded(evidence),
+            generation = {"instructions": QUALITY_INSTRUCTIONS, "input_text": encoded(evidence),
                           "model": MODEL, "max_output_tokens": MAX_OUTPUT}
             payload = text_generation_body(api="responses", **generation, json_output=True, thinking_disabled=True)
             request = build_text_provider_request(ENDPOINT.removesuffix("/responses"), "responses", payload, headers={})
@@ -194,7 +208,7 @@ def prepare(corpus_raw, *, candidate_sha, reference_raw=None, observed_at_ms=OBS
     require(input_tokens + output_tokens <= MAX_TOKENS and cost <= MAX_COST, "total_budget_exceeded")
     return {"version": VERSION, "candidate_sha": candidate_sha, "candidate_verified_by_cli": False,
             "corpus_sha256": CORPUS_SHA256, "synthetic_observed_at_ms": observed_at_ms,
-            "parser_version": PARSER, "strategy_sha256": STRATEGY_SHA, "model": MODEL, "endpoint": ENDPOINT,
+            "parser_version": PARSER, "strategy_sha256": QUALITY_STRATEGY_SHA, "model": MODEL, "endpoint": ENDPOINT,
             "intended_use": INTENDED_USE, "case_count": len(cases), "request_count": len(requests),
             "requests": requests, "cases": cases,
             "references": {"file_sha256": hashlib.sha256(reference_raw).hexdigest() if reference_raw else None,

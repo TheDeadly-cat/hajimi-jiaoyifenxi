@@ -7,8 +7,10 @@ import unittest
 from unittest.mock import patch
 
 from backend.decision_lineage import canonical_sha256
-from backend.news_review_contracts import ENDPOINT, INSTRUCTIONS, MODEL
-from backend.news_review_quality_preparation import prepare, signoff_template, strict_json
+from backend.news_review_contracts import ENDPOINT, MODEL, STRATEGY_SHA
+from backend.news_review_quality_preparation import (
+    QUALITY_INSTRUCTIONS, QUALITY_STRATEGY_SHA, prepare, signoff_template, strict_json,
+)
 
 CORPUS_RAW = (Path(__file__).parent / "fixtures/news_review_quality_v1.json").read_bytes()
 CANDIDATE = "a" * 40
@@ -40,10 +42,12 @@ class QualityPreparationTests(unittest.TestCase):
             self.assertLessEqual(len(body), 4096)
             payload = json.loads(body)
             self.assertEqual((payload["model"], payload["instructions"], payload["max_output_tokens"]),
-                             (MODEL, INSTRUCTIONS, 1400))
+                             (MODEL, QUALITY_INSTRUCTIONS, 1400))
             self.assertEqual(entry["reserved_input_tokens"], len(body) + 256)
             self.assertEqual(json.loads(payload["input"])["document"]["origin"], "synthetic_fixture")
         self.assertEqual(value["endpoint"], ENDPOINT)
+        self.assertEqual(value["strategy_sha256"], QUALITY_STRATEGY_SHA)
+        self.assertNotEqual(value["strategy_sha256"], STRATEGY_SHA)
         self.assertLessEqual(value["reservation"]["total_tokens"], 207072)
         self.assertFalse(value["reservation"]["prices_independently_verified"])
         self.assertFalse(value["candidate_verified_by_cli"])
