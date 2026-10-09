@@ -41,7 +41,9 @@ MICRON_METADATA_CACHE_CAPACITY = 30
 MICRON_METADATA_REVALIDATE_PER_POLL = 4
 MICRON_METADATA_PRIORITY_RETRIES_PER_POLL = 1
 MICRON_METADATA_MAX_AGE_MS = 3_600_000
-MICRON_METADATA_REVALIDATION_TIMEOUT_MS = 2_000
+# Match the sealed transport's 12-second ceiling for valid but slower heads.
+# The caller's existing poll deadline and commit reserve still take precedence.
+MICRON_METADATA_REVALIDATION_TIMEOUT_MS = 12_000
 MICRON_METADATA_COMMIT_RESERVE_MS = 500
 _MAX_EXACT_JSON_INTEGER = (1 << 53) - 1
 _ORIGIN = "https://investors.micron.com"
@@ -67,7 +69,7 @@ def _sha256(value: Any) -> str:
 def micron_metadata_cache_policy() -> dict[str, Any]:
     """Fixed in-process policy; no cache data is a persisted checkpoint."""
     return {
-        "version": "micron_metadata_cache_policy_v2",
+        "version": "micron_metadata_cache_policy_v3",
         "parser_version": "micron_newsarticle_head_parser_v1",
         "time_hash_semantics": MICRON_TIME_METADATA_HASH_SEMANTICS,
         "list_binding": "entire_normalized_q4_row_v1",
