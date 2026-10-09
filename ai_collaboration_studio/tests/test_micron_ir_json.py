@@ -837,6 +837,109 @@ class MicronIrIncrementalTests(unittest.TestCase):
         self.assertTrue(restarted.read_recent(require_complete=False)["complete"])
         self.assertEqual(len(fetch.calls) - before, 31)
 
+    def test_slow_valid_old_metadata_refreshes_without_extra_requests_or_starving_new_release(self):
+        fetch = self.fixture()
+        slow_old = [False]
+        dispatched, responses = [], []
+
+        class SlowHead(io.BytesIO):
+            def __init__(self, raw):
+                super().__init__(raw)
+                self.headers = {}
+                self.closed_event = threading.Event()
+                self.delayed = False
+
+            def close(self):
+                self.closed_event.set()
+                super().close()
+
+            def read(self, size=-1):
+                if not self.delayed:
+                    self.delayed = True
+                    if self.closed_event.wait(2.5):
+                        raise OSError("synthetic response closed before valid metadata arrived")
+                return super().read(size)
+
+            def read1(self, size=-1):
+                return self.read(size)
+
+        def opener(request, **_controls):
+            url = request.full_url
+            dispatched.append(url)
+            raw = listing(fetch.rows) if url == EXPECTED_LIST_URL else fetch.heads[url]
+            response = (SlowHead(raw) if slow_old[0] and "/cached-" in url else io.BytesIO(raw))
+            response.headers = {}
+            responses.append(response)
+            return response
+
+        with patch("backend.market.micron_ir_json.open_official_https", side_effect=opener):
+            client = MicronIrJsonClient(clock=lambda: NOW)
+            client.read_recent()
+            new_row = record(31)
+            new_row["LinkToDetailPage"] = "/news/press-release/2026/new-before-slow-old/default.aspx"
+            fetch.rows = fetch.rows[:-1] + [new_row]
+            fetch.heads[HOST + new_row["LinkToDetailPage"]] = head(metadata(new_row))
+            slow_old[0] = True
+            before = len(dispatched)
+            result = client.read_recent(require_complete=False,
+                                        deadline_monotonic_ms=int(time.monotonic() * 1000) + 20_000)
+
+        self.assertEqual(sum(isinstance(response, SlowHead) and response.delayed for response in responses), 4)
+        self.assertTrue(result["complete"], result["source_errors"])
+        self.assertEqual(result["source_errors"], [])
+        self.assertEqual(len(dispatched) - before, 6)  # list + one new + four existing slots
+        self.assertEqual(dispatched[before + 1], HOST + new_row["LinkToDetailPage"])
+        self.assertEqual(set(result["metadata_progress"]["requested_ids"]), {1, 2, 3, 4, 31})
+        self.assertEqual({row["q4_press_release_id"] for row in result["releases"]},
+                         set(range(1, 30)) | {31})
+        self.assertTrue(all(response.closed for response in responses))
+        self.assertFalse(any(thread.name.startswith("micron-ir-head") or thread.name == "official-source-body-control"
+                             for thread in threading.enumerate()))
+
+    def test_default_old_revalidation_deadline_keeps_the_existing_commit_reserve(self):
+        fetch = self.fixture()
+        block_old = [False]
+        closed = threading.Event()
+        observed_deadlines = []
+
+        class BlockedHead:
+            headers = {}
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                self.close()
+            def close(self):
+                closed.set()
+            def read(self, _size):
+                if not closed.wait(4):
+                    raise AssertionError("remaining poll budget did not close old metadata")
+                raise OSError("closed by remaining poll budget")
+
+        old_url = HOST + fetch.rows[0]["LinkToDetailPage"]
+        def opener(request, **controls):
+            if block_old[0] and request.full_url == old_url:
+                observed_deadlines.append(controls["deadline_monotonic_ms"])
+                return BlockedHead()
+            raw = listing(fetch.rows) if request.full_url == EXPECTED_LIST_URL else fetch.heads[request.full_url]
+            response = io.BytesIO(raw)
+            response.headers = {}
+            return response
+
+        with patch("backend.market.micron_ir_json.open_official_https", side_effect=opener):
+            client = MicronIrJsonClient(clock=lambda: NOW)
+            client.read_recent()
+            block_old[0] = True
+            deadline = int(time.monotonic() * 1000) + 1_500
+            result = client.read_recent(require_complete=False, deadline_monotonic_ms=deadline)
+
+        self.assertEqual(observed_deadlines, [deadline - 500])
+        self.assertTrue(closed.is_set())
+        self.assertFalse(result["complete"])
+        self.assertIn("MICRON_IR_REVALIDATION_TIMEOUT", {error["code"] for error in result["source_errors"]})
+        self.assertNotIn(1, {row["q4_press_release_id"] for row in result["releases"]})
+        self.assertFalse(any(thread.name.startswith("micron-ir-head") or thread.name == "official-source-body-control"
+                             for thread in threading.enumerate()))
+
     def test_old_revalidation_timeout_closes_response_and_keeps_new_metadata_before_global_deadline(self):
         fetch = self.fixture()
         block_old = [False]
