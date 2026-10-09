@@ -1,0 +1,278 @@
+{
+  "version": "news_review_longrun_hardening_offline_evidence_v1",
+  "recorded_at_utc": "2026-10-07T12:31:02.333910+00:00",
+  "base_commit": "300855a5c971f1179b59bba5097741792d9898aa",
+  "branch": "qwen/closeout-audit-20261006",
+  "frozen_local_delivery_manifest_sha256": "5524c149f07cb13eb2b2b18fc46863233304068782b44d5381ae77804cb48d85",
+  "local_manifest_revision": 2,
+  "identity_verification": {
+    "source_files": 17,
+    "local_artifacts": 90,
+    "mismatches": 0,
+    "format_only_source_changes_after_frozen_check": 2
+  },
+  "source_identity": [
+    {
+      "path": "ai_collaboration_studio/backend/news_review_controller.py",
+      "tested_working_copy_bytes": 11695,
+      "tested_working_copy_sha256": "5e6173bf5bc095f539701023167872cab8bafcdbcaee9b76b276cfd06180e834",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "f1a706c9e8bd143dea0d0b17859586e4cc02aacc"
+    },
+    {
+      "path": "ai_collaboration_studio/backend/news_review_report.py",
+      "tested_working_copy_bytes": 16703,
+      "tested_working_copy_sha256": "7c2a267991156c5122d038cfddc0f366545e28a114bd93cc238c206496440d5c",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "26b6f1dfbf8e8e4a62ac668b3fc22283dcb43c66"
+    },
+    {
+      "path": "ai_collaboration_studio/backend/news_review_source_analysis.py",
+      "tested_working_copy_bytes": 7379,
+      "tested_working_copy_sha256": "f288cf73ae7de4e6b0c3da25ded153762f1041dfed0cbf7ae7a84de364a077f6",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "0bf281b92fa6c205addaef089d1289a8b123bda9"
+    },
+    {
+      "path": "ai_collaboration_studio/backend/source_inbox_service.py",
+      "tested_working_copy_bytes": 110698,
+      "tested_working_copy_sha256": "d79f899ea375aedd5e8c8bd70066bc0e1f5984b7197f4e33e52f5b880367e948",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "acc54e927fe3111d406e3c57bdc5f25b0a174d8c"
+    },
+    {
+      "path": "ai_collaboration_studio/frontend/src/api.js",
+      "tested_working_copy_bytes": 25805,
+      "tested_working_copy_sha256": "f3c81e9dc5714b56871b7cbdc2c17434745a31a398749d9e3e8c20076b3ca02e",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "2228a741628b4997ab54996b7316b613f8b5052f"
+    },
+    {
+      "path": "ai_collaboration_studio/frontend/tests/api.test.js",
+      "tested_working_copy_bytes": 25223,
+      "tested_working_copy_sha256": "9689a65ccacae297abbace88b90ae4edc43b65a7dce6b8827f91b114db6ba8ea",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "98188506b3e9e3e93c48bb20a650f77bd56dfc87"
+    },
+    {
+      "path": "ai_collaboration_studio/scripts/news_review_observer_wait.py",
+      "tested_working_copy_bytes": 21715,
+      "tested_working_copy_sha256": "8a60509503bb6cca4cf5542ec97fb0831a36c2ce126cbd58c88540245086d839",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "aca440782a68e48aca3a54f935a392fda53358ce"
+    },
+    {
+      "path": "ai_collaboration_studio/scripts/run_news_review_observer.py",
+      "tested_working_copy_bytes": 38078,
+      "tested_working_copy_sha256": "5e7f7443eae5b2ab927389428f92e80710f38606cf041028f03bea6ceddaa9c5",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "3f1f34157064f5f51376b5c5e74d063344fb6122"
+    },
+    {
+      "path": "ai_collaboration_studio/tests/test_news_review_observer.py",
+      "tested_working_copy_bytes": 51865,
+      "tested_working_copy_sha256": "5184e4e2ab2825497a89fda3c18e34be1bbfc099acce593b940d2290814c5885",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "c3452e729b68f7c1ff7382e07cfe705f51cc8d14"
+    },
+    {
+      "path": "ai_collaboration_studio/tests/test_news_review_observer_wait.py",
+      "tested_working_copy_bytes": 36354,
+      "tested_working_copy_sha256": "8a2c0edbd138a5abafb20911e8b36ae3d585375258744839afe76512c0e66fc8",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "cd4f7039e26cb897216448553e0ea97a2e830ade"
+    },
+    {
+      "path": "ai_collaboration_studio/frontend/tests/monitoringReadTimeout.test.js",
+      "tested_working_copy_bytes": 6596,
+      "tested_working_copy_sha256": "e51bc83238ef3e6ba31c3624d3a203ef8f3e02008470e46b747eb87f43cefc6f",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "94ebbc06933c43be3c148c98818039a04d3543f0",
+      "frozen_pre_format_sha256": "55af1ab3633c6509c6e8068751d4d8c3b0454e2e4b35a766250bb659b6b9a6c7",
+      "frozen_pre_format_bytes": 6598,
+      "publication_format_change": "remove_one_trailing_blank_line_preserving_CRLF"
+    },
+    {
+      "path": "ai_collaboration_studio/scripts/closeout_receipt_contract_audit.py",
+      "tested_working_copy_bytes": 45631,
+      "tested_working_copy_sha256": "6f94ad3d51e357a75895818df607acc07b0397a4c4d60f1f3bdcfbb24f2ddf15",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "1c401f3fc3f35e1ac3dde8399d0ae49410579691"
+    },
+    {
+      "path": "ai_collaboration_studio/tests/test_closeout_receipt_contract_audit.py",
+      "tested_working_copy_bytes": 41002,
+      "tested_working_copy_sha256": "cdd0f9e959d478579b05c050ede04805e1932440e38c3377992b3dbd537ee669",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "e3d2c64d333f400511d56294cd4a8f21724e4dfe"
+    },
+    {
+      "path": "ai_collaboration_studio/tests/test_news_review_enrichment_batches.py",
+      "tested_working_copy_bytes": 10422,
+      "tested_working_copy_sha256": "15f0d1dd14c8abb5a70189699b1813ca6754ebdf837a5291d43d212f2798b516",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "f3d1505e3d0c24c48b564d6d72b30740d7dbb313"
+    },
+    {
+      "path": "ai_collaboration_studio/tests/test_news_review_observer_startup_identity.py",
+      "tested_working_copy_bytes": 7970,
+      "tested_working_copy_sha256": "28dec448da7c254e4afe42eb880cd1d81483de2aae4ebcba44d2bc416feddc25",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "e70bcf06dad16fbb423403c50d6019c3ac3a31b6"
+    },
+    {
+      "path": "ai_collaboration_studio/tests/test_news_review_report_standards.py",
+      "tested_working_copy_bytes": 7616,
+      "tested_working_copy_sha256": "b55646a3ed86158342dbd1c2a90e077d568cfb19ae6d5bf06c55233251aa34f5",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "61e05e4aa622d1dd4499ed8386df3f3b20c12528"
+    },
+    {
+      "path": "ai_collaboration_studio/tests/test_source_inbox_read_cost.py",
+      "tested_working_copy_bytes": 4865,
+      "tested_working_copy_sha256": "0e01f69c19a60a8d274ee350cc38b205cb512ca829196928229eb4558450fcb2",
+      "working_copy_line_endings": "CRLF",
+      "expected_git_blob": "7fbb368a5ea65413ef8603747916b66546c70aab",
+      "frozen_pre_format_sha256": "c4ca3ff33d7cc06a35960f974a823fa3e28e18071bcf58c3241a10368efa4535",
+      "frozen_pre_format_bytes": 4867,
+      "publication_format_change": "remove_one_trailing_blank_line_preserving_CRLF"
+    }
+  ],
+  "encoding_note": "Working-copy SHA-256 identifies tested CRLF bytes. Expected Git blob identifies repository clean-filter bytes with core.autocrlf=true; staged and committed blobs are checked separately.",
+  "offline_tests": [
+    {
+      "group": "observer_contracts",
+      "tests": 153,
+      "failed": 0,
+      "skipped": 0,
+      "local_log_sha256": "d11f2f4c73ddab2177100222a0c3ef2e1f80d010ed8a5782218d8857a38f8979"
+    },
+    {
+      "group": "pipeline_runtime",
+      "tests": 154,
+      "failed": 0,
+      "skipped": 0,
+      "local_log_sha256": "9c381134e73059e5752775e8f166f70003b64c1f89c7061fdbeaf0c4adad7fe8"
+    },
+    {
+      "group": "bounded_enrichment",
+      "tests": 11,
+      "failed": 0,
+      "skipped": 0,
+      "local_log_sha256": "2a8cc0af62354250e34e4cec6cbed5e08720c39fb53780ff088dfe3fb0771431"
+    },
+    {
+      "group": "report_clock",
+      "tests": 42,
+      "failed": 0,
+      "skipped": 0,
+      "local_log_sha256": "6b56b30c136fb83cdfa4823b2c2e50a22c945273951ec26616a124e9e048364c"
+    },
+    {
+      "group": "source_inbox_market_fixture",
+      "tests": 36,
+      "failed": 0,
+      "skipped": 0,
+      "local_log_sha256": "c833649fb734e11203ba35678ea49456bf714f10a3e1061a4ec30ce64c2a7c0e"
+    },
+    {
+      "group": "frontend_read_api",
+      "tests": 35,
+      "failed": 0,
+      "skipped": 0,
+      "local_log_sha256": "3fb6df256b02eba9a4efa0f71b54604470b98aa2e16a447c6a8d1a05b5cfd071"
+    },
+    {
+      "group": "frontend_dom",
+      "tests": 70,
+      "failed": 0,
+      "skipped": 0,
+      "local_log_sha256": "fb262e0cc8c50b6781dc74dd712b6645c25bde11b26ff0151060aaf6758a917b"
+    }
+  ],
+  "test_groups_overlap": true,
+  "browser": {
+    "status": "PASS",
+    "local_result_sha256": "9c1a5003ded3a76147dd35efd0d3fc682171ad309149219c6c0cf455c20de7f1",
+    "synthetic_payloads_only": true,
+    "real_source_requests": 0,
+    "real_provider_calls": 0,
+    "refresh_iterations": 25,
+    "p50_ms": 120.59970000000067,
+    "p95_ms": 151.54460000000017,
+    "desktop_and_mobile": true
+  },
+  "accelerated_scheduler": {
+    "local_result_sha256": "0218893d7cb95738259833e98462628d6a72a8c221f81285c1746f2e62d50fb0",
+    "historical_events": 50000,
+    "iterations": 86400,
+    "elapsed_seconds": 94.49429930000042,
+    "new_events_selected_in_arrival_cycle": 576,
+    "body_revisions_selected_in_arrival_cycle": 24,
+    "max_queue_callbacks_per_cycle": 19,
+    "resource_samples": 8,
+    "stop_prevented_further_work": true,
+    "real_time_24h_acceptance": false
+  },
+  "frontend_build": {
+    "exit_code": 0,
+    "modules_transformed": 1766,
+    "production_deployed": false
+  },
+  "boundaries": {
+    "historical_b_root_cause": "UNKNOWN",
+    "product_provider_changed": false,
+    "real_source_requests": 0,
+    "real_provider_calls": 0,
+    "production_database_opened": false,
+    "fallback_receipt_is_offline_only": true,
+    "watchdog_modified": false,
+    "external_recorder_implemented": false,
+    "new_trial_started": false,
+    "merged": false,
+    "deployed": false,
+    "live_trading": false
+  },
+  "github_ci": {
+    "basis": "separate exact-commit workflow evidence",
+    "local_results_are_github_ci": false
+  },
+  "publication_checks": {
+    "format_changes": [
+      {
+        "path": "ai_collaboration_studio/frontend/tests/monitoringReadTimeout.test.js",
+        "before_bytes": 6598,
+        "after_bytes": 6596,
+        "before_sha256": "55af1ab3633c6509c6e8068751d4d8c3b0454e2e4b35a766250bb659b6b9a6c7",
+        "after_sha256": "e51bc83238ef3e6ba31c3624d3a203ef8f3e02008470e46b747eb87f43cefc6f",
+        "change": "remove_one_trailing_blank_line_preserving_CRLF"
+      },
+      {
+        "path": "ai_collaboration_studio/tests/test_source_inbox_read_cost.py",
+        "before_bytes": 4867,
+        "after_bytes": 4865,
+        "before_sha256": "c4ca3ff33d7cc06a35960f974a823fa3e28e18071bcf58c3241a10368efa4535",
+        "after_sha256": "0e01f69c19a60a8d274ee350cc38b205cb512ca829196928229eb4558450fcb2",
+        "change": "remove_one_trailing_blank_line_preserving_CRLF"
+      }
+    ],
+    "frontend_tests": {
+      "tests": 35,
+      "passed": 35,
+      "skipped": 0,
+      "local_log_sha256": "fc9f7dd2a799d4bc4759b3e4693692d0ecb442b71cf8f9b69179b1c938658ed8"
+    },
+    "source_inbox_read_cost_tests": {
+      "tests": 5,
+      "passed": 5,
+      "skipped": 0,
+      "local_log_sha256": "dcf79f1694ea61724e55449161579c873e538463df7cc0f41dc82b7474cec7d9"
+    },
+    "offline_static_baseline": {
+      "checks": 7,
+      "passed": 7,
+      "local_report_sha256": "c673ef7fefb15b29f0e58e4379c234c3f57aa7024754672773044126ff96ce6d",
+      "complete_security_audit": false
+    }
+  }
+}

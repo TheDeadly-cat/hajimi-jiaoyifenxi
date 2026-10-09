@@ -45,6 +45,127 @@ def safe_path(value):
     return path.resolve()
 
 
+def bounded_code(value, fallback='unclassified_error'):
+    """Normalise an exception type name to a bounded, log-safe token.
+
+    Mirrors ``backend/news_review_stop.py`` so a receipt never carries free
+    text: only ``[A-Za-z][A-Za-z0-9_]{0,99}`` is retained, everything else
+    collapses to the fallback.  ``str(exc)`` is never written.
+    """
+    return value if type(value) is str and re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,99}', value) else fallback
+
+
+def publish_exit_receipt(directory, ended, *, fallback_version, ticks_provider=None,
+                         observer_identity=None):
+    """Publish the primary exit receipt, degrading to a fallback on failure.
+
+    Returns ``'primary_published'``, ``'fallback_only_published'``,
+    ``'fallback_present_content_unverified'``, ``'both_failed'`` or
+    ``'receipt_directory_rejected:<bounded>'``.  It never raises: a publication
+    failure is recorded as a bounded code, not propagated, so it cannot mask the
+    original exception nor alter process teardown.
+
+    Review fixes R-01..R-04 are enforced here rather than left to callers:
+
+    * **R-01** production callers reuse their confirmed startup pin, avoiding a
+      second native query during teardown. Standalone callers can query inside
+      this protected path via ``ticks_provider``. A query that raises is recorded as
+      ``identity_unavailable:<bounded>`` and cannot abort the caller's ``finally``
+      block; a query that yields no exact creation time produces
+      ``observer-exit-fallback-unidentified-<pid>.json`` -- deliberately *not*
+      the exact-ticks name, and it never claims a pin-level match.
+    * **R-02** the publication directory is re-validated with the existing
+      ``safe_path`` immediately before writing.  On rejection nothing is written
+      and ``receipt_directory_rejected:<bounded>`` is returned.
+    * **R-03** every failure code is merged back into ``ended['failure_codes']``,
+      so pre-existing report failures survive a fallback publication, and a
+      primary+fallback double failure keeps both codes instead of leaving them in
+      process memory only.
+    * **R-04** a same-name collision is reported as
+      ``fallback_present_content_unverified`` -- "the path exists, its content was
+      not verified".  It is never called positive evidence, and no runtime
+      validator or watchdog is added to check it.
+
+    The fallback receipt remains **offline corroborating evidence only**: not read
+    by the watchdog receipt chain, opening no alert, never marking the run as
+    normally closed out.  The three always-false fields are re-asserted here so a
+    degraded path can never become an acceptance shortcut, and
+    ``publish_json_once`` still refuses to overwrite an existing file
+    (``os.link``).  ``safe_path``'s symlink/junction checks are unchanged.
+    """
+    codes = [c for c in (ended.get('failure_codes') or [])]
+
+    def commit(extra=()):
+        merged = codes + [c for c in extra]
+        ended['failure_codes'] = merged
+        return merged
+
+    # R-02: re-validate the directory at write time, not only at plan time.
+    try:
+        directory = safe_path(str(Path(directory)))
+    except Exception as exc:
+        code = 'receipt_directory_rejected:' + bounded_code(type(exc).__name__)
+        commit([code])
+        return code
+    pid = os.getpid()
+    ticks = None
+    identity_basis = 'pid_only'
+    if observer_identity is not None:
+        if (type(observer_identity) is tuple and len(observer_identity) == 2
+                and integer(observer_identity[0], positive=True)
+                and observer_identity[0] == pid
+                and integer(observer_identity[1], positive=True)):
+            ticks = observer_identity[1]
+            identity_basis = 'startup_pin'
+        else:
+            codes.append('startup_identity_unconfirmed')
+        ended.update(pid=pid, process_start_utc_ticks=ticks)
+        commit()
+    try:
+        publish_json_once(directory/'observer-exit.json', ended)
+        commit()
+        return 'primary_published'
+    except Exception as exc:
+        codes.append('exit_receipt_publish_failed:' + bounded_code(type(exc).__name__))
+    # Production callers reuse the already-confirmed startup pin. Standalone
+    # callers may use the protected query, but a malformed result never claims
+    # a native identity and never replaces an explicitly rejected startup pin.
+    if observer_identity is None:
+        try:
+            candidate_ticks = ticks_provider(pid) if callable(ticks_provider) else None
+            if integer(candidate_ticks, positive=True):
+                ticks = candidate_ticks
+                identity_basis = 'native_creation_ticks'
+            elif candidate_ticks is not None:
+                codes.append('identity_unconfirmed')
+        except Exception as exc:
+            codes.append('identity_unavailable:' + bounded_code(type(exc).__name__))
+    fallback_payload = dict(ended)
+    fallback_payload['version'] = fallback_version
+    fallback_payload['failure_codes'] = list(codes)
+    fallback_payload['fallback_identity_basis'] = identity_basis
+    fallback_payload['pid'] = pid
+    fallback_payload['process_start_utc_ticks'] = ticks
+    fallback_payload['final_acceptance_verified'] = False
+    fallback_payload['monitored_processes_stopped_by_observer'] = False
+    fallback_payload['database_opened'] = False
+    name = (f'observer-exit-fallback-{pid}-{ticks}.json' if ticks is not None
+            else f'observer-exit-fallback-unidentified-{pid}.json')
+    try:
+        publish_json_once(directory/name, fallback_payload)
+        commit()
+        return 'fallback_only_published'
+    except FileExistsError:
+        # R-04: the path exists; its content is NOT verified and it is NOT
+        # treated as positive evidence.
+        commit(['fallback_present_content_unverified'])
+        return 'fallback_present_content_unverified'
+    except Exception as exc:
+        # R-03: keep both failure codes instead of losing them with the process.
+        commit(['exit_receipt_fallback_publish_failed:' + bounded_code(type(exc).__name__)])
+        return 'both_failed'
+
+
 def read_json(path, limit=262144):
     return read_record(path, limit)[0]
 
@@ -342,15 +463,15 @@ def run_observer(plan, plan_hash):
     publish_json_once(directory/'observer-pin.json', {'version':'news_review_direct_observer_pin_v1',
         'identity':identity, 'plan_sha256':plan_hash, 'plan':plan,
         'pid':os.getpid(), 'process_start_utc_ticks':ticks, 'started_at_ms':time.time_ns()//1_000_000})
-    return observe_active(plan, plan_hash, directory)
+    return observe_active(plan, plan_hash, directory,
+                          observer_identity=(os.getpid(), ticks))
 
 
-def observe_active(plan, plan_hash, directory, *, inspector=None):
+def observe_active(plan, plan_hash, directory, *, inspector=None, observer_identity=None):
     """Internal continuation of the same already-approved observer process."""
     target = plan['request']['target']
     identity = target['identity']
     stop = threading.Event()
-    inspector = inspector or NativeInspector(plan, directory)
     ended = {'phase':'drain_deadline_unconfirmed_user_action_required', 'two_native_terminal_checks':False}
     wall = lambda:time.time_ns()//1_000_000
     mono = lambda:time.monotonic_ns()//1_000_000
@@ -372,7 +493,6 @@ def observe_active(plan, plan_hash, directory, *, inspector=None):
                 stop.set()
             return second
         return tree
-    probe = NewsReviewStatusProbe(target, inspect_tree=inspect, wall_ms=lambda:time.time_ns()//1_000_000)
     fatal_codes = {'control_identity_mismatch','control_unconfirmed','source_scope_mismatch',
                    'host_generation_changed','process_tree_identity_mismatch','monitor_window_closed_or_unconfirmed',
                    'monitor_source_changed','powershell_changed','observer_not_independent'}
@@ -384,9 +504,12 @@ def observe_active(plan, plan_hash, directory, *, inspector=None):
                 ended.update(phase='inspection_failure_user_action_required', code=str(exc))
                 stop.set()
             raise
-    writer = MonitorReceiptWriter(directory, identity, wall_ms=lambda:time.time_ns()//1_000_000,
-                                  monotonic_ms=lambda:time.monotonic_ns()//1_000_000)
+    writer = None
     try:
+        inspector = inspector or NativeInspector(plan, directory)
+        probe = NewsReviewStatusProbe(target, inspect_tree=inspect, wall_ms=lambda:time.time_ns()//1_000_000)
+        writer = MonitorReceiptWriter(directory, identity, wall_ms=lambda:time.time_ns()//1_000_000,
+                                      monotonic_ms=lambda:time.monotonic_ns()//1_000_000)
         schedule_end = writer.run_schedule(probe=observe, stop_event=stop, expires_at_ms=target['expires_at_ms'],
                                           interval_ms=plan['poll_interval_ms'])
         hard_mono = min(hard_mono,schedule_end['deadline_monotonic_ms']+plan['drain_grace_ms'])
@@ -428,16 +551,56 @@ def observe_active(plan, plan_hash, directory, *, inspector=None):
         ended.update(phase='observer_interrupted_or_failed', code='OBSERVER_INCOMPLETE')
         raise
     finally:
-        report = safe_path(str(Path(plan['request']['root'])/'window-report.json'))
+        failure_codes = []
+        # Resolve the host report path, but never let a rejection abort the
+        # whole receipt.  An unresolved path means "unknown", not "absent":
+        # original_report_exists stays None so a degraded path cannot turn
+        # "cannot confirm" into "confirmed missing" (the closeout checklist's
+        # original error).  safe_path's symlink/junction checks are unchanged.
+        try:
+            report = safe_path(str(Path(plan['request']['root'])/'window-report.json'))
+        except Exception as exc:
+            report = None
+            failure_codes.append('report_path_unresolved:' + bounded_code(type(exc).__name__))
+        report_exists = None
+        report_sha = None
+        if report is not None:
+            try:
+                report_exists = report.is_file()
+            except Exception as exc:
+                failure_codes.append('report_existence_unconfirmed:' + bounded_code(type(exc).__name__))
+            if report_exists:
+                try:
+                    report_sha = sha(report)
+                except Exception as exc:
+                    failure_codes.append('report_hash_unavailable:' + bounded_code(type(exc).__name__))
         ended.update(version='news_review_observer_exit_v1', identity=identity, plan_sha256=plan_hash,
-            ended_at_ms=time.time_ns()//1_000_000, completed_checks=writer.sequence,
-            original_report_exists=report.is_file(), final_acceptance_verified=False,
-            original_report_sha256=sha(report) if report.is_file() else None,
-            monitored_processes_stopped_by_observer=False, database_opened=False)
-        if ended['two_native_terminal_checks'] and not report.is_file():
+            ended_at_ms=time.time_ns()//1_000_000, completed_checks=getattr(writer, 'sequence', None),
+            original_report_exists=report_exists, final_acceptance_verified=False,
+            original_report_sha256=report_sha,
+            monitored_processes_stopped_by_observer=False, database_opened=False,
+            failure_codes=failure_codes)
+        # Phase refinement.  Only a *confirmed absent* report is the classic
+        # "missing report" fault; an unknown report state is reported separately
+        # and never collapsed into the confirmed-missing verdict.
+        if ended['two_native_terminal_checks'] and report_exists is False:
             ended.update(phase='terminal_report_missing_user_action_required')
-        publish_json_once(directory/'observer-exit.json', ended)
-    return 0 if ended['phase'] == 'registered_tree_terminal' else 2
+        elif ended['two_native_terminal_checks'] and report_exists is None:
+            ended.update(phase='terminal_report_state_unconfirmed_user_action_required')
+        # Reuse the same PID/ticks written in the startup pin. The provider is
+        # needed only for standalone callers that did not supply a startup pin.
+        publication = publish_exit_receipt(directory, ended,
+            fallback_version='news_review_observer_exit_fallback_v1',
+            ticks_provider=native_creation_ticks, observer_identity=observer_identity)
+        ended['exit_receipt_publication'] = publication
+    # The return code reflects whether closeout publication was *confirmed*,
+    # which is orthogonal to the native terminal fact.  A native-terminal run
+    # whose primary exit receipt was not published must NOT return 0, otherwise
+    # the "closeout unconfirmed" signal is lost (report 8.3.3).  The native
+    # terminal fact stays in two_native_terminal_checks / phase, unaltered.
+    if ended['phase'] != 'registered_tree_terminal':
+        return 2
+    return 0 if ended.get('exit_receipt_publication') == 'primary_published' else 2
 
 
 def main(argv=None):

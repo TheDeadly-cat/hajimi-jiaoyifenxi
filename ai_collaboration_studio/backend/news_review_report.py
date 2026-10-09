@@ -11,7 +11,8 @@ from .decision_lineage import canonical_sha256
 from .document_evidence import current_document
 from .news_review_contracts import VERSION, encoded, freshness, is_dual_policy, require
 from .news_review_service import _policy
-from .news_review_source_analysis import analyze_source_runs
+from .news_review_source_analysis import (analyze_source_runs, source_timing_standards,
+                                         SOURCE_TIMING_STANDARD_VERSION)
 from .provider_call_ledger import ProviderCallLedger
 from .source_monitoring.state_repository import SourceMonitoringStateRepository
 
@@ -56,7 +57,59 @@ class NewsReviewJournal:
         self.record("source_poll",runtime_status="running",source_run_id=observation["run_id"])
 
 
-def build_news_review_report(service, policy_id):
+
+def _observation_window(samples, policy, now_ms, window_reached):
+    """Scope the observation endpoint to the latest journal session.
+
+    A stop request only initiates cancellation. Confirmed session termination is
+    separate, and an old session cannot close a newer session. Later observations
+    contradict an already recorded terminal rather than silently extending it.
+    """
+    session_id = samples[-1]['session_id'] if samples else None
+    session = [sample for sample in samples if sample['session_id'] == session_id]
+    stopped = next((sample for sample in reversed(session)
+                    if sample['kind'] == 'session_stopped'
+                    and sample['runtime_status'] == 'stopped'), None)
+    requests = [sample['stop'] for sample in session if sample['kind'] == 'stop_requested']
+    later = [sample for sample in session
+             if stopped and sample['sequence'] > stopped['sequence']]
+    verified = bool(stopped and not later)
+    if verified:
+        end_ms = stopped['wall_ms']
+        if requests:
+            elapsed = all(stop.get('stop_type') == 'window_elapsed'
+                          and stop.get('window_reached') is True for stop in requests)
+            basis = 'authorized_window_elapsed' if elapsed else 'early_stop_recorded'
+        else:
+            basis = 'session_stopped_reason_unconfirmed'
+    elif stopped:
+        # Preserve the recorded boundary and expose contradictory later evidence.
+        end_ms, basis = stopped['wall_ms'], 'terminal_evidence_missing'
+    elif requests or window_reached():
+        end_ms = session[-1]['wall_ms'] if session else None
+        basis = 'terminal_evidence_missing'
+    else:
+        end_ms, basis = now_ms, 'live_report_time'
+    bound_start = (policy['clock_activation']['wall_ms'] if is_dual_policy(policy)
+                   else policy['not_before_ms'])
+    return {
+        'observation_start_ms': bound_start,
+        'observation_start_basis': ('bound_clock_activation' if is_dual_policy(policy)
+                                    else 'bound_policy_not_before'),
+        'observation_session_id': session_id,
+        'observation_first_sample_ms': session[0]['wall_ms'] if session else None,
+        'session_started_at_ms': next((sample['wall_ms'] for sample in session
+                                      if sample['kind'] == 'session_started'), None),
+        'observation_end_ms': end_ms,
+        'observation_basis': basis,
+        'terminal_evidence_verified': verified,
+        'stop_request_observed': bool(requests),
+        'observation_end_conflict_ms': max((sample['wall_ms'] for sample in later), default=None),
+        'observation_end_conflict_sequence': later[-1]['sequence'] if later else None,
+    }
+
+def build_news_review_report(service, policy_id, *, source_standards=None):
+    standards = source_timing_standards(source_standards)
     snapshot = service.snapshot(policy_id)
     source_repository = SourceMonitoringStateRepository(service.store)
     with service.store._lock, closing(service.store._connect()) as db:
@@ -90,15 +143,33 @@ def build_news_review_report(service, policy_id):
             require(run is not None and canonical_sha256(run) == value["source_run_sha256"], "source_run_integrity")
             runs[value["source_run_id"]] = run
         samples.append(value)
+    now_ms = service.clock()
+    observation = _observation_window(samples, p, now_ms, lambda: service.window_reached(p))
+    observation_end_ms = observation['observation_end_ms']
+
     source_metrics = {}
     for adapter in ("sec_filings","company_ir"):
         selected = [r for r in runs.values() if r["adapter_key"] == adapter]
         status = Counter(r["status"] for r in selected)
-        elapsed = max(0,min(service.clock(),p["expires_at_ms"])-p["not_before_ms"])
+        completed = len(selected)-status['RUNNING']
+        elapsed = max(0,min(now_ms,p["expires_at_ms"])-p["not_before_ms"])
         last_completed = max((r["completed_at_ms"] for r in selected),default=0)
         state = source_repository.get_state(adapter)
+        state_read_at_ms = service.clock()
+        # Evidence completing AFTER the bound terminal point contradicts the
+        # window; surface it explicitly rather than silently widening the window
+        # or swallowing it as a generic unconfirmed diagnostic.
+        conflicts = [r["completed_at_ms"] for r in selected
+                     if observation_end_ms is not None and r["status"] != 'RUNNING'
+                     and r["completed_at_ms"] > observation_end_ms]
+        if observation['observation_end_conflict_ms'] is not None:
+            conflicts.append(observation['observation_end_conflict_ms'])
+        conflict = max(conflicts, default=None)
         source_metrics[adapter] = {"poll_runs_observed":len(selected),"statuses":dict(status),
-                                  "success_rate":status["SUCCEEDED"]/len(selected) if selected else None,
+                                  "success_rate":status["SUCCEEDED"]/completed if completed else None,
+                                  "completed_poll_runs_observed":completed,
+                                  "in_flight_excluded":status['RUNNING'],
+                                  "success_rate_basis":"completed_adapter_polls_not_http_requests_or_announcement_capture",
                                   "nominal_poll_opportunities":(elapsed+299_999)//300_000,
                                   "last_completed_at_ms":last_completed or None,
                                   "observed_error_codes":dict(Counter(r['error_code'] for r in selected if r.get('error_code'))),
@@ -106,13 +177,39 @@ def build_news_review_report(service, policy_id):
                                   "last_error_code":state['last_error_code'] if state else None,
                                   "consecutive_failures":state['consecutive_failures'] if state else None,
                                   "next_due_at_ms":state['next_due_at_ms'] if state else None,
-                                  "actual_http_request_count":None}
-        try:
-            source_metrics[adapter]['diagnostics'] = analyze_source_runs(selected, observed_until_ms=service.clock())
-        except ValueError:
-            # Clock regressions or incomplete metadata must not prevent the
-            # existing stop/ledger report from being persisted.
+                                  "actual_http_request_count":None,
+                                  "report_generated_at_ms":now_ms,
+                                  **observation,
+                                  "observation_end_conflict_ms":conflict,
+                                  "nominal_poll_opportunities_basis":"authorized_elapsed_at_report_time_not_observed_coverage",
+                                  "live_source_state_basis":"global_mutable_state_at_report_time_not_policy_scoped",
+                                  "live_source_state_observed_at_ms":state_read_at_ms}
+        if conflict is not None or observation_end_ms is None:
             source_metrics[adapter]['diagnostics'] = {'available':False,'error_code':'SOURCE_DIAGNOSTIC_UNCONFIRMED'}
+        else:
+            try:
+                observation_start = (p['clock_activation']['wall_ms'] if is_dual_policy(p) else p['not_before_ms'])
+                diagnostics = analyze_source_runs(selected,
+                    observed_until_ms=observation_end_ms, observed_since_ms=observation_start,
+                    maximum_initial_success_delay_ms=standards[adapter]['first_success_ms'],
+                    maximum_success_gap_ms=standards[adapter]['maximum_gap_ms'])
+                diagnostics['observed_until_ms'] = observation_end_ms
+                source_metrics[adapter]['diagnostics'] = diagnostics
+            except ValueError:
+                # Clock regressions or incomplete metadata must not prevent the
+                # existing stop/ledger report from being persisted.
+                source_metrics[adapter]['diagnostics'] = {'available':False,'error_code':'SOURCE_DIAGNOSTIC_UNCONFIRMED'}
+        # Live age is independent of the historical diagnostic's availability.
+        # Only this policy's integrity-checked polls contribute; global mutable
+        # source state is labelled separately above.
+        last_success = max((r['completed_at_ms'] for r in selected
+                            if r['status'] == 'SUCCEEDED'
+                            and type(r['completed_at_ms']) is int and r['completed_at_ms'] >= 0),
+                           default=None)
+        source_metrics[adapter]['live_age_since_last_success_ms'] = (
+            now_ms - last_success if last_success is not None and now_ms >= last_success else None)
+        source_metrics[adapter]['live_diagnostics_basis'] = 'report_generation_time'
+        source_metrics[adapter]['live_age_source_basis'] = 'bound_policy_integrity_checked_polls'
     coverage = Counter()
     latencies = []
     for event in events:
@@ -196,6 +293,10 @@ def build_news_review_report(service, policy_id):
             "outcome":{"work_completed":work_completed,"cleanup_clean":clean,
                        "acceptance_passed":False,"stop_provenance_available":bool(stops)},
             "source_checks":source_metrics,"source_grants":source_grants,
+            "source_timing_standards":{"version":SOURCE_TIMING_STANDARD_VERSION,
+                "basis":"caller_supplied" if source_standards is not None else "profile_diagnostic_defaults",
+                "standards":standards,"sha256":canonical_sha256(standards),
+                "monitoring_approval_verified":False,"acceptance_authority":False},
             "source_runs_without_terminal_observation":[dict(r) for r in source_rows if r["run_id"] not in runs],
             "body_coverage":dict(coverage),
             "publish_to_discovery_ms":{"observed_count":len(latencies),

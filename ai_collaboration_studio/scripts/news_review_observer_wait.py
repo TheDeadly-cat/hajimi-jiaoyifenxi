@@ -245,7 +245,6 @@ def run_waiting(plan, plan_hash, *, core):
     publish_json_once(directory/'observer-pin.json',pin)
     ready_ns = time.monotonic_ns()
     ready_implementation = time.get_clock_info('monotonic').implementation
-    session = WaitingSession(plan,directory,core=core,wall_ms=wall,monotonic_ms=mono)
     maximum_end = plan['activation_eligibility_until_ms']+plan['activation']['duration_ms']+255000
     maximum_mono = started_mono+max(0,maximum_end-started)
     eligibility_mono = started_mono+max(0,plan['activation_eligibility_until_ms']-started)
@@ -253,6 +252,7 @@ def run_waiting(plan, plan_hash, *, core):
     ended = {'phase':'waiting_window_closed','code':'OBSERVER_WINDOW_CLOSED'}
     transitioned = False
     try:
+        session = WaitingSession(plan,directory,core=core,wall_ms=wall,monotonic_ms=mono)
         while wall() < maximum_end and mono() < maximum_mono:
             begin,begin_mono = wall(),mono()
             publish_json_once(directory/f'monitor-wait-start-{sequence+1:06d}.json',
@@ -280,7 +280,8 @@ def run_waiting(plan, plan_hash, *, core):
                     **pin,'version':'news_review_active_observer_pin_v1','identity':active['request']['target']['identity'],
                     'started_at_ms':wall(),'original_started_at_ms':started,'binding_sha256':canonical(binding)})
                 transitioned = True
-                return core.observe_active(active,plan_hash,directory,inspector=session.inspector)
+                return core.observe_active(active,plan_hash,directory,inspector=session.inspector,
+                                           observer_identity=(pin['pid'], ticks))
             if session.activated_until is None and (wall() >= plan['activation_eligibility_until_ms'] or mono() >= eligibility_mono):
                 raise ProbeError('activation_eligibility_elapsed_without_complete_receipt')
             if session.activated_until is not None and wall() >= session.activated_until+255000:
@@ -295,9 +296,27 @@ def run_waiting(plan, plan_hash, *, core):
         ended = {'phase':'waiting_failure_user_action_required','code':code}
         raise
     finally:
-        if not transitioned or not (directory/'observer-exit.json').exists():
-            publish_json_once(directory/'observer-exit.json',{
+        # Only a pre-activation waiting run that never handed off owns this
+        # receipt.  Once transitioned, core.observe_active owns observer-exit.json
+        # (primary or its own fallback); this layer must NOT write a waiting-state
+        # primary receipt over it -- doing so would replace the active layer's
+        # terminal outcome with the initial waiting phase and mask an active-layer
+        # closeout failure (report 8.7).  The active layer's return code and
+        # identity pass through unchanged because this finally does not return.
+        if not transitioned:
+            payload = {
                 'version':'news_review_observer_wait_exit_v1','identity':identity,'plan_sha256':plan_hash,
                 'ended_at_ms':wall(),'completed_wait_checks':sequence,**ended,
-                'activation_created':False,'key_window_opened':False,'final_acceptance_verified':False})
+                'activation_created':False,'key_window_opened':False,'final_acceptance_verified':False}
+            # Reuse the active layer's controlled publisher so the waiting layer
+            # gets the same primary/fallback degradation and never lets a
+            # publication failure escape as an uncaught exception.  identity here
+            # keeps policy_sha256 = None (unactivated waiting mode is never given
+            # a placeholder policy hash, per report 8.3.1).
+            # The startup pin has already confirmed this process identity. Reuse
+            # it rather than querying native state again during failure teardown.
+            core.publish_exit_receipt(directory, payload,
+                fallback_version='news_review_observer_wait_exit_fallback_v1',
+                ticks_provider=core.native_creation_ticks,
+                observer_identity=(pin['pid'], ticks))
     return 2

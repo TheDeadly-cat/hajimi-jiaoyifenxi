@@ -340,6 +340,431 @@ class ObserverPreparationTests(unittest.TestCase):
         self.assertFalse(verdict['live_acceptance_proven'])
 
 
+class PublishExitReceiptTests(unittest.TestCase):
+    """X-03: the controlled primary/fallback exit publisher (report 8.3.1-8.3.4)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        # Captured BEFORE any patch: a helper that calls observer.publish_json_once
+        # from inside its own side_effect would recurse into the mock and make both
+        # publications fail, masking the behaviour under test.
+        self._real_publish = observer.publish_json_once
+
+    def test_primary_success(self):
+        result = observer.publish_exit_receipt(self.dir, {'phase': 'registered_tree_terminal'},
+            fallback_version='v', ticks_provider=lambda pid: 2)
+        self.assertEqual(result, 'primary_published')
+        self.assertTrue((self.dir/'observer-exit.json').exists())
+        self.assertFalse(list(self.dir.glob('observer-exit-fallback-*.json')))
+
+    def test_primary_collision_writes_fallback_without_overwriting(self):
+        (self.dir/'observer-exit.json').write_text('PRE-EXISTING', encoding='utf-8')
+        result = observer.publish_exit_receipt(self.dir, {'phase': 'registered_tree_terminal'},
+            fallback_version='v', ticks_provider=lambda pid: 99)
+        self.assertEqual(result, 'fallback_only_published')
+        # The pre-existing primary receipt is never overwritten (os.link semantics).
+        self.assertEqual((self.dir/'observer-exit.json').read_text(encoding='utf-8'), 'PRE-EXISTING')
+        fallback = self.dir.glob('observer-exit-fallback-*-99.json')
+        self.assertEqual(len(list(self.dir.glob('observer-exit-fallback-*.json'))), 1)
+        payload = json.loads(next(iter(fallback)).read_text(encoding='utf-8'))
+        self.assertFalse(payload['final_acceptance_verified'])
+        self.assertFalse(payload['monitored_processes_stopped_by_observer'])
+        self.assertFalse(payload['database_opened'])
+        self.assertEqual(payload['fallback_identity_basis'], 'native_creation_ticks')
+        self.assertIn('exit_receipt_publish_failed:FileExistsError', payload['failure_codes'])
+
+    def test_fallback_collision_reports_path_exists_content_unverified(self):
+        # R-04: a same-name fallback is "the path exists, content NOT verified".
+        # It is no longer called positive evidence, and is never overwritten.
+        (self.dir/'observer-exit.json').write_text('PRE', encoding='utf-8')
+        pid = observer.os.getpid()
+        existing = self.dir/f'observer-exit-fallback-{pid}-99.json'
+        existing.write_text('EXISTING-FALLBACK-NOT-JSON', encoding='utf-8')
+        ended = {'phase': 'x', 'failure_codes': ['report_path_unresolved:ProbeError']}
+        result = observer.publish_exit_receipt(self.dir, ended,
+            fallback_version='v', ticks_provider=lambda _pid: 99)
+        self.assertEqual(result, 'fallback_present_content_unverified')
+        # Overwrite refused: bytes unchanged.
+        self.assertEqual(existing.read_text(encoding='utf-8'), 'EXISTING-FALLBACK-NOT-JSON')
+        # R-03: pre-existing report code survives, and the collision is recorded
+        # as content-unverified rather than as a success.
+        self.assertIn('report_path_unresolved:ProbeError', ended['failure_codes'])
+        self.assertIn('fallback_present_content_unverified', ended['failure_codes'])
+
+    def test_both_fail_returns_both_failed_without_raising(self):
+        ended = {'phase': 'x', 'failure_codes': ['report_hash_unavailable:OSError']}
+        with patch.object(observer, 'publish_json_once', side_effect=OSError('boom')):
+            result = observer.publish_exit_receipt(self.dir, ended,
+                fallback_version='v', ticks_provider=lambda pid: 1)
+        self.assertEqual(result, 'both_failed')
+        # R-03: a primary+fallback double failure keeps BOTH codes in the
+        # receipt payload instead of leaving them in process memory only.
+        self.assertIn('report_hash_unavailable:OSError', ended['failure_codes'])
+        self.assertTrue(any(c.startswith('exit_receipt_publish_failed') for c in ended['failure_codes']))
+        self.assertTrue(any(c.startswith('exit_receipt_fallback_publish_failed') for c in ended['failure_codes']))
+        # Nothing was written (both publications failed).
+        self.assertFalse(list(self.dir.glob('observer-exit*.json')))
+
+    def test_no_free_text_exception_message_leaks_into_fallback(self):
+        real = observer.publish_json_once
+
+        def fake_publish(path, value):
+            if Path(path).name == 'observer-exit.json':
+                raise OSError('SECRET free text')
+            return real(path, value)  # let the fallback actually be written
+
+        with patch.object(observer, 'publish_json_once', side_effect=fake_publish):
+            observer.publish_exit_receipt(self.dir, {'phase': 'x'},
+                fallback_version='v', ticks_provider=lambda pid: 6)
+        text = next(iter(self.dir.glob('observer-exit-fallback-*-6.json'))).read_text(encoding='utf-8')
+        self.assertNotIn('SECRET free text', text)
+        self.assertIn('exit_receipt_publish_failed:OSError', json.loads(text)['failure_codes'])
+
+
+    # ---- R-01: identity is queried INSIDE the protected path ----
+
+    def test_R01_identity_query_failure_cannot_abort_publication(self):
+        # The native query raises AFTER the primary failed (the query only runs on
+        # the fallback path).  It must be recorded as a bounded code and must NOT
+        # propagate out of the publisher -- propagating would abort the caller's
+        # finally block and lose both receipts, which is what R-01 forbids.
+        ended = {'phase': 'registered_tree_terminal', 'failure_codes': []}
+
+        def failing_query(_pid):
+            raise OSError('native identity query failed')
+
+        with patch.object(observer, 'publish_json_once', side_effect=self._primary_fails):
+            result = observer.publish_exit_receipt(self.dir, ended,
+                fallback_version='v', ticks_provider=failing_query)
+        # No exception escaped, and the fallback was still published.
+        self.assertEqual(result, 'fallback_only_published')
+        self.assertIn('identity_unavailable:OSError', ended['failure_codes'])
+        self.assertIn('exit_receipt_publish_failed:OSError', ended['failure_codes'])
+        self.assertTrue(list(self.dir.glob('observer-exit-fallback-unidentified-*.json')))
+
+    def test_R01_identity_query_success_path_is_unaffected(self):
+        # A successful primary publication never queries identity, so the normal
+        # closeout path keeps its original behaviour and code.
+        ended = {'phase': 'registered_tree_terminal', 'failure_codes': []}
+
+        def exploding_query(_pid):
+            raise AssertionError('identity must not be queried when primary succeeds')
+
+        result = observer.publish_exit_receipt(self.dir, ended,
+            fallback_version='v', ticks_provider=exploding_query)
+        self.assertEqual(result, 'primary_published')
+        self.assertTrue((self.dir/'observer-exit.json').exists())
+        self.assertEqual(ended['failure_codes'], [])
+
+    def test_R01_identity_unavailable_never_yields_a_none_filename(self):
+        # The query returns None instead of an exact creation time.  The fallback
+        # must use the unidentified name and must not claim a pin-level match.
+        ended = {'phase': 'x', 'failure_codes': []}
+        with patch.object(observer, 'publish_json_once', side_effect=self._primary_fails):
+            result = observer.publish_exit_receipt(self.dir, ended,
+                fallback_version='v', ticks_provider=lambda _pid: None)
+        self.assertEqual(result, 'fallback_only_published')
+        names = [x.name for x in self.dir.glob('observer-exit-fallback-*.json')]
+        self.assertEqual(len(names), 1)
+        self.assertNotIn('None', names[0])
+        self.assertTrue(names[0].startswith('observer-exit-fallback-unidentified-'))
+        payload = json.loads(next(iter(self.dir.glob('observer-exit-fallback-*.json'))).read_text(encoding='utf-8'))
+        self.assertEqual(payload['fallback_identity_basis'], 'pid_only')
+
+    def test_R01_exact_ticks_still_names_the_fallback_for_pin_matching(self):
+        # An exact creation time yields the ticks-suffixed name and declares the
+        # stronger identity basis.
+        ended = {'phase': 'x', 'failure_codes': []}
+        with patch.object(observer, 'publish_json_once', side_effect=self._primary_fails):
+            result = observer.publish_exit_receipt(self.dir, ended,
+                fallback_version='v', ticks_provider=lambda _pid: 638000000000000000)
+        self.assertEqual(result, 'fallback_only_published')
+        payload = json.loads(next(iter(self.dir.glob('observer-exit-fallback-*.json'))).read_text(encoding='utf-8'))
+        self.assertEqual(payload['fallback_identity_basis'], 'native_creation_ticks')
+        self.assertTrue(any(x.name.endswith('-638000000000000000.json')
+                            for x in self.dir.glob('observer-exit-fallback-*.json')))
+
+    # ---- R-02: the publication directory is re-validated before writing ----
+
+    def test_R02_directory_rejected_writes_nothing(self):
+        # If the directory no longer passes safe_path at write time (a junction
+        # appeared after planning), nothing is written anywhere and the result
+        # says so.  Writing anyway is what R-02 forbids.
+        ended = {'phase': 'x', 'failure_codes': []}
+        attempts = []
+
+        def record(path, value):
+            attempts.append(str(path))
+            return observer.publish_json_once(path, value)
+
+        with patch.object(observer, 'safe_path', side_effect=ProbeError('linked_path_rejected')), \
+                patch.object(observer, 'publish_json_once', side_effect=record):
+            result = observer.publish_exit_receipt(self.dir, ended,
+                fallback_version='v', ticks_provider=lambda _pid: 1)
+        self.assertEqual(result, 'receipt_directory_rejected:ProbeError')
+        self.assertEqual(attempts, [])
+        self.assertFalse(list(self.dir.glob('observer-exit*.json')))
+        self.assertIn('receipt_directory_rejected:ProbeError', ended['failure_codes'])
+        # A rejected directory is never reported as a successful publication.
+        self.assertNotEqual(result, 'primary_published')
+
+    def test_T2e_link_failure_leaves_no_pending_residue(self):
+        # publish_json_once writes a '.pending' temporary then hard-links it; its
+        # finally unlinks the temporary.  When os.link fails, the publisher must
+        # degrade without leaving residue -- this asserts the cleanup of a file
+        # the forbidden-to-modify publisher owns, from outside it.
+        from backend import news_review_monitor as monitor_module
+        ended = {'phase': 'x', 'failure_codes': []}
+
+        def failing_link(_src, _dst):
+            raise OSError('synthetic link failure')
+
+        with patch.object(monitor_module.os, 'link', side_effect=failing_link):
+            result = observer.publish_exit_receipt(self.dir, ended,
+                fallback_version='v', ticks_provider=lambda _pid: 1)
+        self.assertEqual(result, 'both_failed')
+        # No .pending residue in the publication directory (hidden-name glob).
+        residue = [x.name for x in self.dir.iterdir() if x.name.endswith('.pending')]
+        self.assertEqual(residue, [])
+        # Neither receipt exists, and both failure codes were recorded (R-03).
+        self.assertFalse(list(self.dir.glob('observer-exit*.json')))
+        self.assertTrue(any(c.startswith('exit_receipt_publish_failed') for c in ended['failure_codes']))
+        self.assertTrue(any(c.startswith('exit_receipt_fallback_publish_failed') for c in ended['failure_codes']))
+
+    def _primary_fails(self, path, value):
+        if Path(path).name == 'observer-exit.json':
+            raise OSError('primary publication failed')
+        return self._real_publish(path, value)
+
+
+class ObserverCloseoutReturnCodeTests(unittest.TestCase):
+    """X-03 report 8.3.3: the return code reflects whether closeout publication
+    was CONFIRMED, which is orthogonal to the native terminal fact.  A
+    native-terminal run whose primary exit receipt was not published must NOT
+    return 0 -- otherwise the 'closeout unconfirmed' signal is lost."""
+
+    def setUp(self):
+        self.f = ObserverPreparationTests()
+        self.f.addCleanup = self.addCleanup
+        self.f.setUp()
+
+    def _run_active(self, *, report_exists, fail_primary, fail_fallback):
+        wrapped = self.f.prepared()
+        plan = wrapped['plan']
+        directory = self.f.root/'monitoring'
+        directory.mkdir(exist_ok=True)
+        if report_exists:
+            write(Path(plan['request']['root'])/'window-report.json', {'synthetic_host_report': True})
+        tree = self.f.tree()
+        tree.update(owner_alive=False, safe_status_reads_allowed=False, listeners=[])
+        for process in tree['processes']:
+            process['alive'] = False
+
+        def inspector(**_kwargs):
+            return copy.deepcopy(tree)
+
+        def probe_factory(target, *, inspect_tree, wall_ms):
+            def probe():
+                inspect_tree()
+                return {'identity': target['identity'], 'process_identity_verified': True,
+                        'port_ownership_verified': True,
+                        'health': {'host_alive': False, 'workers_alive': False, 'source_stale_keys': []}}
+            return probe
+
+        real = observer.publish_json_once
+
+        def fake_publish(path, value):
+            name = Path(path).name
+            if name == 'observer-exit.json' and fail_primary:
+                raise OSError('synthetic primary failure')
+            if name.startswith('observer-exit-fallback') and fail_fallback:
+                raise OSError('synthetic fallback failure')
+            return real(path, value)
+
+        with patch.object(observer, 'NewsReviewStatusProbe', side_effect=probe_factory), \
+                patch.object(observer, 'native_creation_ticks', return_value=638000000000000000), \
+                patch.object(observer, 'publish_json_once', side_effect=fake_publish), \
+                patch('socket.socket') as wire:
+            result = observer.observe_active(plan, wrapped['plan_sha256'], directory, inspector=inspector)
+        wire.assert_not_called()
+        return result, directory
+
+    def test_primary_published_native_terminal_returns_zero(self):
+        result, directory = self._run_active(report_exists=True, fail_primary=False, fail_fallback=False)
+        self.assertEqual(result, 0)
+        ended = observer.read_json(directory/'observer-exit.json')
+        self.assertEqual(ended['phase'], 'registered_tree_terminal')
+        self.assertTrue(ended['two_native_terminal_checks'])
+        self.assertIs(ended['original_report_exists'], True)
+        # exit_receipt_publication is a runtime return value, not a persisted
+        # field of the primary receipt; assert the observable outcome instead:
+        # the primary receipt exists and no fallback was produced.
+        self.assertTrue((directory/'observer-exit.json').exists())
+        self.assertFalse(list(directory.glob('observer-exit-fallback-*.json')))
+
+    def test_T2k_both_fail_native_terminal_returns_two(self):
+        # The exact path r2 wrongly claimed was impossible: native terminal true
+        # AND report present, yet both receipts fail.  Must NOT return 0.
+        result, directory = self._run_active(report_exists=True, fail_primary=True, fail_fallback=True)
+        self.assertEqual(result, 2)
+        self.assertFalse((directory/'observer-exit.json').exists())
+        self.assertFalse(list(directory.glob('observer-exit-fallback-*.json')))
+
+    def test_T2l_fallback_only_native_terminal_returns_two(self):
+        result, directory = self._run_active(report_exists=True, fail_primary=True, fail_fallback=False)
+        self.assertEqual(result, 2)
+        self.assertFalse((directory/'observer-exit.json').exists())
+        fallbacks = list(directory.glob('observer-exit-fallback-*.json'))
+        self.assertEqual(len(fallbacks), 1)
+        payload = observer.read_json(fallbacks[0])
+        # Native terminal fact is preserved in the payload, not faked away.
+        self.assertEqual(payload['phase'], 'registered_tree_terminal')
+        self.assertFalse(payload['final_acceptance_verified'])
+        self.assertFalse(payload['monitored_processes_stopped_by_observer'])
+        self.assertFalse(payload['database_opened'])
+        self.assertNotIn('synthetic primary failure', fallbacks[0].read_text(encoding='utf-8'))
+
+    def test_report_state_unknown_is_not_confirmed_missing(self):
+        # safe_path rejection -> original_report_exists stays None (unknown),
+        # never False; phase must not become terminal_report_missing.
+        wrapped = self.f.prepared()
+        plan = wrapped['plan']
+        directory = self.f.root/'monitoring'
+        directory.mkdir(exist_ok=True)
+        tree = self.f.tree()
+        tree.update(owner_alive=False, safe_status_reads_allowed=False, listeners=[])
+        for process in tree['processes']:
+            process['alive'] = False
+
+        def inspector(**_kwargs):
+            return copy.deepcopy(tree)
+
+        def probe_factory(target, *, inspect_tree, wall_ms):
+            def probe():
+                inspect_tree()
+                return {'identity': target['identity'], 'process_identity_verified': True,
+                        'port_ownership_verified': True,
+                        'health': {'host_alive': False, 'workers_alive': False, 'source_stale_keys': []}}
+            return probe
+
+        # Only the REPORT path is rejected.  safe_path must stay valid for the
+        # monitoring directory: R-02 re-validates it before publishing, and a
+        # blanket rejection would (correctly) refuse to write the receipt at all,
+        # which is a different scenario covered by test_R02_directory_rejected.
+        real_safe_path = observer.safe_path
+
+        def report_path_only(value):
+            if 'window-report.json' in str(value):
+                raise ProbeError('linked_path_rejected')
+            return real_safe_path(value)
+
+        with patch.object(observer, 'NewsReviewStatusProbe', side_effect=probe_factory), \
+                patch.object(observer, 'native_creation_ticks', return_value=638000000000000000), \
+                patch.object(observer, 'safe_path', side_effect=report_path_only), \
+                patch('socket.socket'):
+            result = observer.observe_active(plan, wrapped['plan_sha256'], directory, inspector=inspector)
+        ended = observer.read_json(directory/'observer-exit.json')
+        self.assertIsNone(ended['original_report_exists'])
+        self.assertEqual(ended['phase'], 'terminal_report_state_unconfirmed_user_action_required')
+        self.assertTrue(any(c.startswith('report_path_unresolved') for c in ended['failure_codes']))
+        # Unknown report state cannot claim a clean closeout, so it returns 2
+        # (phase is not registered_tree_terminal).  Returning 0 would assert a
+        # confirmed clean closeout that the evidence does not support.
+        self.assertEqual(result, 2)
+        # The receipt itself was still published (the directory was not rejected),
+        # and it carries no publication-failure code.  Note: the publication
+        # STATUS is assigned to the in-memory receipt only after publishing
+        # returns, so it is by construction absent from the on-disk receipt; the
+        # return code and failure_codes are what make it observable.
+        self.assertNotIn('exit_receipt_publication', ended)
+        self.assertFalse([c for c in ended['failure_codes']
+                          if c.startswith('exit_receipt_publish_failed')
+                          or c.startswith('receipt_directory_rejected')])
+
+    def test_T2b_report_existence_check_failure_stays_unknown(self):
+        # report.is_file() raising must leave original_report_exists as None
+        # (unknown), never False, and record report_existence_unconfirmed.
+        wrapped = self.f.prepared()
+        plan = wrapped['plan']
+        directory = self.f.root/'monitoring'
+        directory.mkdir(exist_ok=True)
+        tree = self.f.tree()
+        tree.update(owner_alive=False, safe_status_reads_allowed=False, listeners=[])
+        for process in tree['processes']:
+            process['alive'] = False
+
+        def inspector(**_kwargs):
+            return copy.deepcopy(tree)
+
+        def probe_factory(target, *, inspect_tree, wall_ms):
+            def probe():
+                inspect_tree()
+                return {'identity': target['identity'], 'process_identity_verified': True,
+                        'port_ownership_verified': True,
+                        'health': {'host_alive': False, 'workers_alive': False, 'source_stale_keys': []}}
+            return probe
+
+        real_is_file = Path.is_file
+
+        def is_file_fails_for_report(self):
+            if 'window-report.json' in str(self):
+                raise OSError('synthetic is_file failure')
+            return real_is_file(self)
+
+        with patch.object(observer, 'NewsReviewStatusProbe', side_effect=probe_factory), \
+                patch.object(observer, 'native_creation_ticks', return_value=638000000000000000), \
+                patch.object(Path, 'is_file', new=is_file_fails_for_report), \
+                patch('socket.socket'):
+            result = observer.observe_active(plan, wrapped['plan_sha256'], directory, inspector=inspector)
+        ended = observer.read_json(directory/'observer-exit.json')
+        self.assertIsNone(ended['original_report_exists'])
+        self.assertIsNone(ended['original_report_sha256'])
+        self.assertEqual(ended['phase'], 'terminal_report_state_unconfirmed_user_action_required')
+        self.assertTrue(any(c.startswith('report_existence_unconfirmed') for c in ended['failure_codes']))
+        self.assertEqual(result, 2)
+
+    def test_T2c_report_hash_failure_keeps_existence_true(self):
+        # The report exists (is_file True) but sha() fails: existence must stay
+        # True while the hash is None, and report_hash_unavailable is recorded.
+        wrapped = self.f.prepared()
+        plan = wrapped['plan']
+        directory = self.f.root/'monitoring'
+        directory.mkdir(exist_ok=True)
+        write(Path(plan['request']['root'])/'window-report.json', {'synthetic_host_report': True})
+        tree = self.f.tree()
+        tree.update(owner_alive=False, safe_status_reads_allowed=False, listeners=[])
+        for process in tree['processes']:
+            process['alive'] = False
+
+        def inspector(**_kwargs):
+            return copy.deepcopy(tree)
+
+        def probe_factory(target, *, inspect_tree, wall_ms):
+            def probe():
+                inspect_tree()
+                return {'identity': target['identity'], 'process_identity_verified': True,
+                        'port_ownership_verified': True,
+                        'health': {'host_alive': False, 'workers_alive': False, 'source_stale_keys': []}}
+            return probe
+
+        with patch.object(observer, 'NewsReviewStatusProbe', side_effect=probe_factory), \
+                patch.object(observer, 'native_creation_ticks', return_value=638000000000000000), \
+                patch.object(observer, 'sha', side_effect=OSError('synthetic hash failure')), \
+                patch('socket.socket'):
+            result = observer.observe_active(plan, wrapped['plan_sha256'], directory, inspector=inspector)
+        ended = observer.read_json(directory/'observer-exit.json')
+        self.assertIs(ended['original_report_exists'], True)
+        self.assertIsNone(ended['original_report_sha256'])
+        self.assertTrue(any(c.startswith('report_hash_unavailable') for c in ended['failure_codes']))
+        # Existence is confirmed True, so this is NOT the unconfirmed-state phase.
+        self.assertEqual(ended['phase'], 'registered_tree_terminal')
+        self.assertEqual(result, 0)
+
+
+
+
 SERVER_CHILD = r'''
 import json,os,sys,threading,time
 from pathlib import Path
