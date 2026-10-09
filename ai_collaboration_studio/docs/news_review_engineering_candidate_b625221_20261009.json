@@ -1,0 +1,396 @@
+{
+  "schema": "news_review_engineering_candidate_public_record_v1",
+  "recorded_at_utc": "2026-10-09T05:32:07.873569+00:00",
+  "publication_date": "2026-10-09",
+  "scope": "engineering closeout and preparation only; this record binds b625221, not later documentation HEADs",
+  "repository": "TheDeadly-cat/hajimi-jiaoyifenxi",
+  "candidate_sha": "b625221d4e517e496a1f2fe0d389ad4decc5d1ca",
+  "git_tree_sha": "022e2c3600c112888807f2b531666e66aaec84cf",
+  "branch_label_at_freeze": "qwen/closeout-audit-20261006",
+  "engineering_closeout": "CLOSED",
+  "bound_file_identities": [
+    {
+      "path": "ai_collaboration_studio/backend/news_review_contracts.py",
+      "git_blob_sha1": "281eed69b805b154088f030eafa4fcdeda0d9299"
+    },
+    {
+      "path": "ai_collaboration_studio/backend/news_review_report.py",
+      "git_blob_sha1": "9d340251d836afd542ed939fb4eca76d351d8f74"
+    },
+    {
+      "path": "ai_collaboration_studio/backend/news_review_controller.py",
+      "git_blob_sha1": "f1a706c9e8bd143dea0d0b17859586e4cc02aacc"
+    },
+    {
+      "path": "ai_collaboration_studio/backend/news_review_service.py",
+      "git_blob_sha1": "5d9c3735244b030b96d2e3379823a730680c9cc6"
+    },
+    {
+      "path": "ai_collaboration_studio/backend/news_review_source_analysis.py",
+      "git_blob_sha1": "0bf281b92fa6c205addaef089d1289a8b123bda9"
+    },
+    {
+      "path": "ai_collaboration_studio/backend/news_review_quality_scorecard.py",
+      "git_blob_sha1": "e7c58eddc89f8542b44dbfc981806fec6363aa52"
+    },
+    {
+      "path": "ai_collaboration_studio/backend/controlled_manual_review.py",
+      "git_blob_sha1": "5fd74e1d4298ec716f51fe1bc6ea3c9ed56cc759"
+    },
+    {
+      "path": "ai_collaboration_studio/backend/source_monitoring_soak_cli.py",
+      "git_blob_sha1": "a43d85b0ed14813abdf239cfe4c75d6638be9970"
+    },
+    {
+      "path": "ai_collaboration_studio/scripts/run_news_review_trial.py",
+      "git_blob_sha1": "b0b9b0471fd331d01e1f6d8d64f5aa8b550eec23"
+    },
+    {
+      "path": "ai_collaboration_studio/scripts/run_news_review_observer.py",
+      "git_blob_sha1": "3f1f34157064f5f51376b5c5e74d063344fb6122"
+    },
+    {
+      "path": "ai_collaboration_studio/scripts/news_review_observer_wait.py",
+      "git_blob_sha1": "aca440782a68e48aca3a54f935a392fda53358ce"
+    },
+    {
+      "path": "ai_collaboration_studio/scripts/news_review_watchdog.py",
+      "git_blob_sha1": "a8d18b5d8d141455dca2057e8c201b7ac68bd1e3"
+    },
+    {
+      "path": "ai_collaboration_studio/scripts/closeout_receipt_contract_audit.py",
+      "git_blob_sha1": "1c401f3fc3f35e1ac3dde8399d0ae49410579691"
+    },
+    {
+      "path": "ai_collaboration_studio/scripts/analyze_news_review_sources.py",
+      "git_blob_sha1": "aabd5a7635a5cb7434d59f191ccf8b977a23723e"
+    },
+    {
+      "path": "ai_collaboration_studio/scripts/export_news_review_quality_scorecard.py",
+      "git_blob_sha1": "d3410123e2037ea7911dfc290bb53f7287e170fa"
+    },
+    {
+      "path": "ai_collaboration_studio/scripts/score_news_review_quality.py",
+      "git_blob_sha1": "4bfff506f95fd41964d3d8940135cd56dda5adf6"
+    },
+    {
+      "path": "ai_collaboration_studio/docs/news_review_longrun_hardening_20261007.md",
+      "git_blob_sha1": "0a1e35dfd5fda97d16bcd5a15ae0c2a8e8ea68bb"
+    },
+    {
+      "path": "ai_collaboration_studio/docs/NEWS_REVIEW_DUAL_DEADLINE_REFERENCE.md",
+      "git_blob_sha1": "d92ad86e1c32891d2c69a7d290b48c87cd2e6709"
+    },
+    {
+      "path": "ai_collaboration_studio/docs/qwen_report_closeout_20261007.md",
+      "git_blob_sha1": "715d47cd1196bc918e3b404ffd3d775434330da4"
+    },
+    {
+      "path": "ai_collaboration_studio/tests/test_news_review_enrichment_batches.py",
+      "git_blob_sha1": "d89f8eb8d8aead63c004a5a9a4c73f4b282ad609"
+    }
+  ],
+  "file_identity_basis": "Git blob content at candidate_sha; local materialization and line endings may differ",
+  "focused_validation": {
+    "enrichment_tests": 15,
+    "skips": 0,
+    "original_b1_assertions_preserved": 20,
+    "current_b1_scenario_assertions": 24,
+    "transport": "synthetic",
+    "production_loss_demonstrated": false
+  },
+  "local_sealed_evidence": {
+    "original_batch_artifact_count": 35,
+    "original_batch_manifest_sha256": "b8d2570d9174fd38af4a7f3b183d22aac82052781083c15d0507c564c255959a",
+    "freeze_manifest_sha256": "0582e7e07ed062d9f8d918ef8938fc308f680fb4dc162d3549f1440e6fa670a0",
+    "source_plan_sha256": "495b72ef94182dab1e8f2064005bfeedd801bc86338d4bfe489062789ae8ed1a",
+    "raw_material_published": false,
+    "meaning": "Hashes identify locally verified sealed artifacts, not a claim that the raw materials are publicly available"
+  },
+  "ci": {
+    "checked_head": "b625221d4e517e496a1f2fe0d389ad4decc5d1ca",
+    "runs": [
+      {
+        "id": 37809515570,
+        "head_sha": "b625221d4e517e496a1f2fe0d389ad4decc5d1ca",
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/TheDeadly-cat/hajimi-jiaoyifenxi/actions/runs/37809515570",
+        "updated_at": "2026-10-08T17:38:11Z",
+        "jobs": [
+          {
+            "id": 113422413794,
+            "name": "isolated-validation",
+            "status": "completed",
+            "conclusion": "success",
+            "steps": [
+              {
+                "number": 1,
+                "name": "Set up job",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 2,
+                "name": "Check out source",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 3,
+                "name": "Set up Python 3.14",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 4,
+                "name": "Set up Node 24",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 5,
+                "name": "Verify historical reader objects before offline tests",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 6,
+                "name": "Deterministic offline security baseline",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 7,
+                "name": "Resolve guarded bootstrap runtime",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 8,
+                "name": "Bootstrap locked dependencies and production frontend",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 9,
+                "name": "Guarded frontend regression",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 10,
+                "name": "Required historical reader compatibility matrix",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 11,
+                "name": "Full isolated backend regression",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 12,
+                "name": "Clean-source install, test, build, and startup smoke",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 13,
+                "name": "Isolated install, upgrade, and rollback drill",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 14,
+                "name": "Generate offline dependency inventory",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 15,
+                "name": "Upload non-secret delivery receipts",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 28,
+                "name": "Post Set up Node 24",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 29,
+                "name": "Post Set up Python 3.14",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 30,
+                "name": "Post Check out source",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 31,
+                "name": "Complete job",
+                "status": "completed",
+                "conclusion": "success"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": 37809519719,
+        "head_sha": "b625221d4e517e496a1f2fe0d389ad4decc5d1ca",
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/TheDeadly-cat/hajimi-jiaoyifenxi/actions/runs/37809519719",
+        "updated_at": "2026-10-08T17:32:34Z",
+        "jobs": [
+          {
+            "id": 113422426362,
+            "name": "isolated-validation",
+            "status": "completed",
+            "conclusion": "success",
+            "steps": [
+              {
+                "number": 1,
+                "name": "Set up job",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 2,
+                "name": "Check out source",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 3,
+                "name": "Set up Python 3.14",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 4,
+                "name": "Set up Node 24",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 5,
+                "name": "Verify historical reader objects before offline tests",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 6,
+                "name": "Deterministic offline security baseline",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 7,
+                "name": "Resolve guarded bootstrap runtime",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 8,
+                "name": "Bootstrap locked dependencies and production frontend",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 9,
+                "name": "Guarded frontend regression",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 10,
+                "name": "Required historical reader compatibility matrix",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 11,
+                "name": "Full isolated backend regression",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 12,
+                "name": "Clean-source install, test, build, and startup smoke",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 13,
+                "name": "Isolated install, upgrade, and rollback drill",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 14,
+                "name": "Generate offline dependency inventory",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 15,
+                "name": "Upload non-secret delivery receipts",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 28,
+                "name": "Post Set up Node 24",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 29,
+                "name": "Post Set up Python 3.14",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 30,
+                "name": "Post Check out source",
+                "status": "completed",
+                "conclusion": "success"
+              },
+              {
+                "number": 31,
+                "name": "Complete job",
+                "status": "completed",
+                "conclusion": "success"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "interpretation": "Engineering regression passed. This record grants no online, model, real-data, merge or deployment authority."
+  },
+  "operational_acceptance": {
+    "real_24h_run": "NOT_STARTED",
+    "model_quality": "NOT_ACCEPTED",
+    "supplier_bill": "NOT_VERIFIED",
+    "old_trial_B_exit_attribution": "UNKNOWN",
+    "online_run_authorized": false,
+    "paid_model_authorized": false,
+    "merge_authorized": false,
+    "deployment_authorized": false
+  },
+  "acceptance_passed": false,
+  "release_approved": false,
+  "supplier_bill_verified": false,
+  "independent_factual_verification": false,
+  "future_identity_rule": "Any source change requires a separate candidate and new exact-head CI. This SHA remains the closed batch identity.",
+  "documentation_publication_rule": "This document update changes the branch HEAD, but not the frozen execution candidate. New-head CI must be read separately."
+}
