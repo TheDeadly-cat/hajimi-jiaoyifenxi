@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from backend.decision_lineage import canonical_sha256
-from backend.news_review_contracts import ENDPOINT, MODEL, STRATEGY_SHA
+from backend.news_review_contracts import ENDPOINT, MODEL, STRATEGY_SHA, NewsReviewError, validate_result
 from backend.news_review_quality_preparation import (
     QUALITY_INSTRUCTIONS, QUALITY_STRATEGY_SHA, prepare, signoff_template, strict_json,
 )
@@ -69,6 +69,27 @@ class QualityPreparationTests(unittest.TestCase):
         for case_id in ("Q28_missing_body", "Q29_truncated_body"):
             self.assertEqual([o["action"] for o in cases[case_id]["observations"]], ["do_not_send"])
             self.assertFalse(any(r["case_id"] == case_id for r in value["requests"]))
+
+    def test_quote_text_cannot_rescue_a_mistyped_paragraph_identity(self):
+        request = self.draft()["requests"][0]
+        document = json.loads(json.loads(request["request_utf8"])["input"])["document"]
+        paragraph = document["paragraphs"][1]
+        result = {
+            "version": "news_event_review_v1", "assessment": "reviewed", "summary": "合成正文已读。",
+            "importance": {"level": "high", "reason": "材料内事项需要关注。"},
+            "facts": [{"claim": "给定原文包含该表述。", "paragraph_id": paragraph["id"], "quote": paragraph["text"]}],
+            "inferences": [], "counterevidence": [], "open_questions": [], "limitations": ["仅合成正文，不核验外部事实。"],
+        }
+        validate_result(json.dumps(result, ensure_ascii=False), document)
+        original = copy.deepcopy(result)
+        # This is a synthetic typo, not a copied private provider response.
+        result["facts"][0]["paragraph_id"] = paragraph["id"].replace(":p0002", "abc:p0002")
+        self.assertNotEqual(result["facts"][0]["paragraph_id"], paragraph["id"])
+        self.assertEqual(result["facts"][0]["quote"], original["facts"][0]["quote"])
+        self.assertIn(result["facts"][0]["quote"], paragraph["text"])
+        with self.assertRaises(NewsReviewError) as error:
+            validate_result(json.dumps(result, ensure_ascii=False), document)
+        self.assertEqual(error.exception.code, "unsupported_quote")
 
     def test_duplicate_revision_restore_preserve_version_reuse(self):
         cases = {case["case_id"]: case["observations"] for case in self.draft()["cases"]}
