@@ -51,6 +51,74 @@ function Resolve-RegisteredTree([object[]]$snapshot, [object[]]$pins) {
         processes=@($states | Sort-Object pid,start_utc);unbound_descendant=$unboundDescendant}
 }
 
+function Get-InspectionCimRows {
+    # Deliberately exclude command lines and process environments.
+    return @(Get-CimInstance -Query 'SELECT ProcessId,ParentProcessId,CreationDate FROM Win32_Process' | ForEach-Object {
+        [pscustomobject]@{pid=[int]$_.ProcessId;parent_pid=[int]$_.ParentProcessId;
+            ticks=$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().Ticks } else { $null })}
+    })
+}
+
+function Select-RegisteredCimRows([object[]]$rows, [object[]]$pins) {
+    $related = @{}
+    foreach ($pin in $pins) { $related[[string]$pin.pid] = $true }
+    $changed = $true
+    while ($changed) {
+        $changed = $false
+        foreach ($row in $rows) {
+            # Include numeric descendants even before their generations have
+            # been verified. Resolve-RegisteredTree still rejects reused
+            # parents, unidentified children, and invalid ancestry below.
+            if ($related.ContainsKey([string]$row.parent_pid) -and -not $related.ContainsKey([string]$row.pid)) {
+                if ($related.Count -ge 128) { throw 'process_tree_size_limit' }
+                $related[[string]$row.pid] = $true
+                $changed = $true
+            }
+        }
+    }
+    return @($rows | Where-Object { $related.ContainsKey([string]$_.pid) })
+}
+
+function Test-RegisteredEnumeration([object[]]$first, [object[]]$last, [object[]]$native, [object[]]$pins) {
+    $before = @(Select-RegisteredCimRows $first $pins)
+    $after = @(Select-RegisteredCimRows $last $pins)
+    $beforeById = @{}; $afterById = @{}; $relevant = @{}
+    foreach ($pin in $pins) { $relevant[[string]$pin.pid] = $true }
+    foreach ($row in $before) {
+        $key = [string]$row.pid
+        if ($beforeById.ContainsKey($key)) { return $false }
+        $beforeById[$key] = $row; $relevant[$key] = $true
+    }
+    foreach ($row in $after) {
+        $key = [string]$row.pid
+        if ($afterById.ContainsKey($key)) { return $false }
+        $afterById[$key] = $row; $relevant[$key] = $true
+    }
+    if ($beforeById.Count -ne $afterById.Count) { return $false }
+    foreach ($key in $beforeById.Keys) {
+        if (-not $afterById.ContainsKey($key) -or
+            $beforeById[$key].parent_pid -ne $afterById[$key].parent_pid -or
+            $beforeById[$key].ticks -ne $afterById[$key].ticks) { return $false }
+    }
+    $nativeById = @{}
+    foreach ($row in $native) {
+        $key = [string]$row.pid
+        if (-not $relevant.ContainsKey($key)) { continue }
+        if ($nativeById.ContainsKey($key)) { return $false }
+        $nativeById[$key] = $row
+    }
+    # A pinned PID present natively but absent from CIM must stay unconfirmed;
+    # excluding unrelated activity must not turn this into a dead target.
+    if ($nativeById.Count -ne $afterById.Count) { return $false }
+    foreach ($key in $afterById.Keys) {
+        if (-not $nativeById.ContainsKey($key) -or $null -eq $afterById[$key].ticks -or
+            $null -eq $nativeById[$key].ticks) { return $false }
+        if (($afterById[$key].ticks - ($afterById[$key].ticks % 10)) -ne
+            ($nativeById[$key].ticks - ($nativeById[$key].ticks % 10))) { return $false }
+    }
+    return $true
+}
+
 $inputFile = [IO.Path]::GetFullPath($InputPath)
 if ((Get-Item -LiteralPath $inputFile).Length -gt 65536) { throw 'inspection_input_too_large' }
 $inputValue = Get-Content -LiteralPath $inputFile -Raw -Encoding utf8 | ConvertFrom-Json
@@ -71,18 +139,17 @@ foreach ($pin in $pins) {
     if ($pin.pid -le 0 -or (Get-NativeTicks $pin.start_utc) -le 0) { throw 'inspection_pin_invalid' }
 }
 
-# Explicit property selection avoids command lines and process environments.
-$cimRows = @(Get-CimInstance -Query 'SELECT ProcessId,ParentProcessId,CreationDate FROM Win32_Process' | ForEach-Object {
-    [pscustomobject]@{pid=[int]$_.ProcessId;parent_pid=[int]$_.ParentProcessId;
-        ticks=$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().Ticks } else { $null })}
-})
+# Bracket native generations with two CIM ancestry snapshots. Only changes to
+# registered roots or any of their descendants block a bound status read.
+$firstCimRows = @(Get-InspectionCimRows)
 $nativeRows = @(Get-Process | ForEach-Object {
     $start = $null
     try { $start = $_.StartTime.ToUniversalTime() } catch { }
     [pscustomobject]@{pid=[int]$_.Id;ticks=$(if ($start) {$start.Ticks} else {$null});
         start_utc=$(if ($start) {$start.ToString('o')} else {$null})}
 })
-$enumerationConsistent = @(Compare-Object (@($cimRows.pid | Sort-Object)) (@($nativeRows.pid | Sort-Object))).Count -eq 0
+$cimRows = @(Get-InspectionCimRows)
+$enumerationConsistent = Test-RegisteredEnumeration $firstCimRows $cimRows $nativeRows $pins
 $snapshot = @()
 $unidentified = @()
 foreach ($row in $cimRows) {
