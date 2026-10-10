@@ -122,6 +122,19 @@ class QualityPreparationTests(unittest.TestCase):
         self.assertNotIn("SECRET_GOLD_MARKER", json.dumps(second["requests"]))
         self.assertNotEqual(canonical_sha256(first), canonical_sha256(second))
 
+    def test_changed_classification_references_never_supply_model_answers(self):
+        references = self.signed_fixture()
+        first = self.draft(references)
+        for entry in references["cases"]:
+            entry["reference"]["importance"] = "normal"
+            entry["reference"]["assessment"] = "material_insufficient"
+            entry["reference"]["supported_facts"] = ["GOLD_CLASSIFICATION_MUST_NOT_ENTER_REQUEST"]
+        second = self.draft(references)
+        self.assertNotEqual(first["references"]["file_sha256"], second["references"]["file_sha256"])
+        self.assertEqual(first["requests"], second["requests"])
+        self.assertNotIn("GOLD_CLASSIFICATION", json.dumps(second["requests"]))
+        self.assertFalse(second["request_authorized"])
+
     def test_missing_duplicate_unknown_or_rebound_reference_rejected(self):
         for change in (lambda r: r["cases"].pop(),
                        lambda r: r["cases"].__setitem__(1, copy.deepcopy(r["cases"][0])),
