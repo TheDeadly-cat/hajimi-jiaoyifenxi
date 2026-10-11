@@ -30,6 +30,7 @@ FILES = ('backend/news_review_monitor.py', 'backend/news_review_monitor_probe.py
     'scripts/inspect_news_review_process_tree.ps1', 'scripts/news_review_observer_wait.py')
 RECORDS = ('preparation-manifest.json', 'user-approval.json', 'ci-verification.json',
     'launch-receipt.json', 'launcher-start.json', 'activation-receipt.json', 'activation-policy.json')
+POLL_INTERVALS_MS = (150000, 300000)
 
 
 def sha(path):
@@ -303,10 +304,16 @@ def verify_trial(request):
     return root, hashes
 
 
-def prepare(request, powershell):
+def validated_poll_interval_ms(value):
+    require(type(value) is int and value in POLL_INTERVALS_MS, 'observer_poll_interval_invalid')
+    return value
+
+
+def prepare(request, powershell, *, poll_interval_ms=300000):
+    poll_interval_ms = validated_poll_interval_ms(poll_interval_ms)
     if type(request) is dict and request.get('version') == 'news_review_observer_wait_request_v1':
         from scripts.news_review_observer_wait import prepare_wait
-        return prepare_wait(request, powershell, core=sys.modules[__name__])
+        return prepare_wait(request, powershell, core=sys.modules[__name__], poll_interval_ms=poll_interval_ms)
     root, records = verify_trial(request)
     verify_checkout(request['target']['identity']['candidate_sha'])
     shell = safe_path(powershell)
@@ -315,7 +322,7 @@ def prepare(request, powershell):
         'receipt_sha256': records, 'monitor_files': {name:sha(APP/name) for name in FILES},
         'powershell': {'path':str(shell), 'sha256':sha(shell)},
         'python': {'path':str(Path(sys.executable).resolve()), 'sha256':sha(sys.executable)},
-        'output_directory': str(root/'monitoring'), 'poll_interval_ms':300000,
+        'output_directory': str(root/'monitoring'), 'poll_interval_ms':poll_interval_ms,
         'inspection_timeout_seconds':45, 'status_timeout_seconds':15, 'maximum_silence_ms':360000,
         'drain_native_interval_ms':10000, 'drain_grace_ms':255000,
         'observer_activations':1, 'request_authorized':False}
@@ -326,7 +333,8 @@ def verify_plan(wrapped, approved_hash):
     require(type(wrapped) is dict and set(wrapped) == {'plan', 'plan_sha256'}, 'observer_plan_invalid')
     plan = wrapped['plan']
     require(wrapped['plan_sha256'] == canonical(plan) == approved_hash, 'observer_approval_mismatch')
-    require(plan == prepare(plan['request'], plan['powershell']['path'])['plan'], 'observer_preparation_changed')
+    require(plan == prepare(plan['request'], plan['powershell']['path'],
+                            poll_interval_ms=plan.get('poll_interval_ms'))['plan'], 'observer_preparation_changed')
     require(os.name == 'nt', 'native_windows_required')
     now = time.time_ns()//1_000_000
     if plan['version'] == 'news_review_observer_wait_plan_v1':
@@ -613,15 +621,19 @@ def main(argv=None):
     parser.add_argument('--output')
     parser.add_argument('--plan')
     parser.add_argument('--approve-plan-sha256')
+    parser.add_argument('--poll-interval-ms', type=int, choices=POLL_INTERVALS_MS,
+                        help='Preparation only; default 300000. A changed cadence needs its own approved plan.')
     args = parser.parse_args(argv)
     if args.prepare:
         require(bool(args.request and args.powershell and args.output) and not args.plan and not args.approve_plan_sha256,
                 'observer_prepare_arguments_invalid')
-        wrapped = prepare(read_json(safe_path(args.request)), args.powershell)
+        wrapped = prepare(read_json(safe_path(args.request)), args.powershell,
+                          poll_interval_ms=300000 if args.poll_interval_ms is None else args.poll_interval_ms)
         publish_json_once(safe_path(args.output), wrapped)
         print(json.dumps({'plan_sha256':wrapped['plan_sha256'], 'request_authorized':False}))
         return 0
-    require(bool(args.plan and args.approve_plan_sha256) and not any((args.request,args.powershell,args.output)),
+    require(bool(args.plan and args.approve_plan_sha256) and not any((args.request,args.powershell,args.output))
+            and args.poll_interval_ms is None,
             'observer_run_arguments_invalid')
     wrapped = read_json(safe_path(args.plan))
     plan = verify_plan(wrapped, args.approve_plan_sha256)

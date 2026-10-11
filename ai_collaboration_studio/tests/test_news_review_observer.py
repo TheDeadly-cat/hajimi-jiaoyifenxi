@@ -82,6 +82,74 @@ class ObserverPreparationTests(unittest.TestCase):
         run.assert_not_called()
         wire.assert_not_called()
 
+    def test_cadence_default_retains_five_minute_plan(self):
+        wrapped = self.prepared()
+        self.assertEqual(wrapped['plan']['poll_interval_ms'],300000)
+        self.assertEqual(wrapped['plan']['maximum_silence_ms'],360000)
+        self.assertEqual(wrapped['plan']['request'],self.request)
+
+    def test_cadence_shorter_plan_changes_approval_without_changing_scope(self):
+        legacy = self.prepared()
+        with patch.object(observer,'verify_checkout'),patch('socket.socket') as wire:
+            shorter = observer.prepare(self.request,str(self.shell),poll_interval_ms=150000)
+        expected = copy.deepcopy(legacy['plan'])
+        expected['poll_interval_ms'] = 150000
+        self.assertEqual(shorter['plan'],expected)
+        self.assertEqual(shorter['plan_sha256'],canonical(expected))
+        self.assertNotEqual(shorter['plan_sha256'],legacy['plan_sha256'])
+        self.assertFalse(shorter['plan']['request_authorized'])
+        self.assertFalse((self.root/'monitoring').exists())
+        wire.assert_not_called()
+
+    def test_cadence_invalid_values_fail_before_receipt_or_checkout_reads(self):
+        for value in (0,-1,60000,149999,150001,300001,True,150000.0,'150000',None):
+            with self.subTest(value=value),patch.object(observer,'verify_trial') as trial, \
+                    patch.object(observer,'verify_checkout') as checkout, \
+                    self.assertRaisesRegex(ProbeError,'observer_poll_interval_invalid'):
+                observer.prepare(self.request,str(self.shell),poll_interval_ms=value)
+            trial.assert_not_called()
+            checkout.assert_not_called()
+
+    def test_cadence_shorter_plan_verifies_and_old_approval_cannot_retime_it(self):
+        with patch.object(observer,'verify_checkout'):
+            wrapped = observer.prepare(self.request,str(self.shell),poll_interval_ms=150000)
+            verified = observer.verify_plan(wrapped,wrapped['plan_sha256'])
+        self.assertEqual(verified,wrapped['plan'])
+        changed = copy.deepcopy(wrapped)
+        changed['plan']['poll_interval_ms'] = 300000
+        changed['plan_sha256'] = canonical(changed['plan'])
+        with self.assertRaisesRegex(ProbeError,'observer_approval_mismatch'):
+            observer.verify_plan(changed,wrapped['plan_sha256'])
+        changed['plan']['poll_interval_ms'] = 151000
+        changed['plan_sha256'] = canonical(changed['plan'])
+        with self.assertRaisesRegex(ProbeError,'observer_poll_interval_invalid'):
+            observer.verify_plan(changed,changed['plan_sha256'])
+
+    def test_cadence_cli_prepare_binds_selection_without_starting_observer(self):
+        request_file = self.root/'request.json'
+        output_file = self.root/'prepared-observer.json'
+        write(request_file,self.request)
+        with patch.object(observer,'verify_checkout'),patch.object(observer,'run_observer') as run, \
+                patch('socket.socket') as wire,patch('builtins.print'):
+            code = observer.main(['--prepare','--request',str(request_file),'--powershell',str(self.shell),
+                                  '--output',str(output_file),'--poll-interval-ms','150000'])
+        wrapped = observer.read_json(output_file)
+        self.assertEqual(code,0)
+        self.assertEqual(wrapped['plan']['poll_interval_ms'],150000)
+        self.assertEqual(wrapped['plan']['maximum_silence_ms'],360000)
+        self.assertEqual(wrapped['plan_sha256'],canonical(wrapped['plan']))
+        self.assertFalse(wrapped['plan']['request_authorized'])
+        run.assert_not_called()
+        wire.assert_not_called()
+
+    def test_cadence_cli_cannot_override_interval_at_run_time(self):
+        with patch.object(observer,'read_json') as read,patch.object(observer,'run_observer') as run, \
+                self.assertRaisesRegex(ProbeError,'observer_run_arguments_invalid'):
+            observer.main(['--run','--plan','not-read.json','--approve-plan-sha256','0'*64,
+                           '--poll-interval-ms','150000'])
+        read.assert_not_called()
+        run.assert_not_called()
+
     def test_wrong_approval_changed_receipt_and_changed_runtime_block_before_output(self):
         wrapped = self.prepared()
         with self.assertRaisesRegex(ProbeError,'observer_approval_mismatch'):

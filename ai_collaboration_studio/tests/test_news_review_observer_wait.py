@@ -69,6 +69,46 @@ class WaitingObserverTests(unittest.TestCase):
         return waiting.WaitingSession(self.wrapped['plan'],self.directory,core=core,
             wall_ms=lambda:self.wall,monotonic_ms=lambda:self.mono)
 
+    def test_cadence_waiting_default_is_unchanged(self):
+        self.assertEqual(self.wrapped['plan']['poll_interval_ms'],300000)
+        self.assertEqual(self.wrapped['plan']['waiting_interval_ms'],30000)
+        self.assertEqual(self.wrapped['plan']['maximum_silence_ms'],360000)
+
+    def test_cadence_shorter_wait_plan_verifies_before_activation_without_http(self):
+        with patch.object(core,'verify_checkout'),patch('socket.socket') as wire:
+            shorter = core.prepare(self.request,str(self.f.shell),poll_interval_ms=150000)
+            self.assertEqual(core.verify_plan(shorter,shorter['plan_sha256']),shorter['plan'])
+        expected = copy.deepcopy(self.wrapped['plan'])
+        expected['poll_interval_ms'] = 150000
+        self.assertEqual(shorter['plan'],expected)
+        self.assertNotEqual(shorter['plan_sha256'],self.wrapped['plan_sha256'])
+        self.assertIsNone(self.session().identity['policy_sha256'])
+        self.assertFalse((self.root/'activation-receipt.json').exists())
+        wire.assert_not_called()
+
+    def test_cadence_wait_to_active_handoff_retains_interval_identity_and_window(self):
+        with patch.object(core,'verify_checkout'):
+            self.wrapped = core.prepare(self.request,str(self.f.shell),poll_interval_ms=150000)
+        session = self.session()
+        with patch.object(core,'NativeInspector',self.inspector_class()), \
+                patch.object(core,'verify_checkout'),patch('socket.socket') as wire:
+            self.assertEqual(session.step()['phase'],'waiting_local_input')
+            original = session.inspector
+            self.activate(); self.wall += 30000; self.mono += 30000
+            active = session.step()['resolved_plan']
+        self.assertIs(session.inspector,original)
+        self.assertEqual(active['poll_interval_ms'],150000)
+        self.assertEqual(active['maximum_silence_ms'],360000)
+        self.assertEqual(active['request']['target']['identity']['policy_sha256'],
+                         self.active['activation-receipt.json']['policy_sha256'])
+        self.assertEqual(active['request']['target']['activated_at_ms'],
+                         self.active['activation-receipt.json']['activated_at'])
+        self.assertEqual(active['request']['target']['expires_at_ms'],
+                         self.active['activation-receipt.json']['expires_at'])
+        self.assertEqual(active['drain_grace_ms'],self.wrapped['plan']['drain_grace_ms'])
+        self.assertFalse(active['request_authorized'])
+        wire.assert_not_called()
+
     def test_prepare_wait_leaves_policy_unresolved_and_creates_no_activation(self):
         self.assertEqual(self.wrapped['plan']['version'],waiting.WAIT_PLAN)
         self.assertEqual(self.wrapped['plan']['activation'],self.active['activation-receipt.json']['activation'])

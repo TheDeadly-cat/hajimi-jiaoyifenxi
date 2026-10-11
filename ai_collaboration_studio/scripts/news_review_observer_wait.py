@@ -32,7 +32,8 @@ def readiness_order(ready_ns, implementation, activation):
     return 'unconfirmed'
 
 
-def prepare_wait(request, powershell, *, core):
+def prepare_wait(request, powershell, *, core, poll_interval_ms=300000):
+    poll_interval_ms = core.validated_poll_interval_ms(poll_interval_ms)
     require(type(request) is dict and set(request) == {'version','root','candidate_sha','activation_sha256',
         'policy_id','source_standards'} and request['version'] == WAIT_REQUEST, 'waiting_request_invalid')
     require(type(request['candidate_sha']) is str and re.fullmatch('[0-9a-f]{40}',request['candidate_sha'])
@@ -70,7 +71,7 @@ def prepare_wait(request, powershell, *, core):
         'monitor_files':{name:core.sha(core.APP/name) for name in core.FILES},
         'powershell':{'path':str(shell),'sha256':core.sha(shell)},
         'python':{'path':str(Path(sys.executable).resolve()),'sha256':core.sha(sys.executable)},
-        'output_directory':str(root/'monitoring'),'poll_interval_ms':300000,'waiting_interval_ms':30000,
+        'output_directory':str(root/'monitoring'),'poll_interval_ms':poll_interval_ms,'waiting_interval_ms':30000,
         'inspection_timeout_seconds':45,'status_timeout_seconds':15,'maximum_silence_ms':360000,
         'drain_native_interval_ms':10000,'drain_grace_ms':255000,
         'receipt_publication_grace_ms':45000,'activation_eligibility_until_ms':template['expires_at_ms'],
@@ -214,8 +215,9 @@ class WaitingSession:
         request = {'version':'news_review_observer_request_v1','root':str(self.root),'target':target,
             'host_receipt_name':hosts[0].name,'launcher_pin':self.launcher,'host_pin':pins[0],
             'pins':copy.deepcopy(self.inspector.pins)}
-        active = self.core.prepare(request,self.plan['powershell']['path'])['plan']
-        require(all(active[k] == self.plan[k] for k in ('monitor_files','powershell','python','output_directory')),
+        active = self.core.prepare(request,self.plan['powershell']['path'],
+                                   poll_interval_ms=self.plan['poll_interval_ms'])['plan']
+        require(all(active[k] == self.plan[k] for k in ('monitor_files','powershell','python','output_directory','poll_interval_ms')),
                 'observer_preparation_changed')
         return {'phase':'activation_receipts_bound','inspection_complete':True,'resolved_plan':active}
 
