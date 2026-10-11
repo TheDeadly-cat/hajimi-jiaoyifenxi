@@ -141,6 +141,28 @@ class QualityPreparationTests(unittest.TestCase):
                 self.assertNotIn("paragraph_ids", entry)
         self.assertEqual(result, original)
 
+    def test_nested_top_level_lists_are_rejected_without_lifting_them(self):
+        result, document = self.grounded_instruction_template()
+        for field in ("facts", "inferences", "counterevidence", "open_questions", "limitations"):
+            result["importance"][field] = result.pop(field)
+        original = copy.deepcopy(result)
+        with self.assertRaises(NewsReviewError) as error:
+            validate_result(json.dumps(result, ensure_ascii=False), document)
+        self.assertEqual(error.exception.code, "invalid_review_fields")
+        self.assertEqual(result, original)
+        self.assertEqual(set(result), {"version", "assessment", "summary", "importance"})
+
+    def test_unclosed_root_json_is_rejected_without_adding_a_brace(self):
+        result, document = self.grounded_instruction_template()
+        complete = json.dumps(result, ensure_ascii=False)
+        incomplete = complete[:-1]
+        original = incomplete
+        with self.assertRaises(NewsReviewError) as error:
+            validate_result(incomplete, document)
+        self.assertEqual(error.exception.code, "invalid_review_json")
+        self.assertEqual(incomplete, original)
+        self.assertEqual(json.loads(complete), result)
+
     def test_duplicate_revision_restore_preserve_version_reuse(self):
         cases = {case["case_id"]: case["observations"] for case in self.draft()["cases"]}
         self.assertEqual([o["action"] for o in cases["Q23_duplicate"]], ["send_once", "reuse"])
