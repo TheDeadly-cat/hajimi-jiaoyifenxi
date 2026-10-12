@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from .decision_lineage import canonical_sha256
-from .news_review_clock_policy_review import BoundWindow, DualDeadlineReference, MAX_STEP_MS
-from .news_review_contracts import activation_reading, require
+from .news_review_clock_policy_review import (BoundWindow, DualDeadlineReference, MAX_STEP_MS,
+    VERSION as REFERENCE_VERSION, FULL_DAY_MARGIN_VERSION)
+from .news_review_contracts import activation_reading, is_full_day_margin_policy, require
 from .news_review_windows_clock import sample_windows_clock
 
 EXPIRY_REASONS = frozenset({"absolute_deadline_reached", "elapsed_deadline_reached"})
@@ -24,8 +25,11 @@ class BoundRuntimeClock:
     def __init__(self, policy, *, sample=None):
         self.policy_sha256 = canonical_sha256(policy)
         self.activation = activation_reading(policy["clock_activation"])
+        self.full_day_margin = is_full_day_margin_policy(policy)
         self.reference = DualDeadlineReference(BoundWindow(self.policy_sha256,
-            policy["not_before_ms"], policy["expires_at_ms"], self.activation), sample or sample_windows_clock)
+            policy["not_before_ms"], policy["expires_at_ms"], self.activation,
+            version=FULL_DAY_MARGIN_VERSION if self.full_day_margin else REFERENCE_VERSION),
+            sample or sample_windows_clock)
         self.installed = False
         self.owner = None
 
@@ -48,7 +52,10 @@ class BoundRuntimeClock:
 
     def snapshot(self):
         state = self.reference.snapshot()
-        return {"version": "news_review_runtime_clock_v1", "clock_policy": "dual_deadline_windows_v1",
+        return {"version": ("news_review_runtime_clock_full_day_margin_v2" if self.full_day_margin
+                            else "news_review_runtime_clock_v1"),
+                "clock_policy": ("dual_deadline_windows_full_day_margin_v2" if self.full_day_margin
+                                 else "dual_deadline_windows_v1"),
                 "policy_sha256": self.policy_sha256, "activation_reading": dict(vars(self.activation)),
                 "service_binding_installed": self.installed, "reference": state,
                 "expected_window_end_observed": self.expired(), "request_authorized": False}

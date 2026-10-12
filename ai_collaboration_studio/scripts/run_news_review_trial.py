@@ -77,7 +77,8 @@ def main(argv=None):
             parser.error("prepare/run/report requires --config")
         policy = json.loads(Path(args.config).read_text(encoding="utf-8-sig"))
         requested = Path(policy["database_path"])
-    from backend.news_review_contracts import DISABLED, NewsReviewError, is_dual_policy, require, validate_policy
+    from backend.news_review_contracts import (DISABLED, NewsReviewError, is_dual_policy,
+        is_full_day_margin_policy, policy_window_limit_ms, require, validate_policy)
     # These pure path/contract checks precede config.py, whose directory setup is
     # intentional only after this destination has been admitted.
     database = isolated_path(requested)
@@ -86,7 +87,8 @@ def main(argv=None):
     require(not args.password_dialog or executing, "run_option_without_run")
     require(not (args.resume_paused or args.approve_policy_sha256) or args.run, "fixed_run_option_required")
     require(not args.approve_activation_sha256 or args.activate, "activation_option_without_activation")
-    require(0 < args.duration_ms <= 86_400_000, "invalid_duration")
+    require(0 < args.duration_ms <= policy_window_limit_ms(
+        {"version":"news_event_review_v1"} if args.initialize else policy), "invalid_duration")
     if args.initialize:
         require(not root.exists(), "trial_already_exists")
         root.mkdir(parents=True,exist_ok=False)
@@ -158,7 +160,8 @@ def main(argv=None):
                       "duration_ms":args.duration_ms,"time_resolution":"first_local_key_submission",
                       "permitted_changes":["not_before_ms","expires_at_ms"],"activations":1}
         if is_dual_policy(policy):
-            activation['version'] = 'news_review_dual_clock_activation_v1'
+            activation['version'] = ('news_review_full_day_margin_activation_v2' if is_full_day_margin_policy(policy)
+                                     else 'news_review_dual_clock_activation_v1')
             activation['permitted_changes'].append('clock_activation')
         activation_sha = canonical_sha256(activation)
         if args.prepare_activation:

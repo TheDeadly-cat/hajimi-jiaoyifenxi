@@ -32,7 +32,8 @@ def readiness_order(ready_ns, implementation, activation):
     return 'unconfirmed'
 
 
-def prepare_wait(request, powershell, *, core):
+def prepare_wait(request, powershell, *, core, poll_interval_ms=300000):
+    poll_interval_ms = core.validated_poll_interval_ms(poll_interval_ms)
     require(type(request) is dict and set(request) == {'version','root','candidate_sha','activation_sha256',
         'policy_id','source_standards'} and request['version'] == WAIT_REQUEST, 'waiting_request_invalid')
     require(type(request['candidate_sha']) is str and re.fullmatch('[0-9a-f]{40}',request['candidate_sha'])
@@ -56,9 +57,22 @@ def prepare_wait(request, powershell, *, core):
     template = activation.get('policy_template',{})
     require(template.get('candidate_sha') == request['candidate_sha'] and template.get('policy_id') == request['policy_id']
             and core.safe_path(template.get('database_path')) == root/'data'/'studio.sqlite3', 'activation_proposal_mismatch')
+    from backend.news_review_contracts import (is_full_day_margin_policy, FULL_DAY_MAX_DURATION_MS,
+        validate_policy)
+    margin = is_full_day_margin_policy(template)
+    if margin:
+        try: validate_policy(template, allow_clock_template=True)
+        except ValueError: raise ProbeError('activation_proposal_mismatch') from None
+        require(activation.get('version') == 'news_review_full_day_margin_activation_v2'
+                and activation.get('permitted_changes') == ['not_before_ms','expires_at_ms','clock_activation'],
+                'activation_proposal_mismatch')
+    else:
+        require(activation.get('version') != 'news_review_full_day_margin_activation_v2',
+                'activation_proposal_mismatch')
     require(integer(template.get('not_before_ms')) and integer(template.get('expires_at_ms'),positive=True)
             and template['not_before_ms'] < template['expires_at_ms'] and activation.get('activations') == 1
-            and integer(activation.get('duration_ms'),positive=True) and activation['duration_ms'] <= 86_400_000
+            and integer(activation.get('duration_ms'),positive=True)
+            and activation['duration_ms'] <= (FULL_DAY_MAX_DURATION_MS if margin else 86_400_000)
             and activation.get('permitted_changes') in (['not_before_ms','expires_at_ms'],
                                                        ['not_before_ms','expires_at_ms','clock_activation']),
             'activation_proposal_mismatch')
@@ -70,7 +84,7 @@ def prepare_wait(request, powershell, *, core):
         'monitor_files':{name:core.sha(core.APP/name) for name in core.FILES},
         'powershell':{'path':str(shell),'sha256':core.sha(shell)},
         'python':{'path':str(Path(sys.executable).resolve()),'sha256':core.sha(sys.executable)},
-        'output_directory':str(root/'monitoring'),'poll_interval_ms':300000,'waiting_interval_ms':30000,
+        'output_directory':str(root/'monitoring'),'poll_interval_ms':poll_interval_ms,'waiting_interval_ms':30000,
         'inspection_timeout_seconds':45,'status_timeout_seconds':15,'maximum_silence_ms':360000,
         'drain_native_interval_ms':10000,'drain_grace_ms':255000,
         'receipt_publication_grace_ms':45000,'activation_eligibility_until_ms':template['expires_at_ms'],
@@ -211,11 +225,15 @@ class WaitingSession:
         target = {'identity':{**self.identity,'policy_sha256':activation['policy_sha256']},
             'policy_id':self.plan['request']['policy_id'],'activated_at_ms':begin,'expires_at_ms':end,
             'host_url':host.get('url'),'source_standards':copy.deepcopy(self.plan['request']['source_standards'])}
+        from backend.news_review_contracts import is_full_day_margin_policy, FULL_DAY_POLICY_VERSION
+        if is_full_day_margin_policy(self.plan['activation']['policy_template']):
+            target['window_contract_version'] = FULL_DAY_POLICY_VERSION
         request = {'version':'news_review_observer_request_v1','root':str(self.root),'target':target,
             'host_receipt_name':hosts[0].name,'launcher_pin':self.launcher,'host_pin':pins[0],
             'pins':copy.deepcopy(self.inspector.pins)}
-        active = self.core.prepare(request,self.plan['powershell']['path'])['plan']
-        require(all(active[k] == self.plan[k] for k in ('monitor_files','powershell','python','output_directory')),
+        active = self.core.prepare(request,self.plan['powershell']['path'],
+                                   poll_interval_ms=self.plan['poll_interval_ms'])['plan']
+        require(all(active[k] == self.plan[k] for k in ('monitor_files','powershell','python','output_directory','poll_interval_ms')),
                 'observer_preparation_changed')
         return {'phase':'activation_receipts_bound','inspection_complete':True,'resolved_plan':active}
 

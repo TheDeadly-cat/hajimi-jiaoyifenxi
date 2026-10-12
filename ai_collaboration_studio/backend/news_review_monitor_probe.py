@@ -171,8 +171,11 @@ class NewsReviewStatusProbe:
     does not reconstruct them, acquire ownership or authorize a new trial.
     """
     def __init__(self, target, *, inspect_tree, wall_ms, fetch=get_status_json):
-        require(type(target) is dict and set(target) == {'identity', 'policy_id', 'activated_at_ms',
-            'expires_at_ms', 'host_url', 'source_standards'}, 'monitor_target_invalid')
+        from .news_review_contracts import FULL_DAY_POLICY_VERSION, FULL_DAY_MAX_DURATION_MS
+        margin = type(target) is dict and target.get('window_contract_version') == FULL_DAY_POLICY_VERSION
+        fields = {'identity', 'policy_id', 'activated_at_ms', 'expires_at_ms', 'host_url', 'source_standards'}
+        if margin: fields.add('window_contract_version')
+        require(type(target) is dict and set(target) == fields, 'monitor_target_invalid')
         identity = target['identity']
         require(type(identity) is dict and set(identity) == {'candidate_sha', 'activation_sha256', 'policy_sha256'},
                 'monitor_identity_invalid')
@@ -181,7 +184,7 @@ class NewsReviewStatusProbe:
         require(type(target['policy_id']) is str and re.fullmatch('[A-Za-z0-9_.:-]{1,160}', target['policy_id']),
                 'monitor_policy_invalid')
         start, end = target['activated_at_ms'], target['expires_at_ms']
-        require(integer(start, positive=True) and integer(end, positive=True) and 0 < end-start <= 86_400_000,
+        require(integer(start, positive=True) and integer(end, positive=True) and 0 < end-start <= (FULL_DAY_MAX_DURATION_MS if margin else 86_400_000),
                 'monitor_window_invalid')
         local_port(target['host_url'])
         standards = target['source_standards']
@@ -267,6 +270,11 @@ class NewsReviewStatusProbe:
                 and policy.get('not_before_ms') == target['activated_at_ms']
                 and policy.get('expires_at_ms') == target['expires_at_ms']
                 and canonical(policy) == target['identity']['policy_sha256'], 'control_identity_mismatch')
+        from .news_review_contracts import FULL_DAY_POLICY_VERSION, FULL_DAY_CLOCK_POLICY
+        margin = target.get('window_contract_version') == FULL_DAY_POLICY_VERSION
+        require(margin == (policy.get('version') == FULL_DAY_POLICY_VERSION)
+                and (not margin or canonical(policy.get('clock_policy')) == canonical(FULL_DAY_CLOCK_POLICY)),
+                'monitor_window_contract_mismatch')
         workers = control.get('workers_alive')
         require(type(workers) is dict and set(workers) == {'news-review-evidence', 'news-review-model'}
                 and all(type(v) is bool for v in workers.values()), 'worker_status_unconfirmed')

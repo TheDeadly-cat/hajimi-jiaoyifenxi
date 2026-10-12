@@ -275,6 +275,45 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(ended['ended_monotonic_ms'],ended['deadline_monotonic_ms'])
         self.assertFalse(ended['stop_requested'])
 
+    def test_shorter_cadence_retains_failed_receipt_and_original_deadline(self):
+        for interval in (150000,300000):
+            with self.subTest(interval=interval):
+                wall,mono = [self.wall],[self.mono]
+                start,start_mono = wall[0],mono[0]
+                directory = Path(self.temp.name)/str(interval)
+                writer = MonitorReceiptWriter(directory,self.identity,
+                    wall_ms=lambda:wall[0],monotonic_ms=lambda:mono[0])
+                class Stop:
+                    def is_set(self): return False
+                    def wait(self,seconds):
+                        delta = round(seconds*1000)
+                        wall[0] += delta; mono[0] += delta
+                        return False
+                calls = []
+                def probe():
+                    calls.append(wall[0])
+                    elapsed = 45000 if len(calls) == 2 else 5000
+                    wall[0] += elapsed; mono[0] += elapsed
+                    if len(calls) == 2: raise TimeoutError('synthetic bounded failure')
+                    return self.healthy()
+                ended = writer.run_schedule(probe=probe,stop_event=Stop(),
+                                             expires_at_ms=start+900000,interval_ms=interval)
+                receipts = [json.loads(path.read_text(encoding='utf-8'))['receipt']
+                            for path in sorted(directory.glob('monitor-execution-*.json'))]
+                self.assertFalse(receipts[1]['read_succeeded'])
+                self.assertEqual(receipts[1]['error_code'],'STATUS_READ_TIMEOUT')
+                self.assertEqual(receipts[1]['last_successful_read_at_ms'],receipts[0]['completed_at_ms'])
+                successes = [row['completed_at_ms'] for row in receipts if row['read_succeeded']]
+                gaps = [right-left for left,right in zip(successes,successes[1:])]
+                self.assertEqual(max(gaps),2*interval)
+                self.assertEqual(max(gaps) <= 360000,interval == 150000)
+                self.assertEqual(ended['expires_at_ms'],start+900000)
+                self.assertEqual(ended['ended_at_ms'],start+900000)
+                self.assertEqual(ended['deadline_monotonic_ms'],start_mono+900000)
+                self.assertFalse(ended['stop_requested'])
+                self.assertTrue(all(row['http_retries']==0 and row['automatic_restart_allowed'] is False
+                                    for row in receipts))
+
     def test_scheduler_retains_stop_wait_signal_without_expiry_or_replay(self):
         class Stop:
             def is_set(self): return False
