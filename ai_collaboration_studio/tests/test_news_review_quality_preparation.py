@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from backend.decision_lineage import canonical_sha256
 from backend.news_review_contracts import ENDPOINT, MODEL, STRATEGY_SHA, NewsReviewError, validate_result
+from backend import news_review_quality_preparation as quality_preparation
 from backend.news_review_quality_preparation import (
     QUALITY_INSTRUCTIONS, QUALITY_STRATEGY_SHA, prepare, signoff_template, strict_json,
 )
@@ -91,6 +92,77 @@ class QualityPreparationTests(unittest.TestCase):
             validate_result(json.dumps(result, ensure_ascii=False), document)
         self.assertEqual(error.exception.code, "unsupported_quote")
 
+    def grounded_instruction_template(self):
+        # Exercise the actual prompt's JSON structure against the existing
+        # strict validator. This is synthetic syntax evidence, not a rating.
+        result = json.loads(quality_preparation.QUALITY_OUTPUT_TEMPLATE)
+        request = next(r for r in self.draft()["requests"]
+                       if r["case_id"] == "Q06_earnings_units")
+        document = json.loads(json.loads(request["request_utf8"])["input"])["document"]
+        paragraph = document["paragraphs"][1]
+        result["assessment"] = "reviewed"
+        result["summary"] = "合成正文给出欧元收入，未提供美元换算。"
+        result["importance"].update(level="high", reason="正文包含收入业绩。")
+        result["facts"][0].update(claim="原文包含该收入表述。",
+                                  paragraph_id=paragraph["id"], quote=paragraph["text"])
+        result["inferences"][0].update(claim="不能计算美元等值金额。",
+                                       paragraph_ids=[paragraph["id"]],
+                                       limitations="没有汇率或美元换算信息。")
+        result["counterevidence"][0].update(claim="未披露美元换算，不能支持美元金额主张。",
+                                            paragraph_ids=[paragraph["id"]])
+        result["limitations"] = ["仅合成正文，附件未读，不核验外部事实。"]
+        return result, document
+
+    def test_prompt_json_template_is_unbound_and_passes_native_contract_when_grounded(self):
+        template = json.loads(quality_preparation.QUALITY_OUTPUT_TEMPLATE)
+        # The model must supply its own classification and input identities.
+        self.assertNotIn(template["assessment"], {"reviewed", "material_insufficient"})
+        self.assertNotIn(template["importance"]["level"], {"high", "normal", "uncertain"})
+        self.assertNotIn("quality_document_", quality_preparation.QUALITY_OUTPUT_TEMPLATE)
+        self.assertIn(quality_preparation.QUALITY_OUTPUT_TEMPLATE, QUALITY_INSTRUCTIONS)
+        result, document = self.grounded_instruction_template()
+        validate_result(json.dumps(result, ensure_ascii=False), document)
+
+    def test_reasoning_id_aliases_fail_without_repairing_the_result(self):
+        result, document = self.grounded_instruction_template()
+        original = copy.deepcopy(result)
+        for field, alias, single in (("counterevidence", "paragraph_id", True),
+                                     ("inferences", "paragraph_id", True),
+                                     ("inferences", "paragraphs", False)):
+            with self.subTest(field=field, alias=alias):
+                changed = copy.deepcopy(result)
+                entry = changed[field][0]
+                identifiers = entry.pop("paragraph_ids")
+                entry[alias] = identifiers[0] if single else identifiers
+                with self.assertRaises(NewsReviewError) as error:
+                    validate_result(json.dumps(changed, ensure_ascii=False), document)
+                self.assertEqual(error.exception.code, "invalid_reasoning")
+                self.assertEqual(entry[alias], identifiers[0] if single else identifiers)
+                self.assertNotIn("paragraph_ids", entry)
+        self.assertEqual(result, original)
+
+    def test_nested_top_level_lists_are_rejected_without_lifting_them(self):
+        result, document = self.grounded_instruction_template()
+        for field in ("facts", "inferences", "counterevidence", "open_questions", "limitations"):
+            result["importance"][field] = result.pop(field)
+        original = copy.deepcopy(result)
+        with self.assertRaises(NewsReviewError) as error:
+            validate_result(json.dumps(result, ensure_ascii=False), document)
+        self.assertEqual(error.exception.code, "invalid_review_fields")
+        self.assertEqual(result, original)
+        self.assertEqual(set(result), {"version", "assessment", "summary", "importance"})
+
+    def test_unclosed_root_json_is_rejected_without_adding_a_brace(self):
+        result, document = self.grounded_instruction_template()
+        complete = json.dumps(result, ensure_ascii=False)
+        incomplete = complete[:-1]
+        original = incomplete
+        with self.assertRaises(NewsReviewError) as error:
+            validate_result(incomplete, document)
+        self.assertEqual(error.exception.code, "invalid_review_json")
+        self.assertEqual(incomplete, original)
+        self.assertEqual(json.loads(complete), result)
+
     def test_duplicate_revision_restore_preserve_version_reuse(self):
         cases = {case["case_id"]: case["observations"] for case in self.draft()["cases"]}
         self.assertEqual([o["action"] for o in cases["Q23_duplicate"]], ["send_once", "reuse"])
@@ -121,6 +193,19 @@ class QualityPreparationTests(unittest.TestCase):
         self.assertEqual(first["requests"], second["requests"])
         self.assertNotIn("SECRET_GOLD_MARKER", json.dumps(second["requests"]))
         self.assertNotEqual(canonical_sha256(first), canonical_sha256(second))
+
+    def test_changed_classification_references_never_supply_model_answers(self):
+        references = self.signed_fixture()
+        first = self.draft(references)
+        for entry in references["cases"]:
+            entry["reference"]["importance"] = "normal"
+            entry["reference"]["assessment"] = "material_insufficient"
+            entry["reference"]["supported_facts"] = ["GOLD_CLASSIFICATION_MUST_NOT_ENTER_REQUEST"]
+        second = self.draft(references)
+        self.assertNotEqual(first["references"]["file_sha256"], second["references"]["file_sha256"])
+        self.assertEqual(first["requests"], second["requests"])
+        self.assertNotIn("GOLD_CLASSIFICATION", json.dumps(second["requests"]))
+        self.assertFalse(second["request_authorized"])
 
     def test_missing_duplicate_unknown_or_rebound_reference_rejected(self):
         for change in (lambda r: r["cases"].pop(),
