@@ -13,6 +13,8 @@ from dataclasses import dataclass
 VERSION = 'news_review_dual_deadline_reference_v1'
 CLOCK_BASIS = 'windows_query_performance_counter_including_suspend'
 MAX_DURATION_MS = 86_400_000
+FULL_DAY_MARGIN_VERSION = 'news_review_full_day_margin_reference_v2'
+FULL_DAY_MAX_DURATION_MS = 86_700_000
 MAX_STEP_MS = 2_000
 MAX_OBSERVATION_GAP_MS = 30_000
 MAX_SAMPLING_SPAN_MS = 50
@@ -52,12 +54,15 @@ class BoundWindow:
     expires_at_ms: int
     activation_reading: Reading
     clock_basis: str = CLOCK_BASIS
+    version: str = VERSION
 
     def valid(self):
         import re
         return (type(self.policy_sha256) is str and re.fullmatch('[0-9a-f]{64}', self.policy_sha256)
                 and _integer(self.not_before_ms) and _integer(self.expires_at_ms)
-                and 0 < self.expires_at_ms-self.not_before_ms <= MAX_DURATION_MS
+                and type(self.version) is str and self.version in (VERSION, FULL_DAY_MARGIN_VERSION)
+                and 0 < self.expires_at_ms-self.not_before_ms <= (FULL_DAY_MAX_DURATION_MS
+                    if self.version == FULL_DAY_MARGIN_VERSION else MAX_DURATION_MS)
                 and type(self.activation_reading) is Reading and self.activation_reading.valid()
                 and self.not_before_ms <= self.activation_reading.wall_ms < self.expires_at_ms
                 and self.clock_basis == CLOCK_BASIS)
@@ -172,7 +177,7 @@ class DualDeadlineReference:
                         reason = 'elapsed_deadline_reached'
                 self._high_wall = max(self._high_wall, reading.wall_ms)
                 self._last = reading
-            verdict = {'version': VERSION, 'sequence': self._sequence,
+            verdict = {'version': self._window.version, 'sequence': self._sequence,
                        'policy_sha256': self._window.policy_sha256,
                        'within_proposed_time_bounds': not reason, 'stop_reason': reason,
                        'absolute_expires_at_ms': self._window.expires_at_ms,
@@ -189,7 +194,7 @@ class DualDeadlineReference:
 
     def snapshot(self):
         with self._lock:
-            return {'version': VERSION, 'policy_sha256': self._window.policy_sha256,
+            return {'version': self._window.version, 'policy_sha256': self._window.policy_sha256,
                     'clock_basis': self._window.clock_basis,
                     'absolute_expires_at_ms': self._window.expires_at_ms,
                     'initial_elapsed_deadline_ms': self._initial_deadline,

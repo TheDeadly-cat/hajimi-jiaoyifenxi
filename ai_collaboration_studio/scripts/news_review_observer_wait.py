@@ -57,9 +57,22 @@ def prepare_wait(request, powershell, *, core, poll_interval_ms=300000):
     template = activation.get('policy_template',{})
     require(template.get('candidate_sha') == request['candidate_sha'] and template.get('policy_id') == request['policy_id']
             and core.safe_path(template.get('database_path')) == root/'data'/'studio.sqlite3', 'activation_proposal_mismatch')
+    from backend.news_review_contracts import (is_full_day_margin_policy, FULL_DAY_MAX_DURATION_MS,
+        validate_policy)
+    margin = is_full_day_margin_policy(template)
+    if margin:
+        try: validate_policy(template, allow_clock_template=True)
+        except ValueError: raise ProbeError('activation_proposal_mismatch') from None
+        require(activation.get('version') == 'news_review_full_day_margin_activation_v2'
+                and activation.get('permitted_changes') == ['not_before_ms','expires_at_ms','clock_activation'],
+                'activation_proposal_mismatch')
+    else:
+        require(activation.get('version') != 'news_review_full_day_margin_activation_v2',
+                'activation_proposal_mismatch')
     require(integer(template.get('not_before_ms')) and integer(template.get('expires_at_ms'),positive=True)
             and template['not_before_ms'] < template['expires_at_ms'] and activation.get('activations') == 1
-            and integer(activation.get('duration_ms'),positive=True) and activation['duration_ms'] <= 86_400_000
+            and integer(activation.get('duration_ms'),positive=True)
+            and activation['duration_ms'] <= (FULL_DAY_MAX_DURATION_MS if margin else 86_400_000)
             and activation.get('permitted_changes') in (['not_before_ms','expires_at_ms'],
                                                        ['not_before_ms','expires_at_ms','clock_activation']),
             'activation_proposal_mismatch')
@@ -212,6 +225,9 @@ class WaitingSession:
         target = {'identity':{**self.identity,'policy_sha256':activation['policy_sha256']},
             'policy_id':self.plan['request']['policy_id'],'activated_at_ms':begin,'expires_at_ms':end,
             'host_url':host.get('url'),'source_standards':copy.deepcopy(self.plan['request']['source_standards'])}
+        from backend.news_review_contracts import is_full_day_margin_policy, FULL_DAY_POLICY_VERSION
+        if is_full_day_margin_policy(self.plan['activation']['policy_template']):
+            target['window_contract_version'] = FULL_DAY_POLICY_VERSION
         request = {'version':'news_review_observer_request_v1','root':str(self.root),'target':target,
             'host_receipt_name':hosts[0].name,'launcher_pin':self.launcher,'host_pin':pins[0],
             'pins':copy.deepcopy(self.inspector.pins)}

@@ -269,8 +269,13 @@ def build_news_review_report(service, policy_id, *, source_standards=None):
     full_window = (p["expires_at_ms"]-p["not_before_ms"] == 86_400_000
                    and service.clock() >= p["expires_at_ms"])
     if dual:
-        full_window = bool(p['expires_at_ms']-p['not_before_ms'] == 86_400_000
-                           and elapsed_lower is not None and elapsed_lower >= 86_400_000)
+        from .news_review_contracts import (is_full_day_margin_policy, FULL_DAY_MAX_DURATION_MS,
+            FULL_DAY_REQUIRED_ELAPSED_MS)
+        duration = p["expires_at_ms"]-p["not_before_ms"]
+        full_duration = (FULL_DAY_REQUIRED_ELAPSED_MS <= duration <= FULL_DAY_MAX_DURATION_MS
+                         if is_full_day_margin_policy(p) else duration == 86_400_000)
+        full_window = bool(full_duration and elapsed_lower is not None
+                           and elapsed_lower >= 86_400_000)
     coverage_observed = bool(full_window and len(sessions) == 1 and len(heartbeat) >= 2880
         and heartbeat[0]["kind"] == "session_started" and heartbeat[-1]["kind"] == "window_closed"
         and heartbeat[0]["wall_ms"] <= p["not_before_ms"]+30_000

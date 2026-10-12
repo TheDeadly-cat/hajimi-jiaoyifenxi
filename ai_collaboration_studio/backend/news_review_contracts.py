@@ -16,6 +16,13 @@ DUAL_CLOCK_POLICY = {"version": "dual_deadline_windows_v1",
                      "clock_basis": "windows_query_performance_counter_including_suspend",
                      "max_step_ms": 2000, "max_observation_gap_ms": 30000,
                      "max_sampling_span_ms": 50, "activations": 1}
+FULL_DAY_POLICY_VERSION = "news_event_review_full_day_margin_v2"
+FULL_DAY_REQUIRED_ELAPSED_MS = 86_400_000
+FULL_DAY_MAX_DURATION_MS = 86_700_000
+FULL_DAY_CLOCK_POLICY = {**DUAL_CLOCK_POLICY,
+    "version": "dual_deadline_windows_full_day_margin_v2",
+    "maximum_authorized_duration_ms": FULL_DAY_MAX_DURATION_MS,
+    "required_elapsed_lower_ms": FULL_DAY_REQUIRED_ELAPSED_MS}
 PROFILE = "sec_micron_trial_v1"
 MODEL = "doubao-seed-2-1-pro-260915"
 ENDPOINT = "https://ark.cn-beijing.volces.com/api/v3/responses"
@@ -78,8 +85,17 @@ def activation_reading(value):
     return reading
 
 
+def is_full_day_margin_policy(value):
+    return value.get("version") == FULL_DAY_POLICY_VERSION
+
+
 def is_dual_policy(value):
-    return value.get("version") == DUAL_POLICY_VERSION
+    return value.get("version") in (DUAL_POLICY_VERSION, FULL_DAY_POLICY_VERSION)
+
+
+def policy_window_limit_ms(value):
+    require(value.get("version") in (VERSION, DUAL_POLICY_VERSION, FULL_DAY_POLICY_VERSION), "strategy_mismatch")
+    return FULL_DAY_MAX_DURATION_MS if is_full_day_margin_policy(value) else 86_400_000
 
 
 def validate_policy(value, *, allow_clock_template=False):
@@ -94,7 +110,7 @@ def validate_policy(value, *, allow_clock_template=False):
         fields |= {"clock_policy", "clock_activation"}
     require(set(value) == fields, "invalid_policy_fields")
     p = copy.deepcopy(value)
-    require(p["version"] in (VERSION, DUAL_POLICY_VERSION) and p["strategy_sha256"] == STRATEGY_SHA, "strategy_mismatch")
+    require(p["version"] in (VERSION, DUAL_POLICY_VERSION, FULL_DAY_POLICY_VERSION) and p["strategy_sha256"] == STRATEGY_SHA, "strategy_mismatch")
     for field, pattern in (("policy_id", r"[a-z0-9][a-z0-9_-]{0,79}"),
                            ("candidate_sha", r"[a-f0-9]{40}"), ("room_id", r"room_[a-z0-9_]{1,80}")):
         require(type(p[field]) is str and re.fullmatch(pattern, p[field]), "invalid_policy_identity")
@@ -104,10 +120,11 @@ def validate_policy(value, *, allow_clock_template=False):
             and p["initialization"] == "seed_only", "source_scope_mismatch")
     require((p["provider"], p["model"], p["endpoint"]) == ("doubao", MODEL, ENDPOINT), "route_mismatch")
     start, end = p["not_before_ms"], p["expires_at_ms"]
-    require(type(start) is int and type(end) is int and start > 0 and 0 < end-start <= 86_400_000,
+    require(type(start) is int and type(end) is int and start > 0 and 0 < end-start <= policy_window_limit_ms(p),
             "invalid_window")
     if is_dual_policy(p):
-        require(encoded(p["clock_policy"]) == encoded(DUAL_CLOCK_POLICY), "clock_policy_mismatch")
+        expected_clock = FULL_DAY_CLOCK_POLICY if is_full_day_margin_policy(p) else DUAL_CLOCK_POLICY
+        require(encoded(p["clock_policy"]) == encoded(expected_clock), "clock_policy_mismatch")
         require(p["resume_within_window"] is False, "dual_clock_resume_forbidden")
         if p["clock_activation"] is None:
             require(allow_clock_template, "clock_activation_required")
@@ -120,7 +137,12 @@ def validate_policy(value, *, allow_clock_template=False):
         require(type(p[name]) is int and lower <= p[name] <= upper, "invalid_budget")
     require(type(p["concurrency"]) is int and p["concurrency"] == 1, "concurrency_unsupported")
     require(type(p["resume_within_window"]) is bool and p["stop_on_unknown"] is True, "invalid_stop_policy")
-    decimal(p["spend_limit_cny"])
+    spend = decimal(p["spend_limit_cny"])
+    if is_full_day_margin_policy(p):
+        # The extra clock margin carries no extra request or spending authority.
+        require(all(p[name] <= limit for name, limit in (("max_document_requests", 16),
+            ("max_model_calls", 8), ("max_request_bytes", 32768), ("max_output_tokens", 1400),
+            ("max_total_tokens", 275392))) and spend <= Decimal("2.00"), "full_day_budget_exceeded")
     rate = p["rate_card"]
     require(type(rate) is dict and set(rate) == {"currency", "input_per_million", "output_per_million",
                                                "source_url", "checked_at"}, "invalid_rate_card")

@@ -26,6 +26,7 @@ from backend.news_review_monitor_probe import NewsReviewStatusProbe, ProbeError,
 from scripts.news_review_watchdog import native_creation_ticks
 
 FILES = ('backend/news_review_monitor.py', 'backend/news_review_monitor_probe.py',
+    'backend/news_review_contracts.py',
     'scripts/news_review_watchdog.py', 'scripts/run_news_review_observer.py',
     'scripts/inspect_news_review_process_tree.ps1', 'scripts/news_review_observer_wait.py')
 RECORDS = ('preparation-manifest.json', 'user-approval.json', 'ci-verification.json',
@@ -282,6 +283,16 @@ def verify_trial(request):
             and policy.get('candidate_sha') == identity['candidate_sha'] and policy.get('policy_id') == target['policy_id'],
             'activation_window_mismatch')
     template = proposal.get('policy_template', {})
+    from backend.news_review_contracts import (is_full_day_margin_policy, FULL_DAY_POLICY_VERSION, validate_policy)
+    margin = is_full_day_margin_policy(template)
+    require(margin == (target.get('window_contract_version') == FULL_DAY_POLICY_VERSION),
+            'monitor_window_contract_mismatch')
+    if margin:
+        try: validate_policy(policy)
+        except ValueError: raise ProbeError('activation_resolution_invalid') from None
+        require(proposal.get('version') == 'news_review_full_day_margin_activation_v2', 'activation_resolution_invalid')
+    else:
+        require(proposal.get('version') != 'news_review_full_day_margin_activation_v2', 'activation_resolution_invalid')
     changes = proposal.get('permitted_changes')
     require(changes in (['not_before_ms', 'expires_at_ms'], ['not_before_ms', 'expires_at_ms', 'clock_activation'])
             and proposal.get('activations') == 1 and proposal.get('duration_ms') == end-begin
