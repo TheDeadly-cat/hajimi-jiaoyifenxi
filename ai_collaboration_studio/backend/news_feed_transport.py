@@ -14,6 +14,7 @@ import ssl
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate, parsedate_to_datetime
@@ -32,10 +33,14 @@ _MIN_TIMESTAMP = -62135596800.0
 _MAX_TIMESTAMP = 253402300799.0
 FEED_ERROR_KINDS = frozenset({
     "timeout", "dns_error", "tls_error", "connection_error", "redirect_blocked",
-    "feed_too_large", "invalid_feed", "unsafe_feed", "transport_error", "http_error",
+    "feed_too_large", "invalid_feed", "unsafe_feed", "transport_error", "http_error", "proxy_configuration_error",
 })
 _VALIDATION_ERROR_KINDS = frozenset({
-    "redirect_blocked", "feed_too_large", "invalid_feed", "unsafe_feed",
+    "redirect_blocked", "feed_too_large", "invalid_feed", "unsafe_feed", "proxy_configuration_error",
+})
+PROXY_CONFIGURATION_INTENTS = frozenset({
+    "https_proxy", "all_proxy_fallback", "https_not_configured", "not_configured",
+    "invalid_configuration", "configuration_unavailable", "unknown",
 })
 _CONNECTION_ERRNOS = frozenset({
     errno.ECONNREFUSED, errno.ECONNRESET, errno.ECONNABORTED, errno.ENETUNREACH,
@@ -50,6 +55,56 @@ class FeedValidationError(ValueError):
             raise ValueError("invalid_feed_validation_code")
         self.code = code
         super().__init__(code)
+
+
+def validate_loopback_proxy(value):
+    """Validate in memory only; never return configuration text in an error."""
+    try:
+        if (not isinstance(value, str) or not value or len(value) > 2048
+                or any(ord(char) <= 32 or ord(char) >= 127 for char in value) or "\\" in value):
+            raise ValueError
+        proxy = urlsplit(value)
+        if (proxy.scheme not in {"http", "https"} or proxy.hostname not in _LOOPBACK_HOSTS
+                or proxy.port is None or not 1 <= proxy.port <= 65535
+                or proxy.username is not None or proxy.password is not None
+                or proxy.path not in {"", "/"} or proxy.query or proxy.fragment):
+            raise ValueError
+    except (TypeError, ValueError):
+        raise FeedValidationError("proxy_configuration_error") from None
+    return value
+
+
+def validate_bypass_value(value):
+    # Keep explicit NO_PROXY semantics verbatim; do not persist its rules.
+    if (not isinstance(value, str) or len(value) > 8192
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+        raise FeedValidationError("proxy_configuration_error")
+    return value
+
+
+def feed_proxy_configuration(view):
+    """Resolve one effective stdlib getproxies() view without silent fallback.
+
+    HTTPS wins by key presence, including invalid values. ALL is considered only
+    without HTTPS. HTTP-only configuration is not an HTTPS proxy. No values from
+    this view are copied into the environment: doing so would hide Windows
+    registry ProxyOverride rules from urllib's standard proxy_bypass decision.
+    """
+    if not isinstance(view, Mapping):
+        raise FeedValidationError("proxy_configuration_error")
+    if "no" in view:
+        validate_bypass_value(view["no"])
+    if "https" in view:
+        proxies = {"https": validate_loopback_proxy(view["https"])}
+        intent = "https_proxy"
+    elif "all" in view:
+        proxies = {"https": validate_loopback_proxy(view["all"])}
+        intent = "all_proxy_fallback"
+    else:
+        proxies = {}
+        intent = "https_not_configured" if "http" in view else "not_configured"
+    return proxies, {"proxy_configuration_intent": intent,
+                     "bypass_configured": "no" in view}
 
 
 def classify_feed_error(exc):
@@ -199,6 +254,10 @@ class _Diagnostics:
         self.response_date = None
         self.error_kind = None
         self.phase = "proxy_configuration"
+        self.proxy_configuration_intent = "unknown"
+        # This records an explicit NO_PROXY key in the effective view, not
+        # whether Windows has additional registry ProxyOverride rules.
+        self.bypass_configured = None
         self.response_status = None
         self.retry_after = parse_retry_after(None, 0)
         self.conditional_etag = "if-none-match" in names
@@ -225,6 +284,8 @@ class _Diagnostics:
         route = next(iter(self.routes)) if len(self.routes) == 1 else "unknown"
         bypass = next(iter(self.bypasses)) if len(self.bypasses) == 1 else None
         return {"schema_version": "news_feed_diagnostics_v1", "route_class": route,
+                "proxy_configuration_intent": self.proxy_configuration_intent,
+                "bypass_configured": self.bypass_configured,
                 "effective_bypass": bypass, "redirect_count": self.redirect_count,
                 "final_host": self.final_host, "elapsed_ms": max(0, round((time.monotonic() - self.started) * 1000)),
                 "conditional_etag": self.conditional_etag,
@@ -302,17 +363,18 @@ def fetch_feed(url, headers, timeout, max_bytes):
         raise ValueError("source_not_allowed")
     diagnostics = _Diagnostics(headers)
     try:
-        proxies = {}
-        for scheme, value in urllib.request.getproxies().items():
-            if scheme not in {"http", "https"}:
-                continue
-            try:
-                proxy = urlsplit(value)
-                if (proxy.scheme in {"http", "https"} and proxy.hostname in _LOOPBACK_HOSTS
-                        and proxy.port and not proxy.username and not proxy.password):
-                    proxies[scheme] = value
-            except (ValueError, TypeError):
-                continue
+        try:
+            proxy_view = urllib.request.getproxies()
+        except Exception:
+            diagnostics.proxy_configuration_intent = "configuration_unavailable"
+            raise FeedValidationError("proxy_configuration_error") from None
+        diagnostics.bypass_configured = "no" in proxy_view if isinstance(proxy_view, Mapping) else None
+        try:
+            proxies, configuration = feed_proxy_configuration(proxy_view)
+        except FeedValidationError:
+            diagnostics.proxy_configuration_intent = "invalid_configuration"
+            raise
+        diagnostics.proxy_configuration_intent = configuration["proxy_configuration_intent"]
         opener = urllib.request.build_opener(_ObservedProxyHandler(proxies),
             _SameHostRedirect(url, diagnostics), _ObservedHTTPSHandler(diagnostics))
         request = urllib.request.Request(url, headers={

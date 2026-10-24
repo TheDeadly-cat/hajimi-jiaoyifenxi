@@ -148,7 +148,8 @@ class TransportDiagnosticsTests(unittest.TestCase):
         diagnostic = result.diagnostics
         self.assertEqual(set(diagnostic), {"schema_version", "route_class", "effective_bypass",
             "redirect_count", "final_host", "elapsed_ms", "conditional_etag",
-            "conditional_modified_since", "response_date", "retry_after", "error_kind", "phase", "response_status"})
+            "conditional_modified_since", "response_date", "retry_after", "error_kind", "phase", "response_status",
+            "proxy_configuration_intent", "bypass_configured"})
         self.assertEqual(diagnostic["route_class"], "unknown")
         self.assertIsNone(diagnostic["effective_bypass"])
         self.assertEqual(diagnostic["final_host"], "www.federalreserve.gov")
@@ -198,13 +199,15 @@ class TransportDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(failure.news_diagnostics))
         self.assertEqual(failure.news_diagnostics["route_class"], "unknown")
 
-    def test_proxy_filter_excludes_remote_credential_and_unsupported_entries(self):
-        _, _, handlers = self.mocked_fetch(FakeResponse(), proxies={
-            "https": "http://user:secret@127.0.0.1:12345", "http": "http://remote.invalid:8000",
-            "ftp": "http://127.0.0.1:9999", "all": "socks5://127.0.0.1:1080",
-        })
-        handler = next(item for item in handlers if isinstance(item, _ObservedProxyHandler))
-        self.assertEqual(handler.proxies, {})
+    def test_invalid_relevant_proxy_refuses_instead_of_silent_direct(self):
+        with self.assertRaises(ValueError) as caught:
+            self.mocked_fetch(FakeResponse(), proxies={
+                "https": "http://user:secret@127.0.0.1:12345", "http": "http://remote.invalid:8000",
+                "ftp": "http://127.0.0.1:9999", "all": "socks5://127.0.0.1:1080",
+            })
+        self.assertEqual(caught.exception.code, "proxy_configuration_error")
+        self.assertEqual(caught.exception.news_diagnostics["phase"], "proxy_configuration")
+        self.assertEqual(caught.exception.news_diagnostics["route_class"], "unknown")
 
     def _observe_selected_https_handler(self, request, diagnostic):
         # Execute selection/observation only, with the actual network call stubbed.

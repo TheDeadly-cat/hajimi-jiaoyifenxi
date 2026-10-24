@@ -128,9 +128,11 @@ def _safe_json(value, kind):
     safe = {}
     enums = ({'schema_version': {'news_feed_diagnostics_v1'},
               'route_class': {'direct', 'local_loopback_proxy', 'unknown'},
+              'proxy_configuration_intent': {'https_proxy', 'all_proxy_fallback', 'https_not_configured',
+                                             'not_configured', 'invalid_configuration', 'configuration_unavailable', 'unknown'},
               'final_host': {'www.federalreserve.gov', 'www.bls.gov', 'investors.seagate.com'},
               'error_kind': {'timeout', 'dns_error', 'tls_error', 'connection_error', 'redirect_blocked',
-                             'feed_too_large', 'invalid_feed', 'unsafe_feed', 'transport_error', 'http_error'},
+                             'feed_too_large', 'invalid_feed', 'unsafe_feed', 'transport_error', 'http_error', 'proxy_configuration_error'},
               'phase': {'proxy_configuration', 'request', 'redirect', 'response_headers', 'response_body',
                         'parse', 'complete'}}
              if kind == 'transport' else
@@ -142,11 +144,11 @@ def _safe_json(value, kind):
         candidate = value.get(key)
         if candidate is None or isinstance(candidate, str) and candidate in allowed:
             safe[key] = candidate
-    bools = ('effective_bypass', 'conditional_etag', 'conditional_modified_since') if kind == 'transport' else ('manual_hold',)
+    bools = ('effective_bypass', 'conditional_etag', 'conditional_modified_since', 'bypass_configured') if kind == 'transport' else ('manual_hold',)
     for key in bools:
         if value.get(key) is None or isinstance(value.get(key), bool):
             safe[key] = value.get(key)
-    ints = ('redirect_count', 'elapsed_ms') if kind == 'transport' else ('cooldown_level', 'access_denied_level', 'recovery_successes')
+    ints = ('redirect_count', 'elapsed_ms') if kind == 'transport' else ('cooldown_level', 'access_denied_level', 'recovery_successes', 'rate_recovery_successes', 'access_recovery_successes')
     for key in ints:
         candidate = value.get(key)
         if type(candidate) is int and 0 <= candidate <= 10**12:

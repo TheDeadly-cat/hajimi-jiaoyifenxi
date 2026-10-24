@@ -27,14 +27,36 @@ PROVIDER_ENVIRONMENT_NAMES = (
 )
 DISABLED_PROVIDERS = "openai,anthropic,deepseek,doubao,ark,qwen,glm,zhipu,google,gemini"
 EXPECTED_TOOLCHAIN = {"node": "v24.16.0", "npm": "11.13.0"}
+_PROXY_DISABLED = object()
 
 
 class PortableError(RuntimeError):
     pass
 
 
-def safe_environment(base=None):
+def safe_environment(base=None, *, feed_proxy_view=_PROXY_DISABLED):
     environment = dict(os.environ if base is None else base)
+    preserved_proxy = {}
+    if feed_proxy_view is not _PROXY_DISABLED:
+        # Called only for online news startup. Validate the effective stdlib
+        # environment-or-Windows-registry view before cleaning this process.
+        # Retain original env entries only; never synthesize registry entries,
+        # which would change urllib's environment-first bypass semantics.
+        from backend.news_feed_transport import (
+            FeedValidationError, feed_proxy_configuration, validate_bypass_value, validate_loopback_proxy,
+        )
+        try:
+            feed_proxy_configuration(feed_proxy_view)
+            for name, value in environment.items():
+                if name.upper() not in {"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"}:
+                    continue
+                if name.upper() == "NO_PROXY":
+                    validate_bypass_value(value)
+                elif value != "":
+                    validate_loopback_proxy(value)
+                preserved_proxy[name] = value
+        except FeedValidationError:
+            raise PortableError("proxy_configuration_error") from None
     secrets = {name.upper() for name in PROVIDER_ENVIRONMENT_NAMES}
     for name in tuple(environment):
         upper = name.upper()
@@ -48,6 +70,7 @@ def safe_environment(base=None):
         "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PIP_NO_INPUT": "1",
         "npm_config_audit": "false", "npm_config_fund": "false",
     })
+    environment.update(preserved_proxy)
     return environment
 
 

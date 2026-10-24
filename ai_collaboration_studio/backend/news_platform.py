@@ -447,6 +447,8 @@ class NewsPlatform:
         return {'decision':decision, 'not_before':_iso(source['not_before'] if not_before is None else not_before),
                 'cooldown_level':source['cooldown_level'], 'access_denied_level':source['access_denied_level'],
                 'recovery_successes':source['recovery_successes'], 'manual_hold':bool(source['manual_hold']),
+                'rate_recovery_successes':source['recovery_successes'],
+                'access_recovery_successes':source['access_recovery_successes'],
                 'retry_after_status':retry['status'] if retry else None,
                 'retry_after_kind':retry['kind'] if retry else None,
                 'server_not_before':_iso(retry['retry_at']) if retry and retry['retry_at'] is not None else None,
@@ -612,6 +614,7 @@ class NewsPlatform:
                     'tls_error':'来源安全连接验证失败，已保留已有消息。',
                     'connection_error':'来源连接失败，已保留已有消息。',
                     'redirect_blocked':'来源跳转超出允许范围，已保留已有消息。',
+                    'proxy_configuration_error':'本机来源代理配置不受支持或无效；未发送来源请求，也未自动改用直连。已有消息和冷却状态保留。',
                 }
                 error = messages.get(error_code, f'本次请求返回 HTTP {response_status}，已安排稍后重试。'
                                      if error_code == 'http_error' else '本次获取失败，已保留已有消息并安排稍后重试。')

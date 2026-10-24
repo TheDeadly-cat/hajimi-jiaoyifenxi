@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from .news_platform import _independent_database_path
 from .news_content_quality import (
     QUALITY_VERSION, INSTRUCTIONS as READING_INSTRUCTIONS, TEXT_FORMAT,
+    RSS_V2_QUALITY_VERSION, RSS_V2_INSTRUCTIONS, RSS_V2_TEXT_FORMAT,
     build_input, insufficient_result, validate_output,
 )
 
@@ -149,15 +150,27 @@ class NewsAnalysis:
         # old successful/failed/unknown attempts must remain visible and spent.
         return hashlib.sha256((MODEL + LEGACY_INSTRUCTIONS + NewsAnalysis._input(item)).encode()).hexdigest()
 
+    @staticmethod
+    def _rss_v2_fingerprint(item):
+        # Exact v2 identity. A new wording contract is not permission to replace
+        # a saved result or charge for the same material again.
+        contract = json.dumps(RSS_V2_TEXT_FORMAT, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256((MODEL + RSS_V2_QUALITY_VERSION + RSS_V2_INSTRUCTIONS
+                               + contract + NewsAnalysis._input(item)).encode()).hexdigest()
+
     def _saved(self, db, item):
-        current, legacy = self._fingerprint(item), self._legacy_fingerprint(item)
-        for fingerprint in (current, legacy):
+        current, previous, legacy = self._fingerprint(item), self._rss_v2_fingerprint(item), self._legacy_fingerprint(item)
+        for fingerprint in (current, previous, legacy):
             row = db.execute("SELECT status,result FROM runs WHERE fingerprint=?", (fingerprint,)).fetchone()
             if row is not None:
                 value = {"status": row["status"], **json.loads(row["result"])}
                 if fingerprint == legacy:
                     value.update(legacy=True, quality_version="legacy_unchecked", semantic_review_required=True,
                         legacy_notice="这是已保存的旧版分析，未经过新的原句检查；保留原结果，不自动重新付费分析。")
+                elif fingerprint == previous:
+                    value.update(legacy=True, quality_version=RSS_V2_QUALITY_VERSION,
+                        semantic_review_required=True,
+                        legacy_notice="这是已保存的RSS v2分析，未经过v3关系措辞检查；保留原结果，不自动重新付费分析。")
                 return value
         return None
 
@@ -253,7 +266,7 @@ class NewsAnalysis:
             value["model"] = MODEL
             status = "completed"
         except Exception:
-            status, value = "failed", {"error": "本次分析失败或内容未通过原句检查；为避免重复扣费，不自动重试。",
+            status, value = "failed", {"error": "本次分析失败或内容未通过原句及关系措辞检查；为避免重复扣费，不自动重试。",
                 "quality_version": QUALITY_VERSION, "semantic_review_required": True,
                 "scope": material["scope"], "freshness": material["freshness"],
                 "quality_checked_at": material["checked_at"]}

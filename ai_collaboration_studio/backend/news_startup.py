@@ -46,6 +46,12 @@ class NewsStartup:
         self._lock = threading.RLock()
         self.directory = None
         self._unavailable = ""
+        if os.environ.get("AI_STUDIO_PORTABLE_NEWS") == "1":
+            # The historical shortcut targets port 8770 and a parent database.
+            # Do not register it for an isolated instance with different data,
+            # port and proxy inheritance. Existing registrations are untouched.
+            self._unavailable = "独立运行实例的登录恢复尚未绑定当前数据目录和端口，暂不支持注册；现有启动入口保持不变。"
+            return
         try:
             self.app = _safe(app)
             self.data = _safe(data_directory)

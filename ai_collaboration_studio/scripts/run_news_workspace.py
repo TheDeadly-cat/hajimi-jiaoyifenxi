@@ -17,6 +17,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import urllib.request
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
@@ -91,8 +92,18 @@ def main(argv=None):
         reservation = portable.reserve_port(args.port)
         if args.receipt and portable.unaliased_path(args.receipt).exists():
             raise portable.PortableError("receipt_already_exists")
-        environment = portable.safe_environment()
+        proxy_view = None
+        if not args.offline:
+            try:
+                # Use the standard effective view, including Windows registry
+                # settings, before environment sanitization. Never log it.
+                proxy_view = urllib.request.getproxies()
+            except Exception:
+                raise portable.PortableError("proxy_configuration_error") from None
+        environment = (portable.safe_environment() if args.offline
+                       else portable.safe_environment(feed_proxy_view=proxy_view))
         environment.update({"AI_STUDIO_RUNTIME_DIR": str(root),
+                            "AI_STUDIO_PORTABLE_NEWS": "1",
                             "AI_STUDIO_DATABASE_PATH": str(root / portable.DATABASE_NAMES[0]),
                             "AI_STUDIO_HOST": "127.0.0.1", "AI_STUDIO_PORT": str(args.port)})
         os.environ.clear()
