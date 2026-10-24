@@ -41,6 +41,19 @@ configured. Local `.env` files are skipped, supported inherited provider keys
 and signing secrets are cleared, and inherited runtime/database/port overrides
 are discarded before applying the explicit arguments.
 
+For online startup, supported original proxy environment variables and explicit
+NO_PROXY intent are retained after validation. The effective standard-library
+view may come from Windows registry settings; it is not copied into environment
+variables, which would change Windows bypass precedence. Every proxy variable
+retained for the whole application must be supported, including an unused ALL
+or HTTP value; invalid values cause startup refusal, not silent removal or direct
+fallback. Offline/bootstrap/test defaults still clear proxy environment values.
+See [the source and wording repair record](NEWS_SOURCE_REVIEW_REPAIR_20261025.md).
+
+Login auto-start registration is unavailable in portable mode: the historical
+shortcut does not bind this instance's data directory and port. Enabling or
+disabling it is refused without inspecting or changing an existing registration.
+
 Choose another independent location and port with `--data-root` and `--port`.
 Ports 8770, 11111 and 18787 are rejected. An occupied port causes refusal;
 no existing process is stopped. `--initialize-new` requires a new or completely
