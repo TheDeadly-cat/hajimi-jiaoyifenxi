@@ -168,12 +168,13 @@ class SavedV2CompatibilityTests(unittest.TestCase):
             self.calls.append("synthetic_attempt")
             output = neutral_output(item)
             output["summary"] = "监管机构宣布终止针对合成银行的行动。"
-            return SimpleNamespace(ok=True, content=json.dumps(output, ensure_ascii=False))
+            return SimpleNamespace(ok=True, model="doubao-seed-2-1-pro-260915", content=json.dumps(output, ensure_ascii=False))
         self.app._generate = fake_generate
         self.app.configure(FAKE_KEY, False, True)
         self.app._analyze(item["id"])
         saved = self.app.result(item)
         self.assertEqual(saved["status"], "failed")
+        self.assertEqual(saved["error_code"], "analysis_failed")
         self.assertEqual(saved["quality_version"], QUALITY_VERSION)
         self.app._analyze(item["id"])
         self.assertEqual(self.app.request(item["id"])["status"], "failed")

@@ -108,6 +108,29 @@ class NewsPlatformRouteTests(unittest.TestCase):
         self.assertFalse(body["ok"])
         self.assertNotIn("private diagnostic", str(body))
 
+    def test_explicit_analysis_route_is_forwarded_without_rewriting_key_or_route(self):
+        payload = {"api_key": "synthetic-deepseek-key", "automatic": False,
+                   "acknowledge_budget": True, "provider": "deepseek", "model": "deepseek-flash"}
+        self.runtime.ai.configure.return_value = {"configured": True, "provider": "deepseek", "model": "deepseek-flash"}
+        body, status = news_response(self.runtime, "/api/news/ai/session", payload=payload, method="POST")
+        self.assertEqual(status, 200)
+        self.runtime.ai.configure.assert_called_once_with(**payload)
+        self.assertEqual(body["ai"]["provider"], "deepseek")
+        self.assertNotIn(payload["api_key"], str(body))
+
+    def test_analysis_route_payload_remains_closed_and_model_needs_provider(self):
+        base = {"api_key": "synthetic-key", "automatic": False, "acknowledge_budget": True}
+        extras = ({"model": "deepseek-flash"}, {"provider": None}, {"provider": ["deepseek"]},
+                  {"provider": "deepseek", "model": None},
+                  {"provider": "deepseek", "model": "deepseek-flash", "base_url": "https://example.com"},
+                  {"provider": "deepseek", "retry": True})
+        for extra in extras:
+            with self.subTest(extra=extra):
+                body, status = news_response(self.runtime, "/api/news/ai/session", payload={**base, **extra}, method="POST")
+                self.assertEqual(status, 400)
+                self.assertNotIn(base["api_key"], str(body))
+        self.runtime.ai.configure.assert_not_called()
+
     def test_material_quality_is_available_without_ai_and_does_not_mutate_saved_rows(self):
         original = {"id": "news-123", "title": "Board approves a conditional expansion", "excerpt": "", "published_at": None, "discovered_at": "2026-10-19T12:00:00Z"}
         self.runtime.ai = None

@@ -5,6 +5,21 @@ import "./NewsWorkspace.css";
 import { MaterialQuality, AnalysisEvidence } from "./NewsContentQuality";
 
 const PAGE_SIZE = 100;
+const AI_MODELS = [
+  { provider: "doubao", model: "doubao-seed-2-1-pro-260915", label: "豆包" },
+  { provider: "deepseek", model: "deepseek-flash", label: "DeepSeek Flash" },
+  { provider: "deepseek", model: "deepseek-v4-pro", label: "DeepSeek Pro" },
+];
+const modelId = (entry) => `${entry.provider}:${entry.model}`;
+function savedModel(entry) {
+  return AI_MODELS.find((choice) => choice.model === entry?.model && (!entry?.provider || choice.provider === entry.provider));
+}
+function savedModelLabel(entry) {
+  const known = savedModel(entry);
+  if (known) return known.label;
+  if (!entry?.provider && !entry?.model) return "来源未记录";
+  return [entry.provider, entry.model].filter(Boolean).map((value) => String(value).slice(0, 100)).join(" · ");
+}
 const tabs = [{ id: "latest", label: "最新消息" }, { id: "attention", label: "值得关注" }, { id: "unread", label: "未读" }];
 const sourceStates = { never: "尚未检查", ok: "最近一次检查成功", error: "抓取异常", fetching: "正在抓取", interrupted_unknown: "上次检查中断，结果未确认" };
 const checkOutcomes = { started: "检查中", success: "检查成功", not_modified: "来源未更新", failed: "检查失败", interrupted_unknown: "中断，结果未确认" };
@@ -128,12 +143,13 @@ function RuntimeHistory({ overview, overviewError, pending, startupError, onStar
   </details>;
 }
 
-function AIReading({ analysis, materialQuality, configured, busy, onAnalyze }) {
+function AIReading({ analysis, materialQuality, configured, routeLabel, busy, onAnalyze }) {
   const status = analysis?.status;
   const insufficient = materialQuality?.can_analyze === false;
   return <section className="news-ai-reading">
-    <h3><span className="news-ai-title"><Sparkles size={16} aria-hidden="true" />豆包分析</span></h3>
+    <h3><span className="news-ai-title"><Sparkles size={16} aria-hidden="true" />{analysis ? analysis.analysis_performed === false ? "本机材料检查" : `${savedModelLabel(analysis)} · 分析记录` : `${routeLabel}分析`}</span></h3>
     {analysis ? <>
+      {analysis.analysis_performed !== false ? <p className="news-ai-provenance">保存时使用：{savedModelLabel(analysis)}{analysis.model ? `（${String(analysis.model).slice(0, 100)}）` : ""}。切换模型仍保留这份记录，不会自动重新分析或扣费。</p> : null}
       <p className="news-ai-state">{({ completed: "分析已完成", success: "分析已完成", queued: "已加入分析队列", pending: "正在分析", running: "正在分析", failed: "分析未完成", material_insufficient: "材料不足，未发送模型请求", unknown: "结果未知，不会自动重试" })[String(status).toLowerCase()] || "分析状态待确认"}</p>
       {analysis.summary ? <p>{analysis.summary}</p> : null}
       {Array.isArray(analysis.key_points) && analysis.key_points.length ? <ul>{analysis.key_points.map((point, index) => <li key={index}>{point}</li>)}</ul> : null}
@@ -141,7 +157,7 @@ function AIReading({ analysis, materialQuality, configured, busy, onAnalyze }) {
       <AnalysisEvidence analysis={analysis} />
       {analysis.error ? <p className="news-source-error">{analysis.error}</p> : null}
       <small>{analysis.analysis_performed === false ? "本机材料检查，未调用 AI；请打开原文核对。" : "AI 根据本条来源内容生成，结论仍需结合原文核对。"}</small>
-    </> : <><p>{insufficient ? "当前订阅材料不足，请先阅读官方原文；不会发送模型请求。" : configured ? "需要进一步理解这条消息时，可使用本次已确认的额度分析。" : "AI 分析尚未启用；上方的本机整理不消耗模型额度。"}</p><button type="button" className="news-button" disabled={!configured || busy || insufficient} onClick={onAnalyze}>{busy ? <LoaderCircle className="news-spin" size={16} aria-hidden="true" /> : <Sparkles size={16} aria-hidden="true" />}用豆包分析这条</button></>}
+    </> : <><p>{insufficient ? "当前订阅材料不足，请先阅读官方原文；不会发送模型请求。" : configured ? "需要进一步理解这条消息时，可使用本次已确认的额度分析。" : "AI 分析尚未启用；上方的本机整理不消耗模型额度。"}</p><button type="button" className="news-button" disabled={!configured || busy || insufficient} onClick={onAnalyze}>{busy ? <LoaderCircle className="news-spin" size={16} aria-hidden="true" /> : <Sparkles size={16} aria-hidden="true" />}用{routeLabel}分析这条</button></>}
   </section>;
 }
 
@@ -171,10 +187,16 @@ export function NewsWorkspace({ onOpenRooms, onPrepareResearch, rooms = [], apiC
   const [researchBusy, setResearchBusy] = useState(false);
   const [researchError, setResearchError] = useState("");
   const [ai, setAI] = useState(null);
+  const [requestedModel, setRequestedModel] = useState(null);
   const [aiKey, setAIKey] = useState("");
   const [automaticAI, setAutomaticAI] = useState(false);
   const [budgetAcknowledged, setBudgetAcknowledged] = useState(false);
   const [aiError, setAIError] = useState("");
+  const modelOptions = Array.isArray(ai?.available_models) ? AI_MODELS.filter((choice) => ai.available_models.some((entry) => entry.provider === choice.provider && entry.model === choice.model)) : [AI_MODELS[0]];
+  const activeModel = savedModel(ai) || (!ai?.provider && !ai?.model ? AI_MODELS[0] : null);
+  const selectedModel = requestedModel ? modelOptions.find((choice) => modelId(choice) === requestedModel) : ai?.configured && activeModel && modelOptions.some((choice) => modelId(choice) === modelId(activeModel)) ? activeModel : modelOptions[0];
+  const changingModel = ai?.configured === true && selectedModel && (!activeModel || modelId(selectedModel) !== modelId(activeModel));
+  const aiBusy = !!pending || ai?.busy === true || ["queued", "pending", "running"].includes(detail?.ai_analysis?.status);
   const mounted = useRef(true);
   const itemRequest = useRef({ sequence: 0, controller: null });
   const overviewRequest = useRef({ sequence: 0, controller: null });
@@ -277,8 +299,12 @@ export function NewsWorkspace({ onOpenRooms, onPrepareResearch, rooms = [], apiC
         const [itemPayload, statusPayload] = await Promise.all([apiClient.newsItem(selectedId, controller.signal), apiClient.newsAIStatus(controller.signal)]);
         if (controller.signal.aborted || !mounted.current || selectionRef.current !== selectedId) return;
         if (statusPayload.ai) setAI(statusPayload.ai);
+        if (statusPayload.ai?.error) setAIError(statusPayload.ai.error);
         if (itemPayload.item?.id === selectedId && itemPayload.item.ai_analysis) setDetail(itemPayload.item);
-        else if (statusPayload.ai?.error) { setAIError(statusPayload.ai.error); setDetail((current) => current?.id === selectedId ? { ...current, ai_analysis: null } : current); }
+        else if (itemPayload.item?.id === selectedId && itemPayload.item.ai_analysis === null && detail.ai_analysis.status === "queued" && statusPayload.ai?.configured === false && statusPayload.ai?.busy === false) {
+          setDetail(itemPayload.item);
+          setNotice("排队分析已取消，尚无保存结果。可重新选择模型并确认启用，之后需手动发起分析。");
+        }
       } catch (error) { if (!controller.signal.aborted && mounted.current) setAIError(message(error, "暂时无法读取分析状态，不会重发模型请求。")); }
       finally { inFlight = false; }
     }, 2500);
@@ -335,16 +361,17 @@ export function NewsWorkspace({ onOpenRooms, onPrepareResearch, rooms = [], apiC
   };
   const aiAction = async (kind, event) => {
     event?.preventDefault();
-    if (pendingRef.current || (kind === "configure" && (!aiKey.trim() || !budgetAcknowledged))) return;
+    if (pendingRef.current || (kind === "configure" && (!aiKey.trim() || !budgetAcknowledged || !selectedModel || aiBusy))) return;
     const keyForRequest = aiKey.trim();
+    const routeForRequest = selectedModel;
     const itemId = detail?.id;
-    setAIKey(""); setAIError(""); setNotice("");
+    setAIKey(""); setBudgetAcknowledged(false); setAIError(""); setNotice("");
     pendingRef.current = true; setPending(`ai-${kind}`);
     const controller = new AbortController(); actionController.current = controller;
     overviewRequest.current.controller?.abort(); ++overviewRequest.current.sequence;
     try {
       const payload = kind === "configure"
-        ? await apiClient.newsAIConfigure({ api_key: keyForRequest, automatic: automaticAI, acknowledge_budget: true }, controller.signal)
+        ? await apiClient.newsAIConfigure({ api_key: keyForRequest, provider: routeForRequest.provider, model: routeForRequest.model, automatic: automaticAI, acknowledge_budget: true }, controller.signal)
         : kind === "clear" ? await apiClient.newsAIClear(controller.signal)
           : await apiClient.newsAIAnalyze(itemId, controller.signal);
       if (!mounted.current) return;
@@ -355,8 +382,9 @@ export function NewsWorkspace({ onOpenRooms, onPrepareResearch, rooms = [], apiC
         setNotice("分析请求已返回，请查看这条消息的 AI 分析状态。");
       } else {
         if (!payload.ai || typeof payload.ai.configured !== "boolean") throw new Error("AI 配置状态尚未确认，请重新读取。");
-        setAI(payload.ai); setBudgetAcknowledged(false);
-        setNotice(kind === "clear" ? "当前运行中的密钥已清除，后续 AI 分析已停止。" : "AI 分析已启用，密钥仅在本次服务运行期间有效。");
+        if (kind === "configure" && (payload.ai.configured !== true || (payload.ai.provider && payload.ai.provider !== routeForRequest.provider) || (payload.ai.model && payload.ai.model !== routeForRequest.model) || (routeForRequest.provider !== "doubao" && (!payload.ai.provider || !payload.ai.model)))) throw new Error("所选分析路线尚未确认，请重新读取状态；不会自动重试。");
+        setAI(payload.ai); setRequestedModel(kind === "configure" ? null : requestedModel);
+        setNotice(kind === "clear" ? "当前运行中的密钥已清除，后续 AI 分析已停止。" : `${routeForRequest.label}分析已启用，密钥仅在本次服务运行期间有效。`);
       }
       void loadOverview();
     } catch (error) { if (mounted.current && !controller.signal.aborted) setAIError(message(error, "AI 操作尚未确认，不会自动重试。")); }
@@ -415,14 +443,17 @@ export function NewsWorkspace({ onOpenRooms, onPrepareResearch, rooms = [], apiC
     <details className="news-ai-settings">
       <summary><KeyRound size={15} aria-hidden="true" /><span>{ai?.configured ? "AI 分析已配置" : "配置 AI 分析"}</span><small>{ai?.configured ? `${ai.calls_reserved ?? 0} / ${ai.max_calls ?? 36} 次` : "可选 · 免费抓取不需要密钥"}</small><ChevronDown size={14} aria-hidden="true" /></summary>
       <div className="news-ai-settings-body">
-        <p>豆包模型：doubao-seed-2-1-pro-260915。密钥仅当前运行有效，最长 24 小时，不保存到本地文件。每次调用可能产生费用。</p>
-        <p>近 24 小时累计最多 <strong>36 次</strong>，应用预约预算 <strong>3 元</strong>，失败不重试。预约金额用于限制发送，实际费用以供应商账单为准。</p>
-        {ai?.configured ? <div className="news-ai-configured"><p>已预约 {ai.calls_reserved ?? 0} / {ai.max_calls ?? 36} 次 · 已预约费用 {Number(ai.reserved_cny || 0).toFixed(2)} / {Number(ai.budget_cny || 3).toFixed(2)} 元 · {ai.automatic ? "自动分析此后新增消息" : "仅手动选择消息分析"}</p><button className="news-button" type="button" disabled={!!pending} onClick={() => void aiAction("clear")}>{pending === "ai-clear" ? "正在清除…" : "清除密钥并停止 AI"}</button></div> : <form onSubmit={(event) => void aiAction("configure", event)}>
-          <label className="news-ai-key"><span>豆包 API key</span><input type="password" autoComplete="off" spellCheck={false} value={aiKey} onChange={(event) => setAIKey(event.target.value)} placeholder="仅在本机输入" maxLength={1000} disabled={!!pending} /></label>
-          <label className="news-ai-check"><input type="checkbox" checked={automaticAI} onChange={(event) => setAutomaticAI(event.target.checked)} disabled={!!pending} /><span>自动分析此后新增消息</span></label>
-          <label className="news-ai-check"><input type="checkbox" checked={budgetAcknowledged} onChange={(event) => setBudgetAcknowledged(event.target.checked)} disabled={!!pending} /><span>我确认上述调用次数、预算和用途</span></label>
-          <button type="submit" className="news-button news-button-primary" disabled={!aiKey.trim() || !budgetAcknowledged || !!pending}>{pending === "ai-configure" ? "正在启用…" : "确认额度并启用"}</button>
-        </form>}
+        <label className="news-ai-model"><span>新闻分析模型</span><select aria-label="新闻分析模型" aria-describedby="news-ai-model-help" value={selectedModel ? modelId(selectedModel) : ""} disabled={aiBusy || !modelOptions.length} onChange={(event) => { if (pendingRef.current || aiBusy) return; setRequestedModel(event.target.value); setAIKey(""); setBudgetAcknowledged(false); setAutomaticAI(false); setAIError(""); setNotice(""); }}>{modelOptions.map((choice) => <option key={modelId(choice)} value={modelId(choice)}>{choice.label}</option>)}</select></label>
+        <p id="news-ai-model-help">{changingModel ? `当前仍启用${activeModel?.label || "原路线"}；重新输入对应密钥并确认后才会切换。` : "选择模型后，在本机输入对应平台的密钥。"}切换模型不会自动重新分析已保存的结果。</p>
+        <p>各模型共享近 24 小时最多 <strong>36 次</strong>、<strong>3 元</strong>预约估算，失败不重试。密钥仅本次运行有效，最长 24 小时，不保存到文件。</p>
+        <details className="news-ai-budget-help"><summary>费用如何估算</summary><p>DeepSeek 按美元峰价，以 10 元／美元估算预约金额；这不是实时汇率，也不是供应商账单的硬上限。实际费用以供应商账单为准，切换模型不会重置已用额度。</p></details>
+        {ai?.configured ? <div className="news-ai-configured"><p>当前启用：{activeModel?.label || savedModelLabel(ai)} · 已预约 {ai.calls_reserved ?? 0} / {ai.max_calls ?? 36} 次 · 已预约费用 {Number(ai.reserved_cny || 0).toFixed(2)} / {Number(ai.budget_cny || 3).toFixed(2)} 元 · {ai.automatic ? "自动分析此后新增消息" : "仅手动选择消息分析"}</p><button className="news-button" type="button" disabled={!!pending} onClick={() => void aiAction("clear")}>{pending === "ai-clear" ? "正在清除…" : "清除密钥并停止 AI"}</button></div> : null}
+        {!ai?.configured || changingModel ? <form onSubmit={(event) => void aiAction("configure", event)}>
+          <label className="news-ai-key"><span>{selectedModel?.provider === "deepseek" ? "DeepSeek" : "豆包"} API key</span><input type="password" autoComplete="off" spellCheck={false} value={aiKey} onChange={(event) => setAIKey(event.target.value)} placeholder="仅在本机输入" maxLength={1000} disabled={aiBusy || !selectedModel} /></label>
+          <label className="news-ai-check"><input type="checkbox" checked={automaticAI} onChange={(event) => setAutomaticAI(event.target.checked)} disabled={aiBusy} /><span>自动分析此后新增消息</span></label>
+          <label className="news-ai-check"><input type="checkbox" checked={budgetAcknowledged} onChange={(event) => setBudgetAcknowledged(event.target.checked)} disabled={aiBusy} /><span>我确认上述调用次数、预算和用途</span></label>
+          <button type="submit" className="news-button news-button-primary" disabled={!aiKey.trim() || !budgetAcknowledged || aiBusy || !selectedModel}>{pending === "ai-configure" ? "正在启用…" : changingModel ? "确认额度并切换" : "确认额度并启用"}</button>
+        </form> : null}
         {ai?.error ? <p role="status">{ai.error}</p> : null}
       </div>
     </details>
@@ -445,7 +476,7 @@ export function NewsWorkspace({ onOpenRooms, onPrepareResearch, rooms = [], apiC
       </div>
       <aside className="news-detail" aria-label="消息详情">
         {selectedId ? <div className="news-detail-tools"><button type="button" className="news-inline-button" onClick={closeDetail}><ArrowLeft size={16} aria-hidden="true" />返回列表</button>{detail ? <button type="button" className="news-inline-button" disabled={detail.read || !!pending} onClick={() => void markRead()}><Check size={16} aria-hidden="true" />{pending === "read" ? "正在保存…" : detail.read ? "已读" : "标为已读"}</button> : null}</div> : null}
-        {detailLoading ? <div className="news-detail-loading"><Loading>正在读取消息详情…</Loading></div> : detailError ? <div className="news-empty" role="alert"><h2 ref={detailHeading} tabIndex={-1}>详情暂时不可用</h2><p>{detailError}</p><button className="news-button" type="button" onClick={() => setDetailRefresh((value) => value + 1)}>重新读取</button></div> : detail ? <article className="news-detail-body"><div className="news-detail-source">{detail.source_name}<span>{detail.category_label || "其他"}</span></div><h2 tabIndex={-1} ref={detailHeading}>{detail.title}</h2><dl className="news-timestamps"><div><dt>{detail.material_quality?.freshness?.clock_anomaly ? "来源标注时间（未确认）" : detail.material_quality?.freshness?.revision_after_discovery ? "当前版本标注时间" : "原文发布"}</dt><dd>{timeLabel(detail.published_at, "未提供")}</dd></div><div><dt>本机发现</dt><dd>{timeLabel(detail.discovered_at)}</dd></div></dl><MaterialQuality quality={detail.material_quality} /><section className="news-analysis"><h3>本机整理要点 <span>未使用 AI</span></h3><p>{detail.summary || "来源没有提供可整理的摘要，请查看原文。"}</p>{detail.keywords?.length ? <div className="news-keywords">{detail.keywords.map((word) => <span key={word}>{word}</span>)}</div> : null}<small>按原文与关键词整理，关注标签不代表事实已核验。</small></section><section className="news-excerpt"><h3>来源摘录</h3><p>{detail.excerpt || "该来源未提供正文摘录。"}</p></section>{detail.limitations?.length ? <section className="news-limitations"><h3>阅读提示</h3><ul>{detail.limitations.map((entry, index) => <li key={`${index}-${entry}`}>{entry}</li>)}</ul></section> : null}{originalUrl ? <a className="news-button news-original" href={originalUrl} target="_blank" rel="noopener noreferrer">打开官方原文<ArrowUpRight size={17} aria-hidden="true" /></a> : <p>原文链接不可用。</p>}<AIReading analysis={detail.ai_analysis} materialQuality={detail.material_quality} configured={!!ai?.configured} busy={pending === "ai-analyze"} onAnalyze={() => void aiAction("analyze")} />{typeof onPrepareResearch === "function" ? <section className="news-research-handoff" aria-label="带到讨论房间"><h3>继续研究这条消息</h3><p>将已保存的摘录带入房间共享资料，核对后再保存；此操作不会调用 AI。</p>{!researchOpen ? <button ref={researchTrigger} className="news-button" type="button" onClick={() => { setResearchRoomId(""); setResearchError(""); setResearchOpen(true); }}><MessageSquare size={16} aria-hidden="true" />带到讨论房间</button> : <div className="news-research-picker"><label><span>选择接收资料的房间</span><select ref={researchRoomSelect} aria-label="选择接收资料的房间" value={researchRoomId} disabled={researchBusy} onChange={(event) => setResearchRoomId(event.target.value)}><option value="">请选择房间</option>{rooms.filter((entry) => entry?.id && entry?.title).map((entry) => <option key={entry.id} value={entry.id}>{entry.title}</option>)}</select></label>{!rooms.length ? <p>还没有讨论房间。可先通过页面上方“讨论房间”创建，再回来添加这条消息。</p> : null}<div className="news-research-actions"><button className="news-button news-button-primary" type="button" disabled={!researchRoomId || researchBusy} onClick={() => void prepareResearch()}>{researchBusy ? "正在打开房间…" : "打开资料草稿"}</button><button className="news-button" type="button" onClick={cancelResearch}>取消交接</button></div>{researchError ? <p className="news-source-error" role="alert">{researchError}</p> : null}</div>}</section> : <p className="news-ai-note">需要综合多条消息研判，可进入讨论房间继续研究。</p>}</article> : <div className="news-empty news-detail-empty"><Search size={32} aria-hidden="true" /><h2>选择一条消息开始阅读</h2><p>这里会展示来源摘录、整理要点和原文入口。</p><span><Clock3 size={15} aria-hidden="true" />发布时间与发现时间分别记录</span></div>}
+        {detailLoading ? <div className="news-detail-loading"><Loading>正在读取消息详情…</Loading></div> : detailError ? <div className="news-empty" role="alert"><h2 ref={detailHeading} tabIndex={-1}>详情暂时不可用</h2><p>{detailError}</p><button className="news-button" type="button" onClick={() => setDetailRefresh((value) => value + 1)}>重新读取</button></div> : detail ? <article className="news-detail-body"><div className="news-detail-source">{detail.source_name}<span>{detail.category_label || "其他"}</span></div><h2 tabIndex={-1} ref={detailHeading}>{detail.title}</h2><dl className="news-timestamps"><div><dt>{detail.material_quality?.freshness?.clock_anomaly ? "来源标注时间（未确认）" : detail.material_quality?.freshness?.revision_after_discovery ? "当前版本标注时间" : "原文发布"}</dt><dd>{timeLabel(detail.published_at, "未提供")}</dd></div><div><dt>本机发现</dt><dd>{timeLabel(detail.discovered_at)}</dd></div></dl><MaterialQuality quality={detail.material_quality} /><section className="news-analysis"><h3>本机整理要点 <span>未使用 AI</span></h3><p>{detail.summary || "来源没有提供可整理的摘要，请查看原文。"}</p>{detail.keywords?.length ? <div className="news-keywords">{detail.keywords.map((word) => <span key={word}>{word}</span>)}</div> : null}<small>按原文与关键词整理，关注标签不代表事实已核验。</small></section><section className="news-excerpt"><h3>来源摘录</h3><p>{detail.excerpt || "该来源未提供正文摘录。"}</p></section>{detail.limitations?.length ? <section className="news-limitations"><h3>阅读提示</h3><ul>{detail.limitations.map((entry, index) => <li key={`${index}-${entry}`}>{entry}</li>)}</ul></section> : null}{originalUrl ? <a className="news-button news-original" href={originalUrl} target="_blank" rel="noopener noreferrer">打开官方原文<ArrowUpRight size={17} aria-hidden="true" /></a> : <p>原文链接不可用。</p>}<AIReading analysis={detail.ai_analysis} materialQuality={detail.material_quality} configured={!!ai?.configured && !!activeModel} routeLabel={ai?.configured ? activeModel?.label || "当前路线待确认" : selectedModel?.label || "AI"} busy={aiBusy} onAnalyze={() => void aiAction("analyze")} />{typeof onPrepareResearch === "function" ? <section className="news-research-handoff" aria-label="带到讨论房间"><h3>继续研究这条消息</h3><p>将已保存的摘录带入房间共享资料，核对后再保存；此操作不会调用 AI。</p>{!researchOpen ? <button ref={researchTrigger} className="news-button" type="button" onClick={() => { setResearchRoomId(""); setResearchError(""); setResearchOpen(true); }}><MessageSquare size={16} aria-hidden="true" />带到讨论房间</button> : <div className="news-research-picker"><label><span>选择接收资料的房间</span><select ref={researchRoomSelect} aria-label="选择接收资料的房间" value={researchRoomId} disabled={researchBusy} onChange={(event) => setResearchRoomId(event.target.value)}><option value="">请选择房间</option>{rooms.filter((entry) => entry?.id && entry?.title).map((entry) => <option key={entry.id} value={entry.id}>{entry.title}</option>)}</select></label>{!rooms.length ? <p>还没有讨论房间。可先通过页面上方“讨论房间”创建，再回来添加这条消息。</p> : null}<div className="news-research-actions"><button className="news-button news-button-primary" type="button" disabled={!researchRoomId || researchBusy} onClick={() => void prepareResearch()}>{researchBusy ? "正在打开房间…" : "打开资料草稿"}</button><button className="news-button" type="button" onClick={cancelResearch}>取消交接</button></div>{researchError ? <p className="news-source-error" role="alert">{researchError}</p> : null}</div>}</section> : <p className="news-ai-note">需要综合多条消息研判，可进入讨论房间继续研究。</p>}</article> : <div className="news-empty news-detail-empty"><Search size={32} aria-hidden="true" /><h2>选择一条消息开始阅读</h2><p>这里会展示来源摘录、整理要点和原文入口。</p><span><Clock3 size={15} aria-hidden="true" />发布时间与发现时间分别记录</span></div>}
       </aside>
     </section>
   </main>;

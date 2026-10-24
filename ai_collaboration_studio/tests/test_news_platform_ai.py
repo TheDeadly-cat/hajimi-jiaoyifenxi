@@ -218,7 +218,7 @@ class NewsAnalysisTests(unittest.TestCase):
             with self.subTest(index=index):
                 item_id = f"bad-{index}"
                 self.news.items[item_id] = item(item_id)
-                self.app._generate = lambda *args, value=payload: SimpleNamespace(ok=True, content=json.dumps(value))
+                self.app._generate = lambda *args, value=payload: SimpleNamespace(ok=True, content=json.dumps(value), model=MODEL)
                 self.app._analyze(item_id)
                 self.assertEqual(self.app.result(self.news.items[item_id])["status"], "failed")
         self.assertEqual(self.app.status()["calls_reserved"], len(invalid))
@@ -373,21 +373,20 @@ class NewsAnalysisTests(unittest.TestCase):
         self.assertEqual(self.app.status()['calls_reserved'], 1)
 
     def test_provider_adapter_uses_same_strict_contract_and_existing_output_cap(self):
-        observed = {}
-        def factory(**configuration):
-            observed['configuration'] = configuration
-            def generate(**request):
-                observed['request'] = request
-                return valid_response()
-            return SimpleNamespace(_generate=generate)
-        fake_module = SimpleNamespace(DoubaoProvider=factory)
-        with patch.dict('sys.modules', {'backend.providers.doubao_provider': fake_module}):
-            NewsAnalysis._doubao(FAKE_KEY, 'isolated fixture input')
-        self.assertEqual(observed['request']['text_format'], TEXT_FORMAT)
-        self.assertIs(observed['request']['text_format']['strict'], True)
-        self.assertEqual(observed['request']['max_output_tokens'], 900)
-        self.assertEqual(observed['request']['timeout_seconds'], 45)
-        self.assertEqual(observed['request']['model'], MODEL)
+        from backend import news_analysis_providers as providers
+        with patch.object(providers, 'generate_response', return_value=valid_response()) as generate:
+            with patch.dict('sys.modules', {'backend.config': None}):
+                NewsAnalysis._doubao(FAKE_KEY, 'isolated fixture input')
+        provider, model, key, body = generate.call_args.args
+        self.assertEqual((provider, model, key), ('doubao', MODEL, FAKE_KEY))
+        self.assertEqual(body['text']['format'], TEXT_FORMAT)
+        self.assertIs(body['text']['format']['strict'], True)
+        self.assertEqual(body['max_output_tokens'], 900)
+        self.assertEqual(providers.REQUEST_TIMEOUT_SECONDS, 45)
+        self.assertEqual(body['model'], MODEL)
+        self.assertEqual(body['thinking'], {'type': 'disabled'})
+        self.assertFalse(body['store'])
+        self.assertNotIn('tools', body)
         self.assertEqual(MAX_CALLS, 36)
         self.assertEqual(BUDGET_MICRO_CNY, 3_000_000)
 

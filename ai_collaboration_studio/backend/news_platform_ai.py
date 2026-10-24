@@ -1,4 +1,4 @@
-"""Optional, bounded Doubao analysis. Keys live only in this process."""
+"""Optional, bounded news analysis. Keys live only in this process."""
 from __future__ import annotations
 
 import copy
@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from .news_platform import _independent_database_path
+from . import news_analysis_providers as analysis_providers
 from .news_content_quality import (
     QUALITY_VERSION, INSTRUCTIONS as READING_INSTRUCTIONS, TEXT_FORMAT,
     RSS_V2_QUALITY_VERSION, RSS_V2_INSTRUCTIONS, RSS_V2_TEXT_FORMAT,
@@ -37,7 +38,9 @@ class NewsAnalysis:
         self.path, self.news = _independent_database_path(path), news
         self.path.parent.mkdir(parents=True, exist_ok=True)
         _independent_database_path(path)
-        self._generate = generate or self._doubao
+        self._generate = generate
+        self._provider, self._model = "doubao", MODEL
+        self._generation = 0
         self._lock = threading.RLock()
         self._execution_lock = threading.Lock()
         self._key = ""
@@ -51,12 +54,17 @@ class NewsAnalysis:
         self._queue = queue.Queue(maxsize=36)
         self._thread = None
         with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
             app_id = db.execute("PRAGMA application_id").fetchone()[0]
             tables = db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             if app_id != APPLICATION_ID and (app_id != 0 or tables):
                 raise ValueError("news_analysis_database_must_be_independent")
             db.execute(f"PRAGMA application_id={APPLICATION_ID}")
             db.execute("CREATE TABLE IF NOT EXISTS runs (fingerprint TEXT PRIMARY KEY,item_id TEXT NOT NULL,created REAL NOT NULL,reserved INTEGER NOT NULL,status TEXT NOT NULL,result TEXT NOT NULL DEFAULT '{}')")
+            columns = {row[1] for row in db.execute('PRAGMA table_info(runs)')}
+            for name in ('provider', 'model', 'contract', 'rate_version', 'reservation_basis'):
+                if name not in columns:
+                    db.execute(f'ALTER TABLE runs ADD COLUMN {name} TEXT')
             db.execute("UPDATE runs SET status='unknown',result=? WHERE status='pending'", (json.dumps({"error": "上次分析被中断，结果未确认，不自动重试。"}),))
 
     @contextmanager
@@ -83,6 +91,8 @@ class NewsAnalysis:
     def stop(self, timeout=50):
         with self._lock:
             self._key, self._automatic = "", False
+            self._generation += 1
+            self._drain_queue()
             self._stop.set()
         if self._thread:
             self._thread.join(timeout)
@@ -92,6 +102,8 @@ class NewsAnalysis:
         if self._key and (time.monotonic() >= self._deadline or time.time() >= self._expires_at):
             self._key = ""
             self._automatic = False
+            self._generation += 1
+            self._drain_queue()
             self._error = "本次24小时授权已到期，请重新配置。"
         return bool(self._key)
 
@@ -101,11 +113,17 @@ class NewsAnalysis:
             return {"configured": self._configured(), "automatic": self._automatic,
                 "calls_reserved": row["calls"], "max_calls": MAX_CALLS,
                 "reserved_cny": round(row["reserved"] / 1_000_000, 6), "budget_cny": 3,
-                "model": MODEL, "busy": self._active, "error": self._error,
+                "provider":self._provider, "model": self._model,
+                "available_models":copy.deepcopy(list(analysis_providers.AVAILABLE_MODELS)),
+                "rate_version":analysis_providers.RATE_VERSION,
+                "budget_conversion_cny_per_usd":analysis_providers.CNY_PER_USD,
+                "budget_estimate_notice":analysis_providers.BUDGET_ESTIMATE_NOTICE,
+                "busy": self._active, "error": self._error,
                 "expires_at": datetime.fromtimestamp(self._expires_at, timezone.utc).isoformat() if self._key else None,
                 "supplier_bill_verified": False, "credential_persisted": False}
 
-    def configure(self, api_key, automatic, acknowledge_budget):
+    def configure(self, api_key, automatic, acknowledge_budget, *, provider="doubao", model=None):
+        provider, model = analysis_providers.select_route(provider, model)
         if (type(api_key) is not str or not 1 <= len(api_key) <= 4096
                 or any(not 32 < ord(c) < 127 for c in api_key)
                 or type(automatic) is not bool or acknowledge_budget is not True):
@@ -114,24 +132,26 @@ class NewsAnalysis:
             if self._active:
                 raise ValueError("analysis_in_progress")
             self._key, self._automatic, self._error = api_key, automatic, ""
-            while True:
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    break
+            self._provider, self._model = provider, model
+            self._generation += 1
+            self._drain_queue()
             self._configured_at = time.time()
             self._expires_at = self._configured_at + 86400
             self._deadline = time.monotonic() + 86400
         return self.status()
 
+    def _drain_queue(self):
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                return
+
     def clear(self):
         with self._lock:
             self._key, self._automatic = "", False
-            while True:
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    break
+            self._generation += 1
+            self._drain_queue()
         return self.status()
 
     @staticmethod
@@ -158,21 +178,43 @@ class NewsAnalysis:
         return hashlib.sha256((MODEL + RSS_V2_QUALITY_VERSION + RSS_V2_INSTRUCTIONS
                                + contract + NewsAnalysis._input(item)).encode()).hexdigest()
 
+    @staticmethod
+    def _route_fingerprint(item, provider, model):
+        provider, model = analysis_providers.select_route(provider, model)
+        identity = {"identity_version":"news_analysis_route_v1","provider":provider,"model":model,
+            "quality_version":QUALITY_VERSION,"instructions":INSTRUCTIONS,"contract":TEXT_FORMAT,
+            "material":NewsAnalysis._input(item)}
+        return hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
+
     def _saved(self, db, item):
+        # Check every supported route before admitting any charge. Switching a
+        # provider/model is never authority to analyze the same material again.
         current, previous, legacy = self._fingerprint(item), self._rss_v2_fingerprint(item), self._legacy_fingerprint(item)
-        for fingerprint in (current, previous, legacy):
-            row = db.execute("SELECT status,result FROM runs WHERE fingerprint=?", (fingerprint,)).fetchone()
-            if row is not None:
-                value = {"status": row["status"], **json.loads(row["result"])}
-                if fingerprint == legacy:
-                    value.update(legacy=True, quality_version="legacy_unchecked", semantic_review_required=True,
-                        legacy_notice="这是已保存的旧版分析，未经过新的原句检查；保留原结果，不自动重新付费分析。")
-                elif fingerprint == previous:
-                    value.update(legacy=True, quality_version=RSS_V2_QUALITY_VERSION,
-                        semantic_review_required=True,
-                        legacy_notice="这是已保存的RSS v2分析，未经过v3关系措辞检查；保留原结果，不自动重新付费分析。")
-                return value
-        return None
+        identities = {self._route_fingerprint(item, option['provider'], option['model']):
+                      (option['provider'],option['model']) for option in analysis_providers.AVAILABLE_MODELS}
+        identities.update({key:('doubao',MODEL) for key in (current,previous,legacy)})
+        marks = ','.join('?' for _ in identities)
+        rows = {row['fingerprint']:row for row in db.execute(
+            f"SELECT fingerprint,status,result FROM runs WHERE fingerprint IN ({marks})", tuple(identities))}
+        # Keep the historical v3 > v2 > legacy read precedence. New route
+        # identities have a fixed catalog order, independent of selection.
+        priority = (current,previous,legacy,*identities)
+        row = next((rows[key] for key in priority if key in rows),None)
+        if row is None:
+            return None
+        fingerprint = row['fingerprint']
+        value = {**json.loads(row['result']),"status":row['status']}
+        provider, model = identities[fingerprint]
+        value.setdefault('provider',provider)
+        value.setdefault('model',model)
+        if fingerprint == legacy:
+            value.update(legacy=True, quality_version="legacy_unchecked", semantic_review_required=True,
+                legacy_notice="这是已保存的旧版分析，未经过新的原句检查；保留原结果，不自动重新付费分析。")
+        elif fingerprint == previous:
+            value.update(legacy=True, quality_version=RSS_V2_QUALITY_VERSION,
+                semantic_review_required=True,
+                legacy_notice="这是已保存的RSS v2分析，未经过v3关系措辞检查；保留原结果，不自动重新付费分析。")
+        return value
 
     def result(self, item):
         with self._db() as db:
@@ -180,6 +222,8 @@ class NewsAnalysis:
         return saved if saved is not None else insufficient_result(item)
 
     def request(self, item_id):
+        with self._lock:
+            generation = self._generation
         item = self.news.get_item(item_id)
         if not item:
             raise ValueError("item_missing")
@@ -187,42 +231,49 @@ class NewsAnalysis:
         if existing:
             return existing
         with self._lock:
+            if generation != self._generation:
+                raise ValueError("analysis_configuration_changed")
             if not self._configured():
                 raise ValueError("analysis_session_required")
-        try:
-            self._queue.put_nowait(item_id)
-        except queue.Full:
-            raise ValueError("analysis_queue_full") from None
+            try:
+                self._queue.put_nowait((item_id,generation))
+            except queue.Full:
+                raise ValueError("analysis_queue_full") from None
         return {"status": "queued"}
 
     def _loop(self):
         while not self._stop.is_set():
             try:
-                item_id = self._queue.get(timeout=2)
+                queued = self._queue.get(timeout=2)
             except queue.Empty:
-                item_id = None
+                queued = None
             try:
-                if item_id:
-                    self._analyze(item_id)
+                if queued:
+                    item_id, generation = queued
+                    self._analyze(item_id, generation=generation)
                 else:
                     with self._lock:
                         automatic = self._configured() and self._automatic
                         cutoff = self._configured_at
+                        generation = self._generation
                     if automatic and self.news.overview()["enabled"]:
                         for item in self.news.list_items(limit=100)["items"]:
                             discovered = datetime.fromisoformat(item["discovered_at"].replace("Z", "+00:00")).timestamp()
                             if discovered >= cutoff and self.result(item) is None:
-                                self._analyze(item["id"], automatic=True)
+                                self._analyze(item["id"], automatic=True, generation=generation)
                                 break
             except Exception:
                 with self._lock:
                     self._error = "分析服务暂时无法完成操作；已发送的请求不会自动重试。"
 
-    def _analyze(self, item_id, *, automatic=False):
+    def _analyze(self, item_id, *, automatic=False, generation=None):
+        if generation is None:
+            with self._lock:
+                generation = self._generation
         with self._execution_lock:
-            return self._analyze_once(item_id, automatic=automatic)
+            return self._analyze_once(item_id, automatic=automatic, generation=generation)
 
-    def _analyze_once(self, item_id, *, automatic=False):
+    def _analyze_once(self, item_id, *, automatic=False, generation=None):
         item = self.news.get_item(item_id)
         if not item:
             return
@@ -231,42 +282,60 @@ class NewsAnalysis:
             return
         material = build_input(item, checked_at=time.time())
         text = json.dumps(material, ensure_ascii=False, sort_keys=True)
-        body = {"model": MODEL, "instructions": INSTRUCTIONS, "input": text, "max_output_tokens": MAX_OUTPUT,
-                "thinking": {"type": "disabled"}, "store": False, "text": {"format": copy.deepcopy(TEXT_FORMAT)}}
-        encoded = json.dumps(body).encode()
-        if len(encoded) > 16000:
-            with self._lock:
-                self._error = "此条材料过长，未发送；请阅读原文。"
-            return
-        reservation = (len(encoded) + 256) * 6 + MAX_OUTPUT * 30
-        fingerprint = self._fingerprint(item)
-        with self._lock, self._db() as db:
+        with self._lock:
+            if generation is not None and generation != self._generation:
+                return
             if not self._configured() or self._stop.is_set():
                 return
+            provider, model = self._provider, self._model
+            body = analysis_providers.build_body(provider,model,text,INSTRUCTIONS,TEXT_FORMAT)
+            if len(analysis_providers.encode_body(body)) > analysis_providers.MAX_REQUEST_BYTES:
+                self._error = "此条材料过长，未发送；请阅读原文。"
+                return
+            reservation, basis = analysis_providers.reservation_for(provider,model,body)
+            fingerprint = self._route_fingerprint(item,provider,model)
             if automatic:
                 discovered = datetime.fromisoformat(item["discovered_at"].replace("Z", "+00:00")).timestamp()
                 if not self._automatic or discovered < self._configured_at or not self.news.overview()["enabled"]:
                     return
-            db.execute("BEGIN IMMEDIATE")
-            if self._saved(db, item) is not None:
-                return
-            used = db.execute("SELECT COUNT(*) AS calls,COALESCE(SUM(reserved),0) AS reserved FROM runs WHERE created>=?", (time.time() - 86400,)).fetchone()
-            if used["calls"] >= MAX_CALLS or used["reserved"] + reservation > BUDGET_MICRO_CNY:
-                self._error = "近24小时分析额度已用完；抓取仍继续。"
-                self._automatic = False
-                return
-            db.execute("INSERT INTO runs(fingerprint,item_id,created,reserved,status) VALUES(?,?,?,?,?)", (fingerprint,item_id,time.time(),reservation,"pending"))
+            with self._db() as db:
+                db.execute("BEGIN IMMEDIATE")
+                if self._saved(db, item) is not None:
+                    return
+                used = db.execute("SELECT COUNT(*) AS calls,COALESCE(SUM(reserved),0) AS reserved FROM runs WHERE created>=?", (time.time() - 86400,)).fetchone()
+                if used["calls"] >= MAX_CALLS or used["reserved"] + reservation > BUDGET_MICRO_CNY:
+                    self._error = "近24小时分析额度已用完；抓取仍继续。"
+                    self._automatic = False
+                    return
+                db.execute("""INSERT INTO runs(fingerprint,item_id,created,reserved,status,provider,model,contract,rate_version,reservation_basis)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)""", (fingerprint,item_id,time.time(),reservation,"pending",provider,model,QUALITY_VERSION,
+                        analysis_providers.RATE_VERSION,json.dumps(basis,ensure_ascii=False)))
+            # The reservation committed while holding the configuration lock.
+            # A switch cannot race the chosen route, captured key, or busy flag.
             key = self._key
             self._active = True
+            generator = self._generate
+        response = None
+        reported_model = None
         try:
-            response = self._generate(key, text)
+            response = generator(key,text) if generator is not None else analysis_providers.generate_response(provider,model,key,body)
+            reported_model = analysis_providers.safe_reported_model(
+                getattr(response,'reported_model',None) if hasattr(response,'reported_model') else getattr(response,'model',None),provider,model)
             if not response.ok:
                 raise ValueError("provider_failed")
+            if (reported_model is None or getattr(response,'provider',provider) != provider
+                    or getattr(response,'requested_model',model) != model):
+                raise analysis_providers.NewsModelMismatch('model_mismatch')
             value = validate_output(response.content, material)
-            value["model"] = MODEL
+            value.update(provider=provider,model=reported_model or model,requested_model=model,reported_model=reported_model)
             status = "completed"
-        except Exception:
-            status, value = "failed", {"error": "本次分析失败或内容未通过原句及关系措辞检查；为避免重复扣费，不自动重试。",
+        except Exception as exc:
+            mismatch = isinstance(exc,analysis_providers.NewsModelMismatch) or getattr(response,'error_code',None)=='model_mismatch'
+            if mismatch:
+                reported_model = None
+            status, value = "failed", {"error": "本次返回的模型身份与已选模型不符或无法确认；预约已保留，不自动重试。" if mismatch else "本次分析失败或内容未通过原句及关系措辞检查；为避免重复扣费，不自动重试。",
+                "error_code":"model_mismatch" if mismatch else "analysis_failed",
+                "provider":provider,"model":reported_model or model,"requested_model":model,"reported_model":reported_model,
                 "quality_version": QUALITY_VERSION, "semantic_review_required": True,
                 "scope": material["scope"], "freshness": material["freshness"],
                 "quality_checked_at": material["checked_at"]}
@@ -281,7 +350,6 @@ class NewsAnalysis:
 
     @staticmethod
     def _doubao(key, text):
-        from .providers.doubao_provider import DoubaoProvider
-        provider = DoubaoProvider(api_key=key, base_url="https://ark.cn-beijing.volces.com/api/v3", default_model=MODEL)
-        return provider._generate(instructions=INSTRUCTIONS, input_text=text, model=MODEL,
-            max_output_tokens=MAX_OUTPUT, timeout_seconds=45, text_format=copy.deepcopy(TEXT_FORMAT))
+        # Compatibility entry point; avoids generic providers' config/.env import.
+        body = analysis_providers.build_body('doubao',MODEL,text,INSTRUCTIONS,TEXT_FORMAT)
+        return analysis_providers.generate_response('doubao',MODEL,key,body)

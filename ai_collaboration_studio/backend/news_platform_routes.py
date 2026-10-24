@@ -62,7 +62,11 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
                     raise ValueError("登录恢复设置格式不正确")
                 return {"ok": True, "startup": startup.set_enabled(payload["enabled"])}, 200
             if path == "/api/news/ai/session" and ai is not None:
-                if set(payload) != {"api_key", "automatic", "acknowledge_budget"}:
+                required = {"api_key", "automatic", "acknowledge_budget"}
+                optional = {"provider", "model"}
+                if (not required.issubset(payload) or set(payload) - required - optional
+                        or ("model" in payload and "provider" not in payload)
+                        or any(key in payload and type(payload[key]) is not str for key in optional)):
                     raise ValueError("分析配置格式不正确")
                 return {"ok": True, "ai": ai.configure(**payload)}, 200
             if path == "/api/news/ai/clear" and ai is not None:
