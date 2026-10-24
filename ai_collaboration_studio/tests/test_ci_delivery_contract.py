@@ -73,7 +73,10 @@ class CIWorkflowContractTests(unittest.TestCase):
 
         self.assertIn("runs-on: windows-latest", workflow)
         self.assertIn('python-version: "3.14"', workflow)
-        self.assertIn('node-version: "24"', workflow)
+        toolchain = bootstrap.portable_runtime.EXPECTED_TOOLCHAIN
+        self.assertIn(f'node-version: "{toolchain["node"].removeprefix("v")}"', workflow)
+        self.assertIn(f'npm.cmd install --global npm@{toolchain["npm"]} --ignore-scripts --no-audit --no-fund', workflow)
+        self.assertLess(workflow.index('name: Set up locked npm'), workflow.index('name: Bootstrap locked dependencies'))
         self.assertIn("defaults:\n      run:\n        shell: pwsh", workflow)
         self.assertIn("working-directory: ai_collaboration_studio", workflow)
         self.assertIn(
