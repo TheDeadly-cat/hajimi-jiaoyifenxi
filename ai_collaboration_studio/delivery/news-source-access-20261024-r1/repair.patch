@@ -1,0 +1,773 @@
+--- a/backend/news_platform.py
++++ b/backend/news_platform.py
+@@ -27,7 +27,7 @@
+ 
+ 
+ from .news_feed_transport import (
+-    SOURCES, FeedResponse, fetch_feed, _SameHostRedirect, _safe_url, parse_retry_after,
++    SOURCES, FeedResponse, FeedValidationError, classify_feed_error, fetch_feed, _SameHostRedirect, _safe_url, parse_retry_after,
+ )
+ 
+ 
+@@ -42,6 +42,7 @@
+ LIMITATIONS = ["仅整理官方订阅中的标题与摘录，未抓取或验证全文。", "摘要和分类由本机规则生成，不含 AI 推断；请打开原文核对。"]
+ MAX_BYTES = 2 * 1024 * 1024
+ TIMEOUT_SECONDS = 12
++RATE_RECOVERY_SECONDS = 24 * 3600
+ APPLICATION_ID = 0x4E455753
+ 
+ 
+@@ -121,12 +122,12 @@
+ 
+ def parse_feed(body, source):
+     if len(body) > MAX_BYTES:
+-        raise ValueError("feed_too_large")
++        raise FeedValidationError("feed_too_large")
+     if re.search(br"<!\s*(?:DOCTYPE|ENTITY)\b", body.replace(b"\x00", b""), re.I):
+-        raise ValueError("feed_document_type_not_allowed")
++        raise FeedValidationError("unsafe_feed")
+     root = ET.fromstring(body)
+     if _tag(root) not in {"rss", "feed", "rdf"}:
+-        raise ValueError("not_a_supported_feed")
++        raise FeedValidationError("invalid_feed")
+     result = []
+     for entry in (element for element in root.iter() if _tag(element) in {"item", "entry"}):
+         if len(result) >= 500:
+@@ -262,6 +263,7 @@
+                 'cooldown_reason': 'TEXT',
+                 'manual_hold': 'INTEGER NOT NULL DEFAULT 0',
+                 'refresh_queued': 'INTEGER NOT NULL DEFAULT 0',
++                'rate_recovery_not_before': 'REAL NOT NULL DEFAULT 0',
+             }
+             for name, declaration in additions.items():
+                 if name not in columns:
+@@ -270,6 +272,11 @@
+                 # Existing failed-check deadlines remain binding after migration.
+                 # No old receipt is rewritten or given invented HTTP diagnostics.
+                 db.execute("UPDATE sources SET not_before=MAX(0,next_poll),cooldown_reason='http_error' WHERE failures>0 OR status='error'")
++            if 'rate_recovery_not_before' not in columns:
++                # Legacy pressure has no reliable last-429 timestamp. Start a
++                # conservative wait without rewriting any historical receipt.
++                db.execute("UPDATE sources SET rate_recovery_not_before=MAX(not_before,?) WHERE cooldown_level>0",
++                           (self.clock() + RATE_RECOVERY_SECONDS,))
+             self._sync_refresh_state(db)
+             runtime_evidence.initialize(db)
+ 
+@@ -318,9 +325,10 @@
+                     db.execute('''UPDATE sources SET not_before=MAX(not_before,?),next_poll=MAX(next_poll,?),
+                         cooldown_level=MAX(cooldown_level,?),access_denied_level=MAX(access_denied_level,?),
+                         recovery_successes=0,access_recovery_successes=0,cooldown_reason=?,
++                        rate_recovery_not_before=MAX(rate_recovery_not_before,?),
+                         manual_hold=MAX(manual_hold,?),refresh_queued=CASE WHEN ? THEN 0 ELSE refresh_queued END WHERE id=?''',
+                         (pending['not_before'],pending['not_before'],pending['cooldown_level'],pending['access_denied_level'],
+-                         pending['cooldown_reason'],int(pending['manual_hold']),int(pending['manual_hold']),source_id))
++                         pending['cooldown_reason'],pending.get('rate_recovery_not_before',0),int(pending['manual_hold']),int(pending['manual_hold']),source_id))
+             # A failed commit leaves this map intact, so even a direct _fetch
+             # entry must retry persistence, never the remote source.
+             self._pending_cooldowns.clear()
+@@ -441,7 +449,8 @@
+                 'recovery_successes':source['recovery_successes'], 'manual_hold':bool(source['manual_hold']),
+                 'retry_after_status':retry['status'] if retry else None,
+                 'retry_after_kind':retry['kind'] if retry else None,
+-                'server_not_before':_iso(retry['retry_at']) if retry and retry['retry_at'] is not None else None}
++                'server_not_before':_iso(retry['retry_at']) if retry and retry['retry_at'] is not None else None,
++                'rate_recovery_after':_iso(source['rate_recovery_not_before']) if source['rate_recovery_not_before'] else None}
+ 
+     def _fetch(self, source, *, trigger_kind='manual', pause_epoch=None):
+         self._ensure_session()
+@@ -485,6 +494,7 @@
+         response_status = None
+         response_headers = None
+         diagnostics = None
++        parsing_feed = False
+         try:
+             response = self.transport(source["url"], headers, TIMEOUT_SECONDS, MAX_BYTES)
+             response_status = response.status
+@@ -492,7 +502,9 @@
+             diagnostics = getattr(response, 'diagnostics', None)
+             if response.status not in (200, 304):
+                 raise ValueError(f"http_status_{response.status}")
+-            entries = parse_feed(response.body, source) if response.status == 200 else []
++            parsing_feed = response.status == 200
++            entries = parse_feed(response.body, source) if parsing_feed else []
++            parsing_feed = False
+             now = self.clock()
+             safe_headers = {key.lower(): str(value) for key, value in (response.headers or {}).items()}
+             def cache_header(name, old):
+@@ -513,14 +525,16 @@
+                         updated=CASE WHEN items.title!=excluded.title OR items.url!=excluded.url OR items.excerpt!=excluded.excerpt OR items.published IS NOT excluded.published THEN excluded.updated ELSE items.updated END,
+                         analysis=excluded.analysis""", (entry["id"], source["id"], entry["identity"], entry["title"], entry["url"], entry["excerpt"], entry["published"], now, now, json.dumps(analysis, ensure_ascii=False)))
+                 level, recovery = source['cooldown_level'], source['recovery_successes']
++                rate_recovery_at = source['rate_recovery_not_before']
+                 access_level, access_recovery = source['access_denied_level'], source['access_recovery_successes']
+                 # Only completed successful probes at/after their deadline
+                 # count; one 200 or 304 never erases recent rate-limit pressure.
+                 if started >= source['not_before']:
+                     if level:
+-                        recovery += 1
+-                        if recovery >= 3:
++                        recovery = min(3, recovery + 1)
++                        if recovery >= 3 and now >= rate_recovery_at:
+                             level, recovery = max(0, level - 1), 0
++                            rate_recovery_at = now + RATE_RECOVERY_SECONDS if level else 0
+                     if access_level:
+                         access_recovery += 1
+                         if access_recovery >= 3:
+@@ -530,9 +544,9 @@
+                 not_before = now + delay if pressure else 0
+                 reason = 'rate_limited' if level else 'access_denied' if access_level else None
+                 db.execute("""UPDATE sources SET status='ok',last_success=?,next_poll=?,error=NULL,failures=0,etag=?,last_modified=?,
+-                    cooldown_level=?,recovery_successes=?,access_denied_level=?,access_recovery_successes=?,not_before=?,cooldown_reason=?,refresh_queued=0 WHERE id=?""",
++                    cooldown_level=?,recovery_successes=?,access_denied_level=?,access_recovery_successes=?,not_before=?,cooldown_reason=?,rate_recovery_not_before=?,refresh_queued=0 WHERE id=?""",
+                     (now, now + delay, cache_header('etag', source['etag']), cache_header('last-modified', source['last_modified']),
+-                     level,recovery,access_level,access_recovery,not_before,reason,source['id']))
++                     level,recovery,access_level,access_recovery,not_before,reason,rate_recovery_at,source['id']))
+                 saved = db.execute('SELECT * FROM sources WHERE id=?', (source['id'],)).fetchone()
+                 runtime_evidence.finish_poll(db, poll_id, now, 'not_modified' if response.status == 304 else 'success',
+                     http_status=response.status, parsed_items=len(entries), new_items=new_items, updated_items=updated_items,
+@@ -551,7 +565,8 @@
+                         'cooldown_level':source['cooldown_level'],
+                         'access_denied_level':source['access_denied_level'],
+                         'cooldown_reason':'rate_limited' if source['cooldown_level'] else 'access_denied',
+-                        'manual_hold':bool(source['manual_hold'])}
++                        'manual_hold':bool(source['manual_hold']),
++                        'rate_recovery_not_before':source['rate_recovery_not_before']}
+                 self._pending_recovery = True
+             raise
+         except Exception as exc:
+@@ -561,22 +576,45 @@
+                 response_status = exc.code
+                 response_headers = exc.headers
+             diagnostics = getattr(exc, 'news_diagnostics', diagnostics)
++            error_kind = 'invalid_feed' if isinstance(exc, ET.ParseError) else classify_feed_error(exc)
++            if response_status is None and isinstance(diagnostics, dict):
++                observed_status = diagnostics.get('response_status')
++                if type(observed_status) is int and 100 <= observed_status <= 599:
++                    response_status = observed_status
++            if parsing_feed and isinstance(exc, (FeedValidationError, ET.ParseError)):
++                diagnostics = dict(diagnostics) if isinstance(diagnostics, dict) else {}
++                diagnostics.update(error_kind=error_kind, phase='parse',
++                                   response_status=response_status)
+             retry = parse_retry_after(response_headers, now) if response_status else parse_retry_after(None, now)
+             level, access_level = source['cooldown_level'], source['access_denied_level']
++            rate_recovery_at = source['rate_recovery_not_before']
+             if response_status == 429:
+                 level = min(self._maximum_cooldown_level, level + 1)
++                rate_recovery_at = max(rate_recovery_at, now + RATE_RECOVERY_SECONDS)
+                 error_code, reason, decision = 'rate_limited', 'rate_limited', 'rate_limit_backoff'
+-                error = '本次请求返回 HTTP 429，已保留消息并等待冷却结束；单次成功后仍会逐步恢复检查频率。'
++                error = '本次请求返回 HTTP 429，已保留消息并等待冷却结束；每次提高检查频率至少等待24小时并完成三次成功检查。'
+                 delay = self._pressure_delay(level)
+             elif response_status == 403:
+                 access_level = min(self._maximum_cooldown_level, access_level + 1)
+                 error_code, reason, decision = 'access_denied', 'access_denied', 'access_denied_backoff'
+-                error = '本次请求返回 HTTP 403：访问被拒绝，原因待确认；已有消息保留，将保守等待后检查。'
++                error = '本次请求返回 HTTP 403：访问被拒绝，原因待确认；已有消息保留，将保守等待后检查。持续拒绝时需核查来源访问策略与项目联系信息。'
+                 delay = self._pressure_delay(access_level)
+             else:
+-                error_code = 'invalid_feed' if isinstance(exc, ET.ParseError) else 'http_error' if response_status else 'source_unavailable'
+-                reason, decision = 'http_error' if response_status else 'source_unavailable', 'failure_backoff'
+-                error = '来源内容不是有效订阅格式，已保留已有消息。' if isinstance(exc, ET.ParseError) else f'本次请求返回 HTTP {response_status}，已安排稍后重试。' if response_status else '本次获取失败，已保留已有消息并安排稍后重试。'
++                error_code = ('http_error' if response_status not in (None, 200, 304)
++                              and error_kind in ('http_error', 'transport_error') else error_kind)
++                reason, decision = error_code, 'failure_backoff'
++                messages = {
++                    'invalid_feed':'来源内容不是有效订阅格式，已保留已有消息。',
++                    'unsafe_feed':'来源订阅包含不支持的内容结构，已拒绝解析并保留已有消息。',
++                    'feed_too_large':'来源内容超出读取上限，已保留已有消息。',
++                    'timeout':'来源连接或读取超时，已保留已有消息并安排稍后重试。',
++                    'dns_error':'来源域名解析失败，已保留已有消息。',
++                    'tls_error':'来源安全连接验证失败，已保留已有消息。',
++                    'connection_error':'来源连接失败，已保留已有消息。',
++                    'redirect_blocked':'来源跳转超出允许范围，已保留已有消息。',
++                }
++                error = messages.get(error_code, f'本次请求返回 HTTP {response_status}，已安排稍后重试。'
++                                     if error_code == 'http_error' else '本次获取失败，已保留已有消息并安排稍后重试。')
+                 delay = min(6 * 3600, self.poll_interval * 2 ** min(failures - 1, 10))
+             if level or access_level:
+                 delay = max(delay, self._pressure_delay(max(level, access_level)))
+@@ -595,8 +633,8 @@
+                     with self._db() as db:
+                         db.execute("""UPDATE sources SET status='error',error=?,failures=?,next_poll=?,not_before=?,
+                             cooldown_level=?,access_denied_level=?,recovery_successes=0,access_recovery_successes=0,
+-                            cooldown_reason=?,manual_hold=?,refresh_queued=0 WHERE id=?""",
+-                            (error,failures,not_before,not_before,level,access_level,reason,int(manual_hold),source['id']))
++                            cooldown_reason=?,manual_hold=?,rate_recovery_not_before=?,refresh_queued=0 WHERE id=?""",
++                            (error,failures,not_before,not_before,level,access_level,reason,int(manual_hold),rate_recovery_at,source['id']))
+                         saved = db.execute('SELECT * FROM sources WHERE id=?', (source['id'],)).fetchone()
+                         runtime_evidence.finish_poll(db, poll_id, now, 'failed', http_status=response_status, error_code=error_code,
+                             diagnostics=diagnostics, schedule_basis=self._schedule_basis(saved, decision, retry=retry))
+@@ -606,7 +644,8 @@
+                     # no payload, raw headers or exception text here.
+                     self._pending_cooldowns[source['id']] = {
+                         'not_before':not_before,'cooldown_level':level,'access_denied_level':access_level,
+-                        'cooldown_reason':reason,'manual_hold':manual_hold}
++                        'cooldown_reason':reason,'manual_hold':manual_hold,
++                        'rate_recovery_not_before':rate_recovery_at}
+                     self._pending_recovery = True
+                     raise
+ 
+@@ -626,6 +665,7 @@
+                                "cooldown_until": _iso(source['not_before']) if source['not_before'] and not source['manual_hold'] else None,
+                                "cooldown_active": bool(source['manual_hold'] or source['not_before'] > now),
+                                "cooldown_reason": source['cooldown_reason'],
++                               "rate_recovery_after": _iso(source['rate_recovery_not_before']) if source['rate_recovery_not_before'] else None,
+                                "recovery_pending": bool(source['cooldown_level'] or source['access_denied_level']),
+                                "recovery_successes": source['recovery_successes'] if source['cooldown_level'] else source['access_recovery_successes'],
+                                "refresh_queued": bool(source['refresh_queued'] and source['enabled'] and not source['manual_hold']), "manual_hold": bool(source['manual_hold']),
+--- a/backend/news_feed_transport.py
++++ b/backend/news_feed_transport.py
+@@ -6,8 +6,11 @@
+ """
+ from __future__ import annotations
+ 
++import errno
+ import math
+ import re
++import socket
++import ssl
+ import time
+ import urllib.error
+ import urllib.request
+@@ -27,6 +30,57 @@
+ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+ _MIN_TIMESTAMP = -62135596800.0
+ _MAX_TIMESTAMP = 253402300799.0
++FEED_ERROR_KINDS = frozenset({
++    "timeout", "dns_error", "tls_error", "connection_error", "redirect_blocked",
++    "feed_too_large", "invalid_feed", "unsafe_feed", "transport_error", "http_error",
++})
++_VALIDATION_ERROR_KINDS = frozenset({
++    "redirect_blocked", "feed_too_large", "invalid_feed", "unsafe_feed",
++})
++_CONNECTION_ERRNOS = frozenset({
++    errno.ECONNREFUSED, errno.ECONNRESET, errno.ECONNABORTED, errno.ENETUNREACH,
++    errno.EHOSTUNREACH, errno.ENETDOWN, errno.EPIPE, 10051, 10053, 10054, 10061, 10065,
++})
++
++
++class FeedValidationError(ValueError):
++    """Only a reviewed category may cross the feed-validation boundary."""
++    def __init__(self, code):
++        if not isinstance(code, str) or code not in _VALIDATION_ERROR_KINDS:
++            raise ValueError("invalid_feed_validation_code")
++        self.code = code
++        super().__init__(code)
++
++
++def classify_feed_error(exc):
++    """Classify exception types/codes without reading arbitrary exception text."""
++    seen = set()
++    for _ in range(4):
++        if id(exc) in seen:
++            break
++        seen.add(id(exc))
++        if isinstance(exc, FeedValidationError):
++            return exc.code if exc.code in _VALIDATION_ERROR_KINDS else "transport_error"
++        if isinstance(exc, urllib.error.HTTPError):
++            return "http_error"
++        if isinstance(exc, TimeoutError):
++            return "timeout"
++        if isinstance(exc, socket.gaierror):
++            return "dns_error"
++        if isinstance(exc, ssl.SSLError):
++            return "tls_error"
++        if isinstance(exc, ConnectionError):
++            return "connection_error"
++        if isinstance(exc, OSError):
++            if exc.errno in (errno.ETIMEDOUT, 10060):
++                return "timeout"
++            if exc.errno in _CONNECTION_ERRNOS:
++                return "connection_error"
++        if isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, BaseException):
++            exc = exc.reason
++            continue
++        break
++    return "transport_error"
+ 
+ 
+ def _header_values(headers, name):
+@@ -143,6 +197,9 @@
+         self.redirect_count = 0
+         self.final_host = None
+         self.response_date = None
++        self.error_kind = None
++        self.phase = "proxy_configuration"
++        self.response_status = None
+         self.retry_after = parse_retry_after(None, 0)
+         self.conditional_etag = "if-none-match" in names
+         self.conditional_modified_since = "if-modified-since" in names
+@@ -152,7 +209,9 @@
+         if bypass is not None:
+             self.bypasses.add(bypass)
+ 
+-    def observe_response(self, url, origin, headers):
++    def observe_response(self, url, origin, headers, status=None):
++        if type(status) is int and 100 <= status <= 599:
++            self.response_status = status
+         if _safe_url(url, origin):
+             host = urlsplit(url).hostname
+             self.final_host = host if host in _HOSTS else None
+@@ -170,7 +229,9 @@
+                 "final_host": self.final_host, "elapsed_ms": max(0, round((time.monotonic() - self.started) * 1000)),
+                 "conditional_etag": self.conditional_etag,
+                 "conditional_modified_since": self.conditional_modified_since,
+-                "response_date": self.response_date, "retry_after": dict(self.retry_after)}
++                "response_date": self.response_date, "retry_after": dict(self.retry_after),
++                "error_kind": self.error_kind, "phase": self.phase,
++                "response_status": self.response_status}
+ 
+ 
+ class _SameHostRedirect(urllib.request.HTTPRedirectHandler):
+@@ -184,7 +245,11 @@
+ 
+     def redirect_request(self, req, fp, code, msg, headers, newurl):
+         if not _safe_url(newurl, self.origin):
+-            raise ValueError("redirect_outside_official_source")
++            if self.diagnostics is not None:
++                self.diagnostics.phase = "redirect"
++                if type(code) is int and 100 <= code <= 599:
++                    self.diagnostics.response_status = code
++            raise FeedValidationError("redirect_blocked")
+         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+         if redirected is not None and self.diagnostics is not None:
+             self.diagnostics.redirect_count += 1
+@@ -251,17 +316,20 @@
+         opener = urllib.request.build_opener(_ObservedProxyHandler(proxies),
+             _SameHostRedirect(url, diagnostics), _ObservedHTTPSHandler(diagnostics))
+         request = urllib.request.Request(url, headers={
+-            "User-Agent": "AI-Collaboration-Studio-Local-News/1.0",
++            "User-Agent": "AI-Collaboration-Studio-Local-News/1.0 (+https://github.com/TheDeadly-cat/hajimi-jiaoyifenxi/issues)",
+             "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml",
+             "Accept-Encoding": "identity", **headers,
+         })
++        diagnostics.phase = "request"
+         with opener.open(request, timeout=timeout) as response:
++            diagnostics.phase = "response_headers"
++            diagnostics.observe_response(response.geturl(), url, response.headers, response.status)
+             if not _safe_url(response.geturl(), url):
+-                raise ValueError("response_outside_official_source")
+-            diagnostics.observe_response(response.geturl(), url, response.headers)
++                raise FeedValidationError("redirect_blocked")
+             length = response.headers.get("Content-Length")
+             if length and int(length) > max_bytes:
+-                raise ValueError("feed_too_large")
++                raise FeedValidationError("feed_too_large")
++            diagnostics.phase = "response_body"
+             chunks, size, deadline = [], 0, time.monotonic() + timeout
+             while True:
+                 if time.monotonic() >= deadline:
+@@ -271,21 +339,26 @@
+                     break
+                 size += len(chunk)
+                 if size > max_bytes:
+-                    raise ValueError("feed_too_large")
++                    raise FeedValidationError("feed_too_large")
+                 chunks.append(chunk)
++            diagnostics.phase = "complete"
+             return FeedResponse(response.status, b"".join(chunks), dict(response.headers.items()), diagnostics.snapshot())
+     except urllib.error.HTTPError as exc:
+         try:
+-            diagnostics.observe_response(exc.geturl(), url, exc.headers)
++            diagnostics.phase = "response_headers"
++            diagnostics.observe_response(exc.geturl(), url, exc.headers, exc.code)
++            if exc.code == 304:
++                diagnostics.phase = "complete"
++                return FeedResponse(304, headers=dict(exc.headers.items()), diagnostics=diagnostics.snapshot())
++            diagnostics.error_kind = classify_feed_error(exc)
+             exc.news_diagnostics = diagnostics.snapshot()
+-            if exc.code == 304:
+-                return FeedResponse(304, headers=dict(exc.headers.items()), diagnostics=exc.news_diagnostics)
+             raise
+         finally:
+             exc.close()
+     except Exception as exc:
+         # Preserve the exception type for existing callers; never copy its text.
+         try:
++            diagnostics.error_kind = classify_feed_error(exc)
+             exc.news_diagnostics = diagnostics.snapshot()
+         except Exception:
+             pass
+--- a/backend/news_runtime_evidence.py
++++ b/backend/news_runtime_evidence.py
+@@ -128,7 +128,11 @@
+     safe = {}
+     enums = ({'schema_version': {'news_feed_diagnostics_v1'},
+               'route_class': {'direct', 'local_loopback_proxy', 'unknown'},
+-              'final_host': {'www.federalreserve.gov', 'www.bls.gov', 'investors.seagate.com'}}
++              'final_host': {'www.federalreserve.gov', 'www.bls.gov', 'investors.seagate.com'},
++              'error_kind': {'timeout', 'dns_error', 'tls_error', 'connection_error', 'redirect_blocked',
++                             'feed_too_large', 'invalid_feed', 'unsafe_feed', 'transport_error', 'http_error'},
++              'phase': {'proxy_configuration', 'request', 'redirect', 'response_headers', 'response_body',
++                        'parse', 'complete'}}
+              if kind == 'transport' else
+              {'decision': {'normal', 'manual', 'retry_after', 'rate_limit_backoff', 'access_denied_backoff',
+                            'failure_backoff', 'recovery_probe', 'manual_hold'},
+@@ -147,7 +151,11 @@
+         candidate = value.get(key)
+         if type(candidate) is int and 0 <= candidate <= 10**12:
+             safe[key] = candidate
+-    dates = ('response_date',) if kind == 'transport' else ('not_before', 'server_not_before')
++    if kind == 'transport':
++        status = value.get('response_status')
++        if status is None or type(status) is int and 100 <= status <= 599:
++            safe['response_status'] = status
++    dates = ('response_date',) if kind == 'transport' else ('not_before', 'server_not_before', 'rate_recovery_after')
+     for key in dates:
+         candidate = value.get(key)
+         if candidate is None:
+--- a/tests/test_news_cooldown.py
++++ b/tests/test_news_cooldown.py
+@@ -81,18 +81,24 @@
+         self.assertEqual((self.source()['cooldown_level'], self.source()['recovery_successes']), (2, 0))
+         self.assertEqual(self.source()['next_poll'], self.now + 3600)
+ 
+-    def test_three_due_successes_lower_only_one_level_and_eventually_restore(self):
++    def test_three_successes_and_full_recovery_wait_lower_only_one_level(self):
+         self.fetch(429)
+         self.due()
+         self.fetch(429)
+         for index, status in enumerate((200, 304, 304)):
+             self.due()
+             self.fetch(status)
+-            self.assertEqual(self.source()['cooldown_level'], 2 if index < 2 else 1)
++            self.assertEqual(self.source()['cooldown_level'], 2)
++        self.now = self.source()['rate_recovery_not_before']
++        self.fetch(304)
++        self.assertEqual(self.source()['cooldown_level'], 1)
+         self.assertEqual(self.source()['recovery_successes'], 0)
+         for _ in range(3):
+             self.due()
+             self.fetch(304)
++        self.assertEqual(self.source()['cooldown_level'], 1)
++        self.now = self.source()['rate_recovery_not_before']
++        self.fetch(304)
+         state = self.source()
+         self.assertEqual((state['cooldown_level'], state['not_before']), (0, 0))
+         self.assertEqual(state['next_poll'], self.now + 900)
+@@ -220,6 +226,8 @@
+         for _ in range(3):
+             self.due()
+             self.fetch(304)
++        self.now = self.source()['rate_recovery_not_before']
++        self.fetch(304)
+         self.assertEqual(self.source()['cooldown_level'], 8)
+         self.assertEqual(self.source()['not_before'], self.now + 15360)
+ 
+@@ -312,7 +320,7 @@
+         self.assertEqual([source for source, _ in self.calls], ['bls','fed'])
+         self.assertEqual(set(self.app._pending_cooldowns), {'fed'})
+         self.assertEqual(set(self.app._pending_cooldowns['fed']),
+-            {'not_before','cooldown_level','access_denied_level','cooldown_reason','manual_hold'})
++            {'not_before','cooldown_level','access_denied_level','cooldown_reason','manual_hold','rate_recovery_not_before'})
+         self.assertEqual(self.source('fed')['not_before'], 0)  # Failed write really rolled back.
+         self.app._cycle()
+         self.assertEqual([source for source, _ in self.calls], ['bls','fed','seagate'])
+--- a/tests/test_news_feed_transport_diagnostics.py
++++ b/tests/test_news_feed_transport_diagnostics.py
+@@ -148,7 +148,7 @@
+         diagnostic = result.diagnostics
+         self.assertEqual(set(diagnostic), {"schema_version", "route_class", "effective_bypass",
+             "redirect_count", "final_host", "elapsed_ms", "conditional_etag",
+-            "conditional_modified_since", "response_date", "retry_after"})
++            "conditional_modified_since", "response_date", "retry_after", "error_kind", "phase", "response_status"})
+         self.assertEqual(diagnostic["route_class"], "unknown")
+         self.assertIsNone(diagnostic["effective_bypass"])
+         self.assertEqual(diagnostic["final_host"], "www.federalreserve.gov")
+--- /dev/null
++++ b/tests/test_news_source_recovery.py
+@@ -0,0 +1,108 @@
++"""Focused offline replay of recovery pressure and content-error persistence."""
++import json
++import unittest
++from backend.news_platform import FeedResponse, FeedValidationError, RATE_RECOVERY_SECONDS
++from tests import test_news_cooldown as cooldown_fixture
++
++
++class SourceRecoveryTests(unittest.TestCase):
++    # Reuse only the isolated fixture, not its historical test methods.
++    for _helper in ('setUp', 'tearDown', 'transport', 'new_app', 'source', 'view', 'fetch', 'due'):
++        locals()[_helper] = getattr(cooldown_fixture.NewsCooldownTests, _helper)
++
++    def test_three_successes_cannot_repeat_the_observed_fast_recovery(self):
++        self.fetch(429)
++        self.due()
++        self.fetch(429)
++        deadline = self.source()['rate_recovery_not_before']
++        for _ in range(6):
++            self.due()
++            self.fetch(304)
++        self.assertEqual(self.source()['cooldown_level'], 2)
++        self.assertEqual(self.source()['recovery_successes'], 3)
++        self.assertEqual(self.source()['next_poll'], self.now + 3600)
++        self.app.stop()
++        self.app = self.new_app()
++        self.assertEqual(self.source()['rate_recovery_not_before'], deadline)
++        self.now = deadline
++        self.fetch(304)
++        self.assertEqual(self.source()['cooldown_level'], 1)
++        self.assertEqual(self.source()['rate_recovery_not_before'], self.now + RATE_RECOVERY_SECONDS)
++        for _ in range(3):
++            self.due()
++            self.fetch(304)
++        self.assertEqual(self.source()['cooldown_level'], 1)
++        self.now = self.source()['rate_recovery_not_before']
++        self.fetch(304)
++        self.assertEqual(self.source()['cooldown_level'], 0)
++        self.assertEqual(self.source()['rate_recovery_not_before'], 0)
++
++    def test_relapse_extends_recovery_wait_and_manual_cannot_bypass_retry_after(self):
++        self.fetch(429)
++        old = self.source()['rate_recovery_not_before']
++        self.due()
++        self.fetch(429, {'Retry-After':'172800'})
++        self.assertGreater(self.source()['rate_recovery_not_before'], old)
++        deadline = self.source()['not_before']
++        calls = len(self.calls)
++        self.now += RATE_RECOVERY_SECONDS
++        self.app.refresh()
++        self.assertFalse(self.fetch(304))
++        self.assertEqual(len(self.calls), calls)
++        self.assertEqual(self.source()['not_before'], deadline)
++
++    def test_legacy_pressure_migration_preserves_items_read_cache_history_and_deadline(self):
++        self.fetch(200, {'ETag':'retained-tag'})
++        with self.app._db() as db:
++            db.execute('UPDATE items SET read=1')
++        self.fetch(429, {'Retry-After':'90000'})
++        with self.app._db() as db:
++            before_items = [tuple(row) for row in db.execute('SELECT * FROM items')]
++            before_history = [tuple(row) for row in db.execute('SELECT * FROM poll_runs')]
++            deadline = self.source()['not_before']
++            db.execute('ALTER TABLE sources DROP COLUMN rate_recovery_not_before')
++        self.app.stop()
++        self.app = self.new_app()
++        with self.app._db() as db:
++            self.assertEqual([tuple(row) for row in db.execute('SELECT * FROM items')], before_items)
++            self.assertEqual([tuple(row) for row in db.execute('SELECT * FROM poll_runs')], before_history)
++        self.assertEqual(self.source()['not_before'], deadline)
++        self.assertEqual(self.source()['etag'], 'retained-tag')
++        self.assertGreaterEqual(self.source()['rate_recovery_not_before'], self.now + RATE_RECOVERY_SECONDS)
++
++    def test_invalid_200_content_is_not_misreported_as_http_200_failure(self):
++        self.fetch(200)
++        with self.app._db() as db:
++            before = [tuple(row) for row in db.execute('SELECT * FROM items')]
++        for body, code in [(b'<html/>','invalid_feed'),
++                           (b'<!DOCTYPE rss><rss/>','unsafe_feed'),
++                           (b'<rss>','invalid_feed')]:
++            self.responses['seagate'] = FeedResponse(200, body)
++            self.assertTrue(self.app._fetch(self.source()))
++            check = self.app.overview()['recent_checks'][0]
++            self.assertEqual((check['http_status'],check['error_code']), (200,code))
++            self.assertEqual(check['diagnostics']['phase'], 'parse')
++            self.assertNotIn('HTTP 200', self.view()['error'])
++            with self.app._db() as db:
++                self.assertEqual([tuple(row) for row in db.execute('SELECT * FROM items')], before)
++            self.due()
++
++    def test_body_timeout_retains_http_status_and_safe_category(self):
++        failure = TimeoutError('must-not-be-retained')
++        failure.news_diagnostics = {'response_status':200,'error_kind':'timeout','phase':'response_body'}
++        self.responses['seagate'] = failure
++        self.app._fetch(self.source())
++        check = self.app.overview()['recent_checks'][0]
++        self.assertEqual((check['http_status'],check['error_code']), (200,'timeout'))
++        self.assertEqual(check['diagnostics']['phase'], 'response_body')
++        self.assertNotIn('must-not-be-retained', json.dumps(self.app.overview()))
++
++    def test_rejected_redirect_preserves_transport_phase_and_status(self):
++        failure = FeedValidationError('redirect_blocked')
++        failure.news_diagnostics = {'response_status':302,'error_kind':'redirect_blocked','phase':'redirect'}
++        self.responses['seagate'] = failure
++        self.app._fetch(self.source())
++        check = self.app.overview()['recent_checks'][0]
++        self.assertEqual((check['http_status'],check['error_code']), (302,'redirect_blocked'))
++        self.assertEqual(check['diagnostics']['phase'], 'redirect')
++
+--- /dev/null
++++ b/tests/test_news_transport_classification.py
+@@ -0,0 +1,183 @@
++"""Offline failure diagnostics: no socket, proxy configuration or database access."""
++from __future__ import annotations
++
++import errno
++import io
++import json
++import socket
++import ssl
++import unittest
++import urllib.error
++import urllib.request
++from email.message import Message
++from unittest.mock import patch
++
++from backend.news_feed_transport import (
++    SOURCES, FeedValidationError, _Diagnostics, _SameHostRedirect,
++    classify_feed_error, fetch_feed,
++)
++from backend.news_runtime_evidence import _safe_json
++
++URL = next(source["url"] for source in SOURCES if source["id"] == "bls")
++PRIVATE = "private response header or exception text"
++
++
++class Body(io.BytesIO):
++    status = 200
++
++    def __init__(self, body=b"<rss/>", *, headers=None, failure=None):
++        super().__init__(body)
++        self.headers = headers or {}
++        self.failure = failure
++        self.read_calls = 0
++
++    def geturl(self):
++        return URL
++
++    def read1(self, size):
++        self.read_calls += 1
++        if self.failure is not None:
++            raise self.failure
++        return super().read1(size)
++
++    def read(self, *args):
++        self.read_calls += 1
++        return super().read(*args)
++
++
++class FailureClassificationTests(unittest.TestCase):
++    def setUp(self):
++        for patcher in (
++            patch.object(socket.socket, "connect", side_effect=AssertionError("offline only")),
++            patch.object(socket.socket, "connect_ex", side_effect=AssertionError("offline only")),
++            patch.object(socket, "getaddrinfo", side_effect=AssertionError("offline only")),
++            patch("backend.news_feed_transport.urllib.request.getproxies", return_value={}),
++        ):
++            patcher.start()
++            self.addCleanup(patcher.stop)
++        self.requests = []
++
++    def fetch(self, response, *, max_bytes=1024):
++        requests = self.requests
++
++        class Opener:
++            def open(self, request, *, timeout):
++                requests.append(request)
++                if len(requests) != 1:
++                    raise AssertionError("transport retried unexpectedly")
++                if isinstance(response, BaseException):
++                    raise response
++                return response
++
++        with patch("backend.news_feed_transport.urllib.request.build_opener", return_value=Opener()):
++            return fetch_feed(URL, {}, 12, max_bytes)
++
++    def test_categories_use_types_or_numeric_codes_never_message_guesses(self):
++        class UnprintableError(Exception):
++            def __str__(self):
++                raise AssertionError("exception text inspected")
++
++        cases = (
++            (TimeoutError(PRIVATE), "timeout"),
++            (urllib.error.URLError(TimeoutError(PRIVATE)), "timeout"),
++            (socket.gaierror(socket.EAI_NONAME, PRIVATE), "dns_error"),
++            (urllib.error.URLError(ssl.SSLError(PRIVATE)), "tls_error"),
++            (ConnectionResetError(PRIVATE), "connection_error"),
++            (OSError(errno.ETIMEDOUT, PRIVATE), "timeout"),
++            (OSError(errno.EHOSTUNREACH, PRIVATE), "connection_error"),
++            (urllib.error.URLError("timeout dns tls " + PRIVATE), "transport_error"),
++            (UnprintableError(), "transport_error"),
++        )
++        for failure, expected in cases:
++            with self.subTest(category=expected, failure_type=type(failure).__name__):
++                self.assertEqual(classify_feed_error(failure), expected)
++        for code in ("redirect_blocked", "feed_too_large", "invalid_feed", "unsafe_feed"):
++            self.assertEqual(classify_feed_error(FeedValidationError(code)), code)
++        with self.assertRaises(ValueError):
++            FeedValidationError(PRIVATE)
++
++    def test_body_timeout_retains_received_200_closes_response_and_does_not_retry(self):
++        response = Body(headers={"Set-Cookie": PRIVATE}, failure=TimeoutError(PRIVATE))
++        with self.assertRaises(TimeoutError) as caught:
++            self.fetch(response)
++        diagnostic = caught.exception.news_diagnostics
++        self.assertEqual((diagnostic["error_kind"], diagnostic["phase"], diagnostic["response_status"]),
++                         ("timeout", "response_body", 200))
++        self.assertTrue(response.closed)
++        self.assertEqual(len(self.requests), 1)
++        self.assertNotIn(PRIVATE, json.dumps(diagnostic))
++
++    def test_http_denials_preserve_native_status_and_close_without_reading_error_body(self):
++        for status in (403, 429):
++            with self.subTest(status=status):
++                self.requests.clear()
++                body = Body(PRIVATE.encode())
++                headers = Message()
++                headers["Retry-After"] = "3600"
++                headers["Set-Cookie"] = PRIVATE
++                failure = urllib.error.HTTPError(URL, status, PRIVATE, headers, body)
++                with self.assertRaises(urllib.error.HTTPError) as caught:
++                    self.fetch(failure)
++                self.assertIs(caught.exception, failure)
++                diagnostic = failure.news_diagnostics
++                self.assertEqual((diagnostic["error_kind"], diagnostic["phase"], diagnostic["response_status"]),
++                                 ("http_error", "response_headers", status))
++                self.assertEqual(diagnostic["retry_after"]["delay_seconds"], 3600)
++                self.assertEqual(body.read_calls, 0)
++                self.assertTrue(body.closed)
++                self.assertNotIn(PRIVATE, json.dumps(diagnostic))
++
++    def test_success_uses_honest_contact_user_agent_and_304_is_not_an_error(self):
++        response = Body()
++        result = self.fetch(response)
++        user_agent = dict((key.lower(), value) for key, value in self.requests[0].header_items())["user-agent"]
++        self.assertIn("AI-Collaboration-Studio-Local-News/1.0", user_agent)
++        self.assertIn("https://github.com/TheDeadly-cat/hajimi-jiaoyifenxi/issues", user_agent)
++        self.assertNotIn("Mozilla", user_agent)
++        self.assertEqual((result.diagnostics["error_kind"], result.diagnostics["phase"], result.diagnostics["response_status"]),
++                         (None, "complete", 200))
++        self.requests.clear()
++        body = Body()
++        result = self.fetch(urllib.error.HTTPError(URL, 304, PRIVATE, Message(), body))
++        self.assertEqual((result.status, result.diagnostics["error_kind"], result.diagnostics["response_status"]),
++                         (304, None, 304))
++        self.assertEqual(body.read_calls, 0)
++        self.assertTrue(body.closed)
++
++    def test_redirect_and_both_size_limits_are_typed_and_fail_closed(self):
++        diagnostic = _Diagnostics({})
++        handler = _SameHostRedirect(URL, diagnostic)
++        with self.assertRaises(FeedValidationError) as caught:
++            handler.redirect_request(urllib.request.Request(URL), None, 302, "", {}, "https://example.com/")
++        self.assertEqual(classify_feed_error(caught.exception), "redirect_blocked")
++        self.assertEqual((diagnostic.phase, diagnostic.response_status), ("redirect", 302))
++        for headers, expected_phase in (({"Content-Length": "20"}, "response_headers"), ({}, "response_body")):
++            with self.subTest(phase=expected_phase):
++                self.requests.clear()
++                response = Body(b"x" * 20, headers=headers)
++                with self.assertRaises(FeedValidationError) as caught:
++                    self.fetch(response, max_bytes=10)
++                self.assertEqual(caught.exception.code, "feed_too_large")
++                evidence = caught.exception.news_diagnostics
++                self.assertEqual((evidence["phase"], evidence["response_status"]), (expected_phase, 200))
++                self.assertTrue(response.closed)
++
++    def test_sanitizer_keeps_safe_categories_rejects_payloads_and_bounds_status(self):
++        safe = json.loads(_safe_json({"error_kind": "timeout", "phase": "response_body", "response_status": 200,
++                                     "error_message": PRIVATE, "raw_headers": {"Cookie": PRIVATE}}, "transport"))
++        self.assertEqual((safe["error_kind"], safe["phase"], safe["response_status"]), ("timeout", "response_body", 200))
++        self.assertNotIn(PRIVATE, json.dumps(safe))
++        for status in (True, 99, 600, "200", 200.0):
++            with self.subTest(status_type=type(status).__name__):
++                invalid = json.loads(_safe_json({"error_kind": PRIVATE, "phase": PRIVATE, "response_status": status}, "transport"))
++                self.assertNotIn("error_kind", invalid)
++                self.assertNotIn("phase", invalid)
++                self.assertNotIn("response_status", invalid)
++        schedule = json.loads(_safe_json({"rate_recovery_after": "2026-10-24T20:00:00+08:00"}, "schedule"))
++        self.assertEqual(schedule["rate_recovery_after"], "2026-10-24T12:00:00Z")
++        for date in (PRIVATE, "2026-10-24T20:00:00"):
++            self.assertNotIn("rate_recovery_after", json.loads(_safe_json({"rate_recovery_after": date}, "schedule")))
++
++
++if __name__ == "__main__":
++    unittest.main()

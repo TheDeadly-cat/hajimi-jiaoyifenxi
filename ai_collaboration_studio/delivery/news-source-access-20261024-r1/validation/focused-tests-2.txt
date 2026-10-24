@@ -1,0 +1,8 @@
+test_rejected_redirect_preserves_transport_phase_and_status (tests.test_news_source_recovery.SourceRecoveryTests.test_rejected_redirect_preserves_transport_phase_and_status) ... ok
+test_invalid_200_content_is_not_misreported_as_http_200_failure (tests.test_news_source_recovery.SourceRecoveryTests.test_invalid_200_content_is_not_misreported_as_http_200_failure) ... ok
+test_success_diagnostics_are_allowlisted_and_mock_route_is_unknown (tests.test_news_feed_transport_diagnostics.TransportDiagnosticsTests.test_success_diagnostics_are_allowlisted_and_mock_route_is_unknown) ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.379s
+
+OK
