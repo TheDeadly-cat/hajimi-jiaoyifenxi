@@ -174,6 +174,36 @@ def parse_retry_after(headers, now):
     return result
 
 
+def failure_retry_after(headers, diagnostics, now):
+    """Keep a parsed deadline when failure prevents returning the response.
+
+    Only the normalized parser result is consumed; raw headers and exception
+    text are never recovered from diagnostics. A received absolute deadline is
+    not restarted at failure time. Any available valid constraints are merged
+    conservatively, and an out-of-range hold cannot be replaced by a timer.
+    """
+    result = parse_retry_after(headers, now)
+    observed = diagnostics.get("retry_after") if isinstance(diagnostics, dict) else None
+    if not isinstance(observed, dict) or observed.get("kind") not in ("seconds", "date"):
+        return result
+    if (observed.get("status") == "out_of_range" and observed.get("manual_hold") is True
+            and observed.get("retry_at") is None and observed.get("delay_seconds") is None):
+        result.update(status="out_of_range", kind=observed["kind"], manual_hold=True)
+        return result
+    deadline, delay = observed.get("retry_at"), observed.get("delay_seconds")
+    if (observed.get("status") != "valid" or observed.get("manual_hold") is not False
+            or type(deadline) not in (int, float) or type(delay) not in (int, float)
+            or not _MIN_TIMESTAMP <= deadline <= _MAX_TIMESTAMP
+            or not 0 <= delay <= _MAX_TIMESTAMP - _MIN_TIMESTAMP
+            or not math.isfinite(deadline) or not math.isfinite(delay)):
+        return result
+    if result["retry_at"] is None or deadline > result["retry_at"]:
+        result.update(kind=observed["kind"], retry_at=deadline, delay_seconds=delay)
+        if not result["manual_hold"]:
+            result["status"] = "valid"
+    return result
+
+
 def _safe_url(value, base):
     if not value or any(ord(char) < 32 for char in value):
         return ""

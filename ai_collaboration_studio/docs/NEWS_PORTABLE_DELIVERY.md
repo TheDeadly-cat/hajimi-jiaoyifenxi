@@ -5,6 +5,10 @@ startup and packaging helpers, and tests. It is not a seven-file overlay.
 The portable entry below uses its own data directory and never searches for,
 stops, or reuses a service on port 8770.
 
+For the exact historical 20 source checks and the response-failure Retry-After
+regression, see [the focused reproduction instructions](NEWS_RETRY_AFTER_RECOVERY.md).
+They run from this complete checkout without a production directory or dependency download.
+
 ## Toolchain and bootstrap
 
 Use Windows x64 CPython 3.14, Node **v24.16.0**, and npm **11.13.0**. The observed

@@ -27,7 +27,7 @@ from . import news_runtime_evidence as runtime_evidence
 
 
 from .news_feed_transport import (
-    SOURCES, FeedResponse, FeedValidationError, classify_feed_error, fetch_feed, _SameHostRedirect, _safe_url, parse_retry_after,
+    SOURCES, FeedResponse, FeedValidationError, classify_feed_error, fetch_feed, _SameHostRedirect, _safe_url, parse_retry_after, failure_retry_after,
 )
 
 
@@ -585,7 +585,7 @@ class NewsPlatform:
                 diagnostics = dict(diagnostics) if isinstance(diagnostics, dict) else {}
                 diagnostics.update(error_kind=error_kind, phase='parse',
                                    response_status=response_status)
-            retry = parse_retry_after(response_headers, now) if response_status else parse_retry_after(None, now)
+            retry = failure_retry_after(response_headers, diagnostics, now)
             level, access_level = source['cooldown_level'], source['access_denied_level']
             rate_recovery_at = source['rate_recovery_not_before']
             if response_status == 429:
