@@ -1,5 +1,5 @@
-[CmdletBinding()]
-param([switch]$CheckOnly)
+﻿[CmdletBinding()]
+param([switch]$CheckOnly, [switch]$NoWindow)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -14,6 +14,7 @@ $frontendIndex = Join-Path $projectRoot "frontend\dist\index.html"
 function Show-LauncherError {
     param([Parameter(Mandatory = $true)][string]$Message)
 
+    if ($NoWindow) { Write-Output $Message; return }
     Add-Type -AssemblyName System.Windows.Forms
     [System.Windows.Forms.MessageBox]::Show(
         $Message,
@@ -155,6 +156,9 @@ function Get-StartupFailureMessage {
     }
 
     $logHint = "Logs: $LogDirectory"
+    if ($diagnosticText -match "StartupRecoveryError") {
+        return "启动时的数据恢复未完成，软件已保留备份和恢复记录，未重复修改数据库。请保留现场并检查恢复记录。`n$logHint"
+    }
     if ($diagnosticText -match "DatabaseMigrationRequired|Database migration is required") {
         return @"
 The current source requires a newly prepared and reviewed database migration.
@@ -194,7 +198,7 @@ Diagnostic: $sourceIdentityError
 }
 
 if (Test-StudioReady) {
-    if (-not $CheckOnly) {
+    if (-not $CheckOnly -and -not $NoWindow) {
         Open-StudioWindow
     }
     exit 0
@@ -278,4 +282,4 @@ if (-not $ready) {
     exit 1
 }
 
-Open-StudioWindow
+if (-not $NoWindow) { Open-StudioWindow }

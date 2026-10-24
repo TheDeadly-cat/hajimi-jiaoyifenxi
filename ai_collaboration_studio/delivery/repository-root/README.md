@@ -1,5 +1,13 @@
 # AI 共创室（交易分析工作区）
 
+当前分支是完整新闻运行源码的独立集成候选，包含生产基线源码、对应测试、依赖锁和隔离启动入口。先按[安装与启动说明](ai_collaboration_studio/docs/NEWS_PORTABLE_DELIVERY.md)安装锁定依赖；首次明确新建数据时运行 `run_ai_collaboration_studio.cmd --initialize-new`，之后可双击启动。默认端口 8780、数据位于本检出的 `runtime/news-workspace`，拒绝复用生产端口。采集和付费审核默认关闭。
+
+验证结论见[交付边界](ai_collaboration_studio/docs/NEWS_DELIVERY_ACCEPTANCE.md)和[分来源状态](ai_collaboration_studio/docs/NEWS_SOURCE_STATUS_20261024.md)。构建、服务启动、来源恢复与真实 API 审核质量分别验收。当前本机生产安装不由此入口切换。
+
+## 原仓库说明（历史）
+
+以下保留原发布投影说明；其中旧启动脚本和默认 8770 地址不适用于本分支的新检出。
+
 本仓库是本地非 Git 权威源码目录的 source-only 发布投影。主产品位于 `ai_collaboration_studio/`；仓库根文件只负责说明、受控启动和 CI 发现，不是第二份产品源码。
 
 本地工作区可以另行保留 `TradingAgents/` 作为外部研究参考，但公开投影不包含、合并或重新发布该第三方项目。

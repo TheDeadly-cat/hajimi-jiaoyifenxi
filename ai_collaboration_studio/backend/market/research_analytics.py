@@ -2,25 +2,33 @@ from __future__ import annotations
 
 import math
 import statistics
-from datetime import datetime
 from typing import Any
+
+from .daily_history_integrity import history_integrity_error, validated_close_rows
 
 
 DEFAULT_HORIZONS = (1, 5, 20)
 
 
 def _clean_series(history: dict[str, Any]) -> list[tuple[str, float]]:
-    by_date: dict[str, float] = {}
-    for row in history.get("rows") or []:
-        raw_time = str(row.get("market_time") or row.get("time_key") or "")
-        try:
-            date_key = datetime.strptime(raw_time[:10], "%Y-%m-%d").date().isoformat()
-            close = float(row.get("close"))
-        except (TypeError, ValueError):
-            continue
-        if close > 0 and math.isfinite(close):
-            by_date[date_key] = close
-    return sorted(by_date.items())
+    series, _ = _series_with_errors("", history)
+    return series
+
+
+def _series_with_errors(symbol: str, history: Any) -> tuple[list[tuple[str, float]], list[dict[str, Any]]]:
+    payload = history if isinstance(history, dict) else {}
+    rows, issues = validated_close_rows(payload.get("rows", []))
+    raw_errors = payload.get("source_errors", [])
+    errors = list(raw_errors) if isinstance(raw_errors, list) else []
+    if not isinstance(raw_errors, list):
+        issues.append("HISTORY_SOURCE_ERRORS_INVALID")
+    if payload.get("ok") is False:
+        issues.append("HISTORY_NOT_READY")
+    if issues:
+        errors.append(history_integrity_error(symbol, issues))
+    if errors:
+        return [], errors
+    return [(row["session_date"], row["close"]) for row in rows], []
 
 
 def _non_overlapping_returns(series: list[tuple[str, float]], horizon: int) -> list[dict[str, Any]]:
@@ -53,7 +61,8 @@ def historical_base_rates(
     rows: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     for symbol, history in sorted(histories.items()):
-        series = _clean_series(history if isinstance(history, dict) else {})
+        series, history_errors = _series_with_errors(symbol, history)
+        errors.extend(history_errors)
         if len(series) < 2:
             errors.append({
                 "source": "futu_qfq_daily_history",
@@ -112,16 +121,35 @@ def _pearson(left: list[float], right: list[float]) -> float | None:
 
 
 def equal_weight_portfolio_risk(histories: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    series_by_symbol = {symbol: dict(_clean_series(history)) for symbol, history in histories.items()}
+    series_by_symbol = {}
+    errors: list[dict[str, Any]] = []
+    for symbol, history in histories.items():
+        series, history_errors = _series_with_errors(symbol, history)
+        series_by_symbol[symbol] = dict(series)
+        errors.extend(history_errors)
     symbols = sorted(symbol for symbol, series in series_by_symbol.items() if len(series) >= 2)
-    if len(symbols) < 2:
+    if len(symbols) != len(histories):
+        errors.append({"source": "futu_qfq_daily_history", "code": "PORTFOLIO_HISTORY_INSUFFICIENT",
+                       "message": "有标的历史不足，未改变组合成员或重新分配权重。"})
+    common_dates: list[str] = []
+    if len(symbols) >= 2 and not errors:
+        # Different inception dates may trim the leading edge. Never intersect
+        # away a missing interior or trailing session and call it a daily move.
+        common_start = max(min(series_by_symbol[symbol]) for symbol in symbols)
+        calendars = {symbol: sorted(day for day in series_by_symbol[symbol] if day >= common_start)
+                     for symbol in symbols}
+        common_dates = calendars[symbols[0]]
+        if any(days != common_dates for days in calendars.values()):
+            errors.append({"source": "futu_qfq_daily_history", "code": "PORTFOLIO_HISTORY_SESSION_MISMATCH",
+                           "message": "共同起点后的日线会话不一致，未跨缺口计算每日组合收益。"})
+    if len(symbols) < 2 or errors:
         return {
             "version": "equal_weight_risk_v1",
             "source": "futu_qfq_daily_history",
             "state": "offline",
             "symbols": symbols,
             "sample_count": 0,
-            "source_errors": [{
+            "source_errors": errors or [{
                 "source": "futu_qfq_daily_history",
                 "code": "PORTFOLIO_HISTORY_INSUFFICIENT",
                 "message": "至少需要两个标的的共同历史区间",
@@ -131,7 +159,6 @@ def equal_weight_portfolio_risk(histories: dict[str, dict[str, Any]]) -> dict[st
             "live_trading_allowed": False,
         }
 
-    common_dates = sorted(set.intersection(*(set(series_by_symbol[symbol]) for symbol in symbols)))
     returns_by_symbol: dict[str, list[float]] = {symbol: [] for symbol in symbols}
     portfolio_returns: list[float] = []
     return_dates: list[str] = []

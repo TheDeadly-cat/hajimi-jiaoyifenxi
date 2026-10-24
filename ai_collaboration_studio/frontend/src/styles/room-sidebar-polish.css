@@ -5,6 +5,8 @@
   --room-sidebar-accent: #1769e0;
   --room-sidebar-accent-soft: rgba(23, 105, 224, 0.1);
   --room-sidebar-cyan: #27a9c2;
+  min-height: 0;
+  overflow: hidden;
   isolation: isolate;
   border-right-color: var(--room-sidebar-line);
   background:

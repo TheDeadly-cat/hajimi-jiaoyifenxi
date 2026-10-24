@@ -126,7 +126,7 @@ class ProviderProbeAdapterTests(unittest.TestCase):
         ]
 
         with patch(
-            "backend.providers.probe.urllib.request.urlopen",
+            "backend.providers.probe.open_provider_request",
             side_effect=[
                 ReadyHTTPResponse({
                     "choices": [{
@@ -189,7 +189,7 @@ class ProviderProbeAdapterTests(unittest.TestCase):
             for raw, expected_code in cases:
                 with self.subTest(provider=provider.provider_id, error_code=expected_code):
                     with patch(
-                        "backend.providers.probe.urllib.request.urlopen",
+                        "backend.providers.probe.open_provider_request",
                         return_value=ReadyHTTPResponse(raw),
                     ):
                         result = provider.probe()
@@ -229,7 +229,7 @@ class ProviderProbeAdapterTests(unittest.TestCase):
         for raw, expected_code in cases:
             with self.subTest(error_code=expected_code):
                 with patch(
-                    "backend.providers.probe.urllib.request.urlopen",
+                    "backend.providers.probe.open_provider_request",
                     return_value=ReadyHTTPResponse(raw),
                 ):
                     result = provider.probe()
@@ -263,7 +263,7 @@ class ProviderProbeAdapterTests(unittest.TestCase):
         )
 
         with patch(
-            "backend.providers.probe.urllib.request.urlopen",
+            "backend.providers.probe.open_provider_request",
             side_effect=http_error,
         ):
             result = provider.probe()

@@ -43,6 +43,7 @@ from .integration_manifest import (
     build_studio_integration_manifest,
 )
 from .instance_ownership import DatabaseInstanceOwner
+from .news_platform_routes import news_response
 from .material_ingest import MATERIAL_INGEST
 from .manual_chatgpt import ManualChatGPTError, ManualChatGPTService
 from .market.storage_service import STORAGE_MARKET
@@ -441,6 +442,11 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         if not self._guard_request():
             return
         query = parse_qs(parsed.query)
+        if parsed.path.startswith("/api/news/"):
+            result, status = news_response(getattr(self.server, "news_platform", None),
+                parsed.path, query=parse_qs(parsed.query, keep_blank_values=True))
+            self._send_json(result, status, cache_control="no-store")
+            return
         if parsed.path in {
             "/api/readiness",
             "/api/version",
@@ -1463,6 +1469,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             require_same_origin=readonly_research_match is not None,
         ):
             return
+        is_news_request = parsed.path.startswith("/api/news/")
         is_file_import = bool(re.fullmatch(r"/api/rooms/[^/]+/materials/import-file", parsed.path))
         is_manual_chatgpt_import = bool(re.fullmatch(
             r"/api/rooms/[^/]+/chatgpt-collaborations/[^/]+/imports",
@@ -1492,9 +1499,14 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 if is_source_inbox_import
                 else 128_000
             ),
-            strict=is_source_inbox_request,
+            strict=is_source_inbox_request or is_news_request,
         )
         if payload is None:
+            return
+        if is_news_request:
+            result, status = news_response(getattr(self.server, "news_platform", None),
+                parsed.path, query=parse_qs(parsed.query, keep_blank_values=True), payload=payload, method="POST")
+            self._send_json(result, status, cache_control="no-store")
             return
         if is_source_inbox_import:
             if set(payload) != {"content"} or type(payload.get("content")) is not str:
@@ -5306,10 +5318,22 @@ def run_server(
     store_path = STORE.path
     instance_owner.assert_held_for(store_path)
     server = ThreadingHTTPServer((host, port), StudioRequestHandler)
+    server.daemon_threads = False
     server.ai_studio_startup_ready = False
     started = False
+    server.news_platform = None
+    server.news_analysis = None
     try:
         recovery = STORE.recover_orphaned_work(instance_owner=instance_owner)
+        from .news_platform import NewsPlatform
+        server.news_platform = NewsPlatform(Path(store_path).parent / "news_platform.sqlite3")
+        from .news_startup import NewsStartup
+        server.news_platform.startup = NewsStartup(Path(__file__).resolve().parents[1], Path(store_path).parent)
+        from .news_platform_ai import NewsAnalysis
+        server.news_analysis = NewsAnalysis(Path(store_path).parent / "news_analysis.sqlite3", server.news_platform)
+        server.news_platform.ai = server.news_analysis
+        server.news_analysis.start()
+        server.news_platform.start()
         server.ai_studio_startup_ready = True
         started = True
         emit_event(
@@ -5333,5 +5357,17 @@ def run_server(
         except KeyboardInterrupt:
             emit_event("server_interrupt_received")
     finally:
-        server.server_close()
+        server.ai_studio_startup_ready = False
+        server.server_close()  # Stop HTTP intake and join admitted request handlers first.
+        for worker, label in ((server.news_analysis, "news_analysis"), (server.news_platform, "news_worker")):
+            if worker is None:
+                continue
+            while True:
+                try:
+                    if worker.stop(timeout=20):
+                        break
+                except Exception:
+                    emit_event(label + "_stop_failed", severity="error")
+                    threading.Event().wait(1)
+                emit_event(label + "_draining", severity="warning")
         emit_event("server_stopped", fields={"started": started})

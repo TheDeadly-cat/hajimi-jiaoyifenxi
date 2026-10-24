@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -62,6 +63,11 @@ PROVIDER_ALLOWED_FIELDS = {
 
 class ExecutionBoundaryViolation(ValueError):
     pass
+
+
+_TELEGRAM_BOT_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9:_-]{10,256}$")
+_TELEGRAM_DESTINATION_PATTERN = re.compile(r"^-?[1-9]\d*$")
+_MAX_TELEGRAM_ALERT_CHARS = 4_000
 
 
 def canonical_identifier(value: Any) -> str:
@@ -179,5 +185,61 @@ def build_text_provider_request(
         url,
         data=json.dumps(dict(payload), ensure_ascii=False).encode("utf-8"),
         headers=dict(headers),
+        method="POST",
+    )
+
+
+def build_output_only_telegram_bot_request(
+    api_base_url: str,
+    *,
+    token: str,
+    destination_chat_id: str,
+    text: str,
+) -> urllib.request.Request:
+    """Build the fixed, output-only Telegram ``sendMessage`` request.
+
+    This boundary exposes no arbitrary Bot method, destination, request body,
+    account action, forwarding field, or trading/execution capability.
+    """
+
+    base = str(api_base_url or "").rstrip("/")
+    parsed = urllib.parse.urlsplit(base)
+    if (
+        parsed.scheme.casefold() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise ExecutionBoundaryViolation(
+            "Telegram Bot API base URL must be an HTTPS origin"
+        )
+    clean_token = str(token or "").strip()
+    clean_destination = str(destination_chat_id or "").strip()
+    if not _TELEGRAM_BOT_TOKEN_PATTERN.fullmatch(clean_token):
+        raise ExecutionBoundaryViolation("Telegram Bot token is invalid")
+    if not _TELEGRAM_DESTINATION_PATTERN.fullmatch(clean_destination):
+        raise ExecutionBoundaryViolation(
+            "Telegram Bot destination must be a non-zero numeric chat ID"
+        )
+    if type(text) is not str or not text or len(text) > _MAX_TELEGRAM_ALERT_CHARS:
+        raise ExecutionBoundaryViolation("Telegram Bot alert text is invalid")
+    body = urllib.parse.urlencode(
+        {
+            "chat_id": clean_destination,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": "true",
+        }
+    ).encode("utf-8")
+    return urllib.request.Request(
+        f"{base}/bot{clean_token}/sendMessage",
+        data=body,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "AICollaborationStudio/0.2",
+        },
         method="POST",
     )

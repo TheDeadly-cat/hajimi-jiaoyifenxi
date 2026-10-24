@@ -358,6 +358,7 @@ def validate_readonly_daily_history(
     row_dates: list[date] = []
     previous_time: datetime | None = None
     seen_times: set[str] = set()
+    seen_sessions: set[str] = set()
     if isinstance(rows, list):
         for index, raw_row in enumerate(rows[:MAX_VALIDATED_HISTORY_ROWS]):
             prefix = f"HISTORY_ROW_{index}"
@@ -388,8 +389,10 @@ def validate_readonly_daily_history(
                     f"{prefix}_NOT_STRICTLY_ASCENDING",
                 )
                 reject(market_utc.isoformat() in seen_times, f"{prefix}_DUPLICATE_TIME")
+                reject(row_date.isoformat() in seen_sessions, f"{prefix}_DUPLICATE_SESSION")
                 previous_time = market_utc
                 seen_times.add(market_utc.isoformat())
+                seen_sessions.add(row_date.isoformat())
                 reject(
                     captured_at is not None and market_utc > captured_at,
                     f"{prefix}_AFTER_CAPTURE",

@@ -29,7 +29,7 @@ test("create room groups implementation detail behind a persistent preflight sum
   assert.match(dialogsSource, /aria-controls=\{templateReviewRegionId\}/);
   assert.match(dialogsSource, /aria-expanded=\{templateReviewExpanded\}/);
   assert.match(dialogsSource, /hidden=\{!templateReviewExpanded\}/);
-  assert.match(dialogsSource, /CREATE PERMIT \/ LOCAL DRAFT/);
+  assert.match(dialogsSource, /创建前确认 · 本地草稿/);
   assert.match(dialogsSource, /const creationReviewTone = submitError \|\| creationBlocked \|\| submitUnavailable/);
   assert.match(dialogsSource, /const creationReviewLabel = submitError\s*\? "创建请求需要处理"/);
   assert.match(dialogsSource, /创建房间配置与启动正式讨论轮是两个独立确认步骤/);

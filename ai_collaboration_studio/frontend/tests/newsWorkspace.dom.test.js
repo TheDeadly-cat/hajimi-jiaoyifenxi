@@ -1,0 +1,203 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+import React, { act } from "react";
+import { JSDOM } from "jsdom";
+import { createServer } from "vite";
+
+const vite = await createServer({ root: fileURLToPath(new URL("../", import.meta.url)), appType: "custom", logLevel: "silent", server: { hmr: false, middlewareMode: true } });
+const dom = new JSDOM("<!doctype html><body></body>", { pretendToBeVisual: true, url: "http://news-workspace.test/" });
+for (const key of ["window", "document", "navigator", "HTMLElement", "Node", "Event", "KeyboardEvent"]) Object.defineProperty(globalThis, key, { configurable: true, value: key === "window" ? dom.window : dom.window[key] });
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+const { createRoot } = await import("react-dom/client");
+const { NewsWorkspace } = await vite.ssrLoadModule("/src/components/NewsWorkspace.jsx");
+const originalFetch = globalThis.fetch;
+const source = { id: "fed", name: "合成官方来源", enabled: true, status: "ok", last_success_at: "2026-10-15T02:00:00Z" };
+const fixture = (id = "a", extra = {}) => ({ id, title: `合成消息 ${id}`, source_id: "fed", source_name: "合成官方来源", url: "https://www.federalreserve.gov/newsevents/pressreleases/example.htm", published_at: "2026-10-15T01:00:00Z", discovered_at: "2026-10-15T02:00:00Z", read: false, category: "macro", category_label: "宏观", importance: "attention", summary: "合成原文中的本机摘要。", excerpt: "合成正文摘录。", keywords: ["利率"], limitations: ["只覆盖公开摘要"], analysis_mode: "local_rules", ...extra });
+let host, root, client, calls, currentOverview, records;
+const buttons = () => [...host.querySelectorAll("button")];
+const button = (label) => buttons().find((entry) => entry.textContent.trim() === label);
+async function click(target) { assert.ok(target); await act(async () => target.click()); }
+async function render() { await act(async () => root.render(React.createElement(NewsWorkspace, { apiClient: client, onOpenRooms: () => { calls.rooms++; } }))); }
+async function input(target, value) {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value").set.call(target, value);
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+function deferred() { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; }
+
+test.beforeEach(() => {
+  records = [];
+  currentOverview = { enabled: false, running: true, refresh_pending: false, last_success_at: null, next_poll_at: null, counts: { total: 0, last_24h: 0, unread: 0 }, sources: [source], categories: [{ id: "macro", label: "宏观" }], ai: { configured: false, automatic: false, max_calls: 36, budget_cny: 3, calls_reserved: 0, reserved_cny: 0 } };
+  calls = { lists: [], refresh: 0, control: [], read: [], ai: [], rooms: 0, fetch: 0 };
+  client = {
+    newsOverview: async () => ({ ok: true, overview: currentOverview }),
+    newsItems: async (params) => { calls.lists.push(params); return { ok: true, items: [...records], total: records.length }; },
+    newsItem: async (id) => ({ ok: true, item: records.find((entry) => entry.id === id) }),
+    newsControl: async (enabled) => { calls.control.push(enabled); currentOverview = { ...currentOverview, enabled }; return { ok: true, overview: currentOverview }; },
+    newsRefresh: async () => { calls.refresh++; return { ok: true, overview: { ...currentOverview, refresh_pending: true } }; },
+    newsMarkRead: async (id) => { calls.read.push(id); return { ok: true, item: { ...records.find((entry) => entry.id === id), read: true } }; },
+    newsAIConfigure: async (payload) => { calls.ai.push(payload); return { ok: true, ai: { ...currentOverview.ai, configured: true } }; },
+    newsAIStatus: async () => ({ ok: true, ai: currentOverview.ai }),
+    newsAIClear: async () => ({ ok: true, ai: { ...currentOverview.ai, configured: false } }),
+    newsAIAnalyze: async (id) => { calls.ai.push(id); return { ok: true, ai_analysis: { status: "queued" } }; },
+  };
+  globalThis.fetch = async () => { calls.fetch++; throw new Error("No network permitted in this synthetic DOM test"); };
+  host = document.createElement("div"); document.body.append(host); root = createRoot(host);
+});
+test.afterEach(async () => { await act(async () => root.unmount()); assert.equal(calls.fetch, 0); document.body.replaceChildren(); globalThis.fetch = originalFetch; });
+test.after(async () => { dom.window.close(); await vite.close(); });
+
+test("empty entry offers real collection controls and never fabricates a news item or AI result", async () => {
+  await render();
+  assert.match(host.textContent, /还没有抓取到消息/);
+  assert.equal(host.querySelectorAll(".news-item").length, 0);
+  assert.equal(button("立即检查").disabled, false, "a live worker is not an in-flight fetch");
+  assert.match(host.textContent, /AI 未启用/);
+  assert.equal(calls.refresh, 0); assert.equal(calls.ai.length, 0);
+  await click(button("讨论房间")); assert.equal(calls.rooms, 1);
+  await click(button("立即检查")); assert.equal(calls.refresh, 1);
+  assert.match(host.textContent, /已安排立即检查/);
+});
+
+test("control stays pending until acknowledgement and a failed request does not pretend collection started", async () => {
+  const pending = deferred(); client.newsControl = () => pending.promise;
+  await render(); await click(button("开始持续抓取"));
+  assert.equal(button("开始持续抓取").disabled, true);
+  assert.match(host.querySelector(".news-runtime-primary").textContent, /已暂停/);
+  await act(async () => pending.resolve({ ok: true, overview: { ...currentOverview, enabled: true } }));
+  assert.ok(button("暂停抓取"));
+  client.newsControl = async () => { throw new Error("合成暂停失败"); };
+  await click(button("暂停抓取"));
+  assert.match(host.querySelector("[role=alert]").textContent, /合成暂停失败/);
+  assert.ok(button("暂停抓取"), "failed pause preserves authoritative enabled state");
+});
+
+test("important and unread filters are sent to the server rather than filtering only the first page", async () => {
+  await render(); await click(button("值得关注"));
+  assert.equal(calls.lists.at(-1).importance, "attention");
+  await click(button("未读")); assert.equal(calls.lists.at(-1).unread, true);
+  const field = host.querySelector('select');
+  await act(async () => { field.value = "fed"; field.dispatchEvent(new Event("change", { bubbles: true })); });
+  assert.equal(calls.lists.at(-1).source, "fed");
+});
+
+test("late detail responses cannot overwrite the selected item and closing restores focus", async () => {
+  records = [fixture("a"), fixture("b")]; const first = deferred();
+  client.newsItem = async (id) => id === "a" ? first.promise : { item: fixture("b") };
+  await render(); const [a, b] = host.querySelectorAll(".news-item");
+  await click(a); await click(b);
+  await act(async () => first.resolve({ item: fixture("a") }));
+  assert.equal(host.querySelector(".news-detail-body h2").textContent, "合成消息 b");
+  assert.equal(document.activeElement, host.querySelector(".news-detail-body h2"));
+  await click(button("返回列表")); assert.equal(document.activeElement, b);
+  assert.equal(host.querySelector(".news-reader").classList.contains("news-detail-open"), false);
+});
+
+test("source text stays text, unsafe original links are absent, and reading is saved only on explicit action", async () => {
+  records = [fixture("a", { title: "<img src=x onerror=alert(1)>", url: "javascript:alert(1)" })];
+  await render(); await click(host.querySelector(".news-item"));
+  assert.equal(host.querySelector(".news-detail-body img"), null);
+  assert.equal(host.querySelector(".news-original"), null);
+  assert.equal(calls.read.length, 0);
+  assert.match(host.textContent, /未使用 AI/);
+  await click(button("标为已读")); assert.deepEqual(calls.read, ["a"]); assert.equal(button("已读").disabled, true);
+});
+
+test("AI setup requires explicit budget acknowledgement and clears its password field immediately", async () => {
+  await render(); const key = host.querySelector('input[type="password"]');
+  assert.equal(key.autocomplete, "off");
+  assert.equal(host.querySelectorAll('input[type="checkbox"]')[0].checked, false);
+  await input(key, "synthetic-test-value-not-a-key");
+  assert.equal(button("确认额度并启用").disabled, true);
+  await click(host.querySelectorAll('input[type="checkbox"]')[1]);
+  const pending = deferred(); client.newsAIConfigure = (payload) => { calls.ai.push(payload); return pending.promise; };
+  await act(async () => host.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  assert.equal(key.value, "");
+  assert.deepEqual(calls.ai, [{ api_key: "synthetic-test-value-not-a-key", automatic: false, acknowledge_budget: true }]);
+  assert.ok(!host.textContent.includes("synthetic-test-value-not-a-key"));
+  await act(async () => pending.resolve({ ai: { configured: true, automatic: false } }));
+});
+
+test("manual AI dispatch is explicit and its queued state is not shown as a completed analysis", async () => {
+  records = [fixture()]; currentOverview.ai.configured = true;
+  await render(); await click(host.querySelector(".news-item"));
+  assert.equal(calls.ai.length, 0);
+  await click(button("用豆包分析这条"));
+  assert.deepEqual(calls.ai, ["a"]);
+  assert.match(host.querySelector(".news-ai-reading").textContent, /已加入分析队列/);
+  assert.doesNotMatch(host.querySelector(".news-ai-reading").textContent, /分析已完成/);
+});
+
+test("unmount cancels list and detail reads without creating extra actions", async () => {
+  records = [fixture()]; let listSignal; let detailSignal;
+  client.newsItems = async (params) => { listSignal = params.signal; return { items: records, total: 1 }; };
+  client.newsItem = (_id, signal) => { detailSignal = signal; return new Promise(() => {}); };
+  await render(); await click(host.querySelector(".news-item"));
+  await act(async () => root.unmount());
+  assert.equal(listSignal.aborted, true); assert.equal(detailSignal.aborted, true);
+  assert.equal(calls.refresh, 0); assert.equal(calls.ai.length, 0);
+  root = createRoot(host);
+});
+
+
+test("material checks block title-only dispatch even when AI was configured", async () => {
+  records = [fixture("a", { excerpt: "", material_quality: { status: "title_only", can_analyze: false, label: "仅有标题，缺少业务摘录", warnings: ["全文尚未读取。"] } })];
+  currentOverview.ai.configured = true;
+  await render(); await click(host.querySelector(".news-item"));
+  const quality = host.querySelector('[aria-label="阅读前核对"]');
+  assert.match(quality.textContent, /仅有标题/);
+  assert.match(quality.textContent, /不消耗模型额度/);
+  assert.equal(button("用豆包分析这条").disabled, true);
+  await click(button("用豆包分析这条"));
+  assert.equal(calls.ai.length, 0); assert.equal(calls.refresh, 0);
+});
+
+test("clock anomalies are visible and evidence stays inert exact source text", async () => {
+  const quote = '<img src=x onerror=alert(1)> Future plan remains conditional.';
+  records = [fixture("a", { material_quality: { status: "clock_anomaly", can_analyze: true, label: "发布时间待确认", warnings: ["发布时间晚于检查时间，不能视为已发布的新消息。"] }, ai_analysis: { status: "completed", summary: "这是合成摘要。", key_points: ["计划尚未完成"], uncertainties: ["全文未读"], evidence: [{ claim: "计划尚未完成", evidence_field: "excerpt", quote }] } })];
+  await render(); await click(host.querySelector(".news-item"));
+  assert.match(host.querySelector('[aria-label="阅读前核对"]').textContent, /发布时间待确认/);
+  const evidence = host.querySelector(".news-analysis-evidence");
+  assert.equal(evidence.open, false);
+  await click(evidence.querySelector("summary"));
+  assert.equal(evidence.open, true);
+  assert.equal(evidence.querySelector("blockquote").textContent, quote);
+  assert.equal(evidence.querySelector("img"), null);
+  assert.match(evidence.textContent, /仅说明出处/);
+  assert.equal(calls.ai.length, 0);
+});
+
+test("legacy completed and failed records stay readable without an implicit retry control", async () => {
+  records = [fixture("a", { ai_analysis: { status: "completed", legacy: true, summary: "保留的旧版摘要", key_points: ["保留要点"] } }), fixture("b", { ai_analysis: { status: "failed", legacy: true, error: "原失败记录" } })];
+  currentOverview.ai.configured = true;
+  await render(); await click(host.querySelectorAll(".news-item")[0]);
+  assert.match(host.querySelector(".news-ai-reading").textContent, /保留的旧版摘要/);
+  assert.match(host.querySelector(".news-analysis-legacy").textContent, /不会自动重新分析或扣费/);
+  assert.equal(button("用豆包分析这条"), undefined);
+  await click(host.querySelectorAll(".news-item")[1]);
+  assert.match(host.querySelector(".news-ai-reading").textContent, /原失败记录/);
+  assert.equal(button("用豆包分析这条"), undefined);
+  assert.equal(calls.ai.length, 0);
+});
+
+
+test("free insufficient result is not attributed to AI and anomalous time is explicitly unconfirmed", async () => {
+  records = [fixture("a", { material_quality: { status: "clock_anomaly", can_analyze: false, label: "发布时间异常，需核对", warnings: [], freshness: { clock_anomaly: true } }, ai_analysis: { status: "material_insufficient", analysis_performed: false, summary: "缺少摘录", key_points: [], uncertainties: [] } })];
+  await render(); await click(host.querySelector(".news-item"));
+  assert.match(host.querySelector(".news-timestamps").textContent, /来源标注时间（未确认）/);
+  assert.match(host.querySelector(".news-ai-reading").textContent, /本机材料检查，未调用 AI/);
+  assert.doesNotMatch(host.querySelector(".news-ai-reading").textContent, /AI 根据本条来源内容生成/);
+  assert.equal(calls.ai.length, 0);
+});
+
+
+test("a later saved RSS revision distinguishes current version time from first discovery", async () => {
+  records = [fixture("a", { material_quality: { status: "sufficient_excerpt", can_analyze: true, label: "订阅条目有更新，全文未核对", warnings: ["首次发现时间不代表本次更新发现时间。"], freshness: { clock_anomaly: false, revision_after_discovery: true } } })];
+  await render(); await click(host.querySelector(".news-item"));
+  assert.match(host.querySelector(".news-timestamps").textContent, /当前版本标注时间/);
+  assert.doesNotMatch(host.querySelector(".news-timestamps").textContent, /未确认/);
+  assert.match(host.querySelector('[aria-label="阅读前核对"]').textContent, /订阅条目有更新/);
+  assert.equal(calls.ai.length, 0);
+});

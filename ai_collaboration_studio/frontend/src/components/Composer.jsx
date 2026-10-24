@@ -147,7 +147,7 @@ export function Composer({
             onClick={(event) => onStartRound?.(event.currentTarget)}
             disabled={disabled || roundDisabled}
           >
-            <Sparkles size={16} />API 轮次
+            <Sparkles size={16} />开始一轮
           </button>
           <button
             className="primary chatgpt-button"

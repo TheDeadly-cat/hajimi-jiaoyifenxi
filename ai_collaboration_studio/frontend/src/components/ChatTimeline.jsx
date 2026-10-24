@@ -294,7 +294,7 @@ export const ChatTimeline = memo(function ChatTimeline({
           <p>消息、主持决定与证据引用按确定性时间顺序排列。</p>
         </span>
         <em className={projectionLimited ? "is-limited" : ""}>
-          <span>VISIBLE RECORDS</span>{recordCount}
+          <span>当前记录</span>{recordCount}
         </em>
       </header>
 
@@ -377,6 +377,8 @@ export const ChatTimeline = memo(function ChatTimeline({
       </div>
 
       <div className="timeline-status-stack">
+        <details className="timeline-projection-details">
+          <summary>查看记录与成员统计</summary>
         <div className="timeline-integrity-ledger" role="list" aria-label="时间线本地投影状态">
           <span role="listitem">
             <small>MODE</small>
@@ -391,6 +393,7 @@ export const ChatTimeline = memo(function ChatTimeline({
             <strong>{memberIndex.indexedCount} / {memberIndex.totalCount}</strong>
           </span>
         </div>
+        </details>
         {projectionNotes.length ? (
           <div className="timeline-projection-notice" role="note">
             <ShieldCheck size={14} aria-hidden="true" />

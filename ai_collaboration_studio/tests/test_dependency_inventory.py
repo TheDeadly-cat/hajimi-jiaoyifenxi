@@ -70,13 +70,13 @@ class DependencyInventoryTests(unittest.TestCase):
             {
                 "ecosystem": "pypi",
                 "path": "requirements-lock-win-py314.txt",
-                "sha256": "22e149f601a83f26833cff20d32cbf5aaa01242906de0d8cf9d53a6e569ea699",
+                "sha256": "13c9c10140bb3030cfe699cc128c7f28684930b79c4e58a16751bb25f8ef2fdd",
             },
             {
                 "ecosystem": "npm",
                 "lockfile_version": 3,
                 "path": "frontend/package-lock.json",
-                "sha256": "3483d12256cb3005c350cb00deed8ee61fe7e0a916bb2c95394404bd8a1305f1",
+                "sha256": "f388220844523962781c97633fa51a3054e13851c48a1c7fdd61a703db986b3b",
             },
         ])
         self.assertFalse(first["boundaries"]["vulnerabilities_evaluated"])

@@ -5,6 +5,7 @@ import unittest
 
 from backend.execution_boundary import (
     ExecutionBoundaryViolation,
+    build_output_only_telegram_bot_request,
     build_text_provider_request,
     ensure_safe_api_path,
     ensure_text_only_provider_payload,
@@ -78,6 +79,34 @@ class ExecutionBoundaryTests(unittest.TestCase):
                     endpoint,
                     payload,
                     headers={},
+                )
+
+    def test_telegram_bot_boundary_allows_only_fixed_output_message_shape(self) -> None:
+        request = build_output_only_telegram_bot_request(
+            "https://telegram.invalid",
+            token="1234567890:fixture_TOKEN",
+            destination_chat_id="-100999",
+            text="fixture",
+        )
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(
+            request.full_url,
+            "https://telegram.invalid/bot1234567890:fixture_TOKEN/sendMessage",
+        )
+        self.assertIn(b"chat_id=-100999", bytes(request.data or b""))
+        self.assertIn(b"parse_mode=HTML", bytes(request.data or b""))
+
+        for values in (
+            {"api_base_url": "http://telegram.invalid", "destination_chat_id": "-100999"},
+            {"api_base_url": "https://telegram.invalid/path", "destination_chat_id": "-100999"},
+            {"api_base_url": "https://telegram.invalid", "destination_chat_id": "@dynamic"},
+        ):
+            with self.subTest(values=values), self.assertRaises(ExecutionBoundaryViolation):
+                build_output_only_telegram_bot_request(
+                    values["api_base_url"],
+                    token="1234567890:fixture_TOKEN",
+                    destination_chat_id=values["destination_chat_id"],
+                    text="fixture",
                 )
 
 

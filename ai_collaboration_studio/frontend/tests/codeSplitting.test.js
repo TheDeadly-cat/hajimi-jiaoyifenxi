@@ -100,6 +100,7 @@ test("chat, sidebar and composer stay eager while heavy host surfaces use direct
     "ArtifactDialog",
     "ChatGPTCollaborationDialog",
     "FootballResearchPanel",
+    "NewsWorkspace",
     "PaperPortfolioDialog",
     "RoundExecutionTraceDialog",
     "StockResearchPanel",
@@ -143,8 +144,8 @@ test("every lazy host surface has an explicit Suspense fallback", () => {
   assert.match(deferredFallbackSource, /export function DeferredSurfaceFallback/);
   const lazyCount = (appSource.match(/= lazy\(/g) || []).length;
   const suspenseCount = (appSource.match(/<Suspense fallback=/g) || []).length;
-  assert.equal(lazyCount, 18);
-  assert.equal(suspenseCount, 18);
+  assert.equal(lazyCount, 19);
+  assert.equal(suspenseCount, 19);
 });
 
 test("football and stock panel CSS follows the corresponding lazy module", () => {

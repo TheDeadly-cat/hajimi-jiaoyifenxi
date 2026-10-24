@@ -12,6 +12,13 @@ from .base import (
     classify_provider_exception,
     safe_provider_error_message,
 )
+from .http_transport import (
+    MAX_PROVIDER_ERROR_BYTES,
+    MAX_PROVIDER_RESPONSE_BYTES,
+    ProviderResponseLimitError,
+    read_provider_response,
+    open_provider_request,
+)
 from .probe import model_missing_probe, perform_http_probe, unconfigured_probe
 
 
@@ -198,10 +205,19 @@ class CompatibleChatProvider:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=max(1, int(timeout_seconds))) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+            with open_provider_request(request, timeout=max(1, int(timeout_seconds))) as response:
+                payload = json.loads(
+                    read_provider_response(response, MAX_PROVIDER_RESPONSE_BYTES).decode("utf-8")
+                )
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="ignore")[:800]
+            try:
+                detail = read_provider_response(exc, MAX_PROVIDER_ERROR_BYTES).decode(
+                    "utf-8", errors="ignore"
+                )[:800]
+            except (OSError, TypeError, ValueError):
+                detail = ""
+            finally:
+                exc.close()
             return ProviderResponse(
                 ok=False,
                 provider=self.provider_id,
@@ -209,7 +225,7 @@ class CompatibleChatProvider:
                 error=provider_http_error(detail, exc.code, self._display_name),
                 error_code="http_status",
             )
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except (json.JSONDecodeError, UnicodeDecodeError, ProviderResponseLimitError):
             return ProviderResponse(
                 ok=False,
                 provider=self.provider_id,

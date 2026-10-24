@@ -173,3 +173,6 @@
 @media (prefers-reduced-motion: reduce) {
   .create-room-template-review-control button svg { transition-duration: 0.01ms; }
 }
+
+.create-room-protocol-details > summary { cursor: pointer; font-size: 0.75rem; padding: 10px 0; }
+.create-room-protocol-details > summary:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }

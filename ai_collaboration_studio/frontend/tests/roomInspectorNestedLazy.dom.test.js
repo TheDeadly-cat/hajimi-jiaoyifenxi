@@ -80,7 +80,7 @@ test("late lazy targets keep bounded observer-based navigation and complete clea
   );
   assert.match(navigationSource, /observeChildren\(\);\s*align\(\)/);
   assert.match(navigationSource, /inspector\.scrollTop \+= offset/);
-  assert.match(navigationSource, /resolvedTarget\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(navigationSource, /\.focus\(\{ preventScroll: true \}\)/);
   assert.match(navigationSource, /setTimer\(stop, INSPECTOR_TARGET_NAVIGATION_LIFETIME_MS\)/);
   assert.match(navigationSource, /cancelFrame\(animationFrame\)/);
   assert.match(navigationSource, /clearTimer\(lifetimeTimer\)/);

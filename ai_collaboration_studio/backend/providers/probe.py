@@ -9,6 +9,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .base import ProviderProbeResult
+from .http_transport import open_provider_request
 
 
 PROBE_TIMEOUT_SECONDS = 15
@@ -171,11 +172,13 @@ def perform_http_probe(
     display_name: str,
     timeout_seconds: int = PROBE_TIMEOUT_SECONDS,
     response_text_extractor: ProbeTextExtractor | None = None,
+    open_request: Callable[..., Any] | None = None,
 ) -> ProviderProbeResult:
     started = time.perf_counter()
     response_body = b""
+    opener = open_request or open_provider_request
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        with opener(request, timeout=timeout_seconds) as response:
             if response_text_extractor is not None:
                 response_body = response.read(PROBE_RESPONSE_MAX_BYTES + 1)
     except urllib.error.HTTPError as exc:

@@ -35,8 +35,9 @@ class FakeHTTPResponse:
     def __exit__(self, *_args: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
+    def read(self, size: int = -1) -> bytes:
+        raw = json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
+        return raw if size < 0 else raw[:size]
 
 
 class LegacyPromptProvider:
@@ -369,7 +370,7 @@ class ProviderOutputDispatchTests(unittest.TestCase):
         )
 
         with patch(
-            "urllib.request.urlopen",
+            "backend.providers.http_transport._NO_REDIRECT_OPENER.open",
             return_value=FakeHTTPResponse({
                 "model": "deepseek-fixture",
                 "choices": [{"finish_reason": "stop", "message": {"content": '{"ok":true}'}}],
@@ -383,7 +384,7 @@ class ProviderOutputDispatchTests(unittest.TestCase):
         deepseek_body = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
 
         with patch(
-            "urllib.request.urlopen",
+            "backend.providers.http_transport._NO_REDIRECT_OPENER.open",
             return_value=FakeHTTPResponse({
                 "model": "doubao-fixture",
                 "status": "completed",
@@ -398,7 +399,7 @@ class ProviderOutputDispatchTests(unittest.TestCase):
         doubao_body = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
 
         with patch(
-            "urllib.request.urlopen",
+            "backend.providers.http_transport._NO_REDIRECT_OPENER.open",
             return_value=FakeHTTPResponse({
                 "model": "glm-fixture",
                 "choices": [{"finish_reason": "stop", "message": {"content": '{"ok":true}'}}],

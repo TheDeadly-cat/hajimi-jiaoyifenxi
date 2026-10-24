@@ -436,7 +436,10 @@ class LiveExecutionStaticAuditTests(unittest.TestCase):
             builder_lines: set[int] = set()
             if path.name == "execution_boundary.py":
                 for node in ast.walk(tree):
-                    if isinstance(node, ast.FunctionDef) and node.name == "build_text_provider_request":
+                    if isinstance(node, ast.FunctionDef) and node.name in {
+                        "build_text_provider_request",
+                        "build_output_only_telegram_bot_request",
+                    }:
                         builder_lines.update(range(node.lineno, int(node.end_lineno or node.lineno) + 1))
             for lineno, call_name in _mutating_http_calls(tree):
                 if (

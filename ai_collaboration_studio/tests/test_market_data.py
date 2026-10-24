@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from backend.market.futu_readonly import (
@@ -1008,8 +1008,8 @@ class TechnicalMetricTests(unittest.TestCase):
     def rows(count: int) -> list[dict[str, object]]:
         return [
             {
-                "time": f"2026-01-{index + 1:02d}",
-                "market_time": f"2026-01-{index + 1:02d} 00:00:00",
+                "time": (date(2026, 1, 1) + timedelta(days=index)).isoformat(),
+                "market_time": f"{date(2026, 1, 1) + timedelta(days=index)} 00:00:00",
                 "close": 100 + index,
                 "volume": 200 if index == count - 1 else 100,
             }
