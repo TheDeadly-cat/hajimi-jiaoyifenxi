@@ -1,0 +1,52 @@
+{
+  "schema": "news_sample_executor_v2_offline_verification_v1",
+  "status": "implementation_complete_offline_checks_passed_no_new_real_request",
+  "scope": "Only the new acceptance/news_api_sample_v2 source directory was changed; backend/frontend/scripts and v1 executor/plan were not edited.",
+  "changes": [
+    "Lazy Windows tkinter masked input with Ctrl+V/right-click paste and visible character count",
+    "Printable ASCII key-format validation, explicit cancellation and closed-window reentry prevention",
+    "Synthetic-only standalone UI entry without backend/runner/plan import, with socket/DNS blocked",
+    "Allowlisted integer HTTP status and UTC/monotonic timing receipt; no headers/error body/credential persistence",
+    "Explicit PythonExecutable launcher parameter; no plaintext completion prompt",
+    "Bounded rejected-HTTP-body drain avoids Windows connection reset on denied local routes"
+  ],
+  "tests": {
+    "credentials_mock_tk_passed": 6,
+    "runner_local_http_fake_transport_passed": 8,
+    "total_passed": 14,
+    "runner_final_duration_seconds": 11.851,
+    "final_exit_codes": [0, 0],
+    "initial_runner_result": "7 passed and one Windows local connection-aborted error while rejecting a wrong item route; fixed bounded rejected-body draining before final successful run.",
+    "real_gui_launched_by_implementing_agent": false,
+    "clipboard_read_by_implementing_agent": false,
+    "real_provider_requests": 0,
+    "existing_credentials_read": false,
+    "external_network_used": false,
+    "production_8770_or_database_accessed": false
+  },
+  "limitations": [
+    "MockTk tests do not establish visual/clipboard behavior of the actual Windows dialog; separate synthetic-only UI verification remains available.",
+    "Character count and ASCII validation do not verify whether a key is valid and do not explain the v1 HTTP failure.",
+    "45 seconds is a socket timeout, not an end-to-end wall-clock deadline.",
+    "Application reservation upper bound 0.124536 CNY is not a supplier billing hard cap.",
+    "One-shot control belongs to this isolated executor, not the production general session API.",
+    "No second real model request was authorized or executed as part of this implementation."
+  ],
+  "source_sha256": {
+    "runner.py": "69493c5f3ec16d5c04ba8c19e214f0e6b86b0a05d5cb3b0fab2e243eb0b09eae",
+    "credentials.py": "71cbd5b18aa9848a84276cbe20f37b869eda4e429934e7e457c0e98995dd8659",
+    "ui_smoke.py": "a325f96b44049200a7dca618c6bdc2cd77f241d4364605ead1b778dbc0f562b1",
+    "launch-approved-sample.ps1": "92499cafe5d53dec7a7572bd8ab55c8a157412d0da11eda34b229753a01c3e41",
+    "tests/test_runner.py": "a7eb965eda9efc128568835a6ab3044e15f9d8b6100f036915441b2ad69c3150",
+    "tests/test_credentials.py": "82fbca6f6de5d2c29fe484876464d361482096198a5b21ad042c2486ba4ce8d0"
+  },
+  "v1_preservation": {
+    "runner_sha256": "3392796aa7f12baffacd46e049c6a92b5348fe8d656e75491b8f57bbb344eef4",
+    "plan_sha256": "b1b29c7af5c0e93127e8a1c04892e91e4dc2657129dac480be3db1abb6027b79",
+    "both_hashes_verified_unchanged": true,
+    "historical_real_attempts": 1,
+    "historical_result": "failed",
+    "historical_numeric_http_status": "UNKNOWN",
+    "historical_conclusion_changed": false
+  }
+}
