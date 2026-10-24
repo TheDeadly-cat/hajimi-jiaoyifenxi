@@ -1,5 +1,6 @@
-/requirements-lock-win-py314.txt text eol=lf
-/frontend/package-lock.json text eol=lf
-
 # Preserve the captured runtime source bytes in every checkout.
 * -text
+
+# Lock identities are defined over LF bytes; these explicit exceptions win.
+/requirements-lock-win-py314.txt text eol=lf
+/frontend/package-lock.json text eol=lf

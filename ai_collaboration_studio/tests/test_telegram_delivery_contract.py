@@ -4,6 +4,8 @@ import re
 import unittest
 from pathlib import Path
 
+from backend.telegram_intelligence.settings import TelegramSettings, TelegramSettingsError
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,12 +33,18 @@ class TelegramDeliveryContractTests(unittest.TestCase):
 
     def test_env_example_uses_fail_closed_defaults(self) -> None:
         env = _read(".env.example")
+        assignments = [line.split("=", 1) for raw in env.splitlines()
+                       if (line := raw.strip()) and not line.startswith("#") and "=" in line]
+        values = {name.strip(): value.strip() for name, value in assignments}
+        self.assertEqual(len(values), len(assignments), "duplicate env assignments can override safe defaults")
         for assignment in (
             "TELEGRAM_API_ID=",
             "TELEGRAM_API_HASH=",
             "TELEGRAM_PHONE=",
             "TELEGRAM_TDLIB_LIBRARY_PATH=",
             "TELEGRAM_TDLIB_DATABASE_ENCRYPTION_KEY=",
+            "TELEGRAM_BOT_TOKEN=",
+            "TELEGRAM_DESTINATION_CHAT_ID=",
             "TELEGRAM_DATABASE_PATH=runtime/telegram/telegram.sqlite3",
             "TELEGRAM_HEALTH_HOST=127.0.0.1",
             "TELEGRAM_HISTORY_MAX_LIMIT=1000",
@@ -48,9 +56,24 @@ class TelegramDeliveryContractTests(unittest.TestCase):
             "DRY_RUN=true",
             "TIMEZONE=Asia/Shanghai",
         ):
-            self.assertIn(assignment, env)
-        self.assertNotRegex(env, r"(?m)^TELEGRAM_BOT_TOKEN=\S+")
-        self.assertNotRegex(env, r"(?m)^TELEGRAM_API_HASH=\S+")
+            name, value = assignment.split("=", 1)
+            self.assertIn(name, values)
+            self.assertEqual(values[name], value, name)
+        settings = TelegramSettings.from_env(values, load_local=False)
+        self.assertEqual(settings.api_id, 0)
+        self.assertEqual(settings.api_hash, "")
+        self.assertEqual(settings.phone, "")
+        self.assertIsNone(settings.tdlib_library_path)
+        self.assertEqual(settings.bot_token, "")
+        self.assertEqual(settings.destination_chat_id, "")
+        self.assertEqual(settings.tdlib_database_encryption_key, "")
+        self.assertFalse(settings.enable_ai)
+        self.assertFalse(settings.enable_alerts)
+        self.assertFalse(settings.download_media)
+        self.assertTrue(settings.dry_run)
+        self.assertEqual(settings.health_host, "127.0.0.1")
+        with self.assertRaisesRegex(TelegramSettingsError, "TELEGRAM_API_ID is required"):
+            settings.validate_runtime()
 
     def test_chat_example_is_disabled_and_contains_only_contract_fields(self) -> None:
         chats = _read("config/chats.example.yaml")

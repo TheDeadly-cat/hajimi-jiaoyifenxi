@@ -24,7 +24,7 @@ class PythonLockContractTests(unittest.TestCase):
             "pandas": "3.0.5",
             "protobuf": "7.36.0",
             "pycryptodome": "3.23.0",
-            "pypdf": "6.16.2",
+            "pypdf": "6.19.0",
             "python-dateutil": "2.9.0.post0",
             "simplejson": "4.1.1",
             "six": "1.17.0",
