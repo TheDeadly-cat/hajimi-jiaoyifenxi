@@ -244,7 +244,7 @@ class NewsProviderAdmissionTests(unittest.TestCase):
             for offset,formula,state,summary in (
                 (-20,self.app._legacy_fingerprint,'failed','old legacy failure'),
                 (-10,self.app._rss_v2_fingerprint,'completed','v2 saved result'),
-                (0,self.app._fingerprint,'completed','v3 saved result')):
+                (0,self.app._rss_v3_fingerprint,'completed','v3 saved result')):
                 db.execute('INSERT INTO runs(fingerprint,item_id,created,reserved,status,result) VALUES(?,?,?,?,?,?)',
                     (formula(source),'one',time.time()+offset,100,state,json.dumps({'summary':summary})))
         self.configure()

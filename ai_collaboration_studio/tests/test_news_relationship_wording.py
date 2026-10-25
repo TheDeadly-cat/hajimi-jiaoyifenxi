@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from backend.news_content_quality import (
     INSTRUCTIONS, QUALITY_VERSION, RSS_V2_INSTRUCTIONS, RSS_V2_QUALITY_VERSION,
-    RSS_V2_TEXT_FORMAT, TEXT_FORMAT, build_input, inspect_material, validate_output,
+    RSS_V2_TEXT_FORMAT, TEXT_FORMAT, build_input, inspect_material, validate_output, SemanticReviewRequired,
 )
 from backend.news_platform_ai import NewsAnalysis
 
@@ -46,15 +46,17 @@ class RelationshipWordingTests(unittest.TestCase):
             with self.subTest(term=term):
                 value = neutral_output(item)
                 value["summary"] = "合成机构终止" + term + "合成银行的执法行动。"
-                with self.assertRaisesRegex(ValueError, "unsupported_relationship_direction"):
+                with self.assertRaises(SemanticReviewRequired) as caught:
                     validate(item, value)
+                self.assertTrue(any(issue["code"] == "analysis_unsupported_relationship_direction" for issue in caught.exception.issues))
 
     def test_each_claim_checked_even_with_neutral_summary_and_valid_quotes(self):
         item = synthetic_item()
         value = neutral_output(item)
         value["key_points"].append({"claim": "行动针对合成银行。", "evidence_field": "title", "quote": item["title"]})
-        with self.assertRaisesRegex(ValueError, "unsupported_relationship_direction"):
+        with self.assertRaises(SemanticReviewRequired) as caught:
             validate(item, value)
+        self.assertTrue(any(issue["code"] == "analysis_unsupported_relationship_direction" for issue in caught.exception.issues))
 
     def test_neutral_result_keeps_uncertainty_scope_and_original_material(self):
         item = synthetic_item()
@@ -63,7 +65,7 @@ class RelationshipWordingTests(unittest.TestCase):
         result = validate(item, value)
         self.assertEqual(result["summary"], value["summary"])
         self.assertEqual(result["uncertainties"], value["uncertainties"])
-        self.assertEqual(result["quality_version"], "rss_excerpt_reading_v3")
+        self.assertEqual(result["quality_version"], "rss_excerpt_reading_v4")
         self.assertTrue(result["semantic_review_required"])
         self.assertNotIn("quality_gate_passed", result)
         self.assertEqual(result["freshness"]["publication_age"], "older_than_24h")
@@ -75,6 +77,7 @@ class RelationshipWordingTests(unittest.TestCase):
         item = synthetic_item(relation="against")
         value = neutral_output(item)
         value["summary"] = "合成监管机构宣布终止针对合成银行的执法行动。"
+        value["uncertainties"] = ["仅阅读RSS摘录，未核对全文和具体措施。"]
         self.assertEqual(validate(item, value)["summary"], value["summary"])
         item["title"] = item["excerpt"] = "Synthetic company supplies parts with extended warranties."
         value = neutral_output(item)
@@ -86,11 +89,12 @@ class RelationshipWordingTests(unittest.TestCase):
         item["title"] = item["excerpt"] = "Synthetic regulator ends ENFORCEMENT ACTION\nWITH Synthetic Bank."
         value = neutral_output(item)
         value["summary"] = "针对合成银行的执法行动终止；法律关系仍需确认。"
-        with self.assertRaisesRegex(ValueError, "unsupported_relationship_direction"):
+        with self.assertRaises(SemanticReviewRequired) as caught:
             validate(item, value)
+        self.assertTrue(any(issue["code"] == "analysis_unsupported_relationship_direction" for issue in caught.exception.issues))
 
     def test_new_contract_and_exact_frozen_v2_values(self):
-        self.assertEqual(QUALITY_VERSION, "rss_excerpt_reading_v3")
+        self.assertEqual(QUALITY_VERSION, "rss_excerpt_reading_v4")
         self.assertEqual(TEXT_FORMAT["name"], QUALITY_VERSION)
         self.assertEqual(RSS_V2_QUALITY_VERSION, "rss_excerpt_reading_v2")
         self.assertIn("summary与每条key_points.claim", INSTRUCTIONS)
@@ -161,7 +165,7 @@ class SavedV2CompatibilityTests(unittest.TestCase):
         self.assertTrue(self.app._queue.empty())
         self.assertEqual(self.app.status()["calls_reserved"], 4)
 
-    def test_new_unsupported_summary_is_failed_and_still_not_retried(self):
+    def test_new_unsupported_summary_needs_review_and_still_not_retried(self):
         item = synthetic_item()
         self.news.items[item["id"]] = item
         def fake_generate(*_):
@@ -173,11 +177,13 @@ class SavedV2CompatibilityTests(unittest.TestCase):
         self.app.configure(FAKE_KEY, False, True)
         self.app._analyze(item["id"])
         saved = self.app.result(item)
-        self.assertEqual(saved["status"], "failed")
-        self.assertEqual(saved["error_code"], "analysis_failed")
+        self.assertEqual(saved["status"], "needs_review")
+        self.assertEqual(saved["error_code"], "semantic_review_required")
+        self.assertEqual(json.loads(saved["raw_model_output"])["summary"], "监管机构宣布终止针对合成银行的行动。")
+        self.assertTrue(any(issue["code"] == "analysis_unsupported_relationship_direction" for issue in saved["semantic_review"]["issues"]))
         self.assertEqual(saved["quality_version"], QUALITY_VERSION)
         self.app._analyze(item["id"])
-        self.assertEqual(self.app.request(item["id"])["status"], "failed")
+        self.assertEqual(self.app.request(item["id"])["status"], "needs_review")
         self.assertEqual(self.calls, ["synthetic_attempt"])
         self.assertEqual(self.app.status()["calls_reserved"], 1)
 

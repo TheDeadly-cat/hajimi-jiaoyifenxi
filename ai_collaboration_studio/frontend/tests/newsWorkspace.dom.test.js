@@ -376,3 +376,41 @@ test("a later saved RSS revision distinguishes current version time from first d
   assert.match(host.querySelector('[aria-label="阅读前核对"]').textContent, /订阅条目有更新/);
   assert.equal(calls.ai.length, 0);
 });
+
+test("semantic review preserves raw text without accepting it or offering a paid retry", async () => {
+  const rawOutput = '<img src=x onerror=alert(1)> {"summary":"unaccepted synthetic text"}';
+  records = [fixture("review", { ai_analysis: { status: "needs_review", provider: "deepseek", model: "deepseek-flash", summary: "MUST_NOT_APPEAR_AS_ACCEPTED", raw_model_output: rawOutput, semantic_review: { issues: [{ code: "statistical_comparison_basis", status: "unknown" }] } } })];
+  await render(); await click(host.querySelector(".news-item"));
+  const section = host.querySelector(".news-ai-reading");
+  assert.match(section.textContent, /待复核，不自动重试/);
+  assert.match(section.querySelector('[role="status"]').textContent, /依据不足：来源没有充分支持这项同比或环比口径/);
+  assert.ok(!section.textContent.includes("MUST_NOT_APPEAR_AS_ACCEPTED"));
+  assert.equal(section.querySelector("img"), null);
+  assert.equal(section.querySelector("button"), null);
+  const details = section.querySelector("details.news-analysis-raw");
+  await click(details.querySelector("summary"));
+  assert.equal(details.querySelector("pre").textContent, rawOutput);
+  assert.equal(calls.ai.length, 0);
+});
+
+test("historic completed results remain readable and do not imply verified facts", async () => {
+  records = [fixture("historic", { ai_analysis: { status: "completed", summary: "保留原v3审核内容", legacy: true, legacy_notice: "旧记录未经过v4规则重新检查。", quality_version: "rss_excerpt_reading_v3", freshness: { published_at: "2026-10-01T00:00:00Z", discovered_at: "2026-10-02T00:00:00Z", publication_age: "older_than_24h" }, quality_checked_at: "2026-10-20T00:00:00Z" } })];
+  await render(); await click(host.querySelector(".news-item"));
+  const section = host.querySelector(".news-ai-reading");
+  assert.match(section.textContent, /保留原v3审核内容/);
+  assert.match(section.textContent, /模型输出已保存，事实未确认/);
+  assert.match(section.textContent, /首次发现/);
+  assert.match(section.textContent, /本次审核检查/);
+  assert.match(section.textContent, /已超过24小时/);
+  assert.match(section.textContent, /旧版分析.*尚未经过新规则/);
+  assert.equal(section.querySelector("button"), null);
+  assert.equal(calls.ai.length, 0);
+});
+
+test("future timestamps remain unconfirmed in deterministic analysis time display", async () => {
+  records = [fixture("future", { ai_analysis: { status: "needs_review", raw_model_output: "合成未确认输出", freshness: { published_at: "2026-11-01T00:00:00Z", discovered_at: "2026-10-02T00:00:00Z", clock_anomaly: true }, quality_checked_at: "2026-10-20T00:00:00Z" } })];
+  await render(); await click(host.querySelector(".news-item"));
+  assert.match(host.querySelector(".news-analysis-clock").textContent, /存在异常.*尚未确认/);
+  assert.ok(!host.querySelector(".news-analysis-clock").textContent.includes("不超过24小时"));
+  assert.equal(calls.ai.length, 0);
+});

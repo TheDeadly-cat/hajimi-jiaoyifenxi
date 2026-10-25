@@ -143,20 +143,55 @@ function RuntimeHistory({ overview, overviewError, pending, startupError, onStar
   </details>;
 }
 
+function semanticIssueLabel(issue) {
+  const labels = {
+    statistical_comparison_basis: "来源没有充分支持这项同比或环比口径。",
+    uncertainty_denies_supported_basis: "不确定项把来源已经明确说明的比较口径说成未知。",
+    assertion_uncertainty_conflict: "正文与不确定项对同一信息的说法不一致。",
+    statistical_value_unit: "数字或单位与引用内容不符，或尚无法对应。",
+    monetary_value_currency: "金额、币种或数量级与来源不符，或尚无法对应。",
+    monetary_period: "金额所属期间与来源不符，或尚无法对应。",
+    statistical_period: "数据所属期间与来源不符，或尚无法对应。",
+    enforcement_action_count: "来源没有充分支持这项行动数量。",
+    explicit_relationship_direction_obscured: "原文明确的行动关系被写成未知，需要核对。",
+    analysis_unsupported_relationship_direction: "原文的模糊关系被写成了明确方向，需要核对。",
+    publication_check_direction: "发布时间与审核检查时间的先后关系表述不符。",
+    publication_age_claim: "发布时间距离本次检查的描述需要核对。",
+    discovery_recency_claim: "首次发现时间与“新发现”的表述不符。",
+    publication_not_confirmed: "来源时间存在异常，不能确认已经发布。",
+    validation_unconfirmed: "内容检查未能确认完成，不能当作已经通过。",
+  };
+  const label = typeof issue?.message === "string" ? issue.message : labels[issue?.code] || "这项表述与来源或时间信息无法充分对应，需进一步核对。";
+  return `${issue?.status === "contradicted" ? "存在冲突：" : issue?.status === "unknown" ? "依据不足：" : ""}${label}`;
+}
+
+function AnalysisReview({ analysis }) {
+  const review = analysis?.semantic_review;
+  const issues = Array.isArray(review?.issues) ? review.issues : [];
+  const freshness = analysis?.freshness;
+  return <>
+    {analysis.status === "needs_review" ? <div className="news-semantic-review" role="status"><strong>内容待复核，尚未作为正常分析结果接纳</strong><p>请先核对来源摘录与下方保留的模型原输出。预约已保留，不会自动重试或重复扣费。</p>{issues.length ? <ul>{issues.map((issue, index) => <li key={index}>{semanticIssueLabel(issue)}</li>)}</ul> : null}</div> : null}
+    {freshness && typeof freshness === "object" ? <div className="news-analysis-clock"><h4>时间记录（本机核对）</h4><dl><div><dt>{freshness.revision_after_discovery ? "当前版本标注时间" : "来源标注时间"}</dt><dd>{deadlineLabel(freshness.published_at)}</dd></div><div><dt>首次发现</dt><dd>{deadlineLabel(freshness.discovered_at)}</dd></div><div><dt>本次审核检查</dt><dd>{deadlineLabel(analysis.quality_checked_at)}</dd></div></dl><p>{freshness.clock_anomaly ? "来源标注时间存在异常，发布时间与新鲜度尚未确认。" : freshness.revision_after_discovery ? "条目有更新，首次发现属于更早版本，不能替代当前版本发布时间。" : freshness.publication_age === "older_than_24h" ? "按本次审核检查时间，来源标注时间已超过24小时；发现时间不代表事件发生时间。" : freshness.publication_age === "within_24h" ? "来源标注时间距本次审核检查不超过24小时；未据此确认事件实际发生时间。" : "发布时间或时间关系尚未确认。"}</p></div> : null}
+    {typeof analysis.raw_model_output === "string" ? <details className="news-analysis-raw"><summary>查看保留的模型原输出（未作修正）</summary><p>原输出只作复核依据，不表示事实已确认，也不会触发新的模型请求。</p><pre>{analysis.raw_model_output}</pre></details> : null}
+  </>;
+}
+
 function AIReading({ analysis, materialQuality, configured, routeLabel, busy, onAnalyze }) {
   const status = analysis?.status;
+  const needsReview = status === "needs_review";
   const insufficient = materialQuality?.can_analyze === false;
   return <section className="news-ai-reading">
     <h3><span className="news-ai-title"><Sparkles size={16} aria-hidden="true" />{analysis ? analysis.analysis_performed === false ? "本机材料检查" : `${savedModelLabel(analysis)} · 分析记录` : `${routeLabel}分析`}</span></h3>
     {analysis ? <>
       {analysis.analysis_performed !== false ? <p className="news-ai-provenance">保存时使用：{savedModelLabel(analysis)}{analysis.model ? `（${String(analysis.model).slice(0, 100)}）` : ""}。切换模型仍保留这份记录，不会自动重新分析或扣费。</p> : null}
-      <p className="news-ai-state">{({ completed: "分析已完成", success: "分析已完成", queued: "已加入分析队列", pending: "正在分析", running: "正在分析", failed: "分析未完成", material_insufficient: "材料不足，未发送模型请求", unknown: "结果未知，不会自动重试" })[String(status).toLowerCase()] || "分析状态待确认"}</p>
-      {analysis.summary ? <p>{analysis.summary}</p> : null}
-      {Array.isArray(analysis.key_points) && analysis.key_points.length ? <ul>{analysis.key_points.map((point, index) => <li key={index}>{point}</li>)}</ul> : null}
-      {Array.isArray(analysis.uncertainties) && analysis.uncertainties.length ? <><h4>仍需核实</h4><ul>{analysis.uncertainties.map((point, index) => <li key={index}>{point}</li>)}</ul></> : null}
-      <AnalysisEvidence analysis={analysis} />
+      <p className="news-ai-state">{({ completed: "模型输出已保存，事实未确认", success: "模型输出已保存，事实未确认", needs_review: "待复核，不自动重试", queued: "已加入分析队列", pending: "正在分析", running: "正在分析", failed: "分析未完成", material_insufficient: "材料不足，未发送模型请求", unknown: "结果未知，不会自动重试" })[String(status).toLowerCase()] || "分析状态待确认"}</p>
+      {!needsReview && analysis.summary ? <p>{analysis.summary}</p> : null}
+      {!needsReview && Array.isArray(analysis.key_points) && analysis.key_points.length ? <ul>{analysis.key_points.map((point, index) => <li key={index}>{point}</li>)}</ul> : null}
+      {!needsReview && Array.isArray(analysis.uncertainties) && analysis.uncertainties.length ? <><h4>仍需核实</h4><ul>{analysis.uncertainties.map((point, index) => <li key={index}>{point}</li>)}</ul></> : null}
+      {!needsReview ? <AnalysisEvidence analysis={analysis} /> : null}
+      <AnalysisReview analysis={analysis} />
       {analysis.error ? <p className="news-source-error">{analysis.error}</p> : null}
-      <small>{analysis.analysis_performed === false ? "本机材料检查，未调用 AI；请打开原文核对。" : "AI 根据本条来源内容生成，结论仍需结合原文核对。"}</small>
+      <small>{analysis.analysis_performed === false ? "本机材料检查，未调用 AI；请打开原文核对。" : "格式和引文检查不等于事实确认；模型输出仍需结合原文核对。"}</small>
     </> : <><p>{insufficient ? "当前订阅材料不足，请先阅读官方原文；不会发送模型请求。" : configured ? "需要进一步理解这条消息时，可使用本次已确认的额度分析。" : "AI 分析尚未启用；上方的本机整理不消耗模型额度。"}</p><button type="button" className="news-button" disabled={!configured || busy || insufficient} onClick={onAnalyze}>{busy ? <LoaderCircle className="news-spin" size={16} aria-hidden="true" /> : <Sparkles size={16} aria-hidden="true" />}用{routeLabel}分析这条</button></>}
   </section>;
 }

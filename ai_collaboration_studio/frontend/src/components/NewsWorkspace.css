@@ -239,3 +239,13 @@
 .news-analysis-evidence small { display: block; margin-top: 5px; color: var(--news-muted); }
 .news-analysis-evidence blockquote { margin: 4px 0 14px; padding: 9px 12px; border-left: 3px solid var(--news-border); background: #f4f8fc; white-space: pre-wrap; overflow-wrap: anywhere; }
 .news-analysis-legacy { padding: 10px 12px; border-left: 3px solid #9b6a25; background: #fff8e8; }
+
+.news-semantic-review { margin: 12px 0; padding: 12px 14px; border-left: 3px solid #9b6a25; background: #fff8e8; color: var(--news-text); }
+.news-semantic-review p, .news-semantic-review ul { font-size: 13px; line-height: 1.8; margin: 6px 0; }
+.news-analysis-clock { margin: 14px 0; border-top: 1px solid var(--news-border); padding-top: 10px; }
+.news-analysis-clock dl { display: flex; flex-wrap: wrap; gap: 10px 22px; margin: 8px 0; }
+.news-analysis-clock dt { color: var(--news-muted); font-size: 12px; }
+.news-analysis-clock dd { margin: 4px 0 0; font-size: 13px; }
+.news-analysis-clock p, .news-analysis-raw p { font-size: 13px; line-height: 1.8; }
+.news-analysis-raw summary { min-height: 44px; align-content: center; cursor: pointer; color: var(--news-accent); }
+.news-analysis-raw pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 13px; line-height: 1.8; padding: 12px; border: 1px solid var(--news-border); border-radius: 6px; }
