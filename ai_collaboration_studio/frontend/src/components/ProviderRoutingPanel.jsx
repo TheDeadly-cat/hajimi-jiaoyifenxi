@@ -158,6 +158,7 @@ export const ProviderRoutingPanel = memo(function ProviderRoutingPanel({
     <section
       className="inspector-section provider-routing-section provider-routing-console"
       id="inspector-providers"
+      tabIndex={-1}
       data-routing-busy={busy ? "true" : "false"}
       aria-labelledby={titleId}
       aria-busy={busy}
@@ -320,6 +321,7 @@ export const ProviderRoutingPanel = memo(function ProviderRoutingPanel({
             || typeof onRunPreflight !== "function"
           }
           aria-busy={action === "preflight"}
+          data-inspector-navigation-focus
           onClick={runPreflight}
         >
           {action === "preflight"

@@ -64,8 +64,15 @@ export function bindInspectorTargetNavigation(
       if (Number.isFinite(offset) && Math.abs(offset) > 0.5) {
         inspector.scrollTop += offset;
       }
+      const control = resolvedTarget.querySelector?.("[data-inspector-navigation-focus]:not(:disabled)");
+      if (control) {
+        const bounds = inspector.getBoundingClientRect();
+        const controlBounds = control.getBoundingClientRect();
+        if (controlBounds.bottom > bounds.bottom) inspector.scrollTop += controlBounds.bottom - bounds.bottom;
+        else if (controlBounds.top < bounds.top) inspector.scrollTop += controlBounds.top - bounds.top;
+      }
       if (focusedTarget !== resolvedTarget) {
-        resolvedTarget.focus({ preventScroll: true });
+        (control || resolvedTarget).focus({ preventScroll: true });
         focusedTarget = resolvedTarget;
       }
     });

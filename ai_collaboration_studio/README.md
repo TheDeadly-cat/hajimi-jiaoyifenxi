@@ -1,4 +1,20 @@
+# 完整新闻集成候选（2026-10-24）
+
+本分支固定当前新闻运行基线的完整源码，并增加独立安装、启动、验证与回滚入口。新的检出请从[可移植交付说明](docs/NEWS_PORTABLE_DELIVERY.md)开始；默认独立数据、端口 8780、采集与付费审核关闭。[验收边界](docs/NEWS_DELIVERY_ACCEPTANCE.md)记录各项通过证据与仍未完成的事项。旧生产安装及其数据不受此分支操作影响。
+
+以下内容保留为历史操作手册；旧桌面入口和 8770 地址只属于原有安装，不能作为新检出的启动步骤。
+
+# 历史运行与使用入口（2026-10-19）
+
+本交付是消息抓取与研究工作台。双击原桌面“AI 共创室 - 交易分析”，或打开 http://127.0.0.1:8770/。日常操作见 [使用说明](使用说明.txt)，当前版本、验收范围和剩余事项见 [当前交付状态](docs/daily_workspace_status_20261019.md)。
+
+后文保留原协作功能手册及 2026-10-14 的审计快照。其“隔离候选、尚未替换安装”等描述仅对应当时状态；当前状态以上方链接为准，不能将历史测试或新闻试验结论自动套用到本版本。
+
+---
+
 # AI 共创室
+
+> 当前审计状态（2026-10-14）：见 [审计与交付状态](docs/audit_status_20261014.md)。本目录是已通过限定本地验收的隔离整改候选，最终交付身份以状态页引用的清单为准；没有替换现用安装。新闻候选真实业务门未通过，旧“不重跑”决定有效，原说明和历史失败保留。
 
 AI 共创室是通用多 AI 协作群聊。用户创建房间，为不同 AI 配置身份、职责、边界、立场、模型和发言顺序；AI 读取同一份讨论记录，互相回应并形成由用户确认的结论。
 
@@ -567,3 +583,12 @@ npm.cmd --prefix frontend run build
 - `docs/cross_project_collaboration_architecture.md` / `docs/project_invocation_quickstart.md`：跨项目边界、调用流程和正式启用前置条件。
 - `docs/open_source_upgrade_map.md`：TradingAgents、AI Hedge Fund、FinRobot、LangGraph 等方案的机制复用与许可边界。
 - `docs/industry_proxy_boundary.md`：官方月度行业代理、派生口径与不能外推到单家公司或即时报价的边界。
+
+## Telegram 只读情报（可选）
+
+独立 Telegram/TDLib 来源层的配置、登录、chat 白名单、持久工作管线、手动
+Source Inbox 投影、有界历史、dry-run、固定 Bot 目的地、启停、健康检查、恢复、已知风险与
+Docker 静态交付合同见
+[Telegram 只读情报采集与交付](docs/telegram_intelligence.md)。第一阶段不接入 Grok，不提供
+交易执行；模型声称的 `confirmed` 在没有外部核验源时会降级为 `likely`。OpenAI 继续受宿主硬禁用策略约束。
+当前离线测试不等于真实 Telegram/TDLib、Bot、Provider 或 Docker 集成已经验证。

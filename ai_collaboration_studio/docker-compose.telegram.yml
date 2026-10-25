@@ -1,0 +1,65 @@
+services:
+  telegram-intelligence:
+    build:
+      context: ./backend
+      dockerfile: ../Dockerfile.telegram
+    image: ai-collaboration-studio-telegram:local
+    init: true
+    read_only: true
+    stdin_open: true
+    tty: true
+    command: ["telegram", "run"]
+    environment:
+      AI_STUDIO_SKIP_LOCAL_ENV: "1"
+      AI_STUDIO_DISABLED_PROVIDERS: "openai"
+      APP_ENV: "production"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      TIMEZONE: "Asia/Shanghai"
+      TELEGRAM_API_ID: "${TELEGRAM_API_ID:-}"
+      TELEGRAM_API_HASH: "${TELEGRAM_API_HASH:-}"
+      TELEGRAM_PHONE: "${TELEGRAM_PHONE:-}"
+      TELEGRAM_TDLIB_LIBRARY_PATH: "/opt/tdlib/lib/libtdjson.so"
+      TELEGRAM_TDLIB_DATABASE_ENCRYPTION_KEY: "${TELEGRAM_TDLIB_DATABASE_ENCRYPTION_KEY:-}"
+      TELEGRAM_TDLIB_DATABASE_DIR: "/app/runtime/telegram/tdlib-data"
+      TELEGRAM_TDLIB_FILES_DIR: "/app/runtime/telegram/files"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_DESTINATION_CHAT_ID: "${TELEGRAM_DESTINATION_CHAT_ID:-}"
+      TELEGRAM_CHATS_CONFIG: "/app/config/chats.yaml"
+      TELEGRAM_KEYWORDS_CONFIG: "/app/config/keywords.yaml"
+      TELEGRAM_DATABASE_PATH: "/app/runtime/telegram/telegram.sqlite3"
+      TELEGRAM_HEALTH_HOST: "127.0.0.1"
+      TELEGRAM_HEALTH_PORT: "8781"
+      TELEGRAM_HISTORY_MAX_LIMIT: "${TELEGRAM_HISTORY_MAX_LIMIT:-1000}"
+      TELEGRAM_MAX_DATABASE_BYTES: "${TELEGRAM_MAX_DATABASE_BYTES:-4294967296}"
+      TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS: "${TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS:-90}"
+      TELEGRAM_MAX_MEDIA_BYTES: "${TELEGRAM_MAX_MEDIA_BYTES:-20971520}"
+      TELEGRAM_PRE_SCORE_LIGHT_THRESHOLD: "${TELEGRAM_PRE_SCORE_LIGHT_THRESHOLD:-30}"
+      TELEGRAM_PRE_SCORE_FULL_THRESHOLD: "${TELEGRAM_PRE_SCORE_FULL_THRESHOLD:-60}"
+      TELEGRAM_ALERT_COOLDOWN_SECONDS: "${TELEGRAM_ALERT_COOLDOWN_SECONDS:-300}"
+      TELEGRAM_ANALYZER_PROVIDER: "openai"
+      ENABLE_AI: "false"
+      ENABLE_ALERTS: "${ENABLE_ALERTS:-false}"
+      DOWNLOAD_MEDIA: "false"
+      DRY_RUN: "${DRY_RUN:-true}"
+    volumes:
+      - type: volume
+        source: telegram_intelligence_runtime
+        target: /app/runtime
+      - type: bind
+        source: "${TELEGRAM_CONFIG_DIR_HOST:?Set TELEGRAM_CONFIG_DIR_HOST to a private config directory}"
+        target: /app/config
+        read_only: true
+      - type: bind
+        source: "${TELEGRAM_TDLIB_LIBRARY_PATH_HOST:?Set TELEGRAM_TDLIB_LIBRARY_PATH_HOST to a Linux libtdjson.so}"
+        target: /opt/tdlib/lib/libtdjson.so
+        read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 105s
+
+volumes:
+  telegram_intelligence_runtime:

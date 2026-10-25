@@ -388,7 +388,7 @@ test("v5 freezes project context only through the generic authorization set", ()
 
   assert.equal(normalized.valid, true);
   assert.equal(normalized.version, "round_launch_plan_v5");
-  assert.equal(normalized.project_round_focus_authorization, null);
+  assert.equal(Object.hasOwn(normalized, "project_round_focus_authorization"), false);
   assert.deepEqual(normalized.round_context_authorizations, v5ContextSet({ project: true }));
   assert.deepEqual(payload.round_context_authorizations, v5ContextSet({ project: true }));
   assert.equal(Object.hasOwn(payload, "project_round_focus_authorization"), false);
@@ -820,4 +820,50 @@ test("the dialog renders the backend full Provider total instead of preflight-on
   assert.match(dialogSource, /round_director/);
   assert.match(dialogSource, /独立主持子预算/);
   assert.match(dialogSource, /包含在全局硬上限内/);
+});
+
+
+test("valid v3/v4/v5 plans survive the App-to-dialog normalization chain without adding foreign fields", () => {
+  for (const source of [readyPlan(), focusReadyPlan(), v5ReadyPlan({ project: true, football: true, stock: true })]) {
+    const once = normalizeRoundLaunchPlan(source);
+    const twice = normalizeRoundLaunchPlan(once);
+    const thrice = normalizeRoundLaunchPlan(twice);
+    assert.equal(once.valid, true, source.version);
+    assert.deepEqual(twice, once, source.version);
+    assert.deepEqual(thrice, once, source.version);
+    assert.equal(roundLaunchAuthorizationState(thrice, 28).canConfirm, true);
+    const args = { clientRoundRequestId: "f03-idempotence-request", maxProviderCalls: 28 };
+    assert.deepEqual(buildRoundLaunchAuthorizationPayload(thrice, args), buildRoundLaunchAuthorizationPayload(source, args));
+    const context = {
+      roomId: source.room.id, roomSettingsVersion: source.room.settings_version,
+      objective: source.objective, skipProviders: source.skip_provider_ids,
+      projectRoundFocusAuthorization: source.project_round_focus_authorization ?? null,
+      roundContextAuthorizations: source.round_context_authorizations ?? null,
+    };
+    assert.equal(roundLaunchPlanContextState(source, context).matches, true);
+    assert.equal(roundLaunchPlanContextState(thrice, context).matches, true);
+  }
+});
+
+test("explicit foreign authorization fields including null remain rejected before and after normalization", () => {
+  const variants = [
+    [readyPlan(), "project_round_focus_authorization", null],
+    [readyPlan(), "round_context_authorizations", null],
+    [readyPlan(), "project_round_focus_authorization", focusAuthorization()],
+    [readyPlan(), "round_context_authorizations", v5ContextSet({ project: true })],
+    [focusReadyPlan(), "round_context_authorizations", null],
+    [focusReadyPlan(), "round_context_authorizations", v5ContextSet({ project: true })],
+    [v5ReadyPlan({ project: true }), "project_round_focus_authorization", null],
+    [v5ReadyPlan({ project: true }), "project_round_focus_authorization", focusAuthorization()],
+  ];
+  for (const [source, field, value] of variants) {
+    source[field] = value;
+    const once = normalizeRoundLaunchPlan(source);
+    assert.equal(once.valid, false, `${source.version}: ${field}`);
+    assert.equal(roundLaunchAuthorizationState(source, 28).canConfirm, false);
+    assert.equal(roundLaunchAuthorizationState(once, 28).canConfirm, false);
+    assert.throws(() => buildRoundLaunchAuthorizationPayload(once, {
+      clientRoundRequestId: "f03-invalid-mixed-request", maxProviderCalls: 28,
+    }), /阻断项/);
+  }
 });

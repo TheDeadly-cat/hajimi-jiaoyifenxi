@@ -74,6 +74,65 @@ export function roundLaunchShortHash(value) {
   return clean.length >= 18 ? `${clean.slice(0, 10)}…${clean.slice(-8)}` : "封印不可用";
 }
 
+// Presentation only: every authorization decision remains in the existing gate.
+export function roundLaunchRecovery({ plan, authorization, submitControl, error = "" } = {}) {
+  if (error) return {
+    title: "开始一轮前需要重新检查",
+    detail: `${roundLaunchErrorMessage(error)} 请重新读取确认单；这一步不会调用模型。`,
+    retry: true,
+  };
+  if (!plan) return {
+    title: "暂时无法读取本轮计划",
+    detail: "请重新读取确认单；这一步不会调用模型。仍失败时可取消返回，保留当前输入。",
+    retry: true,
+  };
+  const blockers = Array.isArray(plan.blockers) ? plan.blockers : [];
+  const codes = new Set(blockers.map((blocker) => blocker.code));
+  if (codes.has("CLIENT_PLAN_INVALID")) return {
+    title: "本轮计划校验未通过",
+    detail: "计划或执行边界无法验证。请重新读取确认单；不能跳过校验开始讨论。",
+    retry: true,
+  };
+  if (authorization?.validLimit === false) return {
+    title: "请修正本轮调用总上限",
+    detail: authorization.error || "请输入允许范围内的整数。",
+  };
+  if (codes.has("PROVIDER_POLICY_DISABLED") || codes.has("PROVIDER_SKIPPED")) return {
+    title: "当前模型被停用，暂不能开始一轮",
+    detail: "在“房间信息 → 模型路由与本机配置”中查看可用模型，并显式调整成员路由。被策略停用的模型不能在这里重新启用。",
+    providerSettings: true,
+  };
+  if (codes.has("PROVIDER_NOT_CONFIGURED")) return {
+    title: "模型尚未配置，暂不能开始一轮",
+    detail: "先到“房间信息 → 模型路由与本机配置”查看缺失项。密钥需按项目 README 的模型配置说明在本机设置；此处不能填写密钥。",
+    providerSettings: true,
+  };
+  if (codes.has("PROVIDER_STATUS_UNAVAILABLE")) return {
+    title: "暂时无法读取模型配置状态",
+    detail: "请重新读取确认单。仍失败时到“房间信息 → 模型路由与本机配置”查看状态；不会自动检查连通性或切换模型。",
+    providerSettings: true,
+    retry: true,
+  };
+  if (["PROVIDER_UNKNOWN", "MODERATOR_PROVIDER_ROUTE_UNAVAILABLE", "WORKFLOW_PROVIDER_COVERAGE_INSUFFICIENT"].some((code) => codes.has(code))) return {
+    title: "主持人或讨论成员的模型不可用",
+    detail: "请在“房间信息 → 模型路由与本机配置”核对成员路由；到“房间设置”核对主持人和讨论流程，再重新开始一轮。",
+    providerSettings: true,
+  };
+  if (codes.has("RECOMMENDATION_EXCEEDS_DEPLOYMENT_HARD_LIMIT")) return {
+    title: "本轮所需调用次数超过系统上限",
+    detail: "请取消返回，在房间设置中缩小讨论流程后重新开始一轮。不能通过提高输入值绕过系统上限。",
+  };
+  if (blockers.length) return {
+    title: "本轮仍有条件未满足",
+    detail: `${blockerLabel(blockers[0])}。请核对下方详细原因；当前不能开始一轮。`,
+  };
+  if (!submitControl?.canSubmit) return {
+    title: "本轮确认尚未准备好",
+    detail: submitControl?.instruction || "请取消后重新开始一轮；不能跳过确认。",
+  };
+  return null;
+}
+
 export function roundLaunchSubmitControl({
   authorization,
   requestIdReady,

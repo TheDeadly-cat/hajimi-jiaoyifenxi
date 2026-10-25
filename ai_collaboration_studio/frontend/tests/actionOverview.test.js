@@ -305,7 +305,8 @@ test("exact-room navigation delegates late lazy alignment to the bounded DOM bin
   assert.match(navigationSource, /inspector\.scrollTop \+= offset/);
   assert.doesNotMatch(navigationSource, /headerOffset/);
   assert.match(navigationSource, /INSPECTOR_TARGET_NAVIGATION_LIFETIME_MS = 4000/);
-  assert.match(navigationSource, /resolvedTarget\.focus\(\{ preventScroll: true \}\)/);
+  // The DOM binder tests exercise both the unmarked section and marked-control targets.
+  assert.match(navigationSource, /\.focus\(\{ preventScroll: true \}\)/);
   assert.match(inspectorSource, /id="inspector-paper-portfolio" tabIndex=\{-1\}/);
   assert.match(inspectorSource, /id="inspector-observations" tabIndex=\{-1\}/);
   assert.match(deskSource, /id="inspector-action-desk"[^>]*tabIndex=\{-1\}/);

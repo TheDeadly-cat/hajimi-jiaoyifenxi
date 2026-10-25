@@ -33,6 +33,7 @@ MAX_FILE_BYTES = 2_000_000
 MAX_FETCH_BYTES = 1_500_000
 MAX_EXTRACTED_CHARS = 50_000
 MAX_DOCX_UNCOMPRESSED_BYTES = 12_000_000
+MAX_DOCX_EXTRACTION_UNITS = MAX_DOCX_UNCOMPRESSED_BYTES
 MAX_PDF_PAGES = 80
 MAX_REDIRECTS = 5
 REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
@@ -179,6 +180,12 @@ def extract_html(raw: bytes, charset: str = "") -> tuple[str, str]:
     return normalize_text("".join(parser.parts)), normalize_text(" ".join(parser.title_parts))[:120]
 
 
+class _DocxTreeBuilder(ElementTree.TreeBuilder):
+    def doctype(self, name: str, pubid: str | None, system: str | None) -> None:
+        # Called before the DTD subset/entity expansion, for every XML encoding.
+        raise ValueError("DOCX XML 不允许 DTD 或实体声明")
+
+
 def extract_docx(raw: bytes) -> str:
     try:
         with zipfile.ZipFile(BytesIO(raw)) as archive:
@@ -186,15 +193,31 @@ def extract_docx(raw: bytes) -> str:
             if total_uncompressed > MAX_DOCX_UNCOMPRESSED_BYTES:
                 raise ValueError("DOCX 解压后内容过大")
             try:
-                document_xml = archive.read("word/document.xml")
+                with archive.open("word/document.xml") as document:
+                    document_xml = document.read(MAX_DOCX_UNCOMPRESSED_BYTES + 1)
+                if len(document_xml) > MAX_DOCX_UNCOMPRESSED_BYTES:
+                    raise ValueError("DOCX 正文 XML 过大")
             except KeyError as exc:
                 raise ValueError("DOCX 缺少正文结构") from exc
     except zipfile.BadZipFile as exc:
         raise ValueError("DOCX 文件结构无效") from exc
-    root = ElementTree.fromstring(document_xml)
+    try:
+        parser = ElementTree.XMLParser(target=_DocxTreeBuilder())
+        root = ElementTree.fromstring(document_xml, parser=parser)
+    except ElementTree.ParseError as exc:
+        raise ValueError("DOCX 正文 XML 格式无效") from exc
     paragraphs: list[str] = []
+    remaining_units = MAX_DOCX_EXTRACTION_UNITS
     for paragraph in root.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"):
-        parts = [node.text or "" for node in paragraph.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t")]
+        parts: list[str] = []
+        for node in paragraph.iter():
+            # Nested paragraphs repeat descendants; bound visits as well as copies.
+            value = (node.text or "") if node.tag == "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t" else ""
+            remaining_units -= 1 + len(value)
+            if remaining_units < 0:
+                raise ValueError("DOCX extraction work exceeds the allowed size")
+            if value:
+                parts.append(value)
         text = "".join(parts).strip()
         if text:
             paragraphs.append(text)

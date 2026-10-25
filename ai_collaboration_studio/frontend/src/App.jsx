@@ -1,4 +1,4 @@
-import { Inbox, Menu, PanelLeft, Pause, Settings, Users, X } from "lucide-react";
+import { Inbox, Menu, Newspaper, PanelLeft, Pause, Settings, Users, X } from "lucide-react";
 import {
   Suspense,
   lazy,
@@ -17,6 +17,7 @@ import {
   streamRound,
 } from "./api";
 import { downloadArtifactMarkdown } from "./artifacts";
+import { buildNewsResearchDraft, newsResearchStillCurrent, newsResearchSubmission } from "./newsResearch";
 import { buildArtifactUserDecisionRequest } from "./artifactUserDecision";
 import { resolveComposerMentions } from "./composerMentions";
 import {
@@ -72,6 +73,7 @@ import {
   PROVIDER_CALL_LIMIT_MAX,
   PROVIDER_CALL_LIMIT_MIN,
   roundLaunchPlanContextState,
+  roundLaunchSkipPolicyState,
 } from "./roundLaunchPlan";
 import {
   mergeRoundExecutionTracePages,
@@ -145,6 +147,8 @@ function preloadSourceInboxPanel() {
   loadSourceInboxPanel().catch(() => {});
 }
 const SourceInboxPanel = lazy(loadSourceInboxPanel);
+const NewsWorkspace = lazy(() => import("./components/NewsWorkspace.jsx")
+  .then((module) => ({ default: module.NewsWorkspace })));
 let roomInspectorModulePromise = null;
 function loadRoomInspector() {
   if (!roomInspectorModulePromise) {
@@ -339,7 +343,7 @@ export default function App() {
   const [actionOverviewOpen, setActionOverviewOpen] = useState(false);
   const [sourceInboxOpen, setSourceInboxOpen] = useState(false);
   const [chatGPTCollaborationOpen, setChatGPTCollaborationOpen] = useState(false);
-  const [railSection, setRailSection] = useState("rooms");
+  const [railSection, setRailSection] = useState(() => new URLSearchParams(window.location.search).has("room") ? "rooms" : "news");
   const [inspectorNavigation, setInspectorNavigation] = useState({
     targetId: "",
     requestId: 0,
@@ -412,7 +416,10 @@ export default function App() {
   const candidateComparisonContextRef = useRef("");
   const artifactConfirmRef = useRef(false);
   const materialVersionsRequestRef = useRef(0);
+  const newsResearchRef = useRef({ sequence: 0, context: null });
+  const newsResearchMarketSuppressedRoomsRef = useRef(new Set());
   const marketReadinessRequestRef = useRef(null);
+  const marketSnapshotRequestRef = useRef({ sequence: 0, controller: null });
   const storageRoomIdRef = useRef("");
   const inspectorWrapRef = useRef(null);
   const inspectorToggleRef = useRef(null);
@@ -752,7 +759,7 @@ export default function App() {
     () => templates.find((template) => template.id === room?.template_id) || null,
     [room?.template_id, templates],
   );
-  const storageRoomId = hasRoomCapability(room, ROOM_CAPABILITIES.storageMarket) ? room.id : "";
+  const storageRoomId = railSection !== "news" && hasRoomCapability(room, ROOM_CAPABILITIES.storageMarket) ? room.id : "";
   storageRoomIdRef.current = storageRoomId;
   candidateComparisonContextRef.current = `${storageRoomId}|${paperPortfolioFingerprint}`;
   const decisionLineageEnabled = hasRoomCapability(room, ROOM_CAPABILITIES.paperPortfolio)
@@ -839,6 +846,7 @@ export default function App() {
       roundExecutionTraceRequestRef.current.controller?.abort();
       discussionAuditRequestRef.current.controller?.abort();
       marketReadinessRequestRef.current?.cancel();
+      marketSnapshotRequestRef.current.controller?.abort();
       candidateComparisonRequestRef.current?.cancel();
       for (const control of roundStreamControlsRef.current.values()) {
         control.controller?.abort();
@@ -958,7 +966,11 @@ export default function App() {
 
   useEffect(() => {
     marketReadinessRequestRef.current.cancel();
-    if (!storageRoomId) {
+    const previous = marketSnapshotRequestRef.current;
+    previous.controller?.abort();
+    const sequence = previous.sequence + 1;
+    marketSnapshotRequestRef.current = { sequence, controller: null };
+    if (!storageRoomId || newsResearchMarketSuppressedRoomsRef.current.has(storageRoomId)) {
       setMarketSnapshot(null);
       setMarketStatus(null);
       setMarketReadiness(null);
@@ -967,6 +979,7 @@ export default function App() {
       return undefined;
     }
     const controller = new AbortController();
+    marketSnapshotRequestRef.current = { sequence, controller };
     setMarketLoading(true);
     setMarketReadiness(null);
     Promise.allSettled([
@@ -974,6 +987,7 @@ export default function App() {
       api.storageStatus(controller.signal),
     ])
       .then(([snapshotResult, statusResult]) => {
+        if (controller.signal.aborted || marketSnapshotRequestRef.current.sequence !== sequence || storageRoomIdRef.current !== storageRoomId || newsResearchMarketSuppressedRoomsRef.current.has(storageRoomId)) return;
         if (snapshotResult.status === "fulfilled") setMarketSnapshot(snapshotResult.value.snapshot);
         if (statusResult.status === "fulfilled") setMarketStatus(statusResult.value.status);
         const requestError = [snapshotResult, statusResult]
@@ -982,7 +996,10 @@ export default function App() {
         if (requestError) setError(requestError.message);
       })
       .finally(() => {
-        if (!controller.signal.aborted) setMarketLoading(false);
+        if (!controller.signal.aborted && marketSnapshotRequestRef.current.sequence === sequence) {
+          marketSnapshotRequestRef.current = { sequence, controller: null };
+          setMarketLoading(false);
+        }
       });
     return () => controller.abort();
   }, [storageRoomId]);
@@ -1040,7 +1057,13 @@ export default function App() {
     setProviderPreflightState({ status: "idle", reason: "" });
   }, [providerRouteFingerprint]);
 
-  const loadRoom = async (roomId) => {
+  const discardNewsResearch = () => {
+    newsResearchRef.current.sequence += 1;
+    newsResearchRef.current.context = null;
+    setEditingMaterial((current) => current?._news_research ? null : current);
+  };
+
+  const loadRoom = async (roomId, { canApply = null, reportError = true } = {}) => {
     if (
       roundLaunchControlRef.current.context
       && roundLaunchControlRef.current.context.roomId !== String(roomId)
@@ -1050,7 +1073,7 @@ export default function App() {
     setError("");
     try {
       const data = await api.room(roomId);
-      if (roomLoadRequestRef.current !== requestId) return false;
+      if (roomLoadRequestRef.current !== requestId || (canApply && !canApply(data))) return false;
       const nextActive = {
         room: data.room,
         members: data.members,
@@ -1091,7 +1114,7 @@ export default function App() {
       setComposerMentions([]);
       return true;
     } catch (requestError) {
-      if (roomLoadRequestRef.current === requestId) setError(requestError.message);
+      if (roomLoadRequestRef.current === requestId && reportError) setError(requestError.message);
       return false;
     }
   };
@@ -1886,24 +1909,27 @@ export default function App() {
       if (activeRoomIdRef.current !== targetRoomId) {
         throw new Error("房间已切换，原启动确认单已失效。");
       }
+      const skipPolicy = roundLaunchSkipPolicyState(data.plan, ROUND_LAUNCH_SKIP_PROVIDERS);
+      if (!skipPolicy.matches) throw new Error(skipPolicy.error);
+      const acceptedContext = { ...context, providerSkipPolicy: skipPolicy.binding };
       const contextState = roundLaunchPlanContextState(data.plan, {
         roomId: targetRoomId,
         roomSettingsVersion: context.roomSettingsVersion,
         objective: context.objective,
-        skipProviders: ROUND_LAUNCH_SKIP_PROVIDERS,
+        skipProviders: skipPolicy.binding.effective_provider_ids,
         roundContextAuthorizations: context.roundContextAuthorizations,
       });
       if (!contextState.matches) throw new Error(contextState.error);
       roundLaunchControlRef.current = {
         sequence,
         controller: null,
-        context,
+        context: acceptedContext,
         plan: contextState.plan,
         phase: "ready",
       };
       setRoundLaunch({
         status: "ready",
-        ...context,
+        ...acceptedContext,
         plan: contextState.plan,
         error: "",
       });
@@ -2026,19 +2052,21 @@ export default function App() {
     const launchControl = roundLaunchControlRef.current;
     const context = launchControl.context;
     const plan = launchControl.plan;
-    if (!context || !plan || launchControl.phase !== "ready") {
+    if (!context?.providerSkipPolicy || !plan || launchControl.phase !== "ready") {
       throw new Error("启动确认单已失效，请重新读取。");
     }
+    const skipPolicy = roundLaunchSkipPolicyState(plan, ROUND_LAUNCH_SKIP_PROVIDERS, context.providerSkipPolicy);
+    const expectedSkipProviders = context.providerSkipPolicy.effective_provider_ids;
     const contextState = roundLaunchPlanContextState(plan, {
       roomId: activeRoomIdRef.current,
       roomSettingsVersion: Number(room?.settings_version),
       objective: context.objective,
-      skipProviders: ROUND_LAUNCH_SKIP_PROVIDERS,
+      skipProviders: expectedSkipProviders,
       roundContextAuthorizations: activeRoundContextAuthorizations,
     });
     const skipMatches = Array.isArray(payload?.skip_providers)
-      && payload.skip_providers.length === ROUND_LAUNCH_SKIP_PROVIDERS.length
-      && payload.skip_providers.every((item, index) => item === ROUND_LAUNCH_SKIP_PROVIDERS[index]);
+      && payload.skip_providers.length === expectedSkipProviders.length
+      && payload.skip_providers.every((item, index) => item === expectedSkipProviders[index]);
     const payloadMatches = payload?.client_round_request_id === context.clientRoundRequestId
       && payload?.plan_hash === plan.plan_hash
       && payload?.objective === context.objective
@@ -2048,8 +2076,8 @@ export default function App() {
       && JSON.stringify(payload?.round_context_authorizations || null)
         === JSON.stringify(context.roundContextAuthorizations || null)
       && skipMatches;
-    if (!contextState.matches || !payloadMatches) {
-      const message = contextState.error || "启动确认内容已变化，请重新读取确认单。";
+    if (!skipPolicy.matches || !contextState.matches || !payloadMatches) {
+      const message = skipPolicy.error || contextState.error || "启动确认内容已变化，请重新读取确认单。";
       roundLaunchControlRef.current = {
         ...launchControl,
         controller: null,
@@ -2174,18 +2202,28 @@ export default function App() {
 
   const refreshMarket = async () => {
     if (!storageRoomId || marketLoading) return;
+    const targetRoomId = storageRoomId;
+    const previous = marketSnapshotRequestRef.current;
+    previous.controller?.abort();
+    const sequence = previous.sequence + 1;
+    const controller = new AbortController();
+    marketSnapshotRequestRef.current = { sequence, controller };
     setMarketLoading(true);
     try {
       const [snapshotResult, statusResult] = await Promise.all([
-        api.storageSnapshot(true),
-        api.storageStatus(),
+        api.storageSnapshot(true, controller.signal),
+        api.storageStatus(controller.signal),
       ]);
+      if (controller.signal.aborted || storageRoomIdRef.current !== targetRoomId || marketSnapshotRequestRef.current.sequence !== sequence) return;
       setMarketSnapshot(snapshotResult.snapshot);
       setMarketStatus(statusResult.status);
     } catch (requestError) {
-      setError(requestError.message);
+      if (!controller.signal.aborted && storageRoomIdRef.current === targetRoomId && marketSnapshotRequestRef.current.sequence === sequence) setError(requestError.message);
     } finally {
-      setMarketLoading(false);
+      if (!controller.signal.aborted && marketSnapshotRequestRef.current.sequence === sequence) {
+        marketSnapshotRequestRef.current = { sequence, controller: null };
+        setMarketLoading(false);
+      }
     }
   };
 
@@ -2246,21 +2284,29 @@ export default function App() {
   };
 
   const saveMaterial = async (form) => {
-    const targetRoomId = String(room?.id || "");
+    const newsContext = newsResearchRef.current.context;
+    const isNewsResearch = Boolean(form?._news_research || editingMaterial?._news_research);
+    const submission = isNewsResearch ? newsResearchSubmission(form, newsContext, activeRoomIdRef.current) : null;
+    const targetRoomId = submission?.roomId || String(room?.id || "");
     try {
       const data = form.id
         ? await api.updateMaterial(targetRoomId, form.id, { ...form, expected_version: form.version })
-        : await api.addMaterial(targetRoomId, form);
+        : await api.addMaterial(targetRoomId, submission?.payload || form);
+      if (isNewsResearch && !newsResearchStillCurrent(newsContext, newsResearchRef.current.context, activeRoomIdRef.current)) return data.material;
+      if (isNewsResearch && (!data.material?.id || (data.material.room_id && data.material.room_id !== targetRoomId))) throw new Error("资料保存回执与目标房间不一致，请重新读取目标房间确认，勿重复提交。");
       const material = applyMaterial(data.material, Boolean(form.id), true, targetRoomId);
+      if (isNewsResearch) { newsResearchRef.current.context = null; newsResearchRef.current.sequence += 1; }
       syncConvergence(targetRoomId);
       return material;
     } catch (requestError) {
-      if (activeRoomIdRef.current === targetRoomId) setError(requestError.message);
-      throw requestError;
+      const saveError = isNewsResearch ? new Error(`资料保存尚未确认。请先核对“${newsContext.room_title}”的共享资料，确认没有本条资料后再操作，避免重复。${requestError.message || ""}`) : requestError;
+      if (activeRoomIdRef.current === targetRoomId) setError(saveError.message);
+      throw saveError;
     }
   };
 
   const openMaterial = async (material) => {
+    discardNewsResearch();
     const requestId = materialVersionsRequestRef.current + 1;
     materialVersionsRequestRef.current = requestId;
     const stagedAttestation = officialAttestations.find((attestation) => (
@@ -2912,6 +2958,7 @@ export default function App() {
   };
 
   const navigateRail = (section, navigationTrigger = null) => {
+    discardNewsResearch();
     inspectorRestoreFocusRef.current = navigationTrigger || document.activeElement;
     sourceInboxRestoreFocusRef.current = navigationTrigger || document.activeElement;
     setActionOverviewOpen(false);
@@ -2923,6 +2970,10 @@ export default function App() {
       return;
     }
     setSourceInboxOpen(false);
+    if (section === "news") {
+      setInspectorOpen(false);
+      return;
+    }
     if (section === "rooms") {
       setInspectorOpen(false);
       document.querySelector(".room-search input")?.focus();
@@ -3193,6 +3244,7 @@ export default function App() {
   };
 
   const selectRoom = (roomId) => {
+    discardNewsResearch();
     const targetRoomId = String(roomId || "");
     roomDrawerRestoreFocusRef.current = null;
     setActionOverviewOpen(false);
@@ -3372,7 +3424,41 @@ export default function App() {
   );
   const stableTimelineClearSearch = useStableCallback(clearMessageSearch);
 
+  const prepareNewsResearch = async (item, targetRoomId, { signal } = {}) => {
+    const targetRoom = rooms.find((entry) => entry.id === targetRoomId);
+    if (!targetRoom) throw new Error("所选房间已不在列表中，请刷新后重新选择。");
+    const sequence = ++newsResearchRef.current.sequence;
+    newsResearchRef.current.context = null;
+    const draft = buildNewsResearchDraft(item, targetRoom, `news-research-${sequence}`);
+    // Bringing existing text into a room does not authorize fresh market or source requests.
+    newsResearchMarketSuppressedRoomsRef.current.add(targetRoomId);
+    marketReadinessRequestRef.current?.cancel();
+    const previousMarket = marketSnapshotRequestRef.current;
+    previousMarket.controller?.abort();
+    marketSnapshotRequestRef.current = { sequence: previousMarket.sequence + 1, controller: null };
+    setMarketSnapshot(null); setMarketStatus(null); setMarketReadiness(null);
+    setMarketLoading(false); setMarketReadinessLoading(false);
+    const isCurrent = (data) => !signal?.aborted && newsResearchRef.current.sequence === sequence && data.room?.id === targetRoomId;
+    const loaded = await loadRoom(targetRoomId, { canApply: isCurrent, reportError: false });
+    if (!loaded || signal?.aborted || newsResearchRef.current.sequence !== sequence || activeRoomIdRef.current !== targetRoomId) throw new Error("房间尚未确认或交接已取消，请重新选择后再试。");
+    newsResearchRef.current.context = draft._news_research;
+    setMaterialVersions([]); setMaterialVersionsLoading(false);
+    setEditingMaterial(draft);
+    setRoomDrawerOpen(false); setActionOverviewOpen(false); setSourceInboxOpen(false);
+    setRailSection("materials"); setInspectorOpen(true);
+    setInspectorNavigation((current) => ({ targetId: "inspector-materials", requestId: current.requestId + 1 }));
+  };
+
   if (loading) return <div className="boot-screen">正在打开 AI 共创室…</div>;
+
+  if (railSection === "news") return (
+    <div className="app-shell news-app-shell">
+      <IconRail activeSection="news" onNavigate={navigateRail} onPreloadInspector={preloadRoomInspector} onPreloadSourceInbox={preloadSourceInboxPanel} />
+      <Suspense fallback={<DeferredSurfaceFallback label="消息工作台" />}>
+        <NewsWorkspace rooms={rooms} onOpenRooms={() => navigateRail("rooms")} onPrepareResearch={prepareNewsResearch} />
+      </Suspense>
+    </div>
+  );
 
   return (
     <div className={inspectorOpen ? "app-shell inspector-open" : "app-shell"}>
@@ -3469,6 +3555,13 @@ export default function App() {
             <span className={roundBusy ? "status live" : "status"}>{roundStatusLabel}</span>
           </div>
           <div className="header-actions">
+            <button
+              className="icon-button source-inbox-mobile-entry"
+              type="button"
+              title="打开消息工作台"
+              aria-label="打开消息工作台"
+              onClick={(event) => navigateRail("news", event.currentTarget)}
+            ><Newspaper size={18} /></button>
             <button
               className="icon-button source-inbox-mobile-entry"
               type="button"
@@ -3665,7 +3758,7 @@ export default function App() {
           onRefreshMarketReadiness={refreshMarketReadiness}
           onFreezeOfficialEvidence={freezeOfficialEvidence}
           onAddOfficialSupplement={openOfficialSupplement}
-          onAddMaterial={() => { setMaterialVersions([]); setEditingMaterial({}); }}
+          onAddMaterial={() => { discardNewsResearch(); setMaterialVersions([]); setEditingMaterial({}); }}
           onEditMaterial={openMaterial}
           onGenerateArtifact={generateArtifact}
           onEditArtifact={openArtifact}
@@ -3724,7 +3817,7 @@ export default function App() {
       </Suspense> : null}
       {roundLaunchActivated ? <Suspense fallback={(
         <DeferredSurfaceFallback
-          label="启动确认"
+          label="开始一轮"
           dialog
           open={roundLaunchOpen}
           onClose={discardRoundLaunch}
@@ -3742,6 +3835,11 @@ export default function App() {
           onClose={discardRoundLaunch}
           onRetry={retryRoundLaunchPlan}
           onConfirm={confirmRoundLaunch}
+          onOpenProviderSettings={() => {
+            if (roundLaunch.status === "starting") return;
+            discardRoundLaunch();
+            navigateRail("providers", roundLaunchRestoreFocusRef.current);
+          }}
         />
       </Suspense> : null}
       {roundExecutionTraceActivated ? <Suspense fallback={<DeferredSurfaceFallback label="执行轨迹" dialog />}>
@@ -3816,7 +3914,7 @@ export default function App() {
         material={editingMaterial}
         room={room}
         open={Boolean(editingMaterial)}
-        onClose={() => { materialVersionsRequestRef.current += 1; setEditingMaterial(null); setMaterialVersions([]); setMaterialVersionsLoading(false); }}
+        onClose={() => { discardNewsResearch(); materialVersionsRequestRef.current += 1; setEditingMaterial(null); setMaterialVersions([]); setMaterialVersionsLoading(false); }}
         onSubmit={saveMaterial}
         onFetchUrl={fetchMaterialUrl}
         onImportFile={importMaterialFile}

@@ -7,3 +7,13 @@ frontend/.npm-cache/
 .env
 .env.*
 !.env.example
+tdlib-data/
+telegram-db/
+downloads/
+*.session
+*.session-journal
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+config/chats.yaml
+config/keywords.yaml

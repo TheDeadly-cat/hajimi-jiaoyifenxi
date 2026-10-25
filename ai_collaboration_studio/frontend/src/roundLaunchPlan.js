@@ -552,8 +552,8 @@ export function normalizeRoundLaunchPlan(value) {
     provider_call_projection: providerCallProjection,
     calls,
     safety,
-    project_round_focus_authorization: legacyV4Valid ? focusAuthorization : null,
-    round_context_authorizations: v5Valid ? contextAuthorization : null,
+    ...(legacyV4Valid ? { project_round_focus_authorization: focusAuthorization } : {}),
+    ...(v5Valid ? { round_context_authorizations: contextAuthorization } : {}),
     ready_for_authorization: source.ready_for_authorization === true
       && blockers.length === 0
       && errors.length === 0,
@@ -630,6 +630,45 @@ export function createRoundLaunchRequestContext(
   };
 }
 
+// The server hashes both the effective exclusions and their deployment-policy
+// projection. Keep the client request distinct, and freeze that exact response
+// for confirmation; an arbitrary extra exclusion is still a context mismatch.
+export function roundLaunchSkipPolicyState(plan, requestedSkipProviders = [], frozenPolicy = null) {
+  const normalized = normalizeRoundLaunchPlan(plan);
+  const invalid = (error = "Provider 跳过策略已变化，请重新生成启动确认单。") => ({
+    matches: false, binding: null, error,
+  });
+  if (!normalized.valid) return invalid("启动确认单无法安全读取，请重新生成。");
+  if (!Array.isArray(requestedSkipProviders) || requestedSkipProviders.length > 20
+    || requestedSkipProviders.some((item) => typeof item !== "string"
+      || item.trim().length > 40 || !providerId(item))) return invalid();
+  const requested = uniqueStrings(requestedSkipProviders, providerId, 20).sort();
+  const disabled = normalized.provider_call_projection
+    .filter((item) => item.policy_disabled)
+    .map((item) => item.provider).sort();
+  const effective = [...new Set([...requested, ...disabled])].sort();
+  if (effective.length !== normalized.skip_provider_ids.length
+    || effective.some((item, index) => item !== normalized.skip_provider_ids[index])) return invalid();
+  const projections = new Map(normalized.provider_call_projection.map((item) => [item.provider, item]));
+  const excluded = new Set(effective);
+  if (effective.some((id) => {
+    const projection = projections.get(id);
+    return !projection || !projection.skipped || projection.projected_provider_calls !== 0;
+  })) return invalid();
+  if (normalized.preflight_routes.some((route) => excluded.has(route.provider)
+    && (!route.skipped || route.callable || route.projected_preflight_calls !== 0))) return invalid();
+  if (normalized.ready_for_authorization
+    && !normalized.preflight_routes.some((route) => route.callable)) return invalid();
+  const binding = Object.freeze({
+    plan_hash: normalized.plan_hash,
+    requested_provider_ids: Object.freeze(requested),
+    policy_disabled_provider_ids: Object.freeze(disabled),
+    effective_provider_ids: Object.freeze(effective),
+  });
+  if (frozenPolicy !== null && JSON.stringify(frozenPolicy) !== JSON.stringify(binding)) return invalid();
+  return { matches: true, binding, error: "" };
+}
+
 export function roundLaunchPlanContextState(
   plan,
   {
@@ -676,12 +715,12 @@ export function roundLaunchPlanContextState(
   ) {
     error = "Round context authorizations are invalid.";
   } else if (
-    JSON.stringify(normalized.round_context_authorizations)
+    JSON.stringify(normalized.round_context_authorizations ?? null)
       !== JSON.stringify(expectedContextAuthorizations)
   ) {
     error = "Round context authorization sources changed; rebuild the launch plan.";
   } else if (
-    JSON.stringify(normalized.project_round_focus_authorization)
+    JSON.stringify(normalized.project_round_focus_authorization ?? null)
       !== JSON.stringify(expectedFocusAuthorization)
   ) {
     error = "下一轮项目焦点来源或预览封印已变化，请重新读取焦点与启动确认单。";

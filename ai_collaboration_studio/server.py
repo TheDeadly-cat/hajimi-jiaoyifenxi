@@ -30,6 +30,16 @@ def main() -> None:
         from backend.database_migration import assert_database_ready_for_startup
         from backend.store import STORE
 
+        from backend.database_startup_recovery import assert_no_pending_startup_recovery, recover_startup_database
+        from pathlib import Path
+        import uuid
+        assert_no_pending_startup_recovery(DATABASE_PATH)
+        if any(Path(str(DATABASE_PATH) + suffix).exists() for suffix in ("-wal", "-shm")):
+            emit_event("startup_recovery_started", fields={"reason": "previous_session_files"})
+            recover_startup_database(DATABASE_PATH,
+                DATABASE_PATH.parent / "startup-recovery" / uuid.uuid4().hex,
+                instance_owner=owner)
+            emit_event("startup_recovery_completed")
         readiness = assert_database_ready_for_startup(DATABASE_PATH)
         STORE.configure_verified_startup(
             DATABASE_PATH,

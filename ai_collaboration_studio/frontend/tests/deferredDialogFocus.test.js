@@ -26,7 +26,7 @@ test("deferred dialog fallback is a real top-level modal while its chunk loads",
 });
 
 test("formal round lazy fallback can abort read-only planning and restore its exact trigger", () => {
-  assert.match(appSource, /label="启动确认"[\s\S]*dialog[\s\S]*open=\{roundLaunchOpen\}[\s\S]*onClose=\{discardRoundLaunch\}[\s\S]*restoreFocusRef=\{roundLaunchRestoreFocusRef\}/);
+  assert.match(appSource, /label="开始一轮"[\s\S]*dialog[\s\S]*open=\{roundLaunchOpen\}[\s\S]*onClose=\{discardRoundLaunch\}[\s\S]*restoreFocusRef=\{roundLaunchRestoreFocusRef\}/);
   assert.match(appSource, /launchControl\.controller\?\.abort\(\)/);
   assert.match(appSource, /if \(streamControl\?\.transition === "plan"\) streamControl\.transition = ""/);
   assert.doesNotMatch(deferredFallbackSource, /onConfirm|streamRound|Provider/);

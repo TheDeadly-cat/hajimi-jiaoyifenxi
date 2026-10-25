@@ -4,6 +4,8 @@ import math
 import statistics
 from typing import Any
 
+from .daily_history_integrity import history_integrity_error, validated_close_rows
+
 
 TECHNICAL_FORMULA_VERSION = "technical_metrics_v1"
 
@@ -65,19 +67,22 @@ def _max_drawdown(closes: list[float]) -> float | None:
     return worst * 100
 
 
-def calculate_technical_metrics(symbol: str, history_rows: list[dict[str, Any]]) -> dict[str, Any]:
+def calculate_technical_metrics(
+    symbol: str,
+    history_rows: list[dict[str, Any]],
+    *,
+    source_errors: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Calculate deterministic, backward-looking metrics from adjusted daily bars."""
 
-    ordered_rows = sorted(
-        (dict(row) for row in history_rows if isinstance(row, dict)),
-        key=lambda row: str(row.get("time") or row.get("market_time") or ""),
-    )
-    valid_rows: list[dict[str, Any]] = []
-    for row in ordered_rows:
-        close = _finite(row.get("close"))
-        if close is None or close <= 0:
-            continue
-        valid_rows.append({**row, "close": close, "volume": _finite(row.get("volume"))})
+    ordered_rows, issues = validated_close_rows(history_rows)
+    errors = list(source_errors or [])
+    if issues:
+        errors.append(history_integrity_error(symbol, issues))
+    valid_rows = [
+        {**row, "volume": _finite(row.get("volume"))}
+        for row in ordered_rows
+    ] if not errors else []
 
     closes = [float(row["close"]) for row in valid_rows]
     latest = valid_rows[-1] if valid_rows else {}
@@ -116,6 +121,7 @@ def calculate_technical_metrics(symbol: str, history_rows: list[dict[str, Any]])
         "as_of": latest.get("market_time") or latest.get("time") or None,
         "sample_count": len(closes),
         "quality": quality,
+        "source_errors": errors,
         "missing_metrics": [name for name, value in metrics.items() if value is None],
         **metrics,
     }

@@ -103,7 +103,7 @@ function LoadedDialog({ onClose, onSuccess, open, restoreFocusRef }) {
   return h(
     "section",
     {
-      "aria-label": "启动确认",
+      "aria-label": "开始一轮",
       "aria-modal": "true",
       "data-loaded-dialog": "true",
       ref: dialogRef,
@@ -173,7 +173,7 @@ function RoundLaunchHandoff({ LazyDialog, onOuterClose }) {
       {
         fallback: h(DeferredSurfaceFallback, {
           dialog: true,
-          label: "启动确认",
+          label: "开始一轮",
           onClose: closeDialog,
           open,
           restoreFocusRef,
@@ -218,7 +218,7 @@ test("first lazy fallback disables its trigger, owns modal focus, and Escape clo
   await click(trigger);
   assert.equal(trigger.disabled, true);
 
-  const fallback = view.host.querySelector('[role="dialog"][aria-label="启动确认加载中"]');
+  const fallback = view.host.querySelector('[role="dialog"][aria-label="开始一轮加载中"]');
   assert.ok(fallback);
   assert.equal(fallback.getAttribute("aria-modal"), "true");
   await flushFrames();
@@ -227,7 +227,7 @@ test("first lazy fallback disables its trigger, owns modal focus, and Escape clo
   const escape = await keydown("Escape");
   assert.equal(escape.defaultPrevented, true);
   assert.equal(outerCloseCount, 0);
-  assert.equal(view.host.querySelector('[aria-label="启动确认加载中"]'), null);
+  assert.equal(view.host.querySelector('[aria-label="开始一轮加载中"]'), null);
   assert.equal(trigger.disabled, false);
   await flushFrames();
   assert.equal(document.activeElement, trigger);

@@ -25,6 +25,20 @@ async function jsonRequest(path, options = {}) {
 }
 
 export const api = {
+  newsOverview: (signal) => jsonRequest("/api/news/overview", { signal }),
+  newsItems: ({ query = "", source = "", category = "", unread = false, importance = "", limit = 100, offset = 0, signal } = {}) => {
+    const parameters = new URLSearchParams({ q: query, source, category, unread: unread ? "1" : "0", importance, limit: String(limit), offset: String(offset) });
+    return jsonRequest(`/api/news/items?${parameters.toString()}`, { signal });
+  },
+  newsItem: (id, signal) => jsonRequest(`/api/news/items/${encodeURIComponent(id)}`, { signal }),
+  newsControl: (enabled, signal) => jsonRequest("/api/news/control", { method: "POST", body: JSON.stringify({ enabled }), signal }),
+  newsRefresh: (signal) => jsonRequest("/api/news/refresh", { method: "POST", body: JSON.stringify({}), signal }),
+  newsStartup: (payload, signal) => jsonRequest("/api/news/startup", { method: "POST", body: JSON.stringify(payload), signal }),
+  newsMarkRead: (id, signal) => jsonRequest(`/api/news/items/${encodeURIComponent(id)}/read`, { method: "POST", body: JSON.stringify({ read: true }), signal }),
+  newsAIStatus: (signal) => jsonRequest("/api/news/ai", { signal }),
+  newsAIConfigure: (payload, signal) => jsonRequest("/api/news/ai/session", { method: "POST", body: JSON.stringify(payload), signal }),
+  newsAIClear: (signal) => jsonRequest("/api/news/ai/clear", { method: "POST", body: JSON.stringify({}), signal }),
+  newsAIAnalyze: (id, signal) => jsonRequest(`/api/news/items/${encodeURIComponent(id)}/analyze`, { method: "POST", body: JSON.stringify({}), signal }),
   bootstrap: (roomId = "") => jsonRequest(`/api/bootstrap${roomId ? `?room=${encodeURIComponent(roomId)}` : ""}`),
   room: (roomId) => jsonRequest(`/api/rooms/${encodeURIComponent(roomId)}`),
   listSourceInbox: ({ state = "", query = "", limit = 100, signal } = {}) => {

@@ -446,5 +446,125 @@ class MaterialIngestTests(unittest.TestCase):
             })
 
 
+
+class DocxParserBoundaryTests(unittest.TestCase):
+    @staticmethod
+    def packed(xml: bytes, name: str = "word/document.xml") -> bytes:
+        import io
+        import zipfile
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(name, xml)
+        return output.getvalue()
+
+    @staticmethod
+    def document(text: str, declaration: str = "") -> str:
+        return declaration + '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:t>' + text + '</w:t></w:p></w:document>'
+
+    @staticmethod
+    def encoded(xml: str, encoding: str) -> bytes:
+        import codecs
+        if encoding == "utf-16-le":
+            return codecs.BOM_UTF16_LE + xml.encode(encoding)
+        if encoding == "utf-16-be":
+            return codecs.BOM_UTF16_BE + xml.encode(encoding)
+        return xml.encode(encoding)
+
+    def test_normal_unicode_predefined_entities_and_encoding_remain_compatible(self) -> None:
+        for encoding in ("utf-8", "utf-8-sig", "utf-16-le", "utf-16-be"):
+            xml = self.document("中文 &amp; 正文")
+            with self.subTest(encoding=encoding):
+                result = extract_material(self.packed(self.encoded(xml, encoding)), "normal.docx")
+                self.assertEqual(result.text, "中文 & 正文")
+                self.assertEqual(result.metadata["extraction_method"], "docx_xml")
+                self.assertFalse(result.metadata["truncated"])
+
+    def test_internal_external_parameter_entities_rejected_for_all_encodings(self) -> None:
+        declarations = (
+            '<!DOCTYPE w:document [<!ENTITY item "' + ("x" * 512) + '">]>',
+            '<!DOCTYPE w:document SYSTEM "file:///synthetic-never-read">',
+            '<!DOCTYPE w:document [<!ENTITY item SYSTEM "https://synthetic.example/never-fetch">]>',
+            '<!DOCTYPE w:document [<!ENTITY % item SYSTEM "https://synthetic.example/never-fetch">%item;]>',
+        )
+        for declaration in declarations:
+            for encoding in ("utf-8", "utf-8-sig", "utf-16-le", "utf-16-be"):
+                with self.subTest(declaration=declaration[:60], encoding=encoding):
+                    xml = self.document("&item;" * 2048, declaration)
+                    with self.assertRaisesRegex(ValueError, "DOCX XML 不允许 DTD 或实体声明"):
+                        extract_material(self.packed(self.encoded(xml, encoding)), "synthetic.docx")
+
+    def test_comments_cdata_and_literal_doctype_text_remain_ordinary_content(self) -> None:
+        xml = '<!-- literal <!DOCTYPE placeholder> -->' + self.document('<![CDATA[示例 <!DOCTYPE placeholder>]]> &lt;!ENTITY literal&gt;')
+        result = extract_material(self.packed(xml.encode()), "normal.docx")
+        self.assertEqual(result.text, "示例 <!DOCTYPE placeholder> <!ENTITY literal>")
+
+    def test_mime_alias_uses_identical_entity_rejection(self) -> None:
+        xml = self.document("&item;", '<!DOCTYPE w:document [<!ENTITY item "x">]>')
+        with self.assertRaisesRegex(ValueError, "DTD"):
+            extract_material(self.packed(xml.encode()), "document.bin", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+    def test_declared_archive_limit_rejected_before_xml_parser(self) -> None:
+        raw = self.packed(self.document("normal").encode())
+        with patch.object(material_ingest_module, "MAX_DOCX_UNCOMPRESSED_BYTES", 64):
+            with patch.object(material_ingest_module.ElementTree, "fromstring") as parse:
+                with self.assertRaisesRegex(ValueError, "解压后内容过大"):
+                    material_ingest_module.extract_docx(raw)
+        parse.assert_not_called()
+
+    def test_actual_xml_read_limit_rejected_before_parser_even_if_metadata_lies(self) -> None:
+        import io
+        from types import SimpleNamespace
+        read_sizes = []
+        class Body(io.BytesIO):
+            def read(self, size=-1):
+                read_sizes.append(size)
+                return super().read(size)
+        class Archive:
+            def __enter__(self): return self
+            def __exit__(self, *_args): pass
+            def infolist(self): return [SimpleNamespace(file_size=1)]
+            def open(self, _name): return Body(b"x" * 100)
+        with patch.object(material_ingest_module, "MAX_DOCX_UNCOMPRESSED_BYTES", 64):
+            with patch.object(material_ingest_module.zipfile, "ZipFile", return_value=Archive()):
+                with patch.object(material_ingest_module.ElementTree, "fromstring") as parse:
+                    with self.assertRaisesRegex(ValueError, "正文 XML 过大"):
+                        material_ingest_module.extract_docx(b"synthetic")
+        self.assertEqual(read_sizes, [65])
+        parse.assert_not_called()
+
+    def test_bad_xml_zip_and_missing_document_have_safe_value_errors(self) -> None:
+        cases = (b"not a zip", self.packed(b"missing", "other.xml"), self.packed(b"<invalid-secret-sentinel"))
+        for raw in cases:
+            with self.subTest(size=len(raw)):
+                with self.assertRaises(ValueError) as error:
+                    material_ingest_module.extract_docx(raw)
+                self.assertNotIn("invalid-secret-sentinel", str(error.exception))
+
+    def test_nested_paragraph_copy_budget_rejected_before_normalization(self) -> None:
+        xml = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' + '<w:p>' * 8 + '<w:t>' + ('x' * 32) + '</w:t>' + '</w:p>' * 8 + '</w:document>'
+        with patch.object(material_ingest_module, "MAX_DOCX_EXTRACTION_UNITS", 100):
+            with patch.object(material_ingest_module, "normalize_text") as normalize:
+                with self.assertRaisesRegex(ValueError, "extraction work"):
+                    material_ingest_module.extract_docx(self.packed(xml.encode()))
+        normalize.assert_not_called()
+
+    def test_empty_nested_paragraph_traversal_also_has_a_work_budget(self) -> None:
+        xml = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' + '<w:p>' * 16 + '</w:p>' * 16 + '</w:document>'
+        with patch.object(material_ingest_module, "MAX_DOCX_EXTRACTION_UNITS", 32):
+            with self.assertRaisesRegex(ValueError, "extraction work"):
+                material_ingest_module.extract_docx(self.packed(xml.encode()))
+
+    def test_normal_nested_textbox_keeps_existing_content_order(self) -> None:
+        xml = '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>outer </w:t><w:drawing><w:txbxContent><w:p><w:r><w:t>textbox</w:t></w:r></w:p></w:txbxContent></w:drawing><w:t> tail</w:t></w:r></w:p></w:document>'
+        result = extract_material(self.packed(xml.encode()), "textbox.docx")
+        self.assertEqual(result.text, "outer textbox tail\ntextbox")
+        self.assertFalse(result.metadata["truncated"])
+
+    def test_legitimate_long_document_keeps_existing_truncation_contract(self) -> None:
+        content = "长" * (material_ingest_module.MAX_EXTRACTED_CHARS + 1)
+        result = extract_material(self.packed(self.document(content).encode()), "long.docx")
+        self.assertEqual(len(result.text), material_ingest_module.MAX_EXTRACTED_CHARS)
+        self.assertTrue(result.metadata["truncated"])
+
 if __name__ == "__main__":
     unittest.main()

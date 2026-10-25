@@ -1,0 +1,16 @@
+# Copy this example to a private chats.yaml and replace the IDs with values
+# returned by `python -m backend.telegram_intelligence telegram chats`.
+# Entries stay disabled until an operator explicitly enables each source.
+chats:
+  - chat_id: -1000000000001
+    enabled: false
+    name: "example_official_source"
+    category: "official"
+    priority: high
+    trust_score: 90
+  - chat_id: -1000000000002
+    enabled: false
+    name: "example_market_news"
+    category: "market_news"
+    priority: medium
+    trust_score: 60

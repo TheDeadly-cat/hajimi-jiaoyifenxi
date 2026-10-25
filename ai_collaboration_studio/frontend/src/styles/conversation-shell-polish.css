@@ -4,6 +4,8 @@
   --shell-line: rgba(36, 76, 118, 0.13);
   --shell-accent: #1769e0;
   --shell-cyan: #28a9c3;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
   background:
     radial-gradient(circle at 72% -16%, rgba(38, 128, 215, 0.1), transparent 34%),
     linear-gradient(180deg, #f2f6f9, #edf2f6);
@@ -141,7 +143,6 @@
 
 .conversation-panel > .global-error,
 .conversation-panel > .message-notice {
-  position: relative;
   isolation: isolate;
   border: 1px solid rgba(38, 78, 120, 0.13);
   overflow: hidden;
@@ -179,6 +180,7 @@
 
 .conversation-panel > .global-error button,
 .conversation-panel > .message-notice button {
+  flex-shrink: 0;
   border: 1px solid currentColor;
   border-radius: 7px;
   padding: 4px 8px;

@@ -2,13 +2,18 @@
 setlocal
 
 set "AI_STUDIO_PROJECT_ROOT=%~dp0ai_collaboration_studio"
-set "AI_STUDIO_LAUNCHER=%AI_STUDIO_PROJECT_ROOT%\scripts\start_ai_collaboration_studio.ps1"
+set "AI_STUDIO_LAUNCHER=%AI_STUDIO_PROJECT_ROOT%\scripts\run_news_workspace.py"
+set "AI_STUDIO_PYTHON=%AI_STUDIO_PROJECT_ROOT%\runtime\bootstrap\python\Scripts\python.exe"
 
 if exist "%AI_STUDIO_LAUNCHER%" goto launch
 echo [AI Collaboration Studio] Controlled launcher not found: %AI_STUDIO_LAUNCHER%
 exit /b 1
 
 :launch
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%AI_STUDIO_LAUNCHER%"
+if not exist "%AI_STUDIO_PYTHON%" (
+  echo Install the locked dependencies first. See ai_collaboration_studio\docs\NEWS_PORTABLE_DELIVERY.md.
+  exit /b 1
+)
+"%AI_STUDIO_PYTHON%" -I -B -X utf8 "%AI_STUDIO_LAUNCHER%" %*
 set "AI_STUDIO_EXIT_CODE=%ERRORLEVEL%"
 exit /b %AI_STUDIO_EXIT_CODE%

@@ -21,6 +21,7 @@ import {
   providerLabel,
   roundLaunchErrorMessage,
   roundLaunchNumericCallLimit,
+  roundLaunchRecovery,
   roundLaunchShortHash,
   roundLaunchSubmitControl,
 } from "../roundLaunchUi";
@@ -38,6 +39,7 @@ export function RoundLaunchDialog({
   onClose,
   onConfirm,
   onRetry,
+  onOpenProviderSettings,
 }) {
   const titleId = useId();
   const descriptionId = useId();
@@ -94,6 +96,9 @@ export function RoundLaunchDialog({
     confirmHandlerAvailable: typeof onConfirm === "function",
   }), [authorization, effectiveBusy, externalError, loading, onConfirm, plan, requestIdReady]);
   const canSubmit = submitControl.canSubmit;
+  const recovery = roundLaunchRecovery({
+    plan: plan ? normalizedPlan : null, authorization, submitControl, error: localError || externalError,
+  });
   const passedPermitCount = submitControl.checks.filter((check) => check.passed).length;
   const permitCount = submitControl.checks.length;
   const blockerEntries = useMemo(() => {
@@ -122,7 +127,7 @@ export function RoundLaunchDialog({
         ? "启动确认单不可用"
         : canSubmit
           ? "许可条件已齐备，等待你的最终确认"
-          : "尚不能提交启动确认";
+          : recovery?.title || "本轮确认尚未准备好";
   const launchSummaryDetail = localError || externalError || (
     effectiveBusy
       ? "服务端正在重新核验冻结来源，请勿重复提交。"
@@ -131,8 +136,8 @@ export function RoundLaunchDialog({
         : !plan
           ? "重新读取后仍需完整通过全部许可条件。"
           : canSubmit
-            ? `冻结计划 ${roundLaunchShortHash(normalizedPlan.plan_hash)} · 本轮最多 ${numericCallLimit} 次 Provider 调用；不包含交易权限。`
-            : submitControl.instruction
+            ? `本轮最多 ${numericCallLimit} 次模型调用；不包含交易权限。`
+            : "请先处理上方原因；也可取消返回。"
   );
   const routeByKey = useMemo(
     () => new Map(normalizedPlan.preflight_routes.map((route) => [
@@ -229,13 +234,13 @@ export function RoundLaunchDialog({
         <header>
           <div className="round-launch-title">
             <ShieldCheck size={18} aria-hidden="true" />
-            <div><small>CONTROLLED ROUND AUTHORIZATION</small><h2 id={titleId}>启动前确认</h2></div>
+            <div><small>模型讨论 · 开始前确认</small><h2 id={titleId}>开始一轮</h2></div>
           </div>
           <button
             ref={closeButtonRef}
             type="button"
             className="icon-button"
-            aria-label="关闭启动前确认"
+            aria-label="关闭开始一轮确认"
             onClick={onClose}
             disabled={effectiveBusy}
           >
@@ -259,52 +264,49 @@ export function RoundLaunchDialog({
             </div>
           ) : (
             <>
-          <section aria-label="本轮目标">
-            <h3 className="round-launch-section-title">本轮目标</h3>
-            <p id={descriptionId} className="round-launch-objective">
-              {normalizedPlan.objective || "目标不可用"}
-            </p>
-          </section>
+          {recovery ? (
+            <section className="round-launch-recovery" role="alert" aria-label="开始一轮前需要处理">
+              <strong>{recovery.title}</strong>
+              <p>{recovery.detail}</p>
+              {recovery.providerSettings ? (
+                <>
+                  {typeof onOpenProviderSettings === "function" ? <button
+                    type="button" className="secondary" onClick={onOpenProviderSettings} disabled={effectiveBusy}
+                  >查看模型配置</button> : null}
+                  <p className="round-launch-manual-note">也可取消后选择“ChatGPT 协作”，手动复制问题、导入结果；不会自动调用模型。后续 API 复核仍需可用配置和单独确认。</p>
+                </>
+              ) : null}
+            </section>
+          ) : null}
 
           <section className="round-launch-snapshot" aria-label="启动授权摘要">
             <div className="round-launch-snapshot-grid" role="list">
-              <span className={`round-launch-snapshot-item ${launchSummaryTone}`} role="listitem">
-                <small>TECHNICAL PERMIT</small>
-                <strong>
-                  <data value={passedPermitCount}>{passedPermitCount}</data>
-                  <span aria-hidden="true"> / </span>
-                  <data value={permitCount}>{permitCount}</data>
-                </strong>
-                <em>{canSubmit ? "技术条件已通过，仍需你的确认" : "仍有启动许可未完成"}</em>
-              </span>
               <span className="round-launch-snapshot-item" role="listitem">
-                <small>PROVIDER CEILING</small>
+                <small>本轮调用总上限</small>
                 <strong>
                   {authorization.validLimit
                     ? <><data value={numericCallLimit}>{numericCallLimit}</data> 次</>
                     : "待修正"}
                 </strong>
-                <em>全局绝对硬上限，不是预计用量</em>
+                <em>包含所有调用；次数上限不是费用估算</em>
               </span>
               <span className="round-launch-snapshot-item boundary" role="listitem">
-                <small>EXECUTION BOUNDARY</small>
+                <small>执行边界</small>
                 <strong>只读研究</strong>
                 <em>无下单、实盘或钱包权限</em>
               </span>
             </div>
             <p className="round-launch-boundary-note">
               <ShieldCheck size={16} aria-hidden="true" />
-              本确认只授权这一轮冻结研究计划；服务端仍会在任何 Provider 或市场读取前重新核验来源。
+              确认后才会调用模型，可能产生费用；模型或市场读取前仍会重新核验来源。
             </p>
           </section>
 
-          <section className="round-launch-permit" aria-label="启动许可清单">
-            <header>
-              <span>LAUNCH PERMIT</span>
-              <strong><data value={passedPermitCount}>{passedPermitCount}</data>/{permitCount}</strong>
-            </header>
-            <ul>{submitControl.checks.map((check) => <li className={check.passed ? "passed" : "pending"} key={check.id}><span aria-hidden="true">{check.passed ? "✓" : "·"}</span>{check.label}</li>)}</ul>
-            <p>{submitControl.instruction}</p>
+          <section aria-label="本轮目标">
+            <h3 className="round-launch-section-title">本轮目标</h3>
+            <p id={descriptionId} className="round-launch-objective">
+              {normalizedPlan.objective || "目标不可用"}
+            </p>
           </section>
 
           {focusAuthorization ? (
@@ -315,9 +317,11 @@ export function RoundLaunchDialog({
                   ? `确认产物 ${focusArtifactBinding.artifact_id} · v${focusArtifactBinding.artifact_version}`
                   : "暂无确认产物 · bootstrap 上下文"}
               </p>
+              <details><summary>项目焦点校验标识</summary>
               <p className="round-launch-muted" title={focusAuthorization.preview_sha256}>
                 预览封印：{roundLaunchShortHash(focusAuthorization.preview_sha256)}
               </p>
+              </details>
               <p className="round-launch-muted">
                 确认启动时服务端会再次核验精确来源；若产物或预览变化，本轮将在任何 Provider 或市场调用前阻断。
               </p>
@@ -347,9 +351,11 @@ export function RoundLaunchDialog({
               <p className="round-launch-muted">
                 数据截止：{footballAuthorization.data_cutoff_utc || "不可用"}
               </p>
+              <details><summary>足球上下文校验标识</summary>
               <p className="round-launch-muted" title={footballAuthorization.contract_sha256}>
                 合同封印：{roundLaunchShortHash(footballAuthorization.contract_sha256)}
               </p>
+              </details>
               <p className="round-launch-muted">
                 服务端会在任何 Provider 调用前，用同一 SQLite 事务重新核验材料版本、内容哈希、
                 registry 与生命周期；任一漂移都会阻断本轮。
@@ -371,12 +377,16 @@ export function RoundLaunchDialog({
               <p className="round-launch-muted">
                 数据截止：{stockAuthorization.data_cutoff_utc || "不可用"}
               </p>
+              <details><summary>股票上下文校验标识</summary>
               <p className="round-launch-muted" title={stockAuthorization.contract_sha256}>
                 合同封印：{roundLaunchShortHash(stockAuthorization.contract_sha256)}
               </p>
+              </details>
+              <details><summary>股票池校验标识</summary>
               <p className="round-launch-muted" title={stockAuthorization.stock_room_scope_sha256}>
                 股票池封印：{roundLaunchShortHash(stockAuthorization.stock_room_scope_sha256)}
               </p>
+              </details>
               <p className="round-launch-muted">
                 服务端会在任何 Provider 或市场读取前重新核验股票池、材料版本、合同与 registry；
                 任一漂移都会阻断本轮。
@@ -387,7 +397,44 @@ export function RoundLaunchDialog({
             </section>
           ) : null}
 
-          <div className="round-launch-grid">
+            <section className="round-launch-card" aria-label="设置 Provider 调用次数绝对上限">
+              <label htmlFor={`${titleId}-call-limit`}>
+                模型调用总上限（次数）
+                <input
+                  id={`${titleId}-call-limit`}
+                  type="number"
+                  min={PROVIDER_CALL_LIMIT_MIN}
+                  max={PROVIDER_CALL_LIMIT_MAX}
+                  step="1"
+                  inputMode="numeric"
+                  value={callLimit}
+                  onChange={(event) => setCallLimit(event.target.value)}
+                  disabled={effectiveBusy}
+                  aria-invalid={!authorization.validLimit}
+                />
+              </label>
+              <p className="round-launch-muted">建议 {normalizedPlan.calls.recommended_provider_calls} 次；覆盖本轮全部调用，包括运行中插话。允许 {PROVIDER_CALL_LIMIT_MIN}–{PROVIDER_CALL_LIMIT_MAX}。主持子预算不会叠加在此上限之外。</p>
+            </section>
+          {authorization.warning ? (
+            <div className="round-launch-alert warning" role="alert">
+              <AlertTriangle size={17} aria-hidden="true" />
+              <span>{authorization.warning.message}不能保证完整走完既定流程。</span>
+            </div>
+          ) : null}
+
+
+          <details className="round-launch-technical-details">
+            <summary><span className="round-launch-summary-copy"><strong>查看计划与校验详情</strong><small>许可检查、调用拆分、成员路由与计划标识</small></span></summary>
+            <div className="round-launch-details-body">
+          <section className="round-launch-permit" aria-label="启动许可清单">
+            <header>
+              <span>LAUNCH PERMIT</span>
+              <strong><data value={passedPermitCount}>{passedPermitCount}</data>/{permitCount}</strong>
+            </header>
+            <ul>{submitControl.checks.map((check) => <li className={check.passed ? "passed" : "pending"} key={check.id}><span aria-hidden="true">{check.passed ? "✓" : "·"}</span>{check.label}</li>)}</ul>
+            <p>{submitControl.instruction}</p>
+          </section>
+
             <section className="round-launch-card" aria-label="建议授权 Provider 调用次数">
               <strong className="round-launch-count">{normalizedPlan.calls.recommended_provider_calls}</strong>
               <span className="round-launch-section-title">建议授权额度</span>
@@ -412,33 +459,6 @@ export function RoundLaunchDialog({
                 </small>
               </div>
             </section>
-            <section className="round-launch-card" aria-label="设置 Provider 调用次数绝对上限">
-              <label htmlFor={`${titleId}-call-limit`}>
-                Provider 调用绝对硬上限
-                <input
-                  id={`${titleId}-call-limit`}
-                  type="number"
-                  min={PROVIDER_CALL_LIMIT_MIN}
-                  max={PROVIDER_CALL_LIMIT_MAX}
-                  step="1"
-                  inputMode="numeric"
-                  value={callLimit}
-                  onChange={(event) => setCallLimit(event.target.value)}
-                  disabled={effectiveBusy}
-                  aria-invalid={!authorization.validLimit}
-                />
-              </label>
-              <p className="round-launch-muted">覆盖本轮全部调用类型，包括运行中用户插话；允许 {PROVIDER_CALL_LIMIT_MIN}–{PROVIDER_CALL_LIMIT_MAX}。主持子预算不会叠加在此上限之外。</p>
-            </section>
-          </div>
-
-          {authorization.warning ? (
-            <div className="round-launch-alert warning" role="alert">
-              <AlertTriangle size={17} aria-hidden="true" />
-              <span>{authorization.warning.message}不能保证完整走完既定流程。</span>
-            </div>
-          ) : null}
-
           <div className="round-launch-grid">
             <section className="round-launch-card" aria-label="主持人路由">
               <strong className="round-launch-section-title">主持人</strong>
@@ -543,6 +563,9 @@ export function RoundLaunchDialog({
             </div>
           ) : null}
 
+            </div>
+          </details>
+
           {!authorization.validLimit ? <div className="round-launch-alert error" role="alert">{authorization.error}</div> : null}
           {!requestIdReady ? <div className="round-launch-alert error" role="alert">启动请求标识尚未准备好。</div> : null}
           {externalError || localError ? <div className="round-launch-alert error" role="alert">{localError || externalError}</div> : null}
@@ -564,14 +587,14 @@ export function RoundLaunchDialog({
           </div>
           <div className="round-launch-footer-actions">
             <button type="button" className="secondary" onClick={onClose} disabled={effectiveBusy}>取消</button>
-            {!loading && !plan ? (
+            {!loading && (!plan || recovery?.retry) ? (
               <button type="button" className="primary" onClick={onRetry} disabled={effectiveBusy || typeof onRetry !== "function"}>
                 重新读取
               </button>
             ) : (
               <button type="submit" className="primary" disabled={!canSubmit}>
                 {effectiveBusy ? <LoaderCircle className="spin" size={15} aria-hidden="true" /> : <ShieldCheck size={15} aria-hidden="true" />}
-                {effectiveBusy ? "确认中…" : loading ? "读取中…" : "确认并启动"}
+                {effectiveBusy ? "确认中…" : loading ? "读取中…" : "确认开始一轮"}
               </button>
             )}
           </div>

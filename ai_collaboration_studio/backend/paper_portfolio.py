@@ -307,10 +307,20 @@ def evaluate_paper_portfolio(
     common_dates: list[str] = []
     portfolio_returns: list[float] = []
     return_dates: list[str] = []
+    session_mismatch = False
     if not missing_symbols:
-        common_dates = sorted(
-            set.intersection(*(set(series_by_symbol[symbol]) for symbol in active_symbols))
-        )
+        # A later inception may trim the leading edge. After that shared start,
+        # require identical supplied sessions instead of intersecting away gaps.
+        # Agreement does not prove dates missing from every symbol are present.
+        common_start = max(min(series_by_symbol[symbol]) for symbol in active_symbols)
+        sessions = {
+            symbol: sorted(day for day in series_by_symbol[symbol] if day >= common_start)
+            for symbol in active_symbols
+        }
+        reference_sessions = sessions[active_symbols[0]]
+        session_mismatch = any(days != reference_sessions for days in sessions.values())
+        if not session_mismatch:
+            common_dates = reference_sessions
         for previous_date, current_date in zip(common_dates, common_dates[1:]):
             daily_return = sum(
                 signed_weights[symbol] / 100
@@ -382,7 +392,7 @@ def evaluate_paper_portfolio(
         default=0.0,
     )
 
-    history_ready = not missing_symbols and sample_count >= 20
+    history_ready = not missing_symbols and not session_mismatch and sample_count >= 20
     budgets = plan["budgets"]
     budget_checks = [
         _budget_check(
@@ -484,7 +494,13 @@ def evaluate_paper_portfolio(
             "code": "PORTFOLIO_HISTORY_INSUFFICIENT",
             "message": f"{symbol} 复权日线不足，未补造风险结果",
         })
-    if not missing_symbols and sample_count < 20:
+    if session_mismatch:
+        source_errors.append({
+            "source": "futu_qfq_daily_history",
+            "code": "PORTFOLIO_HISTORY_SESSION_MISMATCH",
+            "message": "活动标的在共同起点后的日线会话不一致，未跨缺口计算每日组合收益。",
+        })
+    if not missing_symbols and not session_mismatch and sample_count < 20:
         source_errors.append({
             "source": "futu_qfq_daily_history",
             "code": "COMMON_HISTORY_INSUFFICIENT",
@@ -508,7 +524,7 @@ def evaluate_paper_portfolio(
             if not invalid_history_symbols
             else "unverified_history_rejected"
         ),
-        "history_contract_ready": not invalid_history_symbols,
+        "history_contract_ready": not invalid_history_symbols and not session_mismatch,
         "history_contracts": history_contracts,
         "input_fingerprint": fingerprint,
         "active_symbols": active_symbols,

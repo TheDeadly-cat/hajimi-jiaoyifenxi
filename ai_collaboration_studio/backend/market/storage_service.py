@@ -15,7 +15,7 @@ from .earnings_pack_contract import (
     covered_official_earnings_pack_symbols,
 )
 from .earnings_metrics import official_earnings_metrics
-from .futu_readonly import FutuUsMarketAdapter, STORAGE_SYMBOLS, _utc_iso
+from .futu_readonly import FutuUsMarketAdapter, STORAGE_SYMBOLS, _utc_iso, validate_readonly_daily_history
 from .industry_proxies import FredIndustryProxyAdapter
 from .ir_releases import OfficialIrReleaseAdapter
 from .research_analytics import build_research_analytics
@@ -221,10 +221,33 @@ class StorageResearchMarketService:
                 }],
             }
         technical_rows = []
-        histories = history_batch.get("histories") or {}
+        raw_histories = history_batch.get("histories") or {}
+        histories = {}
+        history_errors = copy.deepcopy(history_batch.get("source_errors") or [])
         for symbol in STORAGE_SYMBOLS:
-            history = histories.get(symbol) or {}
-            technical_rows.append(calculate_technical_metrics(symbol, history.get("rows") or []))
+            history = raw_histories.get(symbol) or {}
+            report = validate_readonly_daily_history(history, expected_symbol=symbol)
+            raw_errors = history.get("source_errors", []) if isinstance(history, dict) else []
+            errors = copy.deepcopy(raw_errors) if isinstance(raw_errors, list) else []
+            if not report["ready"]:
+                error = {
+                    "source": "futu_qfq_daily_history", "symbol": symbol,
+                    "code": "HISTORY_VALIDATION_FAILED",
+                    "message": f"{symbol} 日线来源或完整性校验未通过，研究统计不可用。",
+                    "issues": report["issues"],
+                }
+                errors.append(error)
+                history_errors.append(error)
+            histories[symbol] = {
+                **(history if isinstance(history, dict) else {}),
+                "ok": report["ready"],
+                "rows": history["rows"] if report["ready"] else [],
+                "source_errors": errors,
+            }
+            technical_rows.append(calculate_technical_metrics(
+                symbol, histories[symbol]["rows"], source_errors=errors,
+            ))
+        history_batch = {**history_batch, "source_errors": history_errors}
         research_analytics = build_research_analytics(histories)
 
         try:

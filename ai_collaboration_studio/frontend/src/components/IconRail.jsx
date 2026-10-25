@@ -1,7 +1,8 @@
-import { Folder, Inbox, MessageSquare, PawPrint, Sparkles, Users } from "lucide-react";
+import { Folder, Inbox, MessageSquare, Newspaper, PawPrint, Sparkles, Users } from "lucide-react";
 import "../styles/icon-rail-polish.css";
 
 const items = [
+  { icon: Newspaper, label: "消息工作台", section: "news" },
   { icon: MessageSquare, label: "讨论房间", section: "rooms" },
   { icon: Inbox, label: "来源收件箱", section: "source-inbox" },
   { icon: Users, label: "成员身份", section: "members" },
@@ -55,7 +56,7 @@ export function IconRail({
         {items.map(({ icon: Icon, label, section }) => {
           const preload = section === "source-inbox"
             ? onPreloadSourceInbox
-            : section === "rooms"
+            : section === "rooms" || section === "news"
               ? undefined
               : onPreloadInspector;
           return (

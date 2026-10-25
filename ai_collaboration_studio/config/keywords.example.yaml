@@ -1,0 +1,71 @@
+# Local deterministic rules. These examples are data, never instructions.
+# Keep group names stable once downstream event history depends on them.
+groups:
+  earnings:
+    keywords:
+      - earnings
+      - guidance
+      - 财报
+      - 业绩指引
+    regex: []
+    tickers: []
+  regulation:
+    keywords:
+      - regulator
+      - investigation
+      - 监管
+      - 调查
+    regex: []
+    tickers: []
+  corporate_action:
+    keywords:
+      - acquisition
+      - merger
+      - buyback
+      - 收购
+      - 回购
+    regex: []
+    tickers: []
+  market_disruption:
+    keywords:
+      - trading halt
+      - outage
+      - 停牌
+      - 中断
+    regex: []
+    tickers: []
+
+ticker_whitelist:
+  NVDA:
+    - NVIDIA
+    - 英伟达
+  TSLA:
+    - Tesla
+    - 特斯拉
+  BABA:
+    - Alibaba
+    - 阿里巴巴
+
+ambiguous_tickers:
+  - AI
+  - IT
+  - ON
+  - CAT
+
+ticker_context:
+  - stock
+  - shares
+  - earnings
+  - guidance
+  - ticker
+  - 股票
+  - 股价
+  - 财报
+  - 代码
+
+breaking_keywords:
+  - breaking
+  - urgent
+  - just in
+  - 突发
+  - 快讯

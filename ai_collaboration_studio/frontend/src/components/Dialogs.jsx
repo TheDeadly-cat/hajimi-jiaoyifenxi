@@ -325,7 +325,7 @@ export function CreateRoomDialog({ open, onClose, onSubmit, restoreFocusRef, tem
         {selectedTemplate ? <section className="create-room-template-review" aria-labelledby={templateReviewTitleId}>
           <div className="create-room-template-review-control">
             <span>
-              <small>IMPLEMENTATION PREVIEW / TEMPLATE</small>
+              <small>房间模板</small>
               <h3 id={templateReviewTitleId}>{selectedTemplate.name}</h3>
               <p id={templateReviewDescriptionId}>{selectedTemplate.description} 创建后仍可增删成员、修改身份和调整讨论流程。</p>
             </span>
@@ -366,7 +366,7 @@ export function CreateRoomDialog({ open, onClose, onSubmit, restoreFocusRef, tem
             ) : null}
           </div>
         </section> : null}
-        {coreProtocols.length ? <fieldset className="capability-pack-picker core-protocol-picker">
+        {coreProtocols.length ? <details className="create-room-protocol-details"><summary>查看内核协议（始终启用）</summary><fieldset className="capability-pack-picker core-protocol-picker">
           <legend>群聊内核协议（始终启用）</legend>
           <p>所有新正式轮都会冻结并核验 AI 相互回应链；旧轮与暂停恢复严格沿用原协议。</p>
           {coreProtocols.map((pack) => (
@@ -376,7 +376,7 @@ export function CreateRoomDialog({ open, onClose, onSubmit, restoreFocusRef, tem
               <em>{packSelectionAvailability(lifecycleView, pack.id).lifecycle?.newBindingsAllowed === true ? "始终启用" : "状态不可用"}</em>
             </div>
           ))}
-        </fieldset> : null}
+        </fieldset></details> : null}
         {optionalDomainPacks.length ? <fieldset
           className="capability-pack-picker create-room-domain-pack-picker"
           id={capabilityPackListId}
@@ -437,7 +437,7 @@ export function CreateRoomDialog({ open, onClose, onSubmit, restoreFocusRef, tem
               : creationReviewTone === "ready"
                 ? <ShieldCheck aria-hidden="true" size={17} />
                 : <NotebookPen aria-hidden="true" size={17} />}
-            <span><small>CREATE PERMIT / LOCAL DRAFT</small><h3 id={creationReviewTitleId}>{creationReviewLabel}</h3></span>
+            <span><small>创建前确认 · 本地草稿</small><h3 id={creationReviewTitleId}>{creationReviewLabel}</h3></span>
             <data value={requiredFieldsCount}>{requiredFieldsCount} / 3 必填</data>
           </div>
           <dl aria-label="创建前复核摘要">
@@ -1033,6 +1033,7 @@ function materialDialogIdentity(material, room) {
     room?.id || "",
     material?.id || "new",
     material?.version || 0,
+    material?._news_research?.handoff_id || "",
     supplement.symbol,
     supplement.fiscal_period,
     supplement.material_kind,
@@ -1224,6 +1225,10 @@ export function MaterialDialog({ material, room, open, onClose, onSubmit, onFetc
 
   const isNew = !form.id;
   const metadata = materialObjectValue(form.metadata);
+  const newsResearch = materialObjectValue(form._news_research);
+  const isNewsResearch = Boolean(newsResearch.handoff_id);
+  const newsResearchUrl = safeExternalUrl(newsResearch.source_url);
+  const newsTargetMismatch = isNewsResearch && newsResearch.room_id !== room?.id;
   const metadataSymbols = materialArrayValue(metadata.symbols);
   const officialSupplementObject = materialObjectValue(form.official_supplement_v1);
   const officialSupplement = Object.keys(officialSupplementObject).length ? officialSupplementObject : null;
@@ -1305,6 +1310,12 @@ export function MaterialDialog({ material, room, open, onClose, onSubmit, onFetc
       : typeof onSubmit === "function";
 
   const submitPrimary = () => {
+    if (newsTargetMismatch) { setLocalError("目标房间已改变，请返回消息工作台重新选择房间。"); return null; }
+    if (isNewsResearch) return run(
+      typeof onSubmit === "function" ? () => onSubmit({ ...form, kind: "note", source_url: newsResearch.source_url || "" }) : null,
+      undefined,
+      "资料保存尚未确认，请先检查目标房间的共享资料，避免重复保存。",
+    );
     if (mode === "url") return run(
       typeof onFetchUrl === "function" ? () => onFetchUrl(form) : null,
       undefined,
@@ -1368,11 +1379,14 @@ export function MaterialDialog({ material, room, open, onClose, onSubmit, onFetc
   }
 
   const primaryDisabled = busy
+    || newsTargetMismatch
     || !primaryHandlerAvailable
     || (mode === "file" && !file)
     || (officialSupplement && officialSupplement.user_confirmed !== true);
   const operationStatus = localError
     ? localError
+    : newsTargetMismatch
+      ? "目标房间已改变，当前消息草稿不能保存。请返回消息工作台重新选择。"
     : busy
       ? "资料操作正在等待服务端确认，请勿重复提交或关闭对话框。"
       : !primaryHandlerAvailable
@@ -1408,7 +1422,10 @@ export function MaterialDialog({ material, room, open, onClose, onSubmit, onFetc
         <fieldset className="material-dialog-fields" disabled={busy}>
           <legend>共享资料字段</legend>
 
-          {isNew && !officialSupplement ? <div className="material-mode-tabs" role="group" aria-label="资料来源方式">
+          {isNewsResearch ? <div className="material-safety-note" role="note"><FileText size={16} aria-hidden="true" /><span><strong>保存到：{newsResearch.room_title}</strong><br />来自消息工作台的研究摘录，按未核验笔记保存。请核对下方内容，再点击“添加资料”；取消不会保存，也不会抓取原文或调用 AI。{newsResearch.title_shortened ? <><br />资料标题已缩短至 120 字符，完整原标题保留在正文中。</> : null}</span></div> : null}
+          {isNewsResearch ? <p>本次交接不会自动刷新房间的行情或其他来源；需要这些数据时，请在房间中手动刷新。</p> : null}
+          {isNewsResearch && newsResearchUrl ? <p><a href={newsResearchUrl} target="_blank" rel="noopener noreferrer">查看这条消息的原文</a>（由你手动打开，不会自动抓取）</p> : null}
+          {isNew && !officialSupplement && !isNewsResearch ? <div className="material-mode-tabs" role="group" aria-label="资料来源方式">
             <button type="button" aria-pressed={mode === "note"} className={mode === "note" ? "active" : ""} onClick={() => selectMode("note")}><NotebookPen size={15} aria-hidden="true" />手工笔记</button>
             <button type="button" aria-pressed={mode === "url"} className={mode === "url" ? "active" : ""} onClick={() => selectMode("url")}><Globe2 size={15} aria-hidden="true" />抓取网页</button>
             <button type="button" aria-pressed={mode === "file"} className={mode === "file" ? "active" : ""} onClick={() => selectMode("file")}><Upload size={15} aria-hidden="true" />上传文件</button>
@@ -1420,7 +1437,7 @@ export function MaterialDialog({ material, room, open, onClose, onSubmit, onFetc
             <p>请只上传从上述固定官方入口下载的原文件。首次提交只会暂存并生成核验预览，不会立即解除 readiness 阻断。</p>
           </section> : null}
 
-          <label>资料标题<input required={mode === "note"} value={form.title} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} placeholder={mode === "note" ? "例如：2026 Q2 财报要点" : "可选；留空时从来源自动识别"} /></label>
+          <label>资料标题<input required={mode === "note"} maxLength={isNewsResearch ? 120 : undefined} value={form.title} onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))} placeholder={mode === "note" ? "例如：2026 Q2 财报要点" : "可选；留空时从来源自动识别"} /></label>
 
           {mode === "url" ? <>
             <label>公开网页链接<input required type="url" value={form.source_url || ""} onChange={(event) => setForm((current) => ({ ...current, source_url: event.target.value }))} placeholder="https://example.com/report" /></label>
@@ -1458,7 +1475,7 @@ export function MaterialDialog({ material, room, open, onClose, onSubmit, onFetc
           <fieldset className="material-evidence-metadata">
             <legend>证据时间与对象</legend>
             <div>
-              <label>来源类型<select disabled={Boolean(officialSupplement)} value={metadata.source_type || "other"} onChange={(event) => updateMetadata({ source_type: event.target.value })}>
+              <label>来源类型<select disabled={Boolean(officialSupplement) || isNewsResearch} value={metadata.source_type || "other"} onChange={(event) => updateMetadata({ source_type: event.target.value })}>
                 {evidenceSourceTypes.map(([value, label], index) => <option key={JSON.stringify(["source-type", value, index])} value={value}>{label}</option>)}
               </select></label>
               <label>事件类型<select disabled={Boolean(officialSupplement)} value={metadata.event_type || "other"} onChange={(event) => updateMetadata({ event_type: event.target.value })}>
@@ -1477,7 +1494,7 @@ export function MaterialDialog({ material, room, open, onClose, onSubmit, onFetc
             <p>公司公告和监管披露按一级来源处理；媒体与分析师研究为二级；社交媒体、内部笔记和未分类来源保持“未核验”。发布时间缺失时，AI 必须明确写成未知。</p>
           </fieldset>
 
-          {(mode === "note" || !isNew) ? <label>可供 AI 使用的内容<textarea className="large" required value={form.content} onChange={(event) => setForm((current) => ({ ...current, content: event.target.value }))} placeholder="粘贴事实、摘要或需要共同核验的原文片段。" /></label> : null}
+          {(mode === "note" || !isNew) ? <label>可供 AI 使用的内容<textarea className="large" aria-label="可供 AI 使用的内容" required value={form.content} onChange={(event) => setForm((current) => ({ ...current, content: event.target.value }))} placeholder="粘贴事实、摘要或需要共同核验的原文片段。" /></label> : null}
 
           {!isNew && Object.keys(metadata).length ? <div className="material-provenance">
             <strong>来源记录</strong>

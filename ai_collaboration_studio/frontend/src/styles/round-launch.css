@@ -64,7 +64,7 @@
 
 .round-launch-snapshot-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .round-launch-snapshot-item {
@@ -263,3 +263,11 @@
     color: ButtonText;
   }
 }
+
+.round-launch-recovery { background: #fff1ed; border: 1px solid var(--launch-line); border-radius: 9px; color: var(--launch-red); display: grid; gap: 8px; padding: 12px; }
+.round-launch-recovery > strong { font-size: 0.82rem; }
+.round-launch-recovery p { font-size: 0.72rem; line-height: 1.55; margin: 0; overflow-wrap: anywhere; }
+.round-launch-recovery button { justify-self: start; min-height: 36px; }
+.round-launch-recovery .round-launch-manual-note { color: var(--launch-muted); }
+.round-launch-details-body { display: grid; gap: 12px; padding: 0 12px 12px; }
+@media (forced-colors: active) { .round-launch-recovery { background: Canvas; color: CanvasText; border-color: CanvasText; } }

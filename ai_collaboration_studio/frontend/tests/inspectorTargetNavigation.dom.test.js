@@ -221,11 +221,15 @@ test("delayed Action Desk mount receives focus and remains aligned after a prece
   await controlled.resolve();
   const target = view.host.querySelector("#inspector-action-desk");
   assert.ok(target);
+  const focusOptions = [];
+  const realFocus = target.focus.bind(target);
+  target.focus = (options) => { focusOptions.push(options); realFocus(options); };
   mutationObserver.emit();
   await flushFrames();
 
   assert.equal(inspector.scrollTop, 620);
   assert.equal(document.activeElement, target);
+  assert.deepEqual(focusOptions, [{ preventScroll: true }]);
   assert.ok(resizeObserver.observed.has(target));
 
   layout.targetOffset = 780;
@@ -239,4 +243,37 @@ test("delayed Action Desk mount receives focus and remains aligned after a prece
   assert.equal(mutationObserver.disconnected, true);
   assert.equal(pendingFrames.size, 0);
   assert.equal(pendingTimers.size, 0);
+});
+
+
+test("an explicit configuration focus marker focuses a usable control without clicking it", async () => {
+  const inspector = document.createElement("aside");
+  const target = document.createElement("section");
+  target.id = "inspector-providers";
+  target.tabIndex = -1;
+  const disabled = document.createElement("button");
+  disabled.disabled = true;
+  disabled.setAttribute("data-inspector-navigation-focus", "");
+  const check = document.createElement("button");
+  check.textContent = "本机配置检查";
+  check.setAttribute("data-inspector-navigation-focus", "");
+  let clicks = 0;
+  check.addEventListener("click", () => clicks++);
+  target.append(disabled, check); inspector.append(target); document.body.append(inspector);
+  let targetOffset = 300;
+  inspector.getBoundingClientRect = () => ({ top: 20, bottom: 220 });
+  target.getBoundingClientRect = () => ({ top: 20 + targetOffset - inspector.scrollTop });
+  check.getBoundingClientRect = () => ({ top: 20 + targetOffset + 300 - inspector.scrollTop, bottom: 20 + targetOffset + 340 - inspector.scrollTop });
+  const stop = bindInspectorTargetNavigation(inspector, target.id, runtime);
+  await flushFrames();
+  assert.equal(document.activeElement, check);
+  assert.equal(clicks, 0);
+  assert.ok(check.getBoundingClientRect().bottom <= inspector.getBoundingClientRect().bottom);
+  targetOffset += 200;
+  ControlledResizeObserver.instances[0].emit();
+  await flushFrames();
+  assert.equal(document.activeElement, check);
+  assert.ok(check.getBoundingClientRect().bottom <= inspector.getBoundingClientRect().bottom);
+  assert.equal(clicks, 0);
+  stop(); inspector.remove();
 });

@@ -717,3 +717,6 @@
   .chat-timeline-workspace .chat-timeline { scroll-behavior: auto; }
   .chat-timeline-workspace .message-history-search { transition: none; }
 }
+
+.timeline-projection-details > summary { color: var(--timeline-muted); cursor: pointer; font-size: var(--timeline-type-control); padding: 4px 2px; }
+.timeline-projection-details > summary:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }

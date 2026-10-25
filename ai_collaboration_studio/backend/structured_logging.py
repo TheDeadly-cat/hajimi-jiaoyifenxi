@@ -82,6 +82,24 @@ def _is_sensitive_key(value: str) -> bool:
         return True
     if "api_key" in normalized or "private_key" in normalized:
         return True
+    if normalized in {
+        "api_hash",
+        "phone",
+        "phone_number",
+        "telegram_phone",
+        "telegram_api_hash",
+        "telegram_code",
+        "authentication_code",
+        "login_code",
+        "verification_code",
+        "two_factor_password",
+        "2fa_password",
+        "two_factor_authentication",
+        "database_encryption_key",
+        "tdlib_database_encryption_key",
+        "2fa",
+    }:
+        return True
     if normalized in {"database", "database_path", "db", "db_path", "sqlite_path"}:
         return True
     return "provider" in tokens and bool(

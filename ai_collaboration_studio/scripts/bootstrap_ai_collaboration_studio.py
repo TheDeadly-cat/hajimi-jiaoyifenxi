@@ -17,18 +17,14 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts import news_portable_runtime as portable_runtime
+
 
 BOOTSTRAP_RECEIPT_VERSION = "studio_bootstrap_receipt_v1"
 PROJECT_ID = "ai_collaboration_studio"
 REPARSE_POINT_ATTRIBUTE = 0x400
-PROVIDER_ENVIRONMENT_NAMES = (
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "GOOGLE_API_KEY",
-    "GEMINI_API_KEY",
-    "FUTU_PASSWORD_MD5",
-)
+PROVIDER_ENVIRONMENT_NAMES = portable_runtime.PROVIDER_ENVIRONMENT_NAMES
 PROJECT_MARKERS = (
     "server.py",
     "requirements.txt",
@@ -192,16 +188,23 @@ def managed_python_path(runtime_root: Path) -> Path:
     return runtime_root / "python" / "bin" / "python"
 
 
+def validate_dependency_child_paths(project_root: Path, runtime_root: Path) -> None:
+    """Refuse aliased install destinations before any dependency command runs."""
+    targets = (
+        runtime_root / "python",
+        managed_python_path(runtime_root),
+        project_root / "frontend" / "node_modules",
+    )
+    for target in targets:
+        offending = first_reparse_component(target)
+        if offending is not None:
+            raise BootstrapError(
+                f"dependency destination contains a reparse point: {offending}"
+            )
+
+
 def safe_environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    environment["AI_STUDIO_SKIP_LOCAL_ENV"] = "1"
-    environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
-    environment["PIP_NO_INPUT"] = "1"
-    environment["npm_config_audit"] = "false"
-    environment["npm_config_fund"] = "false"
-    for name in PROVIDER_ENVIRONMENT_NAMES:
-        environment.pop(name, None)
-    return environment
+    return portable_runtime.safe_environment()
 
 
 def command_result(
@@ -228,13 +231,14 @@ def command_result(
         "label": label,
         "exit_code": completed.returncode,
         "duration_seconds": round(time.monotonic() - started, 3),
-        "stdout_tail": completed.stdout[-12000:],
-        "stderr_tail": completed.stderr[-12000:],
+        # Dependency logs can contain local paths or registry diagnostics. Only
+        # the bounded distribution resolution is needed by the safe receipt.
+        "stdout_tail": completed.stdout[-12000:] if label == "capture_python_resolution" else "",
+        "stderr_tail": "",
     }
     if completed.returncode != 0:
         raise BootstrapError(
-            f"{label} failed with exit code {completed.returncode}: "
-            f"{completed.stderr[-2000:] or completed.stdout[-2000:]}"
+            f"{label} failed with exit code {completed.returncode}"
         )
     return result
 
@@ -257,10 +261,22 @@ def bootstrap(
     check_only: bool,
     report_path: Path | None,
 ) -> dict[str, Any]:
+    # Checking both destinations up front is essential: detecting node_modules
+    # only after pip installs could already modify an unrelated Python tree.
+    validate_dependency_child_paths(project_root, runtime_root)
     npm_name = "npm.cmd" if os.name == "nt" else "npm"
     npm_path = shutil.which(npm_name)
     if not npm_path:
         raise BootstrapError("npm was not found on PATH")
+    node_path = shutil.which("node.exe" if os.name == "nt" else "node")
+    if not node_path:
+        raise BootstrapError("node was not found on PATH")
+    try:
+        toolchain = portable_runtime.verify_toolchain(
+            node_path, npm_path, environment=safe_environment(), cwd=project_root,
+        )
+    except portable_runtime.PortableError as exc:
+        raise BootstrapError(str(exc)) from None
     frontend = project_root / "frontend"
     requirements = project_root / "requirements.txt"
     requirements_lock = project_root / "requirements-lock-win-py314.txt"
@@ -288,11 +304,15 @@ def bootstrap(
         },
         "tools": {
             "bootstrap_python": sys.executable,
+            "bootstrap_python_version": platform.python_version(),
             "npm": npm_path,
+            "node": node_path,
+            "toolchain": toolchain,
         },
         "safety": {
             "local_env_skipped": True,
             "provider_credentials_removed": True,
+            "paid_providers_disabled": True,
             "application_started": False,
             "formal_database_opened": False,
         },
