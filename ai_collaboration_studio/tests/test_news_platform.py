@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.news_platform import (
-    FeedResponse, MAX_BYTES, NewsPlatform, SOURCES, _SameHostRedirect,
+    FeedResponse, FeedValidationError, MAX_BYTES, NewsPlatform, SOURCES, _SameHostRedirect,
     _safe_url, analyze, fetch_feed, parse_feed, plain_text,
 )
 
@@ -282,11 +282,22 @@ class FeedSafetyTests(unittest.TestCase):
 
     def test_xml_entity_declarations_and_oversized_bodies_are_rejected(self):
         dangerous = '<!DOCTYPE rss [<!ENTITY x "bad">]><rss><channel/></rss>'
-        for body in (dangerous.encode(), dangerous.encode("utf-16")):
-            with self.assertRaisesRegex(ValueError, "document_type"):
-                parse_feed(body, SOURCES[0])
-        with self.assertRaisesRegex(ValueError, "too_large"):
-            parse_feed(b" " * (MAX_BYTES + 1), SOURCES[0])
+        for encoding in ("utf-8", "utf-16", "utf-16-be"):
+            body = dangerous.encode(encoding)
+            with self.subTest(encoding=encoding), patch("backend.news_platform.ET.fromstring") as parser:
+                with self.assertRaises(FeedValidationError) as caught:
+                    parse_feed(body, SOURCES[0])
+                self.assertEqual(caught.exception.code, "unsafe_feed")
+                self.assertEqual(str(caught.exception), "unsafe_feed")
+                parser.assert_not_called()
+        with patch("backend.news_platform.ET.fromstring") as parser:
+            with self.assertRaises(FeedValidationError) as caught:
+                parse_feed(b" " * (MAX_BYTES + 1), SOURCES[0])
+            self.assertEqual(caught.exception.code, "feed_too_large")
+            self.assertEqual(str(caught.exception), "feed_too_large")
+            parser.assert_not_called()
+        valid = rss()
+        self.assertEqual(len(parse_feed(valid + b" " * (MAX_BYTES - len(valid)), SOURCES[0])), 1)
 
     def test_company_category_and_rule_keywords(self):
         analysis = analyze("Seagate announces quarterly earnings", "Revenue update.", NOW, NOW, "seagate")

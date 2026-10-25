@@ -38,12 +38,20 @@ jobs:
           python-version: "3.14"
           architecture: "x64"
 
-      - name: Set up Node 24
+      - name: Set up locked Node 24.16.0
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "24"
+          node-version: "24.16.0"
           cache: npm
           cache-dependency-path: ai_collaboration_studio/frontend/package-lock.json
+
+      - name: Set up locked npm 11.13.0
+        shell: pwsh
+        run: |
+          npm.cmd install --global npm@11.13.0 --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) {
+            throw "locked npm installation failed with exit code $LASTEXITCODE"
+          }
 
       - name: Deterministic offline security baseline
         shell: pwsh
