@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -24,7 +25,20 @@ class BootstrapChildPathTests(unittest.TestCase):
         (self.frontend/'package-lock.json').write_text('{}',encoding='utf-8')
         self.runtime = self.project/'runtime'/'bootstrap'
         self.links = []
-        self.npm = patch.object(bootstrap.shutil,'which',return_value='fixture-npm-never-executed')
+        tools = {'node': 'fixture-node-never-executed', 'npm': 'fixture-npm-never-executed'}
+        self.version_commands = []
+        verify_toolchain = bootstrap.portable_runtime.verify_toolchain
+        def version_runner(arguments, **kwargs):
+            self.version_commands.append(arguments)
+            name = next(name for name, executable in tools.items() if executable == arguments[0])
+            self.assertEqual(arguments, [tools[name], '--version'])
+            return subprocess.CompletedProcess(arguments, 0,
+                bootstrap.portable_runtime.EXPECTED_TOOLCHAIN[name] + '\n', '')
+        def verify(node, npm, **kwargs):
+            return verify_toolchain(node, npm, **kwargs, runner=version_runner)
+        self.toolchain = patch.object(bootstrap.portable_runtime, 'verify_toolchain', side_effect=verify)
+        self.toolchain.start()
+        self.npm = patch.object(bootstrap.shutil,'which',side_effect=lambda name: tools[name.removesuffix('.exe').removesuffix('.cmd')])
         self.npm.start()
         self.commands = patch.object(bootstrap,'command_result',side_effect=AssertionError('no_install_command_permitted'))
         self.command_mock = self.commands.start()
@@ -33,6 +47,7 @@ class BootstrapChildPathTests(unittest.TestCase):
         self.command_mock.assert_not_called()
         self.commands.stop()
         self.npm.stop()
+        self.toolchain.stop()
         for path in reversed(self.links):
             # Remove this owned junction entry itself; never recurse into its target.
             os.rmdir(path)
@@ -70,6 +85,7 @@ class BootstrapChildPathTests(unittest.TestCase):
         with self.assertRaisesRegex(bootstrap.BootstrapError,'dependency destination contains a reparse point'):
             self.call()
         self.assertFalse(self.runtime.exists())
+        self.assertEqual(self.version_commands, [])
         self.assertEqual(sentinel.read_bytes(),b'owned synthetic target must remain unchanged')
         self.assertEqual(sorted(p.name for p in target.iterdir()),['preserve.txt'])
 
@@ -97,6 +113,8 @@ class BootstrapChildPathTests(unittest.TestCase):
         self.assertNotIn('python_resolution',result)
         self.assertNotIn('frontend_build',result)
         self.assertFalse(self.runtime.exists())
+        self.assertTrue(result['tools']['toolchain']['matches'])
+        self.assertEqual(len(self.version_commands), 2)
 
     def test_existing_independent_dependency_directories_are_valid_for_check_only(self):
         (self.runtime/'python'/'Scripts').mkdir(parents=True)
