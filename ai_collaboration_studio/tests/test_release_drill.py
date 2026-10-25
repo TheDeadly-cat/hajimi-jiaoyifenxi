@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 from pathlib import Path
 import tempfile
 import unittest
@@ -129,9 +130,24 @@ class ReleaseLifecycleContractTests(unittest.TestCase):
 
     def test_project_drill_is_synthetic_offline_and_preserves_application_data(self) -> None:
         project_root = Path(__file__).resolve().parents[1]
-        with patch.dict(os.environ, {"AI_STUDIO_SKIP_LOCAL_ENV": "1"}):
+        # This synthetic lifecycle fixture must not depend on unrelated host
+        # listeners. Keep the real protected-port decision; replace only the
+        # passive operating-system listener inventory for this test.
+        with patch.dict(os.environ, {"AI_STUDIO_SKIP_LOCAL_ENV": "1"}), patch(
+            "scripts.run_isolated_release_drill._windows_listener_ports",
+            side_effect=lambda *_: set(),
+        ) as listener_inventory:
             result = run_drill(project_root)
 
+        self.assertEqual(listener_inventory.call_count, 4)
+        self.assertEqual(
+            [entry.args[0] for entry in listener_inventory.call_args_list],
+            [socket.AF_INET, socket.AF_INET6] * 2,
+        )
+        expected_ports = {"8770": False, "11111": False, "18787": False}
+        self.assertEqual(result["ports"], {
+            "before": expected_ports, "after": expected_ports,
+        })
         self.assertTrue(result["ok"])
         self.assertEqual(result["schema_version"], "isolated_release_drill_v1")
         self.assertTrue(result["install"]["reinstall_blocked"])
@@ -146,6 +162,29 @@ class ReleaseLifecycleContractTests(unittest.TestCase):
         self.assertFalse(boundaries["database_migration_executed"])
         self.assertFalse(boundaries["formal_database_opened"])
         self.assertEqual(boundaries["external_network_requests"], 0)
+
+    def test_project_drill_refuses_protected_listener_before_creating_artifacts(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        for port in (8770, 11111, 18787):
+            for family in (socket.AF_INET, socket.AF_INET6):
+                with self.subTest(port=port, family=family), patch.dict(
+                    os.environ, {"AI_STUDIO_SKIP_LOCAL_ENV": "1"}
+                ), patch(
+                    "scripts.run_isolated_release_drill._windows_listener_ports",
+                    side_effect=lambda address_family, _row_type: (
+                        {port} if address_family == family else set()
+                    ),
+                ) as listener_inventory, patch(
+                    "scripts.run_isolated_release_drill.source_backup.create_backup"
+                ) as create_archive:
+                    # Exercise run_drill's real refusal, without opening,
+                    # stopping or querying any production socket.
+                    with self.assertRaisesRegex(
+                        ReleaseDrillError, "a protected port already has a listener"
+                    ):
+                        run_drill(project_root)
+                    self.assertEqual(listener_inventory.call_count, 2)
+                    create_archive.assert_not_called()
 
 
 if __name__ == "__main__":

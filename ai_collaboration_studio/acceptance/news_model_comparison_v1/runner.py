@@ -14,6 +14,7 @@ import sqlite3
 import sys
 import threading
 import time
+import types
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
@@ -23,7 +24,7 @@ PROJECT = HERE.parents[1]
 ROUTES = (("doubao", "doubao-seed-2-1-pro-260915"), ("deepseek", "deepseek-flash"))
 FIELDS = ("id", "source_id", "source_name", "url", "title", "excerpt", "published_at", "discovered_at", "updated_at")
 MAX_CALLS, MAX_BUDGET = 10, 1_000_000
-SOURCE_FILES = ("news_analysis_providers.py", "news_content_quality.py")
+SOURCE_FILES = ("execution_boundary.py", "news_analysis_providers.py", "news_content_quality.py")
 _REAL_BUILD_OPENER = urllib.request.build_opener
 
 
@@ -85,8 +86,16 @@ def module(p, name):
 
 
 def modules(root):
-    return (module(root / "frozen-code/news_analysis_providers.py", "comparison_provider"),
-            module(root / "frozen-code/news_content_quality.py", "comparison_quality"))
+    # Load only the hash-bound files, never the ambient backend package/config.
+    # The empty package search path prevents an implicit dependency fallback.
+    package_name = "comparison_frozen_" + sha(str(root).encode("utf-8"))[:16]
+    package = types.ModuleType(package_name)
+    package.__path__ = []
+    package.__package__ = package_name
+    sys.modules[package_name] = package
+    module(root / "frozen-code/execution_boundary.py", package_name + ".execution_boundary")
+    return (module(root / "frozen-code/news_analysis_providers.py", package_name + ".news_analysis_providers"),
+            module(root / "frozen-code/news_content_quality.py", package_name + ".news_content_quality"))
 
 
 def own_hashes():

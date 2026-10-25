@@ -9,6 +9,8 @@ import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING
 
+from .execution_boundary import build_text_provider_request
+
 DOUBAO_MODEL = "doubao-seed-2-1-pro-260915"
 MAX_OUTPUT_TOKENS = 900
 REQUEST_TIMEOUT_SECONDS = 45
@@ -161,8 +163,11 @@ def generate_response(provider, model, api_key, body):
     encoded = encode_body(body)
     if len(encoded) > MAX_REQUEST_BYTES:
         raise ValueError('news_provider_request_too_large')
-    request = urllib.request.Request(endpoint, data=encoded, headers={
-        'Authorization':'Bearer ' + api_key,'Content-Type':'application/json','User-Agent':'AICollaborationStudio/0.2'}, method='POST')
+    request = build_text_provider_request(endpoint.removesuffix('/responses'), 'responses', body, headers={
+        'Authorization':'Bearer ' + api_key,'Content-Type':'application/json','User-Agent':'AICollaborationStudio/0.2'})
+    # Reservation, bound comparison plans and transport must use the same bytes.
+    if request.full_url != endpoint or request.data != encoded:
+        raise ValueError('news_provider_request_encoding_mismatch')
     # Preserve the standard proxy behavior used by the existing Doubao adapter.
     # Configuration modules and implicit credential discovery are never imported.
     opener = urllib.request.build_opener(NoNewsProviderRedirect())

@@ -90,6 +90,16 @@ class ComparisonTests(unittest.TestCase):
         frozen.write_bytes(frozen.read_bytes() + b"\n")
         with self.assertRaises(r.Refused): r.inspect_plan(str(self.plan_path), self.prep["plan_sha256"])
 
+    def test_frozen_boundary_is_bound_and_not_loaded_from_ambient_backend(self):
+        frozen = self.run / "frozen-code/execution_boundary.py"
+        self.assertEqual(self.plan["frozen_code_sha256"]["execution_boundary.py"], r.sha(frozen.read_bytes()))
+        function = self.provider.build_text_provider_request
+        self.assertEqual(Path(sys.modules[function.__module__].__file__).resolve(), frozen.resolve())
+        self.assertEqual(sys.modules[self.provider.__package__].__path__, [])
+        frozen.write_bytes(frozen.read_bytes() + b"\n# tampered\n")
+        with self.assertRaisesRegex(r.Refused, "code_hash_mismatch"):
+            r.inspect_plan(str(self.plan_path), self.prep["plan_sha256"])
+
     def test_authorization_scope_and_expiry(self):
         auth = self.authorization()
         r.check_authorization(auth, self.plan, self.prep["plan_sha256"])
