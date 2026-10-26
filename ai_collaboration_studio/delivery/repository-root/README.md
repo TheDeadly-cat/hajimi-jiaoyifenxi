@@ -1,6 +1,12 @@
 # AI 共创室（交易分析工作区）
 
-当前分支是完整新闻运行源码的独立集成候选，包含生产基线源码、对应测试、依赖锁和隔离启动入口。先按[安装与启动说明](ai_collaboration_studio/docs/NEWS_PORTABLE_DELIVERY.md)安装锁定依赖；首次明确新建数据时运行 `run_ai_collaboration_studio.cmd --initialize-new`，之后可双击启动。默认端口 8780、数据位于本检出的 `runtime/news-workspace`，拒绝复用生产端口。采集和付费审核默认关闭。
+双击 **打开消息工作台.cmd**。首次打开会显示中文设置向导：检查环境、说明需要安装的组件、等待确认，再创建独立消息数据。以后仍双击这个入口回到自己的消息列表，不需要输入命令、选择分支或手工修改配置。
+
+不配置 AI 也能阅读和收集美联储、美国劳工统计局（BLS）及希捷官方订阅。AI 是可跳过的功能，自动分析默认关闭；配置保存不等于密钥已经验证，首次真实解释仍需明确操作。阅读方法见[使用说明](ai_collaboration_studio/使用说明.txt)。
+
+当前分支是基于 PR #38 的独立新手体验候选，尚不代表已替换本机运行版本。统一入口复用现有锁定依赖安装和独立数据初始化，不自动覆盖、迁移或恢复已有数据，也不会停止占用端口的程序。旧 `run_ai_collaboration_studio.cmd` 仅作为同一向导的兼容入口。
+
+维护人员的命令、依赖锁和隔离核验见[高级安装与启动说明](ai_collaboration_studio/docs/NEWS_PORTABLE_DELIVERY.md)；普通首次使用不需要执行其中的命令。
 
 验证结论见[交付边界](ai_collaboration_studio/docs/NEWS_DELIVERY_ACCEPTANCE.md)和[分来源状态](ai_collaboration_studio/docs/NEWS_SOURCE_STATUS_20261024.md)。构建、服务启动、来源恢复与真实 API 审核质量分别验收。当前本机生产安装不由此入口切换。
 

@@ -1,0 +1,22 @@
+.news-reading-review { min-width: 0; }
+.news-reading-review .news-review-explanation { border: 1px solid var(--news-border, #d9e3ee); border-left: 3px solid #9b6a25; border-radius: 8px; padding: 16px; background: #fffaf0; color: var(--news-ink, #172d47); }
+.news-review-explanation > [role="status"] > strong { font-size: 15px; }
+.news-reading-review p, .news-reading-review blockquote, .news-reading-review li { font-size: 14px; line-height: 1.75; overflow-wrap: anywhere; }
+.news-reading-review .news-review-card { margin: 16px 0; padding: 14px; border: 1px solid var(--news-border, #d9e3ee); border-radius: 6px; background: #fff; min-width: 0; }
+.news-reading-review .news-review-card h4 { margin: 0 0 12px; font-size: 14px; color: #794c12; line-height: 1.7; }
+.news-reading-review h5 { margin: 10px 0 5px; font-size: 13px; color: var(--news-ink, #172d47); }
+.news-reading-review blockquote { white-space: pre-wrap; margin: 5px 0 8px; padding: 10px 12px; border-left: 3px solid var(--news-border, #d9e3ee); background: #f4f8fc; }
+.news-reading-review .news-review-claim { border-left-color: #b88437; background: #fff8e8; }
+.news-reading-review .news-review-unmapped, .news-reading-review .news-review-support > p { color: var(--news-muted, #53677f); font-size: 13px; }
+.news-reading-review .news-review-next { padding-top: 6px; }
+.news-reading-review .news-review-support ul { margin: 5px 0; padding-left: 22px; }
+.news-reading-review .news-review-outcome { padding: 12px 14px; margin: 12px 0; border: 1px solid var(--news-border, #d9e3ee); border-radius: 6px; background: #f4f8fc; }
+.news-reading-review summary { min-height: 44px; align-content: center; cursor: pointer; color: var(--news-accent, #1d5a94); font-size: 14px; }
+.news-reading-review summary:focus-visible, .news-reading-review a:focus-visible { outline: 2px solid var(--news-accent, #1d5a94); outline-offset: 3px; border-radius: 3px; }
+.news-reading-review .news-review-original { margin-top: 10px; min-height: 44px; }
+.news-reading-review .news-analysis-raw pre { max-height: 360px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .news-reading-review .news-review-explanation { padding: 12px; }
+  .news-reading-review .news-review-card { padding: 11px; }
+  .news-reading-review blockquote { padding: 8px 10px; }
+}

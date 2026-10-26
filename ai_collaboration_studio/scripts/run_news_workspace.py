@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import urllib.request
+import uuid
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT))
@@ -76,22 +77,40 @@ def main(argv=None):
     parser.add_argument("--initialize-new", action="store_true")
     parser.add_argument("--offline", action="store_true", help="Block all outgoing socket connections and child processes")
     parser.add_argument("--controlled-stdin", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--receipt", help="New safe receipt file; no raw application logs")
+    parser.add_argument("--receipt", help="New safe receipt file; defaults to runtime/news-launcher/receipts")
+    parser.add_argument("--startup-nonce", help=argparse.SUPPRESS)
+    parser.add_argument("--startup-identity", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     receipt = {"schema_version": "news_portable_start_v1", "pid": os.getpid(),
                "started_at": datetime.now(timezone.utc).isoformat(), "offline": args.offline,
                "initialized_new": False, "port": args.port, "ok": False}
     owner = reservation = None
+    receipt_path = PROJECT / "runtime/news-launcher/receipts" / (uuid.uuid4().hex + "-startup.json")
     try:
+        if args.receipt:
+            requested_receipt = portable.unaliased_path(args.receipt)
+            if requested_receipt.exists():
+                raise portable.PortableError("receipt_already_exists")
+            receipt_path = requested_receipt
         root = portable.data_root(PROJECT, args.data_root)
+        if bool(args.startup_nonce) != bool(args.startup_identity):
+            raise portable.PortableError("startup_identity_arguments_required")
+        if args.startup_identity:
+            from scripts.news_first_run import capture_startup_identity, sha
+            started = capture_startup_identity(args.startup_nonce)
+            started.update(project=str(PROJECT.resolve()), data_root=str(root), port=args.port,
+                           backend_sha256=portable.backend_identity(PROJECT),
+                           frontend_sha256=sha(PROJECT / "frontend/dist/index.html"))
+            identity_path = portable.unaliased_path(args.startup_identity)
+            portable.write_receipt(identity_path, started)
+            receipt.update(startup_nonce=args.startup_nonce, host_identity=started["host_identity"],
+                           parent_identity=started["parent_identity"], startup_identity_sha256=sha(identity_path))
         if args.initialize_new:
             portable.require_empty_data(root)
         else:
             for name in portable.DATABASE_NAMES:
                 portable.closed_database(root / name)
         reservation = portable.reserve_port(args.port)
-        if args.receipt and portable.unaliased_path(args.receipt).exists():
-            raise portable.PortableError("receipt_already_exists")
         proxy_view = None
         if not args.offline:
             try:
@@ -139,10 +158,13 @@ def main(argv=None):
         if owner is not None:
             owner.release()
         receipt["finished_at"] = datetime.now(timezone.utc).isoformat()
-        if args.receipt:
-            portable.write_receipt(args.receipt, receipt)
+        try:
+            portable.write_receipt(receipt_path, receipt)
+        except Exception:
+            receipt["ok"] = False
+            print("启动诊断未能保存；请保留已有数据并通过欢迎窗口复制安全诊断。", file=sys.stderr)
     if not receipt["ok"]:
-        print("Portable news startup refused; inspect the safe receipt.", file=sys.stderr)
+        print("工作台启动未完成，已有数据保持原状；请通过欢迎窗口查看安全诊断。", file=sys.stderr)
     return 0 if receipt["ok"] else 1
 
 

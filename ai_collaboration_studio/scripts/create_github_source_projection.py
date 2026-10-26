@@ -43,6 +43,7 @@ ROOT_ASSET_MAP = {
     "delivery/repository-root/run_ai_collaboration_studio.cmd.template": (
         "run_ai_collaboration_studio.cmd"
     ),
+    "delivery/repository-root/打开消息工作台.cmd.template": "打开消息工作台.cmd",
 }
 ROOT_WORKFLOW_PATH = ".github/workflows/isolated-validation.yml"
 _COPY_CHUNK_SIZE = 1024 * 1024

@@ -57,7 +57,7 @@ test("a stopped worker and stale successful source never become a live green sta
   assert.equal(button("立即检查").disabled, false);
   assert.ok(button("恢复持续抓取"));
   assert.match(host.querySelector(".news-runtime-warning").textContent, /检查记录已过期/);
-  assert.match(host.querySelector(".news-source-popover").textContent, /最近一次检查成功.*检查记录已过期/);
+  assert.match(host.querySelector(".news-source-popover").textContent, /检查记录已过期.*不能据此确认.*最近成功/);
   assert.doesNotMatch(host.textContent, /连接正常|连续 24 小时稳定运行已通过/);
   assert.match(history().textContent, /上次退出未确认/);
   assert.equal(history().open, false, "run details must not displace the reading area on entry");
@@ -125,7 +125,7 @@ test("an alive worker with stale heartbeat is unresponsive rather than healthy o
   assert.doesNotMatch(primary().textContent, /抓取后台正在运行|持续抓取已开启|后台已停止|正在抓取/);
   assert.match(history().textContent, /后台线程仍存在，但近期心跳未确认/);
   assert.match(host.querySelector(".news-check-records").textContent, /结果待确认/);
-  assert.match(host.querySelector(".news-source-popover").textContent, /检查推进待确认/);
+  assert.match(host.querySelector(".news-source-popover").textContent, /本次检查结果未确认.*不能确认这个来源正在更新/);
   assert.equal(button("立即检查").disabled, false);
   assert.equal(button("暂停抓取").disabled, false);
   assert.equal(button("恢复持续抓取"), undefined, "an existing unresponsive worker must not be mistaken for a stopped worker");
@@ -270,7 +270,7 @@ test("rate-limited sources show the server's allowed time and remain waiting rat
   overview.sources[0] = { ...overview.sources[0], status: "error", cooldown_active: true, cooldown_reason: "rate_limited", cooldown_until: "2026-10-19T02:30:00Z", refresh_queued: true };
   await render();
   const sources = host.querySelector(".news-source-popover");
-  assert.match(sources.textContent, /限流冷却中/);
+  assert.match(sources.textContent, /来源要求稍后访问/);
   assert.match(sources.textContent, /下次允许检查/);
   assert.doesNotMatch(sources.textContent, /下次常规检查/);
   assert.match(sources.textContent, /已排队，到允许时间再检查/);
@@ -349,8 +349,8 @@ test("manual hold offers no invented release time or bypass but saved messages r
   assert.equal(button("需要检查来源设置").disabled, true);
   await click(button("需要检查来源设置"));
   assert.equal(calls.refresh, 0);
-  assert.match(host.querySelector(".news-source-popover").textContent, /需要人工检查/);
-  assert.match(host.querySelector(".news-source-popover").textContent, /下次允许检查时间待确认/);
+  assert.match(host.querySelector(".news-source-popover").textContent, /等待人工核对/);
+  assert.match(host.querySelector(".news-source-popover").textContent, /允许访问的时间尚未确认/);
   assert.doesNotMatch(host.querySelector(".news-source-popover").textContent, /下次常规检查|下次允许检查：/);
   assert.match(host.querySelector(".news-runtime-times").textContent, /需人工检查/);
   await click(host.querySelector(".news-item"));

@@ -123,7 +123,7 @@ test("AI setup requires explicit budget acknowledgement and clears its password 
   assert.equal(key.autocomplete, "off");
   assert.equal(host.querySelectorAll('input[type="checkbox"]')[0].checked, false);
   await input(key, "synthetic-test-value-not-a-key");
-  assert.equal(button("确认额度并启用").disabled, true);
+  assert.equal(button("保存AI设置").disabled, true);
   await click(host.querySelectorAll('input[type="checkbox"]')[1]);
   const pending = deferred(); client.newsAIConfigure = (payload) => { calls.ai.push(payload); return pending.promise; };
   await act(async () => host.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
@@ -147,7 +147,7 @@ test("model selection defaults to Doubao and clears the key, acknowledgement and
   assert.match(host.querySelector(".news-ai-key").textContent, /DeepSeek API key/);
   assert.equal(aiCheckbox("我确认").checked, false);
   assert.equal(aiCheckbox("自动分析").checked, false);
-  assert.equal(button("确认额度并启用").disabled, true);
+  assert.equal(button("保存AI设置").disabled, true);
   await act(async () => host.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   assert.deepEqual(calls.ai, []);
   assert.match(host.querySelector(".news-ai-settings").textContent, /共享近 24 小时最多 36 次、3 元/);
@@ -166,7 +166,7 @@ test("DeepSeek configuration sends the explicitly selected model once and locks 
   assert.equal(aiCheckbox("我确认").checked, false);
   currentOverview.ai = { ...currentOverview.ai, configured: true, provider: "deepseek", model: "deepseek-v4-pro" };
   await act(async () => request.resolve({ ai: currentOverview.ai }));
-  assert.match(host.querySelector(".news-ai-configured").textContent, /当前启用：DeepSeek Pro/);
+  assert.match(host.querySelector(".news-ai-configured").textContent, /当前设置：DeepSeek Pro/);
   assert.equal(host.querySelector('select[aria-label="新闻分析模型"]').disabled, false);
 });
 
@@ -177,7 +177,7 @@ test("a draft model change leaves the active analysis route and shared usage unc
   await chooseModel("deepseek:deepseek-flash");
   assert.match(host.querySelector("#news-ai-model-help").textContent, /当前仍启用豆包/);
   assert.ok(button("用豆包分析这条"));
-  assert.equal(button("确认额度并切换").disabled, true);
+  assert.equal(button("保存并切换设置").disabled, true);
   assert.match(host.querySelector(".news-ai-configured").textContent, /已预约 12 \/ 36 次.*0.80 \/ 3.00 元/);
   assert.deepEqual(calls.ai, []);
 });
@@ -212,7 +212,7 @@ test("busy analysis prevents model changes without clearing or replacing the con
   const select = host.querySelector('select[aria-label="新闻分析模型"]');
   assert.equal(select.disabled, true);
   await chooseModel("doubao:doubao-seed-2-1-pro-260915");
-  assert.match(host.querySelector(".news-ai-configured").textContent, /当前启用：DeepSeek Flash/);
+  assert.match(host.querySelector(".news-ai-configured").textContent, /当前设置：DeepSeek Flash/);
   assert.equal(host.querySelector(".news-ai-settings form"), null);
   assert.deepEqual(calls.ai, []);
 });
@@ -235,6 +235,7 @@ test("manual AI dispatch is explicit and its queued state is not shown as a comp
   await render(); await click(host.querySelector(".news-item"));
   assert.equal(calls.ai.length, 0);
   await click(button("用豆包分析这条"));
+  assert.equal(calls.ai.length, 0, "preview does not dispatch"); await click(button("确认发送这一条"));
   assert.deepEqual(calls.ai, ["a"]);
   assert.match(host.querySelector(".news-ai-reading").textContent, /已加入分析队列/);
   assert.doesNotMatch(host.querySelector(".news-ai-reading").textContent, /分析已完成/);
@@ -247,7 +248,7 @@ test("clearing a queued request unlocks model setup only after polling confirms 
   try {
     records = [fixture("a", { ai_analysis: null })]; currentOverview.ai.configured = true;
     client.newsAIClear = async () => { currentOverview.ai = { ...currentOverview.ai, configured: false, busy: false, error: "" }; return { ai: currentOverview.ai }; };
-    await render(); await click(host.querySelector(".news-item")); await click(button("用豆包分析这条"));
+    await render(); await click(host.querySelector(".news-item")); await click(button("用豆包分析这条")); await click(button("确认发送这一条"));
     assert.match(host.querySelector(".news-ai-reading").textContent, /已加入分析队列/);
     await click(button("清除密钥并停止 AI"));
     assert.equal(host.querySelector('select[aria-label="新闻分析模型"]').disabled, true, "clear acknowledgement alone must not discard an unverified request");
@@ -257,8 +258,8 @@ test("clearing a queued request unlocks model setup only after polling confirms 
     assert.equal(host.querySelector('select[aria-label="新闻分析模型"]').disabled, false);
     await chooseModel("deepseek:deepseek-flash");
     await input(host.querySelector('input[type="password"]'), "synthetic-new-session-value");
-    await click(aiCheckbox("我确认")); await click(button("确认额度并启用"));
-    assert.match(host.querySelector(".news-ai-configured").textContent, /当前启用：DeepSeek Flash/);
+    await click(aiCheckbox("我确认")); await click(button("保存AI设置"));
+    assert.match(host.querySelector(".news-ai-configured").textContent, /当前设置：DeepSeek Flash/);
     assert.deepEqual(calls.ai.map((entry) => typeof entry === "string" ? entry : entry.model), ["a", "deepseek-flash"], "reconfiguration must not automatically resend the cancelled analysis");
     assert.ok(button("用DeepSeek Flash分析这条"));
   } finally { window.setInterval = originalInterval; }
@@ -270,7 +271,7 @@ test("unconfirmed busy or missing result fields cannot cancel a queued request",
   window.setInterval = (callback, milliseconds, ...args) => { if (milliseconds === 2500) { poll = callback; return 999999; } return originalInterval(callback, milliseconds, ...args); };
   try {
     records = [fixture("a", { ai_analysis: null })]; currentOverview.ai.configured = true;
-    await render(); await click(host.querySelector(".news-item")); await click(button("用豆包分析这条"));
+    await render(); await click(host.querySelector(".news-item")); await click(button("用豆包分析这条")); await click(button("确认发送这一条"));
     currentOverview.ai = { ...currentOverview.ai, configured: false };
     delete currentOverview.ai.busy;
     await act(async () => poll());
@@ -280,7 +281,7 @@ test("unconfirmed busy or missing result fields cannot cancel a queued request",
     await act(async () => poll());
     assert.match(host.querySelector(".news-ai-reading").textContent, /已加入分析队列/);
     assert.equal(host.querySelector('select[aria-label="新闻分析模型"]').disabled, true);
-    assert.deepEqual(calls.ai, ["a"]);
+    assert.deepEqual(calls.ai, ["a"], "unconfirmed polling must not create a second request");
   } finally { window.setInterval = originalInterval; }
 });
 
@@ -299,7 +300,7 @@ test("a real pending analysis is preserved when clearing returns an error and la
     assert.equal(host.querySelector('select[aria-label="新闻分析模型"]').disabled, true);
     client.newsItem = async () => ({ item: { ...records[0], ai_analysis: { status: "unknown", provider: "doubao", model: "doubao-seed-2-1-pro-260915" } } });
     await act(async () => poll());
-    assert.match(host.querySelector(".news-ai-reading").textContent, /结果未知，不会自动重试/);
+    assert.match(host.querySelector(".news-ai-reading").textContent, /本次结果未确认，不会自动重试/);
     assert.equal(host.querySelector(".news-ai-reading button"), null);
     assert.deepEqual(calls.ai, []);
   } finally { window.setInterval = originalInterval; }
@@ -382,8 +383,8 @@ test("semantic review preserves raw text without accepting it or offering a paid
   records = [fixture("review", { ai_analysis: { status: "needs_review", provider: "deepseek", model: "deepseek-flash", summary: "MUST_NOT_APPEAR_AS_ACCEPTED", raw_model_output: rawOutput, semantic_review: { issues: [{ code: "statistical_comparison_basis", status: "unknown" }] } } })];
   await render(); await click(host.querySelector(".news-item"));
   const section = host.querySelector(".news-ai-reading");
-  assert.match(section.textContent, /待复核，不自动重试/);
-  assert.match(section.querySelector('[role="status"]').textContent, /依据不足：来源没有充分支持这项同比或环比口径/);
+  assert.match(section.textContent, /内容待复核，不会自动重试/);
+  assert.match(section.querySelector(".news-review-explanation").textContent, /依据不足：来源没有充分支持这项同比或环比口径/);
   assert.ok(!section.textContent.includes("MUST_NOT_APPEAR_AS_ACCEPTED"));
   assert.equal(section.querySelector("img"), null);
   assert.equal(section.querySelector("button"), null);
@@ -398,7 +399,7 @@ test("historic completed results remain readable and do not imply verified facts
   await render(); await click(host.querySelector(".news-item"));
   const section = host.querySelector(".news-ai-reading");
   assert.match(section.textContent, /保留原v3审核内容/);
-  assert.match(section.textContent, /模型输出已保存，事实未确认/);
+  assert.match(section.textContent, /AI 解释已生成，供理解参考/);
   assert.match(section.textContent, /首次发现/);
   assert.match(section.textContent, /本次审核检查/);
   assert.match(section.textContent, /已超过24小时/);
