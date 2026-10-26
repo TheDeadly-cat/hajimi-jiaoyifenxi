@@ -52,9 +52,11 @@ class GitHubSourceProjectionTests(unittest.TestCase):
             / "repository-root"
             / "run_ai_collaboration_studio.cmd.template"
         ).write_text(
-            "@powershell.exe -File \"%~dp0ai_collaboration_studio\\scripts\\start_ai_collaboration_studio.ps1\"\n",
+            "@powershell.exe -STA -File \"%~dp0ai_collaboration_studio\\scripts\\start_news_workspace.ps1\"\n",
             encoding="utf-8",
         )
+        (source / "delivery/repository-root/打开消息工作台.cmd.template").write_text(
+            '@call "%~dp0run_ai_collaboration_studio.cmd" %*\n', encoding="utf-8")
         (source / "frontend" / "package-lock.json").write_text(
             '{"lockfileVersion":3}\n',
             encoding="utf-8",
@@ -94,6 +96,8 @@ class GitHubSourceProjectionTests(unittest.TestCase):
             self.assertEqual(root_workflow.read_bytes(), nested_workflow.read_bytes())
             self.assertTrue((projection / "README.md").is_file())
             self.assertTrue((projection / "run_ai_collaboration_studio.cmd").is_file())
+            self.assertEqual((projection / "打开消息工作台.cmd").read_bytes(),
+                             (source / "delivery/repository-root/打开消息工作台.cmd.template").read_bytes())
             self.assertTrue(
                 (projection / "ai_collaboration_studio" / ".env.example").is_file()
             )

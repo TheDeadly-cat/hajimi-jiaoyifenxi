@@ -1,5 +1,13 @@
 # Portable news workspace and clean-checkout verification
 
+## 普通用户从统一入口开始
+
+在仓库根目录双击 **打开消息工作台.cmd**。中文向导检查环境后，才会请用户确认下载固定组件与创建独立数据；不再要求用户先准备 Python/Node 或手工传入初始化参数。以后用同一个入口重新打开。旧英文 `.cmd` 保留兼容并进入同一向导。
+
+窗口会显示当前检查结果、失败原因和下一步，并提供安全诊断复制。已存在的数据、其他工作台和占用端口均不会被自动覆盖、修复或停止。便携模式不提供历史安装方式的登录恢复注册；页面按当前模式显示帮助。
+
+以下是维护人员的底层命令与核验说明，不是新手操作清单。保留这些入口用于离线验证和明确授权的维护；它们不会替代向导中的用户确认。
+
 This source tree contains the complete Python host, frontend, dependency locks,
 startup and packaging helpers, and tests. It is not a seven-file overlay.
 The portable entry below uses its own data directory and never searches for,

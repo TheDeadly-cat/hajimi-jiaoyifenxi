@@ -1,5 +1,6 @@
 """Per-user startup changes tested only in temporary directories."""
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -28,6 +29,18 @@ class NewsStartupTests(unittest.TestCase):
 
     def test_reading_status_does_not_register_or_create_files(self):
         self.assertFalse(self.manager.status()["enabled"])
+        self.assertEqual(self.manager.status()["mode"], "installed")
+        self.assertEqual(list(self.data.iterdir()), [])
+        self.assertEqual(list(self.startup.iterdir()), [])
+
+    def test_portable_help_mode_is_explicit_and_does_not_register(self):
+        with mock.patch.dict(os.environ, {"AI_STUDIO_PORTABLE_NEWS": "1"}):
+            manager = NewsStartup(self.app, self.data, startup_directory=self.startup)
+        status = manager.status()
+        self.assertEqual(status["mode"], "portable")
+        self.assertFalse(status["supported"])
+        with self.assertRaises(StartupRegistrationError):
+            manager.set_enabled(True)
         self.assertEqual(list(self.data.iterdir()), [])
         self.assertEqual(list(self.startup.iterdir()), [])
 
@@ -97,6 +110,7 @@ class NewsStartupTests(unittest.TestCase):
         with mock.patch("backend.news_startup._startup_directory", side_effect=OSError("synthetic unavailable folder")):
             manager = NewsStartup(self.app, self.data, create_link=self.manager._create_link)
         self.assertFalse(manager.status()["supported"])
+        self.assertEqual(manager.status()["mode"], "unknown")
         self.assertTrue(manager.status()["error"])
         with self.assertRaises(StartupRegistrationError):
             manager.set_enabled(True)

@@ -46,16 +46,20 @@ class NewsStartup:
         self._lock = threading.RLock()
         self.directory = None
         self._unavailable = ""
+        self._mode = "unknown"
         if os.environ.get("AI_STUDIO_PORTABLE_NEWS") == "1":
             # The historical shortcut targets port 8770 and a parent database.
             # Do not register it for an isolated instance with different data,
             # port and proxy inheritance. Existing registrations are untouched.
             self._unavailable = "独立运行实例的登录恢复尚未绑定当前数据目录和端口，暂不支持注册；现有启动入口保持不变。"
+            self._mode = "portable"
             return
         try:
             self.app = _safe(app)
             self.data = _safe(data_directory)
             self.directory = _safe(startup_directory) if startup_directory is not None else _startup_directory()
+            if self.directory is not None:
+                self._mode = "installed"
         except Exception:
             # Login registration is optional: a redirected/unreadable Startup
             # folder must not prevent the news service itself from starting.
@@ -88,19 +92,20 @@ class NewsStartup:
 
     def status(self):
         if self.directory is None:
-            return {"supported": False, "enabled": False, "error": self._unavailable or "此功能仅支持 Windows。"}
+            return {"mode": self._mode, "supported": False, "enabled": False,
+                    "error": self._unavailable or "此功能仅支持 Windows。"}
         with self._lock:
             try:
                 _safe(self.directory)
                 if _safe(self.pending).exists():
-                    return {"supported": True, "enabled": False, "pending": True,
+                    return {"mode": self._mode, "supported": True, "enabled": False, "pending": True,
                             "error": "上次登录恢复设置未收尾；再次设置时将先核对并恢复，现有入口未改动。"}
                 value = self._registration()
                 enabled = self._owned(value)
-                return {"supported": True, "enabled": enabled, "error": "",
+                return {"mode": self._mode, "supported": True, "enabled": enabled, "error": "",
                         "version_current": bool(enabled and value.get("app") == str(self.app))}
             except Exception:
-                return {"supported": True, "enabled": False,
+                return {"mode": self._mode, "supported": True, "enabled": False,
                         "error": "启动入口状态无法确认，请先检查；现有入口未改动。"}
 
     def set_enabled(self, enabled):
