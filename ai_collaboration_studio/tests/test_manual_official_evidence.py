@@ -6,14 +6,18 @@ import json
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from backend import http_server
 from backend.convergence import ConvergenceService
 from backend.market.earnings_materials import (
+    CURATED_MATERIALS_VALID_UNTIL,
+    CURATED_MATERIALS_VERIFIED_AT,
     CURATED_OFFICIAL_MATERIALS,
     curated_official_material_candidate,
 )
@@ -37,10 +41,39 @@ OFFICIAL_URL = str(CANDIDATE["official_url"])
 FISCAL_PERIOD = str(CANDIDATE["fiscal_period"])
 MATERIAL_KIND = str(CANDIDATE["material_kind"])
 ALLOWED_ERROR = "EARNINGS_MATERIAL_ACCESS_TIMEOUT"
+FIXTURE_NOW = datetime(2026, 8, 3, 12, tzinfo=timezone.utc)
+FIXTURE_CAPTURED_AT = FIXTURE_NOW.isoformat().replace("+00:00", "Z")
 
 
 class ManualOfficialEvidenceHttpTests(unittest.TestCase):
     def setUp(self) -> None:
+        # These local catalog-flow fixtures describe an August observation, not
+        # current source admission. Keep store expiry checks and receipt times
+        # on one movable test clock without replacing process-wide time/sleep.
+        self.fixture_now = FIXTURE_NOW
+        self.assertLessEqual(
+            datetime.fromisoformat(CURATED_MATERIALS_VERIFIED_AT).date(),
+            self.fixture_now.date(),
+        )
+        self.assertLessEqual(
+            self.fixture_now.date(),
+            datetime.fromisoformat(CURATED_MATERIALS_VALID_UNTIL).date(),
+        )
+        owner = self
+
+        class FixtureDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = owner.fixture_now
+                return value.replace(tzinfo=None) if tz is None else value.astimezone(tz)
+
+        for clock_patch in (
+            patch("backend.store.datetime", FixtureDateTime),
+            patch("backend.store.now_ms", side_effect=lambda: int(self.fixture_now.timestamp() * 1000)),
+            patch("backend.material_ingest.current_ms", side_effect=lambda: int(self.fixture_now.timestamp() * 1000)),
+        ):
+            clock_patch.start()
+            self.addCleanup(clock_patch.stop)
         self.temp_dir = tempfile.TemporaryDirectory()
         self.store = StudioStore(Path(self.temp_dir.name) / "studio.sqlite3")
         self.original_store = http_server.STORE
@@ -163,6 +196,7 @@ class ManualOfficialEvidenceHttpTests(unittest.TestCase):
         evidence = {
             "version": "storage_market_evidence_v6",
             "state": "degraded",
+            "captured_at": FIXTURE_CAPTURED_AT,
             "structure_ready": True,
             "official_earnings_materials": {
                 "state": "partial",
@@ -190,6 +224,7 @@ class ManualOfficialEvidenceHttpTests(unittest.TestCase):
         }
         return {
             "snapshot_id": "manual-overlay-security-test",
+            "captured_at": FIXTURE_CAPTURED_AT,
             "symbols": [SYMBOL],
             "evidence": evidence,
             "execution_capability": "none",
@@ -232,6 +267,82 @@ class ManualOfficialEvidenceHttpTests(unittest.TestCase):
         self.assertEqual(duplicate_status, 200, duplicate)
         self.assertEqual(duplicate["official_attestation"]["id"], staged["id"])
         self.assertEqual(duplicate["official_attestation"]["confirmed_at"], confirmed["confirmed_at"])
+
+    def test_expired_catalog_still_rejects_staging_and_keeps_residue_prompt_ineligible(self) -> None:
+        self.fixture_now = datetime.fromisoformat(
+            CURATED_MATERIALS_VALID_UNTIL
+        ).replace(tzinfo=timezone.utc) + timedelta(days=1)
+        marker = "EXPIRED_OFFICIAL_COPY_MUST_NOT_ENTER_PROMPT"
+        status, response = self.request(
+            "/api/rooms/room_storage/materials/import-file",
+            self.import_payload(text=marker),
+        )
+        self.assertEqual(status, 400, response)
+        self.assertIn("已过期", response["error"])
+        snapshot = self.store.room_snapshot("room_storage")
+        self.assertEqual(snapshot["official_attestations"], [])
+        residue = next(item for item in snapshot["materials"] if item["content"] == marker)
+        self.assertTrue(residue["official_supplement_pending"])
+        context, manifest = self.store.material_prompt_bundle("room_storage")
+        self.assertNotIn(marker, context)
+        self.assertNotIn(residue["id"], {item["id"] for item in manifest["materials"]})
+
+    def test_catalog_expiry_between_stage_and_confirm_cannot_be_overridden(self) -> None:
+        self.fixture_now = datetime.fromisoformat(
+            CURATED_MATERIALS_VALID_UNTIL
+        ).replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+        material, staged = self.stage()
+        self.fixture_now += timedelta(seconds=1)
+        status, response = self.confirm(material, staged)
+        self.assertEqual(status, 409, response)
+        current = self.store.room_snapshot("room_storage")["official_attestations"][0]
+        self.assertEqual(current["status"], "STAGED")
+        self.assertEqual(current["confirmed_at"], 0)
+        self.assertFalse(current["confirmation_ready"])
+        self.assertIn("CURATED_CANDIDATE_STALE", current["integrity_issues"])
+
+    def test_receipt_times_follow_the_server_clock_not_client_backfill(self) -> None:
+        imported_at = int(self.fixture_now.timestamp() * 1000)
+        material, staged = self.stage()
+        self.assertEqual(material["metadata"]["extracted_at"], imported_at)
+        self.assertEqual(material["created_at"], imported_at)
+        self.assertEqual(staged["staged_at"], imported_at)
+        self.assertEqual(staged["confirmed_at"], 0)
+        self.fixture_now += timedelta(minutes=5)
+        status, response = self.confirm(
+            material,
+            staged,
+            payload_overrides={"confirmed_at": imported_at - 86_400_000, "confirmed_by": "client-forged"},
+        )
+        self.assertEqual(status, 200, response)
+        confirmed = response["official_attestation"]
+        self.assertEqual(confirmed["staged_at"], imported_at)
+        self.assertEqual(confirmed["confirmed_at"], int(self.fixture_now.timestamp() * 1000))
+        self.assertGreater(confirmed["confirmed_at"], imported_at)
+        self.assertNotEqual(confirmed["confirmed_by"], "client-forged")
+
+    def test_expiry_preserves_frozen_evidence_but_blocks_new_manual_substitution(self) -> None:
+        material, staged = self.stage()
+        status, response = self.confirm(material, staged)
+        self.assertEqual(status, 200, response)
+        original = self.market_snapshot()
+        original_bytes = json.dumps(original, sort_keys=True)
+        overlaid = apply_attested_earnings_overlay(original, self.store.room_snapshot("room_storage"))
+        frozen = copy.deepcopy(overlaid["evidence"]["manual_official_evidence"])
+        frozen_bytes = json.dumps(frozen, sort_keys=True)
+        self.fixture_now = datetime.fromisoformat(
+            CURATED_MATERIALS_VALID_UNTIL
+        ).replace(tzinfo=timezone.utc) + timedelta(days=1)
+        current = self.store.room_snapshot("room_storage")
+        self.assertIn("CURATED_CANDIDATE_STALE", current["official_attestations"][0]["integrity_issues"])
+        subsequent = self.market_snapshot()
+        subsequent["captured_at"] = self.fixture_now.isoformat().replace("+00:00", "Z")
+        subsequent["evidence"]["captured_at"] = subsequent["captured_at"]
+        blocked = apply_attested_earnings_overlay(subsequent, current)
+        self.assertIn(ALLOWED_ERROR, effective_source_error_codes(blocked["evidence"]))
+        self.assertTrue(validate_manual_official_evidence(frozen, expected_room_id="room_storage"))
+        self.assertEqual(json.dumps(frozen, sort_keys=True), frozen_bytes)
+        self.assertEqual(json.dumps(original, sort_keys=True), original_bytes)
 
     def test_staging_requires_explicit_user_confirmation_before_any_write(self) -> None:
         baseline = self.store.room_snapshot("room_storage")
@@ -1074,7 +1185,10 @@ class ManualOfficialEvidenceHttpTests(unittest.TestCase):
             "message": "timed out",
             "official_url": OFFICIAL_URL,
         }
-        evidence = ready_storage_research_evidence()
+        evidence = ready_storage_research_evidence(
+            captured_at=FIXTURE_CAPTURED_AT,
+            technical_as_of="2026-08-03 00:00:00",
+        )
         evidence.update({"state": "degraded", "structure_ready": True})
         evidence["official_earnings_materials"] = {
             "state": "partial",
@@ -1093,7 +1207,7 @@ class ManualOfficialEvidenceHttpTests(unittest.TestCase):
         ]
         snapshot = {
             "snapshot_id": "manual-overlay-four-symbol-gate-test",
-            "captured_at": "2026-07-20T20:00:00Z",
+            "captured_at": FIXTURE_CAPTURED_AT,
             "symbols": list(STORAGE_SYMBOLS),
             "evidence": evidence,
             "execution_capability": "none",

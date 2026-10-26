@@ -14,6 +14,7 @@ import sqlite3
 import sys
 import threading
 import time
+import types
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
@@ -23,7 +24,7 @@ PROJECT = HERE.parents[1]
 ROUTES = (("doubao", "doubao-seed-2-1-pro-260915"), ("deepseek", "deepseek-flash"))
 FIELDS = ("id", "source_id", "source_name", "url", "title", "excerpt", "published_at", "discovered_at", "updated_at")
 MAX_CALLS, MAX_BUDGET = 10, 1_000_000
-SOURCE_FILES = ("news_analysis_providers.py", "news_content_quality.py")
+SOURCE_FILES = ("execution_boundary.py", "news_analysis_providers.py", "news_content_quality.py")
 _REAL_BUILD_OPENER = urllib.request.build_opener
 
 
@@ -41,6 +42,12 @@ def sha(data):
 
 def utc():
     return datetime.now(timezone.utc).isoformat()
+
+
+def budget_cap(value):
+    if type(value) is not int or not 0 < value <= MAX_BUDGET:
+        raise Refused("budget_cap_invalid")
+    return value
 
 
 def timestamp(value):
@@ -85,8 +92,16 @@ def module(p, name):
 
 
 def modules(root):
-    return (module(root / "frozen-code/news_analysis_providers.py", "comparison_provider"),
-            module(root / "frozen-code/news_content_quality.py", "comparison_quality"))
+    # Load only the hash-bound files, never the ambient backend package/config.
+    # The empty package search path prevents an implicit dependency fallback.
+    package_name = "comparison_frozen_" + sha(str(root).encode("utf-8"))[:16]
+    package = types.ModuleType(package_name)
+    package.__path__ = []
+    package.__package__ = package_name
+    sys.modules[package_name] = package
+    module(root / "frozen-code/execution_boundary.py", package_name + ".execution_boundary")
+    return (module(root / "frozen-code/news_analysis_providers.py", package_name + ".news_analysis_providers"),
+            module(root / "frozen-code/news_content_quality.py", package_name + ".news_content_quality"))
 
 
 def own_hashes():
@@ -118,7 +133,8 @@ def validate_samples(raw, quality, checked_at):
     return items
 
 
-def requests_for(items, provider, quality, checked_at):
+def requests_for(items, provider, quality, checked_at, budget_micro_cny=MAX_BUDGET):
+    cap = budget_cap(budget_micro_cny)
     requests = []
     for index, item in enumerate(items, 1):
         material = quality.build_input(item, checked_at=checked_at)
@@ -132,12 +148,13 @@ def requests_for(items, provider, quality, checked_at):
                              "provider": name, "model": model_name, "body": body,
                              "body_sha256": sha(provider.encode_body(body)), "material": material,
                              "reserved_micro_cny": reservation, "reservation_basis": basis})
-    if sum(r["reserved_micro_cny"] for r in requests) > MAX_BUDGET:
+    if sum(r["reserved_micro_cny"] for r in requests) > cap:
         raise Refused("batch_budget_exceeded")
     return requests
 
 
-def prepare(samples_path, samples_sha, output, checked_at=None):
+def prepare(samples_path, samples_sha, output, checked_at=None, *, budget_micro_cny=MAX_BUDGET):
+    cap = budget_cap(budget_micro_cny)
     root = path(output)
     root.mkdir(parents=True, exist_ok=False)
     (root / "frozen-code").mkdir()
@@ -151,14 +168,14 @@ def prepare(samples_path, samples_sha, output, checked_at=None):
     checked = timestamp(checked_at) if checked_at else time.time()
     items = validate_samples(read_json(samples_path, samples_sha), quality, checked)
     write_new(root / "samples.json", items)
-    requests = requests_for(items, provider, quality, checked)
+    requests = requests_for(items, provider, quality, checked, cap)
     plan = {"schema": "news_model_comparison_plan_v1", "run_directory": str(root),
             "grant_id": secrets.token_hex(16), "created_at": utc(), "checked_at": checked,
             "samples_sha256": sha((root / "samples.json").read_bytes()), "source_samples_sha256": samples_sha,
             "frozen_code_sha256": frozen, "executor_sha256": own_hashes(),
             "quality_version": quality.QUALITY_VERSION,
             "instructions_sha256": sha(quality.INSTRUCTIONS.encode()), "format_sha256": sha(canonical(quality.TEXT_FORMAT)),
-            "routes": [list(route) for route in ROUTES], "max_calls": MAX_CALLS, "max_reserved_micro_cny": MAX_BUDGET,
+            "routes": [list(route) for route in ROUTES], "max_calls": MAX_CALLS, "max_reserved_micro_cny": cap,
             "max_output_tokens": 900, "socket_timeout_seconds": 45, "retries": 0,
             "credential_input": "masked_local_two_fields_process_memory_only", "production_writeback": False,
             "transport": "frozen adapter; instrumented final opener with explicit direct ProxyHandler({}); no environment proxy discovery",
@@ -169,25 +186,28 @@ def prepare(samples_path, samples_sha, output, checked_at=None):
     digest = sha((root / "plan.json").read_bytes())
     write_new(root / "authorization.template.json", {"schema": "news_model_comparison_authorization_v1", "approved": False,
               "grant_id": plan["grant_id"], "plan_sha256": digest, "max_calls": MAX_CALLS,
-              "max_reserved_micro_cny": MAX_BUDGET, "approved_at": None, "expires_at": None, "approval_reference": None})
+              "max_reserved_micro_cny": cap, "approved_at": None, "expires_at": None, "approval_reference": None})
     return {"status": "prepared", "plan_sha256": digest, "total_reserved_micro_cny": plan["total_reserved_micro_cny"], "requests": len(requests)}
 
 
 def inspect_plan(plan_path, expected):
     plan = read_json(plan_path, expected)
     root = path(plan_path).parent
+    cap = budget_cap(plan.get("max_reserved_micro_cny"))
     if (plan.get("schema") != "news_model_comparison_plan_v1" or path(plan["run_directory"]) != root
             or plan.get("executor_sha256") != own_hashes() or plan.get("routes") != [list(r) for r in ROUTES]
-            or (plan.get("max_calls"), plan.get("max_reserved_micro_cny"), plan.get("max_output_tokens"), plan.get("socket_timeout_seconds"), plan.get("retries")) != (10, 1_000_000, 900, 45, 0)):
+            or (plan.get("max_calls"), plan.get("max_output_tokens"), plan.get("socket_timeout_seconds"), plan.get("retries")) != (10, 900, 45, 0)):
         raise Refused("plan_binding_mismatch")
     for name in SOURCE_FILES:
         if sha(path(root / "frozen-code" / name).read_bytes()) != plan["frozen_code_sha256"][name]:
             raise Refused("code_hash_mismatch")
     provider, quality = modules(root)
     items = validate_samples(read_json(root / "samples.json", plan["samples_sha256"]), quality, plan["checked_at"])
-    requests = requests_for(items, provider, quality, plan["checked_at"])
+    requests = requests_for(items, provider, quality, plan["checked_at"], cap)
     public = [{key: r[key] for key in ("slot", "sample_index", "sample_id", "provider", "model", "body_sha256", "reserved_micro_cny", "reservation_basis")} for r in requests]
-    if (public != plan["requests"] or sum(r["reserved_micro_cny"] for r in requests) != plan["total_reserved_micro_cny"]
+    if (public != plan["requests"] or type(plan.get("total_reserved_micro_cny")) is not int
+            or not 0 < plan["total_reserved_micro_cny"] <= cap
+            or sum(r["reserved_micro_cny"] for r in requests) != plan["total_reserved_micro_cny"]
             or sha(quality.INSTRUCTIONS.encode()) != plan["instructions_sha256"] or sha(canonical(quality.TEXT_FORMAT)) != plan["format_sha256"]):
         raise Refused("request_binding_mismatch")
     return root, plan, requests, provider, quality
@@ -195,9 +215,13 @@ def inspect_plan(plan_path, expected):
 
 def check_authorization(auth, plan, plan_sha):
     now = time.time()
+    cap = budget_cap(plan.get("max_reserved_micro_cny"))
+    authorized_cap = budget_cap(auth.get("max_reserved_micro_cny"))
     if (auth.get("schema") != "news_model_comparison_authorization_v1" or auth.get("approved") is not True
             or auth.get("plan_sha256") != plan_sha or auth.get("grant_id") != plan["grant_id"]
-            or auth.get("max_calls") != 10 or auth.get("max_reserved_micro_cny") != 1_000_000
+            or auth.get("max_calls") != 10 or authorized_cap != cap
+            or type(plan.get("total_reserved_micro_cny")) is not int
+            or not 0 < plan["total_reserved_micro_cny"] <= cap
             or type(auth.get("approval_reference")) is not str or not auth["approval_reference"].strip()
             or not timestamp(auth["approved_at"]) <= now < timestamp(auth["expires_at"])
             or not 0 < timestamp(auth["expires_at"]) - timestamp(auth["approved_at"]) <= 3600):
@@ -205,7 +229,8 @@ def check_authorization(auth, plan, plan_sha):
 
 
 class Ledger:
-    def __init__(self, database):
+    def __init__(self, database, *, budget_micro_cny=MAX_BUDGET):
+        self.budget_micro_cny = budget_cap(budget_micro_cny)
         self.database = path(database)
         if self.database.exists():
             raise Refused("ledger_already_exists")
@@ -224,10 +249,13 @@ class Ledger:
             db.close()
 
     def reserve(self, request):
+        amount = request.get("reserved_micro_cny")
+        if type(amount) is not int or amount <= 0:
+            raise Refused("reservation_amount_invalid")
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             count, spent = db.execute("SELECT COUNT(*),COALESCE(SUM(reserved),0) FROM attempts").fetchone()
-            if count >= MAX_CALLS or spent + request["reserved_micro_cny"] > MAX_BUDGET:
+            if count >= MAX_CALLS or spent + amount > self.budget_micro_cny:
                 raise Refused("ledger_limit")
             try:
                 db.execute("INSERT INTO attempts VALUES(?,?,?,?,?,'reserved_unknown','{}')", (request["slot"], request["sample_id"], request["provider"], request["model"], request["reserved_micro_cny"]))
@@ -403,7 +431,8 @@ def execute(plan_path, expected, auth_path, auth_sha, allow):
     check_authorization(auth, plan, expected)
     if any((root / n).exists() for n in ("started.json", "comparison.sqlite3", "terminal.json")):
         raise Refused("plan_already_started_no_replay")
-    write_new(root / "started.json", {"plan_sha256": expected, "authorization_sha256": auth_sha, "at": utc(), "status": "claimed_no_replay"})
+    write_new(root / "started.json", {"plan_sha256": expected, "authorization_sha256": auth_sha, "at": utc(),
+              "max_calls": MAX_CALLS, "max_reserved_micro_cny": plan["max_reserved_micro_cny"], "status": "claimed_no_replay"})
     credentials = module(HERE / "credentials.py", "comparison_credentials")
     network = {"allowed": False}
     install_guard(root, network)
@@ -412,8 +441,8 @@ def execute(plan_path, expected, auth_path, auth_sha, allow):
     skipped = []
     terminal_status = "unknown"
     try:
-        keys = credentials.ask_keys(timestamp(auth["expires_at"]))
-        ledger = Ledger(root / "comparison.sqlite3")
+        keys = credentials.ask_keys(timestamp(auth["expires_at"]), max_reserved_micro_cny=plan["max_reserved_micro_cny"])
+        ledger = Ledger(root / "comparison.sqlite3", budget_micro_cny=plan["max_reserved_micro_cny"])
         blocked = set()
         def work(cancel, progress):
             for request in requests:
@@ -436,7 +465,8 @@ def execute(plan_path, expected, auth_path, auth_sha, allow):
     finally:
         keys.clear()
         network["allowed"] = False
-    terminal = {"status": terminal_status, "at": utc(), "plan_sha256": expected, "recorded_results": len(receipts),
+    terminal = {"status": terminal_status, "at": utc(), "plan_sha256": expected,
+                "max_calls": MAX_CALLS, "max_reserved_micro_cny": plan["max_reserved_micro_cny"], "recorded_results": len(receipts),
                 "network_attempts": sum(r["network_attempted"] for r in receipts), "skipped": skipped,
                 "recorded_reserved_micro_cny": sum(r["reserved_micro_cny"] for r in receipts),
                 "incomplete_ledger_entries_may_remain_spent": terminal_status == "unconfirmed_stopped_no_retry",
@@ -453,6 +483,7 @@ def main():
     prep.add_argument("--samples-sha256", required=True)
     prep.add_argument("--out", required=True)
     prep.add_argument("--checked-at")
+    prep.add_argument("--max-reserved-micro-cny", type=int, default=MAX_BUDGET)
     for name in ("inspect", "execute"):
         item = commands.add_parser(name)
         item.add_argument("--plan", required=True)
@@ -464,7 +495,8 @@ def main():
     args = parser.parse_args()
     try:
         if args.command == "prepare":
-            result = prepare(args.samples, args.samples_sha256, args.out, args.checked_at)
+            result = prepare(args.samples, args.samples_sha256, args.out, args.checked_at,
+                             budget_micro_cny=args.max_reserved_micro_cny)
         elif args.command == "inspect":
             root, plan, *_ = inspect_plan(args.plan, args.plan_sha256)
             result = {"status": "verified", "started": (root / "started.json").exists(), "requests": len(plan["requests"]), "reserved_micro_cny": plan["total_reserved_micro_cny"]}

@@ -93,6 +93,29 @@ class NewsTransportTests(unittest.TestCase):
             self.assertFalse(self.send(raw=raw)[0].ok)
         self.assertFalse(self.send(endpoint='https://example.com/redirected')[0].ok)
 
+    def test_routes_reuse_central_text_boundary_before_transport(self):
+        original = providers.build_text_provider_request
+        for option in providers.AVAILABLE_MODELS:
+            with self.subTest(model=option['model']), patch.object(providers, 'build_text_provider_request', wraps=original) as builder:
+                result, observed, body = self.send(option['provider'], option['model'])
+                self.assertTrue(result.ok)
+                self.assertEqual(builder.call_count, 1)
+                self.assertEqual(builder.call_args.args[:2], (providers.ENDPOINTS[option['provider']].removesuffix('/responses'), 'responses'))
+                self.assertEqual(builder.call_args.args[2], body)
+                self.assertEqual(sum(entry[0]=='request' for entry in observed), 1)
+        body = providers.build_body('deepseek', 'deepseek-flash', 'fixture', INSTRUCTIONS, TEXT_FORMAT)
+        body['text']['format']['schema']['properties']['tools'] = {'type':'string'}
+        with patch.object(providers.urllib.request, 'build_opener', side_effect=AssertionError('must not open')):
+            with self.assertRaises(ValueError):
+                providers.generate_response('deepseek', 'deepseek-flash', FAKE_KEY, body)
+
+    def test_boundary_serialization_mismatch_never_opens_network(self):
+        body = providers.build_body('deepseek', 'deepseek-flash', 'fixture', INSTRUCTIONS, TEXT_FORMAT)
+        with patch.object(providers, 'build_text_provider_request', return_value=SimpleNamespace(full_url=providers.ENDPOINTS['deepseek'], data=b'wrong bytes')):
+            with patch.object(providers.urllib.request, 'build_opener', side_effect=AssertionError('must not open')):
+                with self.assertRaisesRegex(ValueError, 'encoding_mismatch'):
+                    providers.generate_response('deepseek', 'deepseek-flash', FAKE_KEY, body)
+
     def test_rolling_model_is_observed_without_changing_requested_route(self):
         result,observed,body=self.send(payload=completed('deepseek-flash-20261025'))
         self.assertTrue(result.ok)
@@ -244,7 +267,7 @@ class NewsProviderAdmissionTests(unittest.TestCase):
             for offset,formula,state,summary in (
                 (-20,self.app._legacy_fingerprint,'failed','old legacy failure'),
                 (-10,self.app._rss_v2_fingerprint,'completed','v2 saved result'),
-                (0,self.app._fingerprint,'completed','v3 saved result')):
+                (0,self.app._rss_v3_fingerprint,'completed','v3 saved result')):
                 db.execute('INSERT INTO runs(fingerprint,item_id,created,reserved,status,result) VALUES(?,?,?,?,?,?)',
                     (formula(source),'one',time.time()+offset,100,state,json.dumps({'summary':summary})))
         self.configure()

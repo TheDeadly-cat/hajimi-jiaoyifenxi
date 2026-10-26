@@ -24,7 +24,7 @@ class PythonLockContractTests(unittest.TestCase):
             "pandas": "3.0.5",
             "protobuf": "7.36.0",
             "pycryptodome": "3.23.0",
-            "pypdf": "6.16.2",
+            "pypdf": "6.19.0",
             "python-dateutil": "2.9.0.post0",
             "simplejson": "4.1.1",
             "six": "1.17.0",
@@ -73,7 +73,10 @@ class CIWorkflowContractTests(unittest.TestCase):
 
         self.assertIn("runs-on: windows-latest", workflow)
         self.assertIn('python-version: "3.14"', workflow)
-        self.assertIn('node-version: "24"', workflow)
+        toolchain = bootstrap.portable_runtime.EXPECTED_TOOLCHAIN
+        self.assertIn(f'node-version: "{toolchain["node"].removeprefix("v")}"', workflow)
+        self.assertIn(f'npm.cmd install --global npm@{toolchain["npm"]} --ignore-scripts --no-audit --no-fund', workflow)
+        self.assertLess(workflow.index('name: Set up locked npm'), workflow.index('name: Bootstrap locked dependencies'))
         self.assertIn("defaults:\n      run:\n        shell: pwsh", workflow)
         self.assertIn("working-directory: ai_collaboration_studio", workflow)
         self.assertIn(
@@ -192,7 +195,14 @@ class CIWorkflowContractTests(unittest.TestCase):
             / "run_ai_collaboration_studio.cmd.template"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("scripts\\start_ai_collaboration_studio.ps1", root_launcher)
+        self.assertIn('set "AI_STUDIO_PROJECT_ROOT=%~dp0ai_collaboration_studio"', root_launcher)
+        self.assertIn('scripts\\run_news_workspace.py', root_launcher)
+        self.assertIn('runtime\\bootstrap\\python\\Scripts\\python.exe', root_launcher)
+        self.assertIn('if exist "%AI_STUDIO_LAUNCHER%" goto launch', root_launcher)
+        self.assertIn('if not exist "%AI_STUDIO_PYTHON%" (', root_launcher)
+        self.assertIn('"%AI_STUDIO_PYTHON%" -I -B -X utf8 "%AI_STUDIO_LAUNCHER%" %*', root_launcher)
+        self.assertNotIn('start_ai_collaboration_studio.ps1', root_launcher)
+        self.assertNotIn('--initialize-new', root_launcher)
         self.assertIn("AI_STUDIO_EXIT_CODE=%ERRORLEVEL%", root_launcher)
         self.assertTrue(root_launcher.isascii())
         self.assertNotIn("chcp", root_launcher.lower())

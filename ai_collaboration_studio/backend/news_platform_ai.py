@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import queue
+import re
 import sqlite3
 import threading
 import time
@@ -16,7 +17,8 @@ from . import news_analysis_providers as analysis_providers
 from .news_content_quality import (
     QUALITY_VERSION, INSTRUCTIONS as READING_INSTRUCTIONS, TEXT_FORMAT,
     RSS_V2_QUALITY_VERSION, RSS_V2_INSTRUCTIONS, RSS_V2_TEXT_FORMAT,
-    build_input, insufficient_result, validate_output,
+    RSS_V3_QUALITY_VERSION, RSS_V3_INSTRUCTIONS, RSS_V3_TEXT_FORMAT,
+    SemanticReviewRequired, build_input, insufficient_result, validate_output,
 )
 
 MODEL = "doubao-seed-2-1-pro-260915"
@@ -31,6 +33,45 @@ LEGACY_INSTRUCTIONS = (
     "summary不超过500字，每列表最多6项；uncertainties明确未核对全文。"
 )
 INSTRUCTIONS = READING_INSTRUCTIONS
+
+
+def _contains_credential(value, key):
+    """Reject credential echoes, including decoded JSON/Unicode spellings."""
+    if isinstance(value, dict):
+        return any(_contains_credential(k, key) or _contains_credential(v, key) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_credential(v, key) for v in value)
+    if not isinstance(value, str):
+        return False
+    text = value
+    for _ in range(4):
+        if key and key in text:
+            return True
+        try:
+            decoded = json.loads(text)
+        except (ValueError, TypeError):
+            decoded = None
+        if isinstance(decoded, (dict, list)) and _contains_credential(decoded, key):
+            return True
+        next_text = decoded if isinstance(decoded, str) else re.sub(
+            r"\\u([0-9a-fA-F]{4})", lambda match: chr(int(match.group(1), 16)), text)
+        if next_text == text:
+            break
+        text = next_text
+    return bool(key and key in text)
+
+
+def _retained_output(content, key):
+    # Keep the received model text unchanged. Refusal is explicit; never silently
+    # repair it or retain a credential echo while trying to preserve evidence.
+    if not isinstance(content, str):
+        return {"raw_output_preserved": False, "raw_output_retention_reason": "no_text_response"}
+    if len(content.encode("utf-8")) > 65536:
+        return {"raw_output_preserved": False, "raw_output_retention_reason": "output_exceeds_retention_limit"}
+    if _contains_credential(content, key):
+        return {"raw_output_preserved": False, "raw_output_retention_reason": "credential_echo_rejected"}
+    return {"raw_output_preserved": True, "raw_model_output": content,
+            "raw_model_output_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}
 
 
 class NewsAnalysis:
@@ -179,6 +220,22 @@ class NewsAnalysis:
                                + contract + NewsAnalysis._input(item)).encode()).hexdigest()
 
     @staticmethod
+    def _rss_v3_fingerprint(item):
+        # Frozen before the v4 quality prompt. This identifies earlier Doubao
+        # results that predate explicit provider/model identities.
+        contract = json.dumps(RSS_V3_TEXT_FORMAT, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256((MODEL + RSS_V3_QUALITY_VERSION + RSS_V3_INSTRUCTIONS
+                               + contract + NewsAnalysis._input(item)).encode()).hexdigest()
+
+    @staticmethod
+    def _rss_v3_route_fingerprint(item, provider, model):
+        provider, model = analysis_providers.select_route(provider, model)
+        identity = {"identity_version":"news_analysis_route_v1","provider":provider,"model":model,
+            "quality_version":RSS_V3_QUALITY_VERSION,"instructions":RSS_V3_INSTRUCTIONS,
+            "contract":RSS_V3_TEXT_FORMAT,"material":NewsAnalysis._input(item)}
+        return hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
+
+    @staticmethod
     def _route_fingerprint(item, provider, model):
         provider, model = analysis_providers.select_route(provider, model)
         identity = {"identity_version":"news_analysis_route_v1","provider":provider,"model":model,
@@ -189,16 +246,21 @@ class NewsAnalysis:
     def _saved(self, db, item):
         # Check every supported route before admitting any charge. Switching a
         # provider/model is never authority to analyze the same material again.
-        current, previous, legacy = self._fingerprint(item), self._rss_v2_fingerprint(item), self._legacy_fingerprint(item)
-        identities = {self._route_fingerprint(item, option['provider'], option['model']):
-                      (option['provider'],option['model']) for option in analysis_providers.AVAILABLE_MODELS}
-        identities.update({key:('doubao',MODEL) for key in (current,previous,legacy)})
+        v3, previous, legacy = self._rss_v3_fingerprint(item), self._rss_v2_fingerprint(item), self._legacy_fingerprint(item)
+        historical_routes = {self._rss_v3_route_fingerprint(item, option['provider'], option['model']):
+                             (option['provider'],option['model']) for option in analysis_providers.AVAILABLE_MODELS}
+        current_routes = {self._route_fingerprint(item, option['provider'], option['model']):
+                          (option['provider'],option['model']) for option in analysis_providers.AVAILABLE_MODELS}
+        # Preserve the exact pre-upgrade read precedence. A quality prompt
+        # change never makes an old pending/failed/unknown attempt chargeable.
+        identities = {key:('doubao',MODEL) for key in (v3,previous,legacy)}
+        identities.update(historical_routes)
+        identities[self._fingerprint(item)] = ('doubao',MODEL)
+        identities.update(current_routes)
         marks = ','.join('?' for _ in identities)
         rows = {row['fingerprint']:row for row in db.execute(
             f"SELECT fingerprint,status,result FROM runs WHERE fingerprint IN ({marks})", tuple(identities))}
-        # Keep the historical v3 > v2 > legacy read precedence. New route
-        # identities have a fixed catalog order, independent of selection.
-        priority = (current,previous,legacy,*identities)
+        priority = tuple(identities)
         row = next((rows[key] for key in priority if key in rows),None)
         if row is None:
             return None
@@ -214,6 +276,10 @@ class NewsAnalysis:
             value.update(legacy=True, quality_version=RSS_V2_QUALITY_VERSION,
                 semantic_review_required=True,
                 legacy_notice="这是已保存的RSS v2分析，未经过v3关系措辞检查；保留原结果，不自动重新付费分析。")
+        elif fingerprint == v3 or fingerprint in historical_routes:
+            value.update(legacy=True, quality_version=RSS_V3_QUALITY_VERSION,
+                semantic_review_required=True,
+                legacy_notice="这是已保存的RSS v3分析，未经过v4范围内语义检查；保留原结果，不自动重新付费分析。")
         return value
 
     def result(self, item):
@@ -317,6 +383,8 @@ class NewsAnalysis:
             generator = self._generate
         response = None
         reported_model = None
+        validation_started = False
+        retained = {"raw_output_preserved": False, "raw_output_retention_reason": "no_confirmed_model_text"}
         try:
             response = generator(key,text) if generator is not None else analysis_providers.generate_response(provider,model,key,body)
             reported_model = analysis_providers.safe_reported_model(
@@ -326,19 +394,54 @@ class NewsAnalysis:
             if (reported_model is None or getattr(response,'provider',provider) != provider
                     or getattr(response,'requested_model',model) != model):
                 raise analysis_providers.NewsModelMismatch('model_mismatch')
+            validation_started = True
+            retained = _retained_output(response.content, key)
+            if retained.get('raw_output_retention_reason') == 'credential_echo_rejected':
+                raise ValueError('credential_echo_rejected')
             value = validate_output(response.content, material)
+            if _contains_credential(value, key):
+                retained = {"raw_output_preserved": False, "raw_output_retention_reason": "credential_echo_rejected"}
+                raise ValueError('credential_echo_rejected')
             value.update(provider=provider,model=reported_model or model,requested_model=model,reported_model=reported_model)
             status = "completed"
         except Exception as exc:
             mismatch = isinstance(exc,analysis_providers.NewsModelMismatch) or getattr(response,'error_code',None)=='model_mismatch'
             if mismatch:
                 reported_model = None
-            status, value = "failed", {"error": "本次返回的模型身份与已选模型不符或无法确认；预约已保留，不自动重试。" if mismatch else "本次分析失败或内容未通过原句及关系措辞检查；为避免重复扣费，不自动重试。",
+            semantic = isinstance(exc, SemanticReviewRequired)
+            controlled_code = str(exc) if type(exc) is ValueError else None
+            known_invalid = controlled_code in {
+                'duplicate_reading_field','invalid_analysis','invalid_analysis_evidence',
+                'analysis_quote_not_in_source','analysis_context_only_evidence',
+                'credential_echo_rejected',
+            }
+            # Scoped semantic findings and validator uncertainty cannot enter
+            # the ordinary completed-result view. The reservation stays spent.
+            review = semantic or (validation_started and not known_invalid and not mismatch)
+            status = 'needs_review' if review else 'failed'
+            value = {"error": "本次返回的模型身份与已选模型不符或无法确认；预约已保留，不自动重试。" if mismatch else
+                     "模型原文需要复核；已保留可安全保存的原输出和预约，不自动重试。" if review else
+                     "本次分析失败或内容未通过原句及关系措辞检查；为避免重复扣费，不自动重试。",
                 "error_code":"model_mismatch" if mismatch else "analysis_failed",
                 "provider":provider,"model":reported_model or model,"requested_model":model,"reported_model":reported_model,
                 "quality_version": QUALITY_VERSION, "semantic_review_required": True,
                 "scope": material["scope"], "freshness": material["freshness"],
-                "quality_checked_at": material["checked_at"]}
+                "quality_checked_at": material["checked_at"],
+                "deterministic_time": copy.deepcopy(material.get('deterministic_time')), **retained}
+            if semantic:
+                value['error_code'] = 'semantic_review_required'
+                semantic_review = getattr(exc, 'semantic_review', None)
+                candidate = getattr(exc, 'candidate_result', None)
+                if isinstance(semantic_review, dict) and not _contains_credential(semantic_review, key):
+                    value['semantic_review'] = copy.deepcopy(semantic_review)
+                if isinstance(candidate, dict) and not _contains_credential(candidate, key):
+                    value['candidate_result'] = copy.deepcopy(candidate)
+            elif review:
+                value['error_code'] = 'validation_unconfirmed'
+                value['semantic_review'] = {'status':'review_required','scope':'validation_unconfirmed',
+                    'general_truth_verified':False,'issues':[{'code':'validation_unconfirmed','status':'unknown'}]}
+            elif known_invalid:
+                value['quality_rejection_code'] = controlled_code
         finally:
             key = ""
         try:

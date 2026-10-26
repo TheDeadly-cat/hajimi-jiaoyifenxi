@@ -11,7 +11,10 @@ def valid_key(value):
     return type(value) is str and 1 <= len(value) <= 4096 and all(32 < ord(c) < 127 for c in value)
 
 
-def ask_keys(expires_at):
+def ask_keys(expires_at, *, max_reserved_micro_cny=1_000_000):
+    if type(max_reserved_micro_cny) is not int or not 0 < max_reserved_micro_cny <= 1_000_000:
+        raise ValueError("budget_cap_invalid")
+    budget_text = "%d.%06d" % divmod(max_reserved_micro_cny, 1_000_000)
     import tkinter as tk
     if time.time() >= expires_at:
         raise PromptCancelled()
@@ -20,7 +23,7 @@ def ask_keys(expires_at):
     window.resizable(False, False)
     state = {"keys": None, "closed": False}
     values = {name: tk.StringVar(master=window) for name in ("doubao", "deepseek")}
-    tk.Label(window, text="已批准：最多 10 次请求，1 元应用预约预算；无重试。\n密钥仅本次进程使用，不保存。两项都输入后才开始。\n45 秒为网络超时；预约预算不是供应商账单硬上限。", padx=20, pady=12).pack()
+    tk.Label(window, text="已批准：最多 10 次请求，%s 元应用预约预算；无重试。\n密钥仅本次进程使用，不保存。两项都输入后才开始。\n45 秒为网络超时；预约预算不是供应商账单硬上限。" % budget_text, padx=20, pady=12).pack()
 
     def close():
         if not state["closed"]:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -86,22 +87,45 @@ class DependencyInventoryTests(unittest.TestCase):
         self.assertNotIn(str(self.project_root), rendered)
 
     def test_authoritative_locks_are_checked_out_with_exact_lf_bytes(self) -> None:
-        attributes = (self.project_root / ".gitattributes").read_text(
-            encoding="ascii"
-        ).splitlines()
-        self.assertEqual(attributes, [
-            "/requirements-lock-win-py314.txt text eol=lf",
-            "/frontend/package-lock.json text eol=lf",
-        ])
-        for relative_path in (
+        lock_paths = (
             "requirements-lock-win-py314.txt",
             "frontend/package-lock.json",
-        ):
+        )
+        for relative_path in lock_paths:
             with self.subTest(relative_path=relative_path):
                 self.assertNotIn(
                     b"\r",
                     (self.project_root / relative_path).read_bytes(),
                 )
+        # Exercise Git's actual rule precedence and Windows-style checkout,
+        # including the captured runtime bytes outside the two lock exceptions.
+        with tempfile.TemporaryDirectory(prefix="ai-studio-lock-checkout-") as temporary:
+            root = Path(temporary)
+            repository, checkout = root / "repository", root / "checkout"
+            repository.mkdir()
+            checkout.mkdir()
+            (repository / "frontend").mkdir()
+            (repository / ".gitattributes").write_bytes((self.project_root / ".gitattributes").read_bytes())
+            expected = {path: (self.project_root / path).read_bytes() for path in lock_paths}
+            expected["captured-source.py"] = b"# Captured source uses CRLF.\r\npass\r\n"
+            for path, content in expected.items():
+                (repository / path).write_bytes(content)
+            def git(*arguments):
+                return subprocess.run(["git", "-C", str(repository), "-c", "core.autocrlf=true",
+                    "-c", "core.safecrlf=false", *arguments], check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
+            git("init", "--quiet")
+            attributes = git("check-attr", "-z", "text", "eol", "--", *lock_paths, "captured-source.py").decode().split("\0")
+            effective = {(attributes[i], attributes[i+1]): attributes[i+2] for i in range(0, len(attributes)-1, 3)}
+            for path in lock_paths:
+                self.assertEqual(effective[path, "text"], "set")
+                self.assertEqual(effective[path, "eol"], "lf")
+            self.assertEqual(effective["captured-source.py", "text"], "unset")
+            git("add", "--", ".gitattributes", *expected)
+            git("checkout-index", "--all", "--prefix=" + checkout.as_posix() + "/")
+            for path, content in expected.items():
+                with self.subTest(checkout=path):
+                    self.assertEqual((checkout / path).read_bytes(), content)
 
     def test_unhashed_python_and_unhashed_npm_entries_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory(

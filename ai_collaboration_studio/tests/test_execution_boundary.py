@@ -81,6 +81,23 @@ class ExecutionBoundaryTests(unittest.TestCase):
                     headers={},
                 )
 
+    def test_responses_reasoning_only_allows_explicit_disabled_mode(self) -> None:
+        base = {"model": "synthetic-text-model", "input": "合成文本", "max_output_tokens": 900}
+        request = build_text_provider_request(
+            "https://provider.example", "responses", {**base, "reasoning": {"effort": "none"}}, headers={})
+        self.assertEqual(json.loads(request.data)["reasoning"], {"effort": "none"})
+        for reasoning in (None, {}, False, "none", {"effort": "low"}, {"effort": "high"},
+                          {"effort": "none", "extra": True}):
+            with self.subTest(reasoning=reasoning), self.assertRaises(ExecutionBoundaryViolation):
+                build_text_provider_request("https://provider.example", "responses", {**base, "reasoning": reasoning}, headers={})
+        for extra in ({"thinking": {"type": "disabled"}}, {"tools": []}, {"tool_choice": "none"}):
+            with self.subTest(extra=extra), self.assertRaises(ExecutionBoundaryViolation):
+                build_text_provider_request("https://provider.example", "responses", {**base, "reasoning": {"effort": "none"}, **extra}, headers={})
+        with self.assertRaises(ExecutionBoundaryViolation):
+            build_text_provider_request("https://provider.example", "chat_completions",
+                {"model": "synthetic-text-model", "messages": [{"role": "user", "content": "fixture"}],
+                 "reasoning": {"effort": "none"}}, headers={})
+
     def test_telegram_bot_boundary_allows_only_fixed_output_message_shape(self) -> None:
         request = build_output_only_telegram_bot_request(
             "https://telegram.invalid",

@@ -49,6 +49,7 @@ PROVIDER_ALLOWED_FIELDS = {
         "max_output_tokens",
         "store",
         "thinking",
+        "reasoning",
         "text",
     },
     "chat_completions": {
@@ -148,6 +149,10 @@ def _ensure_text_generation_schema(endpoint: str, payload: Mapping[str, Any]) ->
             raise ExecutionBoundaryViolation("Responses instructions 必须是文本")
         if "thinking" in payload and payload.get("thinking") != {"type": "disabled"}:
             raise ExecutionBoundaryViolation("Responses thinking 只允许显式 disabled")
+        if "reasoning" in payload and payload.get("reasoning") != {"effort": "none"}:
+            raise ExecutionBoundaryViolation("Responses reasoning 只允许显式 none")
+        if "thinking" in payload and "reasoning" in payload:
+            raise ExecutionBoundaryViolation("Responses 不允许同时指定 thinking 与 reasoning")
     else:
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages:
