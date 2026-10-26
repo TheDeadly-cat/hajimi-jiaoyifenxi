@@ -37,10 +37,10 @@ class MockTk(m.MockTk):
 
 
 class CredentialsTests(unittest.TestCase):
-    def invoke(self, scenario):
+    def invoke(self, scenario, *, cap=1_000_000):
         tk = MockTk(scenario)
         with patch.dict(sys.modules, {"tkinter": tk}):
-            return c.ask_keys(time.time() + 30)
+            return c.ask_keys(time.time() + 30, max_reserved_micro_cny=cap)
 
     def test_two_masked_fields_paste_and_clear(self):
         def scenario(tk):
@@ -72,6 +72,29 @@ class CredentialsTests(unittest.TestCase):
             self.assertEqual(tk.variables[0].get(), "")
             self.assertEqual(tk.variables[1].get(), "")
         with self.assertRaises(c.PromptCancelled): self.invoke(scenario)
+
+    def test_exact_budget_is_shown_without_exposing_keys(self):
+        def scenario(tk):
+            labels = [str(label.options.get("text", "")) for label in tk.labels]
+            self.assertTrue(any("0.452154 元应用预约预算" in label for label in labels))
+            self.assertFalse(any("1 元应用预约预算" in label for label in labels))
+            for entry in tk.entries:
+                entry.bindings["<Control-v>"](None)
+            for label in tk.labels:
+                self.assertNotIn(tk.paste_text, str(label.options.get("text", "")))
+                variable = label.options.get("textvariable")
+                if variable:
+                    self.assertNotIn(tk.paste_text, variable.get())
+            tk.buttons[0].options["command"]()
+        self.assertEqual(self.invoke(scenario, cap=452154),
+                         {"doubao": "SYNTHETIC_KEY_ONLY", "deepseek": "SYNTHETIC_KEY_ONLY"})
+
+    def test_invalid_budget_never_opens_prompt(self):
+        for cap in (True, False, None, 0, -1, 452154.0, "452154", 1_000_001):
+            tk = MockTk(lambda _: self.fail("should_not_open"))
+            with self.subTest(cap=cap), patch.dict(sys.modules, {"tkinter": tk}), self.assertRaises(ValueError):
+                c.ask_keys(time.time() + 30, max_reserved_micro_cny=cap)
+            self.assertFalse(hasattr(tk, "window"))
 
     def test_expired_and_invalid_key_formats(self):
         for value in ("", " ", "x\r\n", "x\x7f", "非ASCII", "x" * 4097):
