@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -138,6 +139,114 @@ def process_identity(pid):
         kernel.CloseHandle(handle)
 
 
+def process_parent_pid(pid):
+    """Read the OS parent relation; never infer it from a claimed PID."""
+    if os.name != "nt" or type(pid) is not int or pid <= 0:
+        raise SetupError("identity_unknown")
+    class Entry(ctypes.Structure):
+        _fields_ = [("size", wintypes.DWORD), ("usage", wintypes.DWORD), ("pid", wintypes.DWORD),
+                    ("heap", ctypes.c_size_t), ("module", wintypes.DWORD), ("threads", wintypes.DWORD),
+                    ("parent", wintypes.DWORD), ("priority", wintypes.LONG), ("flags", wintypes.DWORD),
+                    ("name", wintypes.WCHAR * 260)]
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateToolhelp32Snapshot.argtypes = (wintypes.DWORD, wintypes.DWORD)
+    kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    for name in ("Process32FirstW", "Process32NextW"):
+        getattr(kernel, name).argtypes = (wintypes.HANDLE, ctypes.POINTER(Entry))
+        getattr(kernel, name).restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel.CreateToolhelp32Snapshot(2, 0)
+    if handle in (None, ctypes.c_void_p(-1).value):
+        raise SetupError("identity_unknown")
+    try:
+        entry = Entry(); entry.size = ctypes.sizeof(Entry)
+        found = kernel.Process32FirstW(handle, ctypes.byref(entry))
+        while found:
+            if entry.pid == pid:
+                return int(entry.parent)
+            found = kernel.Process32NextW(handle, ctypes.byref(entry))
+        raise SetupError("identity_unknown")
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _identity_shape(value):
+    return (isinstance(value, dict) and type(value.get("pid")) is int and value["pid"] > 0
+            and isinstance(value.get("creation_filetime"), str)
+            and value["creation_filetime"].isdigit() and int(value["creation_filetime"]) > 0)
+
+
+def _same_live_identity(observed, expected):
+    return (isinstance(observed, dict) and _identity_shape(expected)
+            and observed.get("pid") == expected["pid"] and observed.get("exited") is False
+            and observed.get("creation_filetime") == expected["creation_filetime"])
+
+
+def verify_process_descendant(host_identity, launcher_identity, *, max_depth=4,
+                              identity=process_identity, parent=process_parent_pid):
+    """Prove a live actual interpreter belongs to the held launcher's tree.
+
+    A venv python.exe may be a redirector. The caller retains its Popen handle;
+    its observed creation FILETIME is the root of this bounded OS proof.
+    """
+    if (type(max_depth) is not int or not 0 <= max_depth <= 8
+            or not _identity_shape(host_identity) or not _identity_shape(launcher_identity)):
+        raise SetupError("identity_unknown")
+    current = identity(host_identity.get("pid"))
+    if not _same_live_identity(current, host_identity):
+        raise SetupError("identity_unknown")
+    ancestry, seen = [], set()
+    for depth in range(max_depth + 1):
+        if current["pid"] in seen:
+            raise SetupError("identity_unknown")
+        seen.add(current["pid"]); ancestry.append(dict(current))
+        if current["pid"] == launcher_identity.get("pid"):
+            if not _same_live_identity(current, launcher_identity):
+                raise SetupError("identity_unknown")
+            return {"host_identity": dict(ancestry[0]), "launcher_identity": dict(current),
+                    "ancestry": ancestry, "redirected": len(ancestry) > 1}
+        if depth == max_depth:
+            break
+        parent_id = parent(current["pid"])
+        predecessor = identity(parent_id)
+        if (not _identity_shape(predecessor) or predecessor.get("pid") != parent_id
+                or predecessor.get("exited") is not False
+                or not _same_live_identity(identity(current["pid"]), current)
+                or int(predecessor["creation_filetime"]) > int(current["creation_filetime"])):
+            raise SetupError("identity_unknown")
+        current = predecessor
+    raise SetupError("identity_unknown")
+
+
+def capture_startup_identity(nonce):
+    if not isinstance(nonce, str) or not re.fullmatch(r"(?:[a-f0-9]{32}|[a-f0-9]{64})", nonce):
+        raise SetupError("identity_unknown")
+    host = process_identity(os.getpid())
+    predecessor = process_identity(process_parent_pid(os.getpid()))
+    if host is None or predecessor is None or host["exited"] or predecessor["exited"]:
+        raise SetupError("identity_unknown")
+    return {"schema": "news_workspace_process_started_v1", "startup_nonce": nonce,
+            "host_identity": host, "parent_identity": predecessor, "at": utc()}
+
+
+def verified_startup_record(record, *, identity=process_identity, parent=process_parent_pid):
+    path = portable.unaliased_path(record["startup_identity_path"])
+    raw = path.read_bytes()
+    if len(raw) > 16384:
+        raise SetupError("identity_unknown")
+    started = json.loads(raw.decode("utf-8"))
+    if (started.get("schema") != "news_workspace_process_started_v1"
+            or started.get("startup_nonce") != record["startup_nonce"]
+            or any(started.get(k) != record[k] for k in ("project", "data_root", "port", "backend_sha256", "frontend_sha256"))):
+        raise SetupError("identity_unknown")
+    proof = verify_process_descendant(started["host_identity"], record["launcher_identity"], identity=identity, parent=parent)
+    parent_id = parent(proof["host_identity"]["pid"])
+    if (parent_id != started["parent_identity"].get("pid")
+            or not _same_live_identity(identity(parent_id), started["parent_identity"])):
+        raise SetupError("identity_unknown")
+    return {**proof, "startup_identity_sha256": hashlib.sha256(raw).hexdigest()}
+
+
 def listener_pid(port):
     if os.name != "nt":
         raise SetupError("identity_unknown")
@@ -184,7 +293,8 @@ def get_local(port, endpoint):
     return json.loads(raw.decode("utf-8"))
 
 
-def own_instance(project, data, port, *, identity=process_identity, listener=listener_pid, get=get_local):
+def own_instance(project, data, port, *, identity=process_identity, listener=listener_pid, get=get_local,
+                 parent=process_parent_pid):
     stored = binding_path(project, data, port)
     owner = listener(port)
     if not stored.exists():
@@ -194,14 +304,30 @@ def own_instance(project, data, port, *, identity=process_identity, listener=lis
         expected = {"project": str(project), "data_root": str(data), "port": port}
         if any(record.get(k) != v for k, v in expected.items()):
             return "identity_unknown"
-        actual = identity(record["pid"])
+        expected_host = record.get("host_identity")
+        if "launcher_identity" in record and expected_host is None:
+            launcher = identity(record["launcher_identity"]["pid"])
+            if launcher is None or launcher["exited"]:
+                return "occupied_port" if owner is not None else None
+            if not _same_live_identity(launcher, record["launcher_identity"]):
+                return "identity_unknown"
+            if not Path(record["startup_identity_path"]).exists():
+                return "startup_pending"
+            expected_host = verified_startup_record(record, identity=identity, parent=parent)["host_identity"]
+        elif expected_host is not None:
+            if sha(portable.unaliased_path(record["startup_identity_path"])) != record["startup_identity_sha256"]:
+                return "identity_unknown"
+        else:
+            # Existing direct-process bindings retain their exact PID/time check.
+            expected_host = {"pid": record["pid"], "creation_filetime": record["creation_filetime"]}
+        actual = identity(expected_host["pid"])
         if actual is None or actual["exited"]:
             return "occupied_port" if owner is not None else None
-        if actual["creation_filetime"] != record.get("creation_filetime"):
+        if not _same_live_identity(actual, expected_host):
             return "identity_unknown"
         if owner is None:
             return "startup_pending"
-        if owner != record["pid"]:
+        if owner != expected_host["pid"]:
             return "occupied_port"
         ready, version = get(port, "/api/readiness"), get(port, "/api/version")
         if (ready.get("ready") is True and ready.get("service", {}).get("id") == "ai_collaboration_studio"
@@ -265,8 +391,11 @@ def _launch_owned(project, data, port, python, *, initialize=False, offline=Fals
         return before
     receipt_root = receipt_root or project / "runtime/news-launcher/receipts"
     child_receipt = receipt_root / (uuid.uuid4().hex + "-child.json")
+    startup_nonce = uuid.uuid4().hex
+    startup_identity = receipt_root / (startup_nonce + "-started.json")
     command = [str(python), "-I", "-B", "-X", "utf8", str(project / "scripts/run_news_workspace.py"),
-               "--data-root", str(data), "--port", str(port), "--receipt", str(child_receipt)]
+               "--data-root", str(data), "--port", str(port), "--receipt", str(child_receipt),
+               "--startup-nonce", startup_nonce, "--startup-identity", str(startup_identity)]
     if initialize:
         command.append("--initialize-new")
     if offline:
@@ -288,6 +417,8 @@ def _launch_owned(project, data, port, python, *, initialize=False, offline=Fals
         return status("startup_failed")
     record = {"project": str(project), "data_root": str(data), "port": port, "pid": child.pid,
               "creation_filetime": actual["creation_filetime"], "created_at": utc(), "offline": offline,
+              "launcher_identity": actual, "host_identity": None, "startup_nonce": startup_nonce,
+              "startup_identity_path": str(startup_identity),
               "backend_sha256": portable.backend_identity(project), "frontend_sha256": sha(project / "frontend/dist/index.html")}
     write_binding(binding_path(project, data, port), record)
     deadline = time.monotonic() + 20
@@ -302,8 +433,21 @@ def _launch_owned(project, data, port, python, *, initialize=False, offline=Fals
                 except (OSError, ValueError):
                     pass
             return status(error, child_exit_code=child.returncode, child_receipt=str(child_receipt))
+        if record["host_identity"] is None and startup_identity.exists():
+            try:
+                proof = verified_startup_record(record)
+                record.update(proof)
+                record.update(pid=proof["host_identity"]["pid"], creation_filetime=proof["host_identity"]["creation_filetime"])
+                write_binding(binding_path(project, data, port), record)
+            except (OSError, ValueError, KeyError, TypeError, SetupError):
+                # An exclusive receipt may still be writing. Never bind the
+                # listener or trust an HTTP-reported PID while it is unknown.
+                time.sleep(0.2)
+                continue
         if own_instance(project, data, port) == "already_running":
-            return status("already_running", created_this_time=True, child_receipt=str(child_receipt))
+            return status("already_running", created_this_time=True, child_receipt=str(child_receipt),
+                          startup_identity=str(startup_identity), launcher_identity=record["launcher_identity"],
+                          host_identity=record["host_identity"])
         time.sleep(0.2)
     return status("startup_pending", child_receipt=str(child_receipt))
 

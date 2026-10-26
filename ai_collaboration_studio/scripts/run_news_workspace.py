@@ -78,6 +78,8 @@ def main(argv=None):
     parser.add_argument("--offline", action="store_true", help="Block all outgoing socket connections and child processes")
     parser.add_argument("--controlled-stdin", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--receipt", help="New safe receipt file; defaults to runtime/news-launcher/receipts")
+    parser.add_argument("--startup-nonce", help=argparse.SUPPRESS)
+    parser.add_argument("--startup-identity", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     receipt = {"schema_version": "news_portable_start_v1", "pid": os.getpid(),
                "started_at": datetime.now(timezone.utc).isoformat(), "offline": args.offline,
@@ -91,6 +93,18 @@ def main(argv=None):
                 raise portable.PortableError("receipt_already_exists")
             receipt_path = requested_receipt
         root = portable.data_root(PROJECT, args.data_root)
+        if bool(args.startup_nonce) != bool(args.startup_identity):
+            raise portable.PortableError("startup_identity_arguments_required")
+        if args.startup_identity:
+            from scripts.news_first_run import capture_startup_identity, sha
+            started = capture_startup_identity(args.startup_nonce)
+            started.update(project=str(PROJECT.resolve()), data_root=str(root), port=args.port,
+                           backend_sha256=portable.backend_identity(PROJECT),
+                           frontend_sha256=sha(PROJECT / "frontend/dist/index.html"))
+            identity_path = portable.unaliased_path(args.startup_identity)
+            portable.write_receipt(identity_path, started)
+            receipt.update(startup_nonce=args.startup_nonce, host_identity=started["host_identity"],
+                           parent_identity=started["parent_identity"], startup_identity_sha256=sha(identity_path))
         if args.initialize_new:
             portable.require_empty_data(root)
         else:

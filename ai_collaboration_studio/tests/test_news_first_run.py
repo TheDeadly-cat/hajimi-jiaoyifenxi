@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -156,6 +157,76 @@ class WelcomeTests(unittest.TestCase):
         self.assertEqual(outcomes, ["startup_pending"])
         with setup.launch_gate(self.project, self.data, self.port, timeout_ms=0):
             pass
+
+    def test_redirector_requires_live_full_identity_and_os_parent_relation(self):
+        launcher = {"pid": 32268, "creation_filetime": "134000000000000100", "exited": False}
+        host = {"pid": 8580, "creation_filetime": "134000000000000200", "exited": False}
+        identities = {launcher["pid"]: launcher, host["pid"]: host}
+        proof = setup.verify_process_descendant(host, launcher, identity=identities.get,
+                                                parent=lambda pid: 32268 if pid == 8580 else 1)
+        self.assertTrue(proof["redirected"])
+        self.assertEqual([row["pid"] for row in proof["ancestry"]], [8580, 32268])
+        self.assertEqual(proof["host_identity"], host)
+        self.assertEqual(proof["launcher_identity"], launcher)
+        direct = setup.verify_process_descendant(launcher, launcher, identity=identities.get,
+                                                 parent=lambda _: self.fail("same full identity needs no claimed descendant"))
+        self.assertFalse(direct["redirected"])
+        for candidate in (dict(host, creation_filetime="134000000000000201"), dict(host, pid=True)):
+            with self.subTest(candidate=candidate), self.assertRaises(setup.SetupError):
+                setup.verify_process_descendant(candidate, launcher, identity=identities.get, parent=lambda _: 32268)
+        with self.assertRaises(setup.SetupError):
+            setup.verify_process_descendant(host, launcher, identity=identities.get, parent=lambda _: 9999)
+        with self.assertRaises(setup.SetupError):
+            setup.verify_process_descendant(host, launcher, identity=identities.get, parent=lambda _: 32268, max_depth=0)
+
+    def test_reused_parent_and_cycle_do_not_establish_ancestry(self):
+        host = {"pid": 2, "creation_filetime": "200", "exited": False}
+        late_parent = {"pid": 1, "creation_filetime": "300", "exited": False}
+        with self.assertRaises(setup.SetupError):
+            setup.verify_process_descendant(host, late_parent, identity={1: late_parent, 2: host}.get, parent=lambda _: 1)
+        with self.assertRaises(setup.SetupError):
+            setup.verify_process_descendant(host, {"pid": 1, "creation_filetime": "100"},
+                                             identity={2: host}.get, parent=lambda _: 2)
+
+    def test_nonce_receipt_binds_actual_host_and_rejects_replacement_listener(self):
+        record = self.record()
+        launcher = {"pid": 32268, "creation_filetime": "134000000000000100", "exited": False}
+        host = {"pid": 8580, "creation_filetime": "134000000000000200", "exited": False}
+        identity_path = self.root / "actual-host-started.json"
+        record.update(launcher_identity=launcher, host_identity=None, startup_nonce="a" * 32,
+                      startup_identity_path=str(identity_path))
+        started = {"schema": "news_workspace_process_started_v1", "startup_nonce": "a" * 32,
+                   "host_identity": host, "parent_identity": launcher,
+                   **{k: record[k] for k in ("project", "data_root", "port", "backend_sha256", "frontend_sha256")}}
+        identity_path.write_text(json.dumps(started), encoding="utf-8")
+        identities = {32268: launcher, 8580: host}
+        proof = setup.verified_startup_record(record, identity=identities.get, parent=lambda _: 32268)
+        record.update(proof, pid=host["pid"], creation_filetime=host["creation_filetime"])
+        setup.write_binding(setup.binding_path(self.project, self.data, self.port), record)
+        def get(_port, endpoint):
+            if endpoint == "/api/readiness":
+                return {"ready": True, "service": {"id": "ai_collaboration_studio"}}
+            return {"service": {"id": "ai_collaboration_studio"},
+                    "backend_build": {"source_sha256": record["backend_sha256"]},
+                    "frontend_build": {"index_sha256": record["frontend_sha256"]}}
+        self.assertEqual(setup.own_instance(self.project, self.data, self.port, identity=identities.get,
+                         listener=lambda _: 8580, get=get), "already_running")
+        self.assertEqual(setup.own_instance(self.project, self.data, self.port, identity=identities.get,
+                         listener=lambda _: 32268, get=lambda *_: self.fail("redirector is not actual listener")), "occupied_port")
+        started["startup_nonce"] = "b" * 32
+        identity_path.write_text(json.dumps(started), encoding="utf-8")
+        with self.assertRaises(setup.SetupError):
+            setup.verified_startup_record(record, identity=identities.get, parent=lambda _: 32268)
+        self.assertEqual(setup.own_instance(self.project, self.data, self.port, identity=identities.get,
+                         listener=lambda _: 8580, get=lambda *_: self.fail("changed started receipt must refuse")), "identity_unknown")
+
+    @unittest.skipUnless(os.name == "nt", "Windows process identity boundary")
+    def test_native_current_interpreter_parent_proof_without_starting_a_service(self):
+        started = setup.capture_startup_identity("c" * 64)
+        self.assertEqual(started["host_identity"]["pid"], os.getpid())
+        proof = setup.verify_process_descendant(started["host_identity"], started["parent_identity"], max_depth=1)
+        self.assertTrue(proof["redirected"])
+        self.assertEqual(proof["ancestry"][1]["pid"], setup.process_parent_pid(os.getpid()))
 
     def test_safe_copy_excludes_paths_body_and_secret_values(self):
         value = setup.status("startup_failed", path=str(self.data), key="SYNTHETIC_NOT_REAL", body="synthetic body")
