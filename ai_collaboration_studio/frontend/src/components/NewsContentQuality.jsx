@@ -6,7 +6,7 @@ export function MaterialQuality({ quality }) {
   const warnings = Array.isArray(quality.warnings) ? quality.warnings : [];
   return <section className="news-material-quality" aria-label="阅读前核对">
     <h3>阅读前核对 <span>本机检查 · 不消耗模型额度</span></h3>
-    <p className={quality.status === "clock_anomaly" || quality.can_analyze === false ? "news-source-error" : ""}>{quality.label || "仅有订阅标题与摘录"}</p>
+    <p className={quality.status === "clock_anomaly" || quality.can_analyze === false ? "news-source-error" : ""}>{quality.label || (quality.scope?.kind === "article_evidence" ? quality.scope?.full_text_read ? "已保存正文证据，附件范围另列" : "已保存部分正文证据，需核对缺失范围" : "仅有订阅标题与摘录")}</p>
     {warnings.length ? <ul>{warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul> : null}
     {quality.can_analyze === false ? <p>请先打开官方原文核对；当前材料不会发送给模型。</p> : null}
   </section>;
@@ -18,10 +18,10 @@ export function AnalysisEvidence({ analysis }) {
   if (!evidence.length) return null;
   return <details className="news-analysis-evidence">
     <summary>查看 AI 说法与引用原文（{evidence.length}）</summary>
-    <p>引文与已保存材料对应，仅说明出处；数字含义、条件与结论仍需人工核对。全文尚未读取。</p>
+    <p>引文与已保存材料对应，仅说明出处；数字含义、条件与结论仍需人工核对。{analysis?.scope?.kind === "article_evidence" ? "本次使用已保存的正文证据包，具体阅读范围和截断以保存记录为准；附件另行标记。" : "全文尚未读取。"}</p>
     <ol>{evidence.map((entry, index) => <li key={index}>
       <strong>{plain(entry?.claim) || "这条要点的文字未保留"}</strong>
-      <small>{entry?.evidence_field === "title" ? "记录引用的来源标题" : entry?.evidence_field === "excerpt" ? "记录引用的来源摘录" : "引用位置未确认"}</small>
+      <small>{entry?.evidence_field === "title" ? "记录引用的来源标题" : entry?.evidence_field === "excerpt" ? "记录引用的来源摘录" : entry?.evidence_field === "body" ? `记录引用的正文${entry?.locator?.segment_id ? ` · ${entry.locator.segment_id}` : "（具体段落未标注）"}` : "引用位置未确认"}</small>
       <blockquote>{plain(entry?.quote) || "没有可显示的引用原文"}</blockquote>
     </li>)}</ol>
   </details>;
@@ -109,11 +109,18 @@ function EvidenceReference({ reference, field, candidate, analysis, source }) {
     const quote = plain(entry?.quote);
     const sourceField = entry?.evidence_field;
     const claim = plain(listAt(candidate?.key_points, index));
-    const currentSource = ["title", "excerpt"].includes(sourceField) ? plain(source?.[sourceField]) : "";
+    const bodyEvidence = source?.event?.current_version?.evidence || source?.evidence;
+    const locator = object(entry?.locator);
+    const segment = sourceField === "body" && Array.isArray(bodyEvidence?.segments) ? bodyEvidence.segments.find(value => value.id === locator?.segment_id) : null;
+    const sameVersion = plain(analysis.article_version_id || candidate?.article_version_id) && (analysis.article_version_id || candidate?.article_version_id) === source?.current_version_id;
+    // Saved offsets count Unicode code points (Python), not UTF-16 code units.
+    const segmentCharacters = Array.from(plain(segment?.text));
+    const locatedQuote = sameVersion && segment && Number.isInteger(locator?.start) && Number.isInteger(locator?.end) && locator.start >= 0 && locator.end > locator.start && locator.end <= segmentCharacters.length ? segmentCharacters.slice(locator.start, locator.end).join("") : "";
+    const currentSource = ["title", "excerpt"].includes(sourceField) ? plain(source?.[sourceField]) : sourceField === "body" && locatedQuote === quote ? locatedQuote : "";
     if ((ownIndex >= 0 && ownIndex !== index) || !quote || !claim || claim !== plain(entry?.claim) || !currentSource.includes(quote)) {
       return <p className="news-review-unmapped">记录中的引文无法与当前保存的来源准确对应，暂不并排当作依据；可展开技术详情核对原记录。</p>;
     }
-    return <div className="news-review-support"><h5>记录引用的原句 · {sourceField === "title" ? "来源标题" : "来源摘录"}</h5><blockquote>{quote}</blockquote><p>这段引文可在当前保存的材料中找到；它不代表 AI 对原文的解读正确。</p></div>;
+    return <div className="news-review-support"><h5>记录引用的原句 · {sourceField === "title" ? "来源标题" : sourceField === "body" ? "已保存正文" : "来源摘录"}{entry?.locator?.segment_id ? ` · ${entry.locator.segment_id}` : ""}</h5><blockquote>{quote}</blockquote><p>这段引文可在当前保存的材料中找到；它不代表 AI 对原文的解读正确。</p></div>;
   }
   if (reference === "source_text.title" || reference === "source_text.excerpt") {
     const sourceField = reference === "source_text.title" ? "title" : "excerpt";

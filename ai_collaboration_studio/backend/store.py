@@ -7825,6 +7825,9 @@ class StudioStore:
         if not title or not content:
             raise ValueError("资料标题和内容不能为空")
         metadata = self._clean_material_metadata(payload.get("metadata"))
+        if "market_context" in metadata:
+            from .news_market_material import validate_market_material_content
+            validate_market_material_content(metadata, content, source_url)
         metadata["prompt_injection_risk"] = self._material_prompt_injection_risk(content)
         timestamp = now_ms()
         material = {
@@ -7917,6 +7920,9 @@ class StudioStore:
                 else self._metadata_from_json(current.get("metadata_json"))
             )
             metadata["prompt_injection_risk"] = self._material_prompt_injection_risk(content)
+            if "market_context" in metadata:
+                from .news_market_material import validate_market_material_content
+                validate_market_material_content(metadata, content, self._clean_source_url(payload.get("source_url", current["source_url"])))
             changed_at = now_ms()
             material = {
                 **current,
@@ -7993,6 +7999,9 @@ class StudioStore:
             "presentation_hub_url", "direct_material_count", "located_metric_count",
         }
         clean: dict[str, Any] = {}
+        if "market_context" in value:
+            from .news_market_material import clean_market_context_metadata
+            clean["market_context"] = clean_market_context_metadata(value["market_context"])
         for key in allowed:
             raw = value.get(key)
             if isinstance(raw, bool):

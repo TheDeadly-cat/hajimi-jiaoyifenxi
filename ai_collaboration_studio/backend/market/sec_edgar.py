@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from ..config import SEC_CACHE_TTL_SECONDS, SEC_USER_AGENT
+from ..sec_request_limit import sec_request_slot
 from .futu_readonly import STORAGE_SYMBOLS, US_EASTERN, _utc_iso
 
 
@@ -228,7 +229,7 @@ class SecEdgarAdapter:
         return ticker_map
 
     def _request_json(self, url: str) -> dict[str, Any]:
-        with self._request_lock:
+        with self._request_lock, sec_request_slot(self._min_interval):
             remaining = self._min_interval - (time.monotonic() - self._last_request_monotonic)
             if remaining > 0:
                 time.sleep(remaining)

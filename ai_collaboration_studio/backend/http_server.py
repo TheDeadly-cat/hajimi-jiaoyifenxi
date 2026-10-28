@@ -5327,6 +5327,7 @@ def run_server(
         recovery = STORE.recover_orphaned_work(instance_owner=instance_owner)
         from .news_platform import NewsPlatform
         server.news_platform = NewsPlatform(Path(store_path).parent / "news_platform.sqlite3")
+        server.news_platform.research_store = STORE
         from .news_startup import NewsStartup
         server.news_platform.startup = NewsStartup(Path(__file__).resolve().parents[1], Path(store_path).parent)
         from .news_platform_ai import NewsAnalysis
