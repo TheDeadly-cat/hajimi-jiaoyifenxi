@@ -6,6 +6,7 @@ work awaiting the existing authorization/budget gate, not permission to spend.
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import math
 import re
@@ -70,6 +71,15 @@ def initialize(db, now):
             previous_version_id TEXT, version_seen REAL NOT NULL, snapshot TEXT NOT NULL,
             UNIQUE(item_id,version_number));
         CREATE INDEX IF NOT EXISTS news_versions_item ON news_article_versions(item_id,version_number DESC);
+        CREATE TABLE IF NOT EXISTS news_relation_annotations(
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT NOT NULL REFERENCES items(id),
+            version_id TEXT NOT NULL REFERENCES news_article_versions(id),recorded_at REAL NOT NULL,
+            event_id TEXT NOT NULL REFERENCES news_events(id),origin_url TEXT NOT NULL,confirmation TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS news_relation_annotations_item ON news_relation_annotations(item_id,seq DESC);
+        CREATE TRIGGER IF NOT EXISTS news_relation_annotations_no_update BEFORE UPDATE ON news_relation_annotations
+            BEGIN SELECT RAISE(ABORT,'news_relation_annotation_immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS news_relation_annotations_no_delete BEFORE DELETE ON news_relation_annotations
+            BEGIN SELECT RAISE(ABORT,'news_relation_annotation_immutable'); END;
         CREATE TABLE IF NOT EXISTS news_analysis_tasks(
             id TEXT PRIMARY KEY, item_id TEXT NOT NULL REFERENCES items(id), event_id TEXT NOT NULL,
             version_id TEXT NOT NULL REFERENCES news_article_versions(id), evidence_package_id TEXT NOT NULL,
@@ -119,6 +129,41 @@ def _version(row):
     return value
 
 
+def equivalent_reading_versions(db, item_id, version_id):
+    """Follow only this selected version's contiguous same-material ancestry.
+
+    Provenance changes commit here before the optional AI alias cache is written.
+    This immutable chain therefore remains the authority after an interrupted
+    cross-database update. Never search other articles or jump a changed version.
+    """
+    selected=db.execute('SELECT * FROM news_article_versions WHERE item_id=? AND id=?',(item_id,version_id)).fetchone()
+    if selected is None:
+        return []
+    content_hash=selected['content_hash']
+    if not isinstance(content_hash,str) or re.fullmatch(r'[0-9a-f]{64}',content_hash) is None:
+        return []
+    result,visited=[],set()
+    row=selected
+    last_number=selected['version_number']+1
+    while row is not None:
+        if (row['id'] in visited or row['item_id']!=item_id or row['content_hash']!=content_hash
+                or row['version_number']>=last_number):
+            break
+        visited.add(row['id'])
+        last_number=row['version_number']
+        result.append({**_version(dict(row)),'current_version_id':row['id'],'content_hash':row['content_hash']})
+        previous=row['previous_version_id']
+        row=db.execute('SELECT * FROM news_article_versions WHERE item_id=? AND id=?',(item_id,previous)).fetchone() if previous else None
+    return result
+
+
+def relation_annotations(db, item_id, as_of=None):
+    cutoff=timestamp(as_of) if as_of is not None else float('inf')
+    return [{**{key:row[key] for key in ('seq','item_id','version_id','event_id','origin_url')},
+             'recorded_at':iso(row['recorded_at']),'confirmation':json.loads(row['confirmation'])}
+            for row in db.execute('SELECT * FROM news_relation_annotations WHERE item_id=? AND recorded_at<=? ORDER BY seq DESC',(item_id,cutoff))]
+
+
 def _association(db, item, evidence, now):
     existing = db.execute("SELECT * FROM news_event_articles WHERE item_id=?", (item["id"],)).fetchone()
     origin = canonical_url(evidence.get("origin_url")) if evidence.get("origin_confirmed") is True else ""
@@ -161,6 +206,20 @@ def record_version(db, item, now, *, evidence=None, metadata=None, migrated=Fals
         # A new RSS revision does not prove a previously read body is current.
         evidence = {"content_status": "excerpt_only" if item.get("excerpt") else "headline_only",
                     "body_text": "", "segments": [], "attachments": [], "extractor_version": "rss-v1"}
+    if old:
+        prior=old.get('evidence') or {}
+        existing_origin=canonical_url(old.get('origin_url'))
+        incoming_origin=canonical_url(evidence.get('origin_url')) if evidence.get('origin_confirmed') is True else ''
+        replacing_origin=bool(incoming_origin and incoming_origin!=existing_origin)
+        if not replacing_origin:
+            # User confirmation is persistent provenance, not source response
+            # text. A parser's fresh evidence cannot silently erase it.
+            latest=db.execute('SELECT origin_url,confirmation FROM news_relation_annotations WHERE item_id=? ORDER BY seq DESC LIMIT 1',(item['id'],)).fetchone()
+            persistent={key:prior[key] for key in ('origin_url','origin_confirmed','relation_confirmation') if key in prior}
+            if latest and latest['origin_url']==existing_origin:
+                persistent.update(origin_url=latest['origin_url'],origin_confirmed=True,relation_confirmation=json.loads(latest['confirmation']))
+            for key,value in persistent.items():
+                evidence.setdefault(key,copy.deepcopy(value))
     state = evidence.get("content_status", evidence.get("status"))
     if state not in CONTENT_STATES:
         raise ValueError("invalid_article_content_status")
@@ -244,17 +303,34 @@ def record_version(db, item, now, *, evidence=None, metadata=None, migrated=Fals
     return _version(dict(db.execute("SELECT * FROM news_article_versions WHERE id=?", (version_id,)).fetchone())), True
 
 
-def save_evidence(db, item, evidence, now):
+def save_evidence(db, item, evidence, now, *, relation_annotation=False, withdrawal_annotation=False):
     evidence = dict(evidence)
     state = evidence.get("content_status", evidence.get("status"))
     if state not in CONTENT_STATES:
         raise ValueError("invalid_article_content_status")
+    if relation_annotation:
+        confirmation=evidence.get('relation_confirmation')
+        if (evidence.get('origin_confirmed') is not True or not canonical_url(evidence.get('origin_url'))
+                or not isinstance(confirmation,dict)):
+            raise ValueError('invalid_relation_annotation')
+        original=db.execute('SELECT snapshot FROM news_article_versions WHERE item_id=? AND id=?',
+                            (confirmation.get('original_item_id'),confirmation.get('original_version_id'))).fetchone()
+        if original is None or confirmation.get('original_item_id')==item['id']:
+            raise ValueError('saved_original_required')
+        original_snapshot=json.loads(original['snapshot'])
+        if canonical_url(original_snapshot.get('origin_url') or original_snapshot.get('url'))!=canonical_url(evidence['origin_url']):
+            raise ValueError('relation_origin_mismatch')
     # Every attempt is retained; a transient failure never replaces saved text.
     receipt = {key: evidence.get(key) for key in ("content_status", "status", "http_status", "error_code", "error", "fetched_at", "canonical_url")}
-    db.execute("INSERT INTO news_article_fetches(item_id,fetched,receipt) VALUES(?,?,?)", (item["id"],now,_json(receipt)))
+    if not relation_annotation and not withdrawal_annotation:
+        db.execute("INSERT INTO news_article_fetches(item_id,fetched,receipt) VALUES(?,?,?)", (item["id"],now,_json(receipt)))
     if state in {"fetch_failed", "access_restricted"}:
         return None, False
-    return record_version(db, item, now, evidence=evidence)
+    version,changed=record_version(db, item, now, evidence=evidence)
+    if relation_annotation:
+        db.execute('INSERT INTO news_relation_annotations(item_id,version_id,recorded_at,event_id,origin_url,confirmation) VALUES(?,?,?,?,?,?)',
+                   (item['id'],version['id'],now,version['event_id'],canonical_url(evidence['origin_url']),_json(confirmation)))
+    return version,changed
 
 
 def versions(db, item_id, as_of=None):
@@ -392,12 +468,14 @@ def detail(db, item_id, as_of=None):
     observations = [{'observed_at':iso(row['observed_at']),**json.loads(row['record'])} for row in db.execute(
         'SELECT observed_at,record FROM news_article_observations WHERE item_id=? AND observed_at<=? ORDER BY seq DESC',
         (item_id,timestamp(as_of) if as_of is not None else float('inf')))]
+    annotations=relation_annotations(db,item_id,as_of)
     return {"event_id":current["event_id"], "current_version":current, "version_count":len(history), "versions":history,
             "sources":list(members.values()), "independent_evidence_count":len({m["origin_url"] or m["item_id"] for m in members.values()}),
             "requires_review":withdrawn or any(c["field"] in {"excerpt", "body_text"} for c in current["changes"]),
             "retracted":withdrawn, "queue":queue_summary(db,current["event_id"]) if as_of is None else None,
             "last_fetch_attempt":json.loads(last_fetch["receipt"]) if last_fetch else None,
             "observations":observations,
+            "relation_annotations":annotations,"latest_relation_annotation":annotations[0] if annotations else None,
             "historical_as_of": iso(timestamp(as_of)) if as_of is not None else None}
 
 

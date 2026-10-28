@@ -12,7 +12,7 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
 from .news_sources import allowed_url, canonical_url, fetch_official, source_definition
-from .news_feed_transport import FeedValidationError
+from .news_feed_transport import FeedValidationError, failure_retry_after
 
 EXTRACTOR_VERSION = 'official-html-segments-v1'
 MAX_ARTICLE_BYTES = 2 * 1024 * 1024
@@ -267,6 +267,10 @@ def read_article(item, *, transport=None, now=None, include_attachments=False, s
     evidence['http_status'] = response.status
     attempts = 0
     for attachment in evidence['attachments']:
+        if evidence.get('source_restriction'):
+            if attachment['status'] == 'not_read':
+                attachment['reason'] = 'source_wait_after_attachment_failure'
+            continue
         if not include_attachments or attachment['status'] != 'not_read':
             continue
         if attempts >= MAX_ATTACHMENTS_READ:
@@ -279,9 +283,20 @@ def read_article(item, *, transport=None, now=None, include_attachments=False, s
             result = extract_article(attached.body, attachment['url'], source_id,
                                      content_type=attached_headers.get('content-type', 'text/html'), now=now)
             attachment.update(status=result['content_status'], read=result['content_status'] in {'full_text', 'partial_text'}, evidence=result)
-        except urllib.error.HTTPError:
-            # A source restriction applies to all its tasks, including attachments.
-            raise
+            if result['content_status'] == 'access_restricted':
+                evidence['source_restriction'] = {'http_status': attached.status, 'retry': {},
+                                                  'restricted': True, 'origin': 'attachment'}
+        except urllib.error.HTTPError as error:
+            # Preserve the successful body and earlier attachments. Carry the
+            # source-wide wait separately, before another attachment can start.
+            retry = failure_retry_after(error.headers, getattr(error, 'news_diagnostics', None), now)
+            limited = error.code in {403, 429}
+            attachment.update(status='access_restricted' if limited else 'fetch_failed', read=False,
+                              http_status=error.code, reason='attachment_http_error')
+            if limited or retry.get('status') == 'valid' or retry.get('manual_hold'):
+                evidence['source_restriction'] = {'http_status': error.code, 'retry': retry,
+                                                  'restricted': False, 'origin': 'attachment'}
+            error.close()
         except (ValueError, TimeoutError, OSError, FeedValidationError):
             attachment.update(status='fetch_failed', reason='attachment_read_failed')
     evidence['attachment_scope'] = 'some_read' if any(a['read'] for a in evidence['attachments']) else 'not_read'

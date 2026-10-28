@@ -24,10 +24,19 @@ def prepare(news, store, item_id, *, room_id=None, round_id=None, material_refs=
     identity['material_refs'] = [{'id':key,'version':version} for key,version in sorted(references)]
     evidence_identity=[item['event']['event_id'],item['evidence_package_id']]
     context_id = hashlib.sha256(_json([evidence_identity,identity]).encode()).hexdigest()
+    equivalent=news.equivalent_reading_versions(item_id,item['current_version_id']) if hasattr(news,'equivalent_reading_versions') else []
+    compatible_ids={context_id}
+    for version in equivalent:
+        compatible_ids.add(hashlib.sha256(_json([[version['event_id'],version['evidence_package_id']],identity]).encode()).hexdigest())
     with news._db() as db:
         db.execute('''CREATE TABLE IF NOT EXISTS news_market_contexts(
             id TEXT PRIMARY KEY,item_id TEXT NOT NULL,version_id TEXT NOT NULL,created REAL NOT NULL,
             context TEXT NOT NULL,item_snapshot TEXT NOT NULL)''')
+        marks=','.join('?' for _ in compatible_ids)
+        existing=db.execute('SELECT id,context FROM news_market_contexts WHERE id IN ('+marks+') ORDER BY created,id LIMIT 1',tuple(compatible_ids)).fetchone()
+        if existing:
+            value=json.loads(existing['context'])
+            return {**value,'evidence_context_id':value['context_id'],'context_id':existing['id']}
         db.execute('INSERT OR IGNORE INTO news_market_contexts VALUES(?,?,?,?,?,?)',
                    (context_id,item_id,item['current_version_id'],news.clock(),_json(context),_json(item)))
         stored=db.execute('SELECT context FROM news_market_contexts WHERE id=?',(context_id,)).fetchone()
@@ -48,9 +57,23 @@ def get(news, item_id, context_id=None):
             item = news.get_item(item_id)
             if not item:
                 return None
-            row = db.execute("SELECT * FROM news_market_contexts WHERE json_extract(item_snapshot,'$.evidence_package_id')=? ORDER BY created DESC,id DESC LIMIT 1",
-                             (item.get('evidence_package_id'),)).fetchone()
+            equivalent=news.equivalent_reading_versions(item_id,item['current_version_id']) if hasattr(news,'equivalent_reading_versions') else []
+            ids=[v['id'] for v in equivalent]
+            clause=' OR (item_id=? AND version_id IN ('+','.join('?' for _ in ids)+'))' if ids else ''
+            args=(item.get('evidence_package_id'),item_id,*ids) if ids else (item.get('evidence_package_id'),)
+            row = db.execute("SELECT * FROM news_market_contexts WHERE json_extract(item_snapshot,'$.evidence_package_id')=?"+clause+" ORDER BY created DESC,id DESC LIMIT 1",args).fetchone()
     return {**dict(row),'context':json.loads(row['context']),'item':json.loads(row['item_snapshot'])} if row else None
+
+
+def belongs_to_current_evidence(news,saved,item_id):
+    current=news.get_item(item_id)
+    if not current:
+        return False
+    if saved['item'].get('evidence_package_id')==current.get('evidence_package_id'):
+        return True
+    if saved['item_id']!=item_id or not hasattr(news,'equivalent_reading_versions'):
+        return False
+    return any(version['id']==saved['version_id'] for version in news.equivalent_reading_versions(item_id,current['current_version_id']))
 
 
 def fingerprint(context_id):

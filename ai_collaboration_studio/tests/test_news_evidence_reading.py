@@ -181,6 +181,70 @@ class EvidenceReadingTests(unittest.TestCase):
         self.assertEqual(self.ai.request(self.item_id)['status'],'needs_review')
         self.assertEqual(self.calls,[])
 
+    def test_attachment_restriction_preserves_read_body_and_honors_shared_wait(self):
+        body=b'<article><p>A synthetic official body with important conditions already read.</p><a href="/financial-table.html">Financial table</a><a href="/another-table.html">Financial table two</a></article>'
+        requests=[]
+        def transport(url,*args):
+            requests.append(url)
+            return FeedResponse(429,headers={'Retry-After':'1800'}) if url.endswith('financial-table.html') else FeedResponse(200,body,{'content-type':'text/html'})
+        self.news.article_transport=transport
+        item=self.news.read_article(self.item_id,include_attachments=True)
+        self.assertEqual(item['evidence']['content_status'],'full_text')
+        self.assertIn('conditions already read',item['evidence']['body_text'])
+        self.assertEqual(item['evidence']['attachments'][0]['status'],'access_restricted')
+        self.assertFalse(item['evidence']['attachments'][0]['read'])
+        self.assertEqual(len(requests),2)
+        source=next(row for row in self.news.overview()['sources'] if row['id']=='fed')
+        self.assertTrue(source['cooldown_active'])
+        with self.assertRaisesRegex(ValueError,'cooldown'):
+            self.news.read_article(self.item_id)
+        self.assertEqual(len(requests),2)
+
+    def test_relation_interruption_and_restart_never_recharge_equivalent_body(self):
+        from backend.news_event_actions import confirm_relation
+        self.news.ai=self.ai
+        self.news.save_article_evidence(self.item_id,self.evidence())
+        self.ai.configure('PUBLIC_FAKE_TEST_ONLY',False,True)
+        self.ai._analyze(self.item_id)
+        original=self.news.get_item(self.item_id)
+        original_key=self.ai._version_fingerprint(original)
+        self.news.transport=lambda *args:FeedResponse(200,b'<rss><channel><item><guid>origin1</guid><title>Original one</title><link>https://www.federalreserve.gov/origin1.htm</link><description>A separate saved original announcement.</description></item><item><guid>origin2</guid><title>Original two</title><link>https://www.federalreserve.gov/origin2.htm</link><description>Another separately saved original announcement.</description></item></channel></rss>')
+        self.fetch()
+        origins=[row for row in self.news.list_items()['items'] if row['id']!=self.item_id]
+        with patch.object(self.ai,'retain_equivalent_reading',side_effect=RuntimeError('interrupted_between_databases')):
+            with self.assertRaises(RuntimeError):
+                confirm_relation(self.news,self.item_id,origins[0]['id'])
+        generator=self.ai._generate
+        self.ai.stop()
+        self.ai=NewsAnalysis(Path(self.temp.name)/'ai.db',self.news,generate=generator)
+        self.addCleanup(self.ai.stop)
+        self.news.ai=self.ai
+        self.ai.configure('PUBLIC_FAKE_TEST_ONLY',False,True)
+        confirm_relation(self.news,self.item_id,origins[1]['id'])
+        for terminal in ('completed','unknown','failed'):
+            with self.subTest(status=terminal):
+                with self.ai._db() as db:
+                    db.execute('UPDATE runs SET status=? WHERE fingerprint=?',(terminal,original_key))
+                self.assertEqual(self.ai.request(self.item_id)['status'],terminal)
+                self.ai._analyze(self.item_id)
+                self.assertEqual(len(self.calls),1)
+                self.assertEqual(self.ai.status()['calls_reserved'],1)
+
+    def test_market_relation_confirmation_reuses_same_context_and_result(self):
+        from backend.news_event_actions import confirm_relation
+        self.test_market_task_uses_shared_budget_and_same_binding_does_not_recharge()
+        prior=self.ai.market_context(self.news.get_item(self.item_id))
+        self.news.ai=self.ai
+        self.news.transport=lambda *args:FeedResponse(200,b'<rss><channel><item><guid>origin</guid><title>Saved original</title><link>https://www.federalreserve.gov/origin.htm</link><description>A saved synthetic original announcement.</description></item></channel></rss>')
+        self.fetch()
+        origin=next(row for row in self.news.list_items()['items'] if row['id']!=self.item_id)
+        confirm_relation(self.news,self.item_id,origin['id'])
+        after=self.ai.prepare_market_context(self.item_id)
+        self.assertEqual(after['context_id'],prior['context_id'])
+        self.assertEqual(self.ai.market_result(self.news.get_item(self.item_id))['status'],'completed')
+        self.assertEqual(self.ai.request_market(self.item_id,after['context_id'])['status'],'completed')
+        self.assertEqual(len(self.calls),1)
+
 
 if __name__ == '__main__':
     unittest.main()

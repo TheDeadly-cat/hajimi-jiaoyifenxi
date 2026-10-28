@@ -254,6 +254,18 @@ class NewsAnalysis:
             row = db.execute("SELECT status,result FROM runs WHERE fingerprint=?", (version_key,)).fetchone()
             if row is None:
                 row=db.execute('SELECT r.status,r.result FROM reading_identity_aliases a JOIN runs r ON r.fingerprint=a.target WHERE a.alias=?',(version_key,)).fetchone()
+            if row is None and hasattr(self.news,'equivalent_reading_versions'):
+                # The immutable news history is authoritative across the gap
+                # between its commit and the optional AI alias-cache write.
+                # This walk stops as soon as actual material/scope changes.
+                for version in self.news.equivalent_reading_versions(item['id'],item['current_version_id']):
+                    previous_key=self._version_fingerprint({'current_version_id':version['id'],
+                        'evidence_package_id':version['evidence_package_id'],'event':{'event_id':version['event_id']}})
+                    row=db.execute('SELECT status,result FROM runs WHERE fingerprint=?',(previous_key,)).fetchone()
+                    if row is None:
+                        row=db.execute('SELECT r.status,r.result FROM reading_identity_aliases a JOIN runs r ON r.fingerprint=a.target WHERE a.alias=?',(previous_key,)).fetchone()
+                    if row:
+                        break
             if row:
                 return {**json.loads(row['result']), 'status': row['status']}
             # A newly fetched body is a distinct evidence package; keep the
@@ -391,7 +403,7 @@ class NewsAnalysis:
 
     def request_market(self,item_id,context_id):
         saved=market_tasks.get(self.news,item_id,context_id)
-        if not saved or saved['item'].get('evidence_package_id') != (self.news.get_item(item_id) or {}).get('evidence_package_id'):
+        if not saved or not market_tasks.belongs_to_current_evidence(self.news,saved,item_id):
             raise ValueError('market_context_missing_or_version_changed')
         existing=self.market_result(saved['item'],context_id)
         if existing and existing.get('status') not in {'queued'}:

@@ -17,7 +17,7 @@ def confirm_relation(news,item_id,origin_item_id):
                     origin_confirmed=True,
                     relation_confirmation={'basis':'user_confirmed_same_original','original_item_id':origin_item_id,
                        'original_version_id':origin['current_version_id'],'independently_verified':False})
-    updated=news.save_article_evidence(item_id,evidence)
+    updated=news.save_article_evidence(item_id,evidence,relation_annotation=True)
     ai=getattr(news,'ai',None)
     if ai:
         ai.retain_equivalent_reading(before,updated)
@@ -39,4 +39,4 @@ def confirm_withdrawal(news,item_id,evidence_item_id,quote):
        withdrawal_evidence={'item_id':evidence_item_id,'version_id':source['current_version_id'],
                             'url':source['url'],'quote':quote,'basis':'user_confirmed_publisher_notice',
                             'independently_verified':False})
-    return news.save_article_evidence(item_id,evidence)
+    return news.save_article_evidence(item_id,evidence,withdrawal_annotation=True)

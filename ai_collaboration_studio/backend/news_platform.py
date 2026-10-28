@@ -839,12 +839,17 @@ class NewsPlatform:
         with self._db() as db:
             return event_store.versions(db,item_id)
 
-    def save_article_evidence(self, item_id, evidence):
+    def equivalent_reading_versions(self, item_id, version_id):
+        with self._db() as db:
+            return event_store.equivalent_reading_versions(db,item_id,version_id)
+
+    def save_article_evidence(self, item_id, evidence, *, relation_annotation=False, withdrawal_annotation=False):
         with self._db() as db:
             row = db.execute('SELECT * FROM items WHERE id=?',(item_id,)).fetchone()
             if row is None:
                 raise ValueError('news_item_not_found')
-            event_store.save_evidence(db,dict(row),evidence,self.clock())
+            event_store.save_evidence(db,dict(row),evidence,self.clock(),relation_annotation=relation_annotation,
+                                      withdrawal_annotation=withdrawal_annotation)
         return self.get_item(item_id)
 
     def pending_analysis_tasks(self, limit=100, offset=0, after=None):
@@ -1025,6 +1030,10 @@ class NewsPlatform:
                                     include_attachments=include_attachments,sec_user_agent=self.sec_user_agent)
             if evidence.get('content_status') == 'access_restricted':
                 self._article_source_wait(source['id'],evidence.get('http_status'),{},self.clock(),restricted=True)
+            restriction=evidence.get('source_restriction')
+            if restriction:
+                self._article_source_wait(source['id'],restriction.get('http_status'),restriction.get('retry') or {},
+                                          self.clock(),restricted=restriction.get('restricted',False))
             return self.save_article_evidence(item_id,evidence)
         except Exception as exc:
             status = exc.code if isinstance(exc,urllib.error.HTTPError) else None
