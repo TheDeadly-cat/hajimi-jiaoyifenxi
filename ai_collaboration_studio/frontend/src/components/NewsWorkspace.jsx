@@ -6,6 +6,7 @@ import { MaterialQuality, AnalysisEvidence, AnalysisReview, analysisStateLabel }
 import { runtimeHelp, sourceDisplayName, sourceGuidance } from "../newsBeginnerGuidance";
 import { NewsEventCard, NewsQueueSummary, NewsQualitySummary } from "./NewsEventCard";
 import { NewsMarketContext } from "./NewsMarketContext";
+import { NewsMarketReplay } from "./NewsMarketReplay";
 
 const PAGE_SIZE = 100;
 const AI_MODELS = [
@@ -23,15 +24,15 @@ function savedModelLabel(entry) {
   if (!entry?.provider && !entry?.model) return "来源未记录";
   return [entry.provider, entry.model].filter(Boolean).map((value) => String(value).slice(0, 100)).join(" · ");
 }
-const tabs = [{ id: "latest", label: "最新消息" }, { id: "attention", label: "值得关注" }, { id: "unread", label: "未读" }];
+const tabs = [{ id: "latest", label: "消息记录" }, { id: "attention", label: "值得关注" }, { id: "unread", label: "未读" }];
 const sourceStates = { never: "尚未检查", ok: "最近一次检查成功", error: "抓取异常", fetching: "正在抓取", interrupted_unknown: "上次检查中断，结果未确认" };
 const checkOutcomes = { started: "检查中", success: "检查成功", not_modified: "来源未更新", failed: "检查失败", interrupted_unknown: "中断，结果未确认" };
 const gapLabels = { unclean_restart: "上次退出未确认", clean_restart: "正常停机后恢复", heartbeat_gap: "心跳记录存在缺口", monitor_paused: "曾暂停抓取", clock_changed: "系统时间发生变化" };
 const timeFormatter = new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 const deadlineFormatter = new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
-function timeLabel(value, empty = "暂无记录") {
+function timeLabel(value, empty = "暂无记录", includeYear = false) {
   const parsed = value ? new Date(value) : null;
-  return parsed && Number.isFinite(parsed.getTime()) ? timeFormatter.format(parsed) : empty;
+  return parsed && Number.isFinite(parsed.getTime()) ? (includeYear ? deadlineFormatter : timeFormatter).format(parsed) : empty;
 }
 function deadlineLabel(value) {
   const parsed = value ? new Date(value) : null;
@@ -48,6 +49,46 @@ function overviewFrom(payload) {
 function Loading({ children }) { return <span className="news-loading"><LoaderCircle className="news-spin" size={16} aria-hidden="true" />{children}</span>; }
 function countLabel(value) { return Number.isSafeInteger(value) && value >= 0 ? value : "—"; }
 function checkStatusLabel(value) { return Number.isInteger(value) && value >= 100 && value <= 599 ? `HTTP ${value}` : "未取得 HTTP 状态"; }
+function checkResultLabel(check) {
+  if (check?.outcome === "failed") return `检查失败 · ${checkStatusLabel(check.http_status)}`;
+  if (check?.outcome === "not_modified") return "检查成功，来源未更新";
+  if (check?.outcome !== "success") return checkOutcomes[check?.outcome] || "结果待确认";
+  if (!Number.isSafeInteger(check.parsed_items) || check.parsed_items < 0) return "检查成功（读取条数未记录）";
+  if (check.parsed_items === 0) return "检查成功，本次读取 0 条";
+  return `检查成功，读到 ${check.parsed_items} 条${check.new_items === 0 && check.updated_items === 0 ? "，均无新增或更新" : ""}`;
+}
+function checkBeforeEndpointChange(check, change) {
+  const finished = Date.parse(check?.finished_at), changed = Date.parse(change?.changed_at);
+  return Number.isFinite(finished) && Number.isFinite(changed) && finished < changed;
+}
+function sourceMethodLabel(source) {
+  if (source.discovery_method === "quarterly_directory") return "季度业绩目录";
+  if (source.discovery_method === "rss" || source.source_kind === "rss") return "RSS 订阅";
+  if (source.source_kind === "sec") return "SEC 申报接口";
+  return "入口类型未记录";
+}
+function historyWindowLabel(value) {
+  const labels = { quarterly_directory_snapshot: "当前目录列出的季度历史资料；不证明连续覆盖", feed_window_only: "当前 RSS 订阅窗口；已移除条目的覆盖未知", submissions_files_paged: "可分页读取申报历史；实际已覆盖时段仍需核对" };
+  return Object.hasOwn(labels, value) ? labels[value] : "历史覆盖窗口未确认";
+}
+function sourcePublicationLabel(item, legacyEmpty) {
+  return timeLabel(item.published_at, item.published_time_source !== undefined ? "未注明发布时间" : legacyEmpty, true);
+}
+function ItemProvenance({ item }) {
+  const historical = item.discovery_kind === "historical_backfill";
+  const period = typeof item.reference_period === "string" ? item.reference_period : "";
+  const directoryAttachments = Array.isArray(item.discovery_evidence?.attachment_references) ? item.discovery_evidence.attachment_references.filter(value => value && typeof value === "object") : [];
+  const attachmentNames = { "Earnings presentation": "业绩演示材料", "Prepared remarks": "预备讲话稿", "Form 10-Q / 10K": "年度或季度申报文件" };
+  if (!historical && !period && !directoryAttachments.length && item.published_time_source === undefined && item.automatic_reading_eligible !== false) return null;
+  return <section className="news-item-provenance news-limitations" aria-label="材料发现范围">
+    {historical ? <p><strong>历史资料</strong>：本次新入库不代表公告刚刚发布。</p> : null}
+    {period ? <p>资料所属期间：{period}。所属期间不代替发布时间。</p> : null}
+    {item.discovery_evidence?.title_basis === "directory_label" ? <p>条目名称来自目录期间标签，尚未从正文确认原文标题。</p> : null}
+    {item.published_time_source === "unknown_directory_listing" ? <p>季度目录未注明发布时间；本机发现时间只表示何时保存这份资料。</p> : !item.published_at && item.published_time_source !== undefined ? <p>未注明发布时间；不能用本机发现时间代替来源发布时间。</p> : null}
+    {item.automatic_reading_eligible === false ? <p>此条目不纳入自动正文读取；可按需手动读取已保存的官方链接。</p> : null}
+    {directoryAttachments.length ? <details className="news-directory-attachments"><summary>目录另列的附件（发现时未读） · {directoryAttachments.length} 份</summary><p>这里只列出目录发现时保存的引用；正文取得不表示这些附件已读，正文阅读范围中的附件状态另列。</p><ul>{directoryAttachments.map((attachment, index) => <li key={`${attachment.url}-${index}`}><strong>{Object.hasOwn(attachmentNames, attachment.category) ? attachmentNames[attachment.category] : typeof attachment.category === "string" ? attachment.category : `目录附件 ${index + 1}`}</strong>{typeof attachment.reference_period === "string" ? <p>资料期间：{attachment.reference_period}</p> : null}<p>{attachment.read === false || attachment.status === "not_read" ? "目录发现时未读，尚未取得附件文本。" : "目录引用的读取状态待确认。"}{attachment.registered_host_allowed === false || attachment.allowed === false ? "不在自动来源范围内。" : ""}</p>{safeLink(attachment.url) ? <a href={safeLink(attachment.url)} target="_blank" rel="noopener noreferrer">查看目录记录的附件原链接</a> : <span>附件链接不可用</span>}</li>)}</ul></details> : null}
+  </section>;
+}
 function durationLabel(value) {
   if (!Number.isFinite(value) || value < 0) return "时长未知";
   if (value < 60) return "不足 1 分钟";
@@ -93,21 +134,27 @@ function SourceStatus({ entry, workerStopped, workerUnresponsive, collectionRunn
   const cooling = entry.cooldown_active === true;
   const recovering = entry.recovery_pending === true;
   const restricted = held || cooling || recovering;
-  const guidance = sourceGuidance(entry, { collectionRunning, workerStopped, workerUnresponsive });
+  const change = entry.endpoint_change;
+  const reenable = change?.explicit_reenable_required === true && entry.enabled === false;
+  const guidance = reenable ? { title: "新入口待重新启用", impact: "来源入口已经更换，旧入口失败记录仍保留。", next: "核对新入口和覆盖范围后，点击下方重新启用；原有等待期限继续生效。" } : sourceGuidance(entry, { collectionRunning, workerStopped, workerUnresponsive });
   const contactNeeded = entry.source_kind === "sec" && !secContactConfigured;
-  return <article>
+  const checkBeforeChange = checkBeforeEndpointChange(entry.last_check, change);
+  return <article className="news-source-entry" data-source-id={entry.id}>
     <strong>{sourceDisplayName(entry)}</strong>
     {entry.coverage ? <p>覆盖：{Array.isArray(entry.coverage) ? entry.coverage.join("、") : entry.coverage}</p> : null}
+    {entry.discovery_method || entry.time_semantics || entry.history_capability ? <details className="news-source-capabilities"><summary>入口与覆盖说明</summary><p>发现入口：{sourceMethodLabel(entry)}</p>{safeLink(entry.url) ? <a href={safeLink(entry.url)} target="_blank" rel="noopener noreferrer">查看当前来源入口</a> : null}<p>历史范围：{historyWindowLabel(entry.history_capability)}</p>{entry.time_semantics ? <p>时间含义：{entry.time_semantics}</p> : null}{entry.access_policy ? <p>访问限制：{entry.access_policy}</p> : null}</details> : null}
+    {change ? <details className="news-source-endpoint-change" open><summary>来源入口变更记录</summary><p>入口更换于 {deadlineLabel(change.changed_at)}；更换入口不代表旧 RSS 已恢复，旧检查与失败记录仍保留。</p><p>{safeLink(change.previous_url) ? <a href={safeLink(change.previous_url)} target="_blank" rel="noopener noreferrer">原入口</a> : "原入口未提供"} → {safeLink(change.current_url) ? <a href={safeLink(change.current_url)} target="_blank" rel="noopener noreferrer">当前入口</a> : "当前入口未提供"}</p>{reenable ? <p>新入口尚未获准开始检查，需你明确重新启用。</p> : null}{held ? <p>当前仍需人工核对；重新启用不会解除等待。</p> : null}</details> : null}
     <span className={restricted || entry.status === "error" || entry.status === "interrupted_unknown" || entry.stale || entry.overdue ? "news-source-error" : ""}>{guidance.title}</span>
     <p>{guidance.impact}</p><p className="news-source-next"><b>下一步：</b>{guidance.next}</p>
     {recovering && !held ? <p>恢复观察中 · 连续成功 {countLabel(entry.recovery_successes)} 次。单次成功不代表持续恢复，将逐步恢复检查频率。</p> : null}
     {entry.refresh_queued === true ? <small className="news-source-queue">{held ? "已排队，需先完成人工检查" : cooling ? "已排队，到允许时间再检查" : "检查已排队"}；重复点击不会增加请求。</small> : null}
-    <small>最近成功：{timeLabel(entry.last_success_at)}</small>
-    {entry.enabled !== false && !held && (cooling || recovering) ? <small>下次允许检查：{deadlineLabel(entry.cooldown_until)}</small> : entry.enabled !== false && !held && entry.next_poll_at ? <small>下次常规检查：{timeLabel(entry.next_poll_at)}</small> : null}
+    {entry.last_check ? <p className="news-source-last-check"><strong>{checkBeforeChange ? "更换入口前的检查记录" : "最近保存的检查记录"}：</strong>{checkResultLabel(entry.last_check)}<br />新入库条目 {countLabel(entry.last_check.new_items)} · 更新 {countLabel(entry.last_check.updated_items)} · {timeLabel(entry.last_check.finished_at, "暂无记录", true)}</p> : null}
+    <small>{change ? "当前入口最近成功" : "最近成功"}：{timeLabel(entry.last_success_at)}</small>
+    {(entry.enabled !== false || reenable) && !held && (cooling || recovering) ? <small>下次允许检查：{deadlineLabel(entry.cooldown_until)}</small> : entry.enabled !== false && !held && entry.next_poll_at ? <small>下次常规检查：{timeLabel(entry.next_poll_at)}</small> : null}
     {entry.overdue ? <small>已超过检查时间 {durationLabel(entry.overdue_seconds)}</small> : null}
     {entry.error ? <details className="news-source-diagnostics"><summary>技术详情</summary><p>{String(entry.error).slice(0, 300)}</p><p>这条信息用于排查，不会自动重试来源或模型。</p></details> : null}
     {contactNeeded ? <p>启用前请先填写下方 SEC 联系标识。</p> : null}
-    {entry.can_configure && onConfigure ? <button className="news-button" type="button" disabled={!!pending || (contactNeeded && entry.enabled === false)} onClick={() => onConfigure(entry.id, entry.enabled === false)}>{pending === `source-${entry.id}` ? "正在保存…" : entry.enabled === false ? "启用这个来源" : "暂停这个来源"}</button> : null}
+    {entry.can_configure && onConfigure ? <button className="news-button" type="button" disabled={!!pending || (contactNeeded && entry.enabled === false)} onClick={() => onConfigure(entry.id, entry.enabled === false)}>{pending === `source-${entry.id}` ? "正在保存…" : reenable ? "重新启用目录来源" : entry.enabled === false ? "启用这个来源" : "暂停这个来源"}</button> : null}
   </article>;
 }
 
@@ -158,8 +205,8 @@ function RuntimeHistory({ overview, overviewError, pending, startupError, onStar
       </section>
       <section aria-label="近24小时检查统计">
         <h2>近 24 小时来源检查</h2><p className="news-history-caption">按每个来源的一次检查计数，仅统计已记录的时段。</p>
-        <dl className="news-run-counts"><div><dt>成功</dt><dd>{countLabel(checks?.successful)}</dd></div><div><dt>失败</dt><dd>{countLabel(checks?.failed)}</dd></div><div><dt>中断未确认</dt><dd>{countLabel(checks?.interrupted)}</dd></div><div><dt>新增消息</dt><dd>{countLabel(checks?.new_items)}</dd></div></dl>
-        {records.length ? <ol className="news-check-records" aria-label="最近来源检查">{records.slice(0, 10).map((entry, index) => <li key={`${entry.source_id}-${entry.started_at}-${index}`}><div><strong>{entry.source_name || "来源未标注"}</strong><span className={entry.outcome === "failed" || entry.outcome === "interrupted_unknown" ? "news-source-error" : ""}>{entry.outcome === "started" && (health?.alive === false || health?.status === "unresponsive" || health?.heartbeat_fresh === false) ? "结果待确认" : checkOutcomes[entry.outcome] || "结果待确认"}{entry.outcome === "failed" ? ` · ${checkStatusLabel(entry.http_status)}` : ""}</span></div><div><time dateTime={entry.finished_at || entry.started_at || undefined}>{timeLabel(entry.finished_at || entry.started_at)}</time><span>新增 {countLabel(entry.new_items)} · 更新 {countLabel(entry.updated_items)}</span></div></li>)}</ol> : <p className="news-history-caption">尚无检查记录；点击“立即检查”后会在这里显示结果。</p>}
+        <dl className="news-run-counts"><div><dt>成功</dt><dd>{countLabel(checks?.successful)}</dd></div><div><dt>失败</dt><dd>{countLabel(checks?.failed)}</dd></div><div><dt>中断未确认</dt><dd>{countLabel(checks?.interrupted)}</dd></div><div><dt>新入库条目</dt><dd>{countLabel(checks?.new_items)}</dd></div></dl>
+        {records.length ? <ol className="news-check-records" aria-label="最近来源检查">{records.slice(0, 10).map((entry, index) => <li key={`${entry.source_id}-${entry.started_at}-${index}`}><div><strong>{entry.source_name || "来源未标注"}{checkBeforeEndpointChange(entry, overview?.sources?.find(source => source.id === entry.source_id)?.endpoint_change) ? " · 更换入口前的记录" : ""}</strong><span className={entry.outcome === "failed" || entry.outcome === "interrupted_unknown" ? "news-source-error" : ""}>{entry.outcome === "started" && (health?.alive === false || health?.status === "unresponsive" || health?.heartbeat_fresh === false) ? "结果待确认" : checkResultLabel(entry)}</span></div><div><time dateTime={entry.finished_at || entry.started_at || undefined}>{timeLabel(entry.finished_at || entry.started_at)}</time><span>新入库条目 {countLabel(entry.new_items)} · 更新 {countLabel(entry.updated_items)}</span></div></li>)}</ol> : <p className="news-history-caption">尚无检查记录；点击“立即检查”后会在这里显示结果。</p>}
       </section>
 
     </div>
@@ -211,6 +258,8 @@ export function NewsWorkspace({ onOpenRooms, onPrepareResearch, rooms = [], apiC
   const [detailError, setDetailError] = useState("");
   const [detailRefresh, setDetailRefresh] = useState(0);
   const [viewingHistory, setViewingHistory] = useState(false);
+  const [historyVersion, setHistoryVersion] = useState(null);
+  const handleHistoryChange = useCallback((historical, version = null) => { setViewingHistory(historical); setHistoryVersion(historical ? version : null); }, []);
   const [pending, setPending] = useState("");
   const [notice, setNotice] = useState("");
   const [actionError, setActionError] = useState("");
@@ -528,7 +577,7 @@ export function NewsWorkspace({ onOpenRooms, onPrepareResearch, rooms = [], apiC
       <div><span className="news-eyebrow">AI 共创室 · 消息与研究</span><h1>消息工作台</h1><p>集中看新消息，保留原文，找出值得继续研究的变化。</p></div>
       <button type="button" className="news-button" onClick={onOpenRooms}><MessageSquare size={17} aria-hidden="true" />讨论房间<ArrowUpRight size={15} aria-hidden="true" /></button>
     </header>
-    <p className="news-coverage-scope">{sourceList.length ? <>当前订阅范围：<strong>{sourceList.filter(entry => entry.enabled !== false).map(sourceDisplayName).join("、") || "尚未启用来源"}</strong>。不是全市场监控。{sourceList.some(entry => entry.enabled === false) ? "其他已配置来源可在来源状态中选择启用。" : ""}</> : "正在读取订阅范围；目前不能据此确认来源覆盖。"}</p>
+    <p className="news-coverage-scope">{sourceList.length ? <>当前来源范围：<strong>{sourceList.filter(entry => entry.enabled !== false).map(sourceDisplayName).join("、") || "尚未启用来源"}</strong>。不是全市场监控。{sourceList.some(entry => entry.enabled === false) ? "其他已配置来源可在来源状态中选择启用。" : ""}</> : "正在读取订阅范围；目前不能据此确认来源覆盖。"}</p>
 
     <section className="news-runtime" aria-label="抓取运行状态">
       <div className="news-runtime-primary"><Activity size={20} aria-hidden="true" /><div><strong>{runningLabel}</strong><small>{overviewError ? "等待重新读取后台状态" : workerLabel(overview?.worker_health)} · {ai?.configured ? "AI 按已确认额度使用" : "本机整理 · AI 未启用"}</small></div></div>
@@ -582,13 +631,13 @@ export function NewsWorkspace({ onOpenRooms, onPrepareResearch, rooms = [], apiC
         {listError ? <div className="news-alert" role="alert"><span>{listError}</span><button type="button" className="news-inline-button" onClick={() => void loadItems()}>重试</button></div> : null}
         <div className="news-item-scroll" aria-busy={listLoading}>
           {!items.length && !listLoading && !listError ? <div className="news-empty"><Inbox size={32} aria-hidden="true" /><h2>{settledQuery || source || category || tab !== "latest" ? "没有符合条件的消息" : "还没有抓取到消息"}</h2><p>{settledQuery || source || category || tab !== "latest" ? "换一个筛选条件，或查看最新消息。" : restrictedSources.length ? "请查看来源状态；冷却期间等待允许时间，需要人工核对的来源暂不检查。" : "点击“立即检查”获取官方来源的最新内容，也可以开启持续抓取。"}</p></div> : null}
-          {items.map((item) => <button key={item.id} type="button" className={`news-item${selectedId === item.id ? " selected" : ""}${item.read ? " read" : ""}`} aria-current={selectedId === item.id ? "true" : undefined} onClick={(event) => { selectedTrigger.current = event.currentTarget; setSelectedId(item.id); }}><span className="news-item-meta"><span>{item.source_name}</span><time dateTime={item.published_at || undefined}>{timeLabel(item.published_at, "发布时间未知")}</time></span><strong>{!item.read ? <span className="news-unread-dot"><span className="news-sr-only">未读：</span></span> : null}{item.title}</strong><p>{item.summary || item.excerpt || "打开查看来源详情"}</p><span className="news-item-tags"><span>{item.category_label || "其他"}</span>{item.importance === "attention" ? <span className="news-attention">值得关注</span> : null}<span>本机整理</span></span></button>)}
+          {items.map((item) => <button key={item.id} type="button" className={`news-item${selectedId === item.id ? " selected" : ""}${item.read ? " read" : ""}`} aria-current={selectedId === item.id ? "true" : undefined} onClick={(event) => { selectedTrigger.current = event.currentTarget; setSelectedId(item.id); }}><span className="news-item-meta"><span>{item.source_name}</span><time dateTime={item.published_at || undefined}>{sourcePublicationLabel(item, "发布时间未知")}</time></span><strong>{!item.read ? <span className="news-unread-dot"><span className="news-sr-only">未读：</span></span> : null}{item.title}</strong><p>{item.summary || item.excerpt || "打开查看来源详情"}</p><span className="news-item-tags">{item.discovery_kind === "historical_backfill" ? <span className="news-item-history">历史资料</span> : null}{typeof item.reference_period === "string" && item.reference_period ? <span className="news-item-period">{item.reference_period}</span> : null}<span>{item.category_label || "其他"}</span>{item.importance === "attention" ? <span className="news-attention">值得关注</span> : null}<span>本机整理</span></span></button>)}
           {items.length < total ? <button className="news-load-more news-button" type="button" disabled={listLoading} onClick={() => void loadItems(true)}>{listLoading ? "正在读取…" : "加载更多消息"}</button> : null}
         </div>
       </div>
       <aside className="news-detail" aria-label="消息详情">
         {selectedId ? <div className="news-detail-tools"><button type="button" className="news-inline-button" onClick={closeDetail}><ArrowLeft size={16} aria-hidden="true" />返回列表</button>{detail ? <button type="button" className="news-inline-button" disabled={detail.read || !!pending} onClick={() => void markRead()}><Check size={16} aria-hidden="true" />{pending === "read" ? "正在保存…" : detail.read ? "已读" : "标为已读"}</button> : null}</div> : null}
-        {detailLoading ? <div className="news-detail-loading"><Loading>正在读取消息详情…</Loading></div> : detailError ? <div className="news-empty" role="alert"><h2 ref={detailHeading} tabIndex={-1}>详情暂时不可用</h2><p>{detailError}</p><button className="news-button" type="button" onClick={() => setDetailRefresh((value) => value + 1)}>重新读取</button></div> : detail ? <article className="news-detail-body"><div className="news-detail-source">{detail.source_name}<span>{detail.category_label || "其他"}</span></div><h2 tabIndex={-1} ref={detailHeading}>{viewingHistory ? "历史版本阅读" : detail.title}</h2>{!viewingHistory ? <dl className="news-timestamps"><div><dt>{detail.material_quality?.freshness?.clock_anomaly ? "来源标注时间（未确认）" : detail.material_quality?.freshness?.revision_after_discovery ? "当前版本标注时间" : "原文发布"}</dt><dd>{timeLabel(detail.published_at, "未提供")}</dd></div><div><dt>本机发现</dt><dd>{timeLabel(detail.discovered_at)}</dd></div></dl> : null}{!viewingHistory ? <MaterialQuality quality={detail.material_quality} /> : null}<NewsEventCard key={`event-${detail.id}`} item={detail} apiClient={apiClient} onHistoryChange={setViewingHistory} onUpdated={updated => { if (updated?.id === selectionRef.current) setDetail(updated); void loadItems(); void loadOverview(); }} busy={!!pending} onRead={typeof apiClient.newsReadEvidence === "function" ? readEvidence : undefined} />{!viewingHistory && detail.event ? <NewsMarketContext key={`market-${detail.id}-${detail.current_version_id || "legacy"}`} item={detail} rooms={rooms} apiClient={apiClient} configured={!!ai?.configured} routeLabel={activeModel?.label} busy={!!pending} /> : null}{!viewingHistory ? <><section className="news-analysis"><h3>本机整理要点 <span>未使用 AI</span></h3><p>{detail.summary || "来源没有提供可整理的摘要，请查看原文。"}</p>{detail.keywords?.length ? <div className="news-keywords">{detail.keywords.map((word) => <span key={word}>{word}</span>)}</div> : null}<small>按原文与关键词整理，关注标签不代表事实已核验。</small></section><section className="news-excerpt"><h3>来源摘录</h3><p>{detail.excerpt || "该来源未提供正文摘录。"}</p></section>{detail.limitations?.length ? <section className="news-limitations"><h3>阅读提示</h3><ul>{detail.limitations.filter(entry => !(detail.material_quality?.scope?.kind === "article_evidence" && entry.includes("未抓取或验证全文"))).map((entry, index) => <li key={`${index}-${entry}`}>{entry}</li>)}</ul></section> : null}{originalUrl ? <a className="news-button news-original" href={originalUrl} target="_blank" rel="noopener noreferrer">打开官方原文<ArrowUpRight size={17} aria-hidden="true" /></a> : <p>原文链接不可用。</p>}</> : null}{!viewingHistory ? <AIReading key={detail.id} analysis={detail.ai_analysis} materialQuality={detail.material_quality} source={detail} originalUrl={originalUrl} configured={!!ai?.configured && !!activeModel} routeLabel={ai?.configured ? activeModel?.label || "当前路线待确认" : selectedModel?.label || "AI"} automatic={ai?.automatic === true} busy={aiBusy} onAnalyze={() => void aiAction("analyze")} onSetup={openAISetup} /> : <p className="news-event-warning">历史版本阅读中；返回当前版本后可查看当前 AI 记录或创建研究草稿。</p>}{!viewingHistory && typeof onPrepareResearch === "function" ? <section className="news-research-handoff" aria-label="带到讨论房间"><h3>继续研究这条消息</h3><p>将当前版本的已保存证据、来源与缺失项带入房间共享资料，核对后再保存；此操作不会调用 AI。</p>{!researchOpen ? <button ref={researchTrigger} className="news-button" type="button" onClick={() => { setResearchRoomId(""); setResearchError(""); setResearchOpen(true); }}><MessageSquare size={16} aria-hidden="true" />带到讨论房间</button> : <div className="news-research-picker"><label><span>选择接收资料的房间</span><select ref={researchRoomSelect} aria-label="选择接收资料的房间" value={researchRoomId} disabled={researchBusy} onChange={(event) => setResearchRoomId(event.target.value)}><option value="">请选择房间</option>{rooms.filter((entry) => entry?.id && entry?.title).map((entry) => <option key={entry.id} value={entry.id}>{entry.title}</option>)}</select></label>{!rooms.length ? <p>还没有讨论房间。可先通过页面上方“讨论房间”创建，再回来添加这条消息。</p> : null}<div className="news-research-actions"><button className="news-button news-button-primary" type="button" disabled={!researchRoomId || researchBusy} onClick={() => void prepareResearch()}>{researchBusy ? "正在打开房间…" : "打开资料草稿"}</button><button className="news-button" type="button" onClick={cancelResearch}>取消交接</button></div>{researchError ? <p className="news-source-error" role="alert">{researchError}</p> : null}</div>}</section> : <p className="news-ai-note">需要综合多条消息研判，可进入讨论房间继续研究。</p>}</article> : <div className="news-empty news-detail-empty"><Search size={32} aria-hidden="true" /><h2>选择一条消息开始阅读</h2><p>这里会展示来源摘录、整理要点和原文入口。</p><span><Clock3 size={15} aria-hidden="true" />发布时间与发现时间分别记录</span></div>}
+        {detailLoading ? <div className="news-detail-loading"><Loading>正在读取消息详情…</Loading></div> : detailError ? <div className="news-empty" role="alert"><h2 ref={detailHeading} tabIndex={-1}>详情暂时不可用</h2><p>{detailError}</p><button className="news-button" type="button" onClick={() => setDetailRefresh((value) => value + 1)}>重新读取</button></div> : detail ? <article className="news-detail-body"><div className="news-detail-source">{detail.source_name}<span>{detail.category_label || "其他"}</span></div><h2 tabIndex={-1} ref={detailHeading}>{viewingHistory ? "历史版本阅读" : detail.title}</h2>{!viewingHistory ? <dl className="news-timestamps"><div><dt>{detail.material_quality?.freshness?.clock_anomaly ? "来源标注时间（未确认）" : detail.material_quality?.freshness?.revision_after_discovery ? "当前版本标注时间" : "原文发布"}</dt><dd>{sourcePublicationLabel(detail, "未提供")}</dd></div><div><dt>本机发现</dt><dd>{timeLabel(detail.discovered_at, "暂无记录", true)}</dd></div></dl> : null}{!viewingHistory ? <><ItemProvenance item={detail} /><MaterialQuality quality={detail.material_quality} /></> : null}<NewsEventCard key={`event-${detail.id}`} item={detail} apiClient={apiClient} onHistoryChange={handleHistoryChange} onUpdated={updated => { if (updated?.id === selectionRef.current) setDetail(updated); void loadItems(); void loadOverview(); }} busy={!!pending} onRead={typeof apiClient.newsReadEvidence === "function" ? readEvidence : undefined} />{detail.event?.current_version && (!viewingHistory || historyVersion) ? <NewsMarketReplay key={`replay-${detail.id}-${viewingHistory ? historyVersion.id : detail.event.current_version.id}`} item={detail} version={viewingHistory ? historyVersion : detail.event.current_version} rooms={rooms} apiClient={apiClient} configured={!!ai?.configured} routeLabel={activeModel?.label} busy={!!pending} initiallyOpen={viewingHistory} /> : null}{!viewingHistory && detail.event ? <NewsMarketContext key={`market-${detail.id}-${detail.current_version_id || "legacy"}`} item={detail} rooms={rooms} apiClient={apiClient} configured={!!ai?.configured} routeLabel={activeModel?.label} busy={!!pending} /> : null}{!viewingHistory ? <><section className="news-analysis"><h3>本机整理要点 <span>未使用 AI</span></h3><p>{detail.summary || "来源没有提供可整理的摘要，请查看原文。"}</p>{detail.keywords?.length ? <div className="news-keywords">{detail.keywords.map((word) => <span key={word}>{word}</span>)}</div> : null}<small>按原文与关键词整理，关注标签不代表事实已核验。</small></section><section className="news-excerpt"><h3>来源摘录</h3><p>{detail.excerpt || "该来源未提供正文摘录。"}</p></section>{detail.limitations?.length ? <section className="news-limitations"><h3>阅读提示</h3><ul>{detail.limitations.filter(entry => !(detail.material_quality?.scope?.kind === "article_evidence" && entry.includes("未抓取或验证全文"))).map((entry, index) => <li key={`${index}-${entry}`}>{entry}</li>)}</ul></section> : null}{originalUrl ? <a className="news-button news-original" href={originalUrl} target="_blank" rel="noopener noreferrer">打开官方原文<ArrowUpRight size={17} aria-hidden="true" /></a> : <p>原文链接不可用。</p>}</> : null}{!viewingHistory ? <AIReading key={detail.id} analysis={detail.ai_analysis} materialQuality={detail.material_quality} source={detail} originalUrl={originalUrl} configured={!!ai?.configured && !!activeModel} routeLabel={ai?.configured ? activeModel?.label || "当前路线待确认" : selectedModel?.label || "AI"} automatic={ai?.automatic === true} busy={aiBusy} onAnalyze={() => void aiAction("analyze")} onSetup={openAISetup} /> : <p className="news-event-warning">历史版本阅读中；返回当前版本后可查看当前 AI 记录或创建研究草稿。</p>}{!viewingHistory && typeof onPrepareResearch === "function" ? <section className="news-research-handoff" aria-label="带到讨论房间"><h3>继续研究这条消息</h3><p>将当前版本的已保存证据、来源与缺失项带入房间共享资料，核对后再保存；此操作不会调用 AI。</p>{!researchOpen ? <button ref={researchTrigger} className="news-button" type="button" onClick={() => { setResearchRoomId(""); setResearchError(""); setResearchOpen(true); }}><MessageSquare size={16} aria-hidden="true" />带到讨论房间</button> : <div className="news-research-picker"><label><span>选择接收资料的房间</span><select ref={researchRoomSelect} aria-label="选择接收资料的房间" value={researchRoomId} disabled={researchBusy} onChange={(event) => setResearchRoomId(event.target.value)}><option value="">请选择房间</option>{rooms.filter((entry) => entry?.id && entry?.title).map((entry) => <option key={entry.id} value={entry.id}>{entry.title}</option>)}</select></label>{!rooms.length ? <p>还没有讨论房间。可先通过页面上方“讨论房间”创建，再回来添加这条消息。</p> : null}<div className="news-research-actions"><button className="news-button news-button-primary" type="button" disabled={!researchRoomId || researchBusy} onClick={() => void prepareResearch()}>{researchBusy ? "正在打开房间…" : "打开资料草稿"}</button><button className="news-button" type="button" onClick={cancelResearch}>取消交接</button></div>{researchError ? <p className="news-source-error" role="alert">{researchError}</p> : null}</div>}</section> : <p className="news-ai-note">需要综合多条消息研判，可进入讨论房间继续研究。</p>}</article> : <div className="news-empty news-detail-empty"><Search size={32} aria-hidden="true" /><h2>选择一条消息开始阅读</h2><p>这里会展示来源摘录、整理要点和原文入口。</p><span><Clock3 size={15} aria-hidden="true" />发布时间与发现时间分别记录</span></div>}
       </aside>
     </section>
   </main>;

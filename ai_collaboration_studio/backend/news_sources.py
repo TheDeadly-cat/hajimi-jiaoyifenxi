@@ -22,6 +22,7 @@ def source_registry():
     result = []
     for item in SOURCES:
         result.append({**item, 'kind': 'rss', 'source_kind': 'rss', 'enabled_default': True,
+                       'discovery_method': 'rss',
                        'symbols': ['US.STX'] if item['id'] == 'seagate' else [],
                        'hosts': [urlsplit(item['url']).hostname], 'poll_interval': 900,
                        'coverage': '官方机构订阅' if item['id'] != 'seagate' else '希捷官方公司公告',
@@ -30,14 +31,22 @@ def source_registry():
                        'history_capability': 'feed_window_only', 'continuous_coverage': False})
     for symbol, config in IR_FEEDS.items():
         if symbol != 'US.STX':
+            discovery = config.get('news_discovery') or {}
+            directory = discovery.get('kind') == 'micron_directory'
             result.append({'id': 'ir_' + symbol[3:].lower(), 'name': config['publisher'],
-                           'url': config['url'], 'kind': 'rss', 'source_kind': 'company_ir',
+                           'url': discovery.get('url', config['url']), 'kind': discovery.get('kind', 'rss'), 'source_kind': 'company_ir',
+                           'discovery_method': 'rss',
                            'symbols': [symbol], 'hosts': sorted(config['hosts']),
                            'enabled_default': False, 'poll_interval': 900,
                            'coverage': symbol + ' 官方 IR 公告与已链接材料',
                            'time_semantics': 'RSS 原始发布时间与来源修订时间分别保存',
                            'access_policy': '固定 HTTPS；继承来源等待期限；附件单独读取',
                            'history_capability': 'feed_window_only', 'continuous_coverage': False})
+            if directory:
+                result[-1].update(name=discovery['name'], discovery_method='quarterly_directory',
+                    coverage=symbol+' 官方季度业绩目录；公告与附件链接，正文及附件另读',
+                    time_semantics='目录仅提供财政年与季度；发布时间未知，不按发现时间标为最新公告',
+                    history_capability='quarterly_directory_snapshot')
         result.append({'id': 'sec_' + symbol[3:].lower(), 'name': symbol[3:] + ' SEC 申报',
                        'url': 'https://data.sec.gov/submissions/', 'kind': 'sec', 'source_kind': 'sec',
                        'symbols': [symbol], 'hosts': ['www.sec.gov', 'data.sec.gov'],
@@ -167,6 +176,38 @@ def discover(source, *, transport=None, headers=None, timeout=12, max_bytes=2 * 
             raise error
         return response
 
+    if definition['kind'] == 'micron_directory':
+        response = get(definition['url'], headers)
+        if response.status == 304:
+            return {'response':response, 'entries':None}
+        from .news_micron_directory import parse_micron_directory, MicronDirectoryError
+        try:
+            directory = parse_micron_directory(response.body, directory_url=definition['url'], observed_at=now, max_bytes=max_bytes)
+        except MicronDirectoryError:
+            # The caller records the successful HTTP response and failed parse
+            # separately; a changed/blocked HTML page cannot become empty success.
+            return {'response':response, 'entries':[], 'parse_error':'invalid_feed'}
+        old_state = history_state if isinstance(history_state,dict) else {}
+        baseline = old_state.get('baseline_identities') if (old_state.get('schema')=='micron_directory_state_v1'
+                    and old_state.get('directory_url')==definition['url']) else None
+        first = not isinstance(baseline,list)
+        if first:baseline=[row['identity'] for row in directory['announcements']]
+        entries=[]
+        for row in directory['announcements']:
+            historical=first or row['identity'] in baseline
+            references=[attachment for attachment in directory['attachments']
+                        if attachment.get('fiscal_year',attachment.get('year'))==row['fiscal_year'] and attachment['quarter']==row['quarter']]
+            provenance={key:row.get(key) for key in ('directory_sha256','json_path','reference_period','title_basis','observed_url')}
+            provenance.update(schema=directory['schema'],directory_url=directory['directory_url'],attachment_references=references)
+            entries.append({**row,'id':hashlib.sha256((source['id']+'\n'+row['identity']).encode()).hexdigest(),
+                            'excerpt':'','symbols':['US.MU'],'source_updated_at':None,'published':None,
+                            'published_time_source':'unknown_directory_listing','discovery_evidence':provenance,
+                            'discovery_kind':'historical_backfill' if historical else 'directory_change',
+                            'automatic_reading_eligible':not historical})
+        state={'schema':'micron_directory_state_v1','directory_url':definition['url'],
+               'baseline_identities':baseline,'last_snapshot':{key:directory[key] for key in
+                   ('directory_sha256','observed_at','coverage','counts','rejected_announcements','attachments')}}
+        return {'response':response,'entries':entries,'history_state':state}
     if definition['kind'] != 'sec':
         return {'response': get(definition['url'], headers), 'entries': None}
     if not _declared_agent(sec_user_agent):

@@ -24,6 +24,11 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
         return {**item, "material_quality": inspect_material(item)}
     def detail(item):
         item = reading(item)
+        if item is not None:
+            from .news_evidence_preview import evidence_preview
+            preview = evidence_preview(item)
+            if preview is not None:
+                item['evidence_preview'] = preview
         if item is not None and ai is not None:
             item["ai_analysis"] = ai.result(item)
             if callable(getattr(ai, "market_context", None)):
@@ -35,7 +40,11 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
         return item
     try:
         if method == "GET":
-            allowed = {"q", "source", "category", "unread", "importance", "limit", "offset"} if path == "/api/news/items" else {"room_id"} if path == "/api/news/market/options" else set()
+            replay_match=re.fullmatch(r"/api/news/items/([a-zA-Z0-9_-]{1,128})/market/replays",path)
+            saved_context_match=re.fullmatch(r"/api/news/items/([a-zA-Z0-9_-]{1,128})/market/context",path)
+            allowed = ({"q", "source", "category", "unread", "importance", "limit", "offset"} if path == "/api/news/items" else
+                       {"room_id","as_of","limit","offset"} if path == "/api/news/market/options" else
+                       {"version_id","limit","offset"} if replay_match else {"context_id"} if saved_context_match else set())
             if set(query) - allowed or any(len(v) != 1 for v in query.values()):
                 raise ValueError("不支持的查询参数")
             if path == "/api/news/overview":
@@ -44,6 +53,25 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
                 return {"ok": True, "ai": ai.status()}, 200
             if path == "/api/news/startup" and startup is not None:
                 return {"ok": True, "startup": startup.status()}, 200
+            if replay_match:
+                from .news_market_tasks import replay_list
+                item_id=replay_match.group(1)
+                if runtime.get_item(item_id) is None:return {"ok":False,"error":"这条消息不存在。"},404
+                version_id=query.get('version_id',[None])[0]
+                if version_id is not None and (not isinstance(version_id,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,128}',version_id)):
+                    raise ValueError('请明确选择新闻版本')
+                limit,offset=int(query.get('limit',['50'])[0]),int(query.get('offset',['0'])[0])
+                if not 1<=limit<=100 or not 0<=offset<=1_000_000:raise ValueError('分页范围不正确')
+                return {'ok':True,**replay_list(runtime,item_id,version_id,limit,offset)},200
+            if saved_context_match:
+                from .news_market_tasks import get,public_context
+                context_id=query.get('context_id',[''])[0]
+                if not isinstance(context_id,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,128}',context_id):
+                    raise ValueError('请明确选择已保存回放')
+                saved=get(runtime,saved_context_match.group(1),context_id)
+                if saved is None:return {'ok':False,'error':'这份已保存材料不存在或不属于该消息。'},404
+                impact=ai.market_result(saved['item'],context_id) if ai is not None else None
+                return {'ok':True,'market_context':public_context(saved),'market_impact':impact if isinstance(impact,dict) else None},200
             if path == "/api/news/market/options":
                 room_id = query.get("room_id", [""])[0]
                 if not isinstance(room_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", room_id):
@@ -51,6 +79,12 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
                 store = getattr(runtime, "research_store", None)
                 if store is None:
                     return {"ok": False, "error": "当前运行方式尚未连接讨论房间资料，已有消息仍可阅读。"}, 503
+                if 'as_of' in query:
+                    from .news_market_replay import round_options
+                    limit,offset=int(query.get('limit',['50'])[0]),int(query.get('offset',['0'])[0])
+                    if not 1<=limit<=100 or not 0<=offset<=1_000_000:raise ValueError('分页范围不正确')
+                    return {'ok':True,**round_options(store,room_id,query['as_of'][0],runtime.clock(),limit,offset)},200
+                if 'limit' in query or 'offset' in query:raise ValueError('历史轮次分页需要明确截止时间')
                 snapshot = store.room_snapshot(room_id)
                 if not isinstance(snapshot, dict):
                     return {"ok": False, "error": "这个资料房间不存在。"}, 404
@@ -83,11 +117,19 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
                 return {"ok": True, **result, "items": [reading(item) for item in result["items"]]}, 200
             versions_match = re.fullmatch(r"/api/news/items/([a-zA-Z0-9_-]{1,128})/versions", path)
             if versions_match:
-                if runtime.get_item(versions_match.group(1)) is None:
+                current = runtime.get_item(versions_match.group(1))
+                if current is None:
                     return {"ok": False, "error": "这条消息不存在。"}, 404
                 versions = runtime.event_versions(versions_match.group(1))
+                from .news_evidence_preview import evidence_preview
+                projected = []
+                for version in versions:
+                    snapshot = {**current, **{key: version.get(key) for key in ('title', 'url', 'excerpt', 'published_at', 'version_seen_at', 'source_updated_at', 'evidence', 'symbols', 'discovery_evidence', 'discovery_kind', 'reference_period', 'automatic_reading_eligible')},
+                                'current_version_id': version['id'], 'discovered_at': version.get('first_seen_at')}
+                    preview = evidence_preview(snapshot)
+                    projected.append({**version, 'evidence_preview': preview} if preview is not None else version)
+                versions = projected
                 if ai is not None and callable(getattr(ai, "version_result", None)):
-                    current = runtime.get_item(versions_match.group(1))
                     versions = [{**version, "ai_analysis": ai.version_result(current, version)} for version in versions]
                 return {"ok": True, "versions": versions}, 200
             matched = re.fullmatch(r"/api/news/items/([a-zA-Z0-9_-]{1,128})", path)
@@ -119,10 +161,13 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
                     raise ValueError("不接受额外参数")
                 return {"ok": True, "ai_analysis": ai.request(analyze_match.group(1))}, 202
             context_match = re.fullmatch(r"/api/news/items/([a-zA-Z0-9_-]{1,128})/market/context", path)
-            if context_match and ai is not None:
-                if set(payload) != {"room_id", "round_id", "material_refs"}:
+            if context_match:
+                historical=set(payload)=={"room_id","round_id","material_refs","version_id","as_of"}
+                if set(payload) != {"room_id", "round_id", "material_refs"} and not historical:
                     raise ValueError("市场资料格式不正确")
-                if not isinstance(payload["room_id"], str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", payload["room_id"]):
+                if historical and (not isinstance(payload['version_id'],str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,128}',payload['version_id']) or not isinstance(payload['as_of'],str)):
+                    raise ValueError('market_replay_requires_version_and_as_of')
+                if not (historical and payload['room_id'] is None) and (not isinstance(payload["room_id"], str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", payload["room_id"])):
                     raise ValueError("请选择资料房间")
                 if payload["round_id"] is not None and (not isinstance(payload["round_id"], str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", payload["round_id"])):
                     raise ValueError("请选择已保存轮次")
@@ -134,12 +179,22 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
                             or type(ref["material_id"]) is not str or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", ref["material_id"])
                             or type(ref["version"]) is not int or ref["version"] < 1):
                         raise ValueError("资料版本不正确")
-                context = ai.prepare_market_context(context_match.group(1), **payload)
-                return {"ok": True, "market_context": context, "market_impact": None}, 200
+                if historical and ((payload['room_id'] is None)!=(payload['round_id'] is None) or payload['room_id'] is None and refs):
+                    raise ValueError('历史回放需明确房间和轮次，或仅准备新闻版本')
+                if ai is not None:
+                    context = ai.prepare_market_context(context_match.group(1), **payload)
+                else:
+                    from .news_market_tasks import prepare
+                    context=prepare(runtime,getattr(runtime,'research_store',None),context_match.group(1),**payload)
+                impact=ai.market_result({'id':context_match.group(1)},context['context_id']) if ai is not None and callable(getattr(ai,'market_result',None)) else None
+                return {"ok": True, "market_context": context, "market_impact": impact if isinstance(impact,dict) else None}, 200
             market_match = re.fullmatch(r"/api/news/items/([a-zA-Z0-9_-]{1,128})/market/analyze", path)
             if market_match and ai is not None:
-                if set(payload) != {"context_id"} or type(payload["context_id"]) is not str or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", payload["context_id"]):
+                if set(payload) not in ({"context_id"},{"context_id","acknowledge_historical"}) or type(payload["context_id"]) is not str or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", payload["context_id"]):
                     raise ValueError("请先绑定市场资料")
+                if 'acknowledge_historical' in payload:
+                    if payload['acknowledge_historical'] is not True:raise ValueError('historical_market_confirmation_required')
+                    return {'ok':True,'market_impact':ai.request_market(market_match.group(1),payload['context_id'],acknowledge_historical=True)},202
                 return {"ok": True, "market_impact": ai.request_market(market_match.group(1), payload["context_id"])}, 202
             if path == "/api/news/control":
                 if set(payload) != {"enabled"} or type(payload["enabled"]) is not bool:
@@ -196,6 +251,18 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
         return {"ok": False, "error": "没有这个消息操作。"}, 404
     except (ValueError, TypeError) as error:
         reasons = {
+            "market_as_of_requires_timezone": "请提供带时区的历史截止时间。",
+            "market_as_of_in_future": "历史截止时间不能晚于当前时间。",
+            "market_replay_requires_version_and_as_of": "历史回放必须同时明确新闻版本和截止时间。",
+            "news_version_not_known_at_as_of": "截止时点尚未保存这个新闻版本，不能用于历史回放。",
+            "news_version_not_current_at_as_of": "该时点已有不同的已知版本，请选择对应版本或调整截止时间。",
+            "market_round_history_unavailable": "此运行方式不能读取历史轮次；可以仅准备所选新闻版本。",
+            "market_room_not_found": "这个资料房间不存在。",
+            "historical_market_confirmation_required": "发送前请明确确认历史版本和回放截止时间。",
+            "market_checkpoint_not_known_at_as_of": "所选轮次在截止时点尚未保存，不能用后来的资料回填。",
+            "market_material_not_known_at_as_of": "所选资料版本晚于回放截止时间。",
+            "market_material_not_known_at_checkpoint": "资料版本晚于所选轮次的保存时间，不能作为该轮次已知材料。",
+            "market_snapshot_not_known_at_as_of": "所选行情在回放截止时间后才取得。",
             "market_checkpoint_unverified": "该轮次的证据记录尚未核验完整，暂不能用于市场分析。",
             "market_material_not_in_manifest": "所选资料版本未保存在该轮次中，请重新选择。",
             "market_context_missing_or_version_changed": "消息已有新版本，请重新绑定材料并核对发送范围。",

@@ -3,6 +3,11 @@ IR_FEEDS = {
     "US.MU": {
         "publisher": "Micron Technology Investor Relations",
         "url": "https://investors.micron.com/rss/news-releases.xml?items=30",
+        "news_discovery": {
+            "kind": "micron_directory",
+            "url": "https://investors.micron.com/financials/quarterly-results/default.aspx",
+            "name": "美光季度业绩目录",
+        },
         "hosts": {"investors.micron.com"},
         "presentation_hub_url": "https://investors.micron.com/quarterly-results",
         "technology_scope": ["DRAM", "NAND"],

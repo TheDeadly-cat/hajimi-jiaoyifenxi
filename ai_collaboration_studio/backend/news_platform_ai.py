@@ -16,6 +16,7 @@ from .news_platform import _independent_database_path
 from . import news_analysis_providers as analysis_providers
 from . import news_evidence_reading as article_reading
 from . import news_market_tasks as market_tasks
+from . import news_event_store as event_store
 from .news_content_quality import (
     QUALITY_VERSION, INSTRUCTIONS as READING_INSTRUCTIONS, TEXT_FORMAT,
     RSS_V2_QUALITY_VERSION, RSS_V2_INSTRUCTIONS, RSS_V2_TEXT_FORMAT,
@@ -252,18 +253,19 @@ class NewsAnalysis:
         version_key = self._version_fingerprint(item)
         if version_key:
             row = db.execute("SELECT status,result FROM runs WHERE fingerprint=?", (version_key,)).fetchone()
-            if row is None:
-                row=db.execute('SELECT r.status,r.result FROM reading_identity_aliases a JOIN runs r ON r.fingerprint=a.target WHERE a.alias=?',(version_key,)).fetchone()
             if row is None and hasattr(self.news,'equivalent_reading_versions'):
                 # The immutable news history is authoritative across the gap
                 # between its commit and the optional AI alias-cache write.
                 # This walk stops as soon as actual material/scope changes.
-                for version in self.news.equivalent_reading_versions(item['id'],item['current_version_id']):
-                    previous_key=self._version_fingerprint({'current_version_id':version['id'],
+                keys = [self._version_fingerprint({'current_version_id':version['id'],
                         'evidence_package_id':version['evidence_package_id'],'event':{'event_id':version['event_id']}})
+                        for version in self.news.equivalent_reading_versions(item['id'],item['current_version_id'])]
+                allowed_targets = set(keys)
+                for previous_key in keys:
                     row=db.execute('SELECT status,result FROM runs WHERE fingerprint=?',(previous_key,)).fetchone()
                     if row is None:
-                        row=db.execute('SELECT r.status,r.result FROM reading_identity_aliases a JOIN runs r ON r.fingerprint=a.target WHERE a.alias=?',(previous_key,)).fetchone()
+                        alias=db.execute('SELECT r.fingerprint,r.status,r.result FROM reading_identity_aliases a JOIN runs r ON r.fingerprint=a.target WHERE a.alias=?',(previous_key,)).fetchone()
+                        row = alias if alias and alias['fingerprint'] in allowed_targets else None
                     if row:
                         break
             if row:
@@ -314,16 +316,20 @@ class NewsAnalysis:
         old,new=self._version_fingerprint(before),self._version_fingerprint(after)
         # Only a provenance annotation can use this bridge. Raw material and
         # scope must be byte-equivalent; meaningful corrections cannot alias.
-        fields=('title','excerpt','url')
-        if (not old or not new or old==new or any(before.get(k)!=after.get(k) for k in fields)
-                or any((before.get('evidence') or {}).get(k)!=(after.get('evidence') or {}).get(k)
-                       for k in ('body_text','content_status','attachments','segments'))):
+        if (not old or not new or old==new or before.get('id') != after.get('id')
+                or event_store.material_identity(before,before.get('evidence') or {}) != event_store.material_identity(after,after.get('evidence') or {})
+                or not hasattr(self.news,'equivalent_reading_versions')):
+            return
+        versions = self.news.equivalent_reading_versions(after['id'],after['current_version_id'])
+        allowed_targets = {self._version_fingerprint({'current_version_id':v['id'], 'evidence_package_id':v['evidence_package_id'],
+                           'event':{'event_id':v['event_id']}}) for v in versions}
+        if old not in allowed_targets:
             return
         with self._db() as db:
             target=db.execute('SELECT fingerprint FROM runs WHERE fingerprint=?',(old,)).fetchone()
             if target is None:
                 target=db.execute('SELECT target AS fingerprint FROM reading_identity_aliases WHERE alias=?',(old,)).fetchone()
-            if target:
+            if target and target['fingerprint'] in allowed_targets:
                 db.execute('INSERT OR IGNORE INTO reading_identity_aliases(alias,target) VALUES(?,?)',(new,target['fingerprint']))
 
     def version_result(self,current,version):
@@ -352,9 +358,13 @@ class NewsAnalysis:
         if saved is None and hasattr(self.news, 'analysis_task_for_item'):
             task = self.news.analysis_task_for_item(item['id'])
             if task and task['evidence_package_id'] == item.get('evidence_package_id') and task['status'] in {'failed','unknown','needs_review'}:
+                if task.get('reason') == article_reading.NO_SELECTED_EVIDENCE:
+                    return article_reading.insufficient_article_result(item, reason=task['reason'])
                 return {'status':task['status'],'error':'本版本任务已有未确认或需复核记录，保留原状态，不自动重试。',
                         'article_version_id':item.get('current_version_id')}
-        return saved if saved is not None else insufficient_result(item)
+        if saved is not None:
+            return saved
+        return article_reading.insufficient_article_result(item) if article_reading.has_article(item) else insufficient_result(item)
 
     def request(self, item_id):
         with self._lock:
@@ -395,15 +405,20 @@ class NewsAnalysis:
         with self.news._db() as db:
             task=db.execute('SELECT status,reason FROM news_analysis_tasks WHERE id=?',(market_tasks.fingerprint(saved['id']),)).fetchone()
         if task:
+            insufficient = task['reason'] == 'market_evidence_unavailable_no_send'
             return {'status':'queued' if task['status']=='pending' else task['status'],
                     'context_id':saved['id'],'analysis_performed':False,
                     'waiting_for_authorized_processing':task['status']=='pending',
-                    'error':task['reason'] or ('待处理；执行前仍会核对当前授权与预算。' if task['status']=='pending' else '已有未确认任务记录，保留状态。')}
+                    **({'error_code':task['reason'],'material_insufficient':True} if insufficient else {}),
+                    'error':'没有可引用的原文证据，只有标题或行情不足以分析新闻影响；未发送模型请求。' if insufficient else task['reason'] or ('待处理；执行前仍会核对当前授权与预算。' if task['status']=='pending' else '已有未确认任务记录，保留状态。')}
         return None
 
-    def request_market(self,item_id,context_id):
+    def request_market(self,item_id,context_id,*,acknowledge_historical=False):
         saved=market_tasks.get(self.news,item_id,context_id)
-        if not saved or not market_tasks.belongs_to_current_evidence(self.news,saved,item_id):
+        historical=bool(saved and saved['context'].get('mode')=='historical_replay')
+        if historical and acknowledge_historical is not True:
+            raise ValueError('historical_market_confirmation_required')
+        if not saved or not (market_tasks.belongs_to_replay(self.news,saved,item_id) if historical else market_tasks.belongs_to_current_evidence(self.news,saved,item_id)):
             raise ValueError('market_context_missing_or_version_changed')
         existing=self.market_result(saved['item'],context_id)
         if existing and existing.get('status') not in {'queued'}:
@@ -484,7 +499,9 @@ class NewsAnalysis:
         if existing is not None and not (market_saved and existing.get('status') == 'queued'):
             if task_id:
                 state = existing.get('status')
-                self.news.transition_analysis_task(task_id, state if state in {'completed','failed','unknown','needs_review'} else 'skipped', expected_status='pending')
+                insufficient = existing.get('error_code') == article_reading.NO_SELECTED_EVIDENCE
+                self.news.transition_analysis_task(task_id, 'needs_review' if insufficient else state if state in {'completed','failed','unknown','needs_review'} else 'skipped',
+                    expected_status='pending', reason=article_reading.NO_SELECTED_EVIDENCE if insufficient else None)
             return
         if market_saved:
             from . import news_market_context as market_contract
@@ -501,7 +518,8 @@ class NewsAnalysis:
                 return
             provider, model = self._provider, self._model
             article = article_reading.has_article(item) and not market_saved
-            instructions, text_format = (market_contract.INSTRUCTIONS,market_contract.TEXT_FORMAT) if market_saved else (article_reading.INSTRUCTIONS, article_reading.TEXT_FORMAT) if article else (INSTRUCTIONS, TEXT_FORMAT)
+            revision_reading = (material.get('revision_comparison') or {}).get('status') == 'available'
+            instructions, text_format = (market_contract.INSTRUCTIONS,market_contract.TEXT_FORMAT) if market_saved else (article_reading.INSTRUCTIONS, article_reading.TEXT_FORMAT) if article or revision_reading else (INSTRUCTIONS, TEXT_FORMAT)
             body = analysis_providers.build_body(provider,model,text,instructions,text_format)
             if article:
                 for byte_budget in (4000,2000,1000):
@@ -510,6 +528,20 @@ class NewsAnalysis:
                     material = article_reading.build_input(item, checked_at=time.time(), text_budget=byte_budget)
                     text = json.dumps(material,ensure_ascii=False,sort_keys=True)
                     body = analysis_providers.build_body(provider,model,text,instructions,text_format)
+            # Check the final input after every budget reduction. A saved full
+            # body, a title, or a quote snapshot cannot substitute for omitted
+            # source evidence and must not create a paid reservation.
+            no_article = article and not article_reading.has_selected_evidence(material)
+            no_market = market_saved and not any(
+                row.get('type') in {'article','article_excerpt','consensus','old_guidance','reported_actual','article_revision_comparison'}
+                and isinstance(row.get('text'),str) and row['text'].strip()
+                for row in material.get('evidence',[]) if isinstance(row,dict))
+            if no_article or no_market:
+                reason = article_reading.NO_SELECTED_EVIDENCE if no_article else 'market_evidence_unavailable_no_send'
+                self._error = '没有完整可引用的原文证据，未发送；请核对本次读取范围。'
+                if task_id:
+                    self.news.transition_analysis_task(task_id,'needs_review',expected_status='pending',reason=reason)
+                return
             if len(analysis_providers.encode_body(body)) > analysis_providers.MAX_REQUEST_BYTES:
                 self._error = "此条材料过长，未发送；请阅读原文。"
                 if task_id:

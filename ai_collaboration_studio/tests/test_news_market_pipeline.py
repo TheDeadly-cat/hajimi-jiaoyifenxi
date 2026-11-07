@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 os.environ['AI_STUDIO_SKIP_LOCAL_ENV'] = '1'
 
-from backend.news_platform import NewsPlatform
+from backend.news_platform import NewsPlatform, analyze
+from backend import news_event_store
 from backend.news_platform_ai import NewsAnalysis, MODEL
 from backend.news_feed_transport import FeedResponse
 from backend.news_market_context import project_result
@@ -30,16 +31,17 @@ class MarketPipelineTests(unittest.TestCase):
         self.now = ms(ASOF) / 1000
         self.store = FrozenStore(); self.store.add_actual()
         self.news = NewsPlatform(Path(self.temp.name) / 'news.db', clock=lambda:self.now,
-            transport=lambda *args:FeedResponse(200, (
-                '<rss><channel><item><guid>market-pipeline</guid><title>Micron quarterly revenue</title>'
-                '<link>'+ITEM['url']+'</link><pubDate>Thu, 29 Oct 2026 15:50:00 GMT</pubDate>'
-                '<description>'+ITEM['excerpt']+'</description></item></channel></rss>').encode()))
+            transport=lambda *args:self.fail('Saved market pipeline must not discover sources'))
         self.news.research_store = self.store
         self.news.configure_source('ir_mu',True)
+        self.item_id='market-pipeline'
         with self.news._db() as db:
-            source = db.execute("SELECT * FROM sources WHERE id='ir_mu'").fetchone()
-        self.news._fetch(source)
-        self.item_id = self.news.list_items()['items'][0]['id']
+            published=ms('2026-10-29T15:50:00Z')/1000
+            db.execute('INSERT INTO items(id,source_id,identity,title,url,excerpt,published,discovered,updated,analysis) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                (self.item_id,'ir_mu',self.item_id,'Micron quarterly revenue',ITEM['url'],ITEM['excerpt'],published,self.now,self.now,
+                 json.dumps(analyze('Micron quarterly revenue',ITEM['excerpt'],published,self.now,'ir_mu'))))
+            item=dict(db.execute('SELECT * FROM items WHERE id=?',(self.item_id,)).fetchone())
+            news_event_store.record_version(db,item,self.now,metadata={'symbols':['US.MU'],'published_time_source':'saved_fixture'})
         self.calls=[]
         def generate(key,text):
             material=json.loads(text);self.calls.append(material)
@@ -121,6 +123,41 @@ class MarketPipelineTests(unittest.TestCase):
         self.assertEqual(reopened.market_result(self.news.get_item(self.item_id))['status'],'unknown')
         self.assertEqual(reopened.status()['calls_reserved'],1)
         self.assertEqual(self.calls,[])
+
+    def test_explicit_historical_request_keeps_cutoff_freshness_and_shared_spent_identity(self):
+        from backend.news_article_evidence import extract_article
+        from backend.news_market_context import build_market_input
+        from backend.news_platform_routes import news_response
+        first=self.news.get_item(self.item_id)
+        self.now+=3600
+        later=extract_article(b'<article><p>Later corrected value 99 is not known at the historical cutoff.</p></article>',ITEM['url'],'ir_mu',now=self.now)
+        self.news.save_article_evidence(self.item_id,later)
+        history=self.ai.prepare_market_context(self.item_id,**self.bindings,version_id=first['current_version_id'],as_of=ASOF)
+        self.assertEqual(history['mode'],'historical_replay')
+        with self.assertRaisesRegex(ValueError,'historical_market_confirmation_required'):
+            self.ai.request_market(self.item_id,history['context_id'])
+        self.assertEqual(self.ai.status()['calls_reserved'],0)
+        self.assertEqual(self.ai.request_market(self.item_id,history['context_id'],acknowledge_historical=True)['status'],'queued')
+        with patch('backend.news_platform_ai.datetime',wraps=datetime) as clock:
+            clock.now.return_value=datetime.fromtimestamp(self.now,timezone.utc)
+            self.ai._analyze(self.item_id,task_id=fingerprint(history['context_id']),market_context_id=history['context_id'])
+        result=self.ai.market_result(first,history['context_id'])
+        self.assertEqual(result['status'],'completed',result)
+        self.assertEqual(len(self.calls),1)
+        sent=self.calls[0]
+        self.assertEqual(sent['mode'],'historical_replay')
+        self.assertEqual(sent['as_of'],ASOF);self.assertTrue(sent['has_market'])
+        self.assertEqual(sent['freshness']['evaluated_at'],ASOF)
+        self.assertNotIn('Later corrected value 99',json.dumps(sent))
+        self.assertIsNone(self.ai.market_context(self.news.get_item(self.item_id)))
+        self.assertEqual(self.ai.request_market(self.item_id,history['context_id'],acknowledge_historical=True)['status'],'completed')
+        self.assertEqual(self.ai.status()['calls_reserved'],1)
+        self.news.ai=self.ai
+        body,status=news_response(self.news,f'/api/news/items/{self.item_id}/market/context',method='POST',
+            payload={**self.bindings,'material_refs':[{'material_id':ref['id'],'version':ref['version']} for ref in self.bindings['material_refs']],
+                     'version_id':first['current_version_id'],'as_of':ASOF})
+        self.assertEqual(status,200);self.assertEqual(body['market_impact']['status'],'completed')
+        self.assertEqual(len(self.calls),1)
 
 
 if __name__=='__main__':

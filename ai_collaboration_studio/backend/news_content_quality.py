@@ -544,7 +544,8 @@ def insufficient_result(item, *, checked_at=None):
 
 
 def _reading_fields(material):
-    return ("title", "excerpt", "body") if material.get("reading_contract") == "article_evidence_reading_v1" else _SOURCE_FIELDS
+    fields = ("title", "excerpt", "body") if material.get("reading_contract") == "article_evidence_reading_v1" else _SOURCE_FIELDS
+    return (*fields, "revision") if (material.get('revision_comparison') or {}).get('status') == 'available' else fields
 
 
 def validate_output(raw, material):

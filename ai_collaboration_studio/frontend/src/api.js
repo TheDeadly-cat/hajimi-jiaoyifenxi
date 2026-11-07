@@ -39,8 +39,16 @@ export const api = {
   newsEventRelation: (id, originItemId, signal) => jsonRequest(`/api/news/items/${encodeURIComponent(id)}/event-relation`, { method: "POST", body: JSON.stringify({ origin_item_id: originItemId, acknowledge: true }), signal }),
   newsWithdrawal: (id, evidenceItemId, quote, signal) => jsonRequest(`/api/news/items/${encodeURIComponent(id)}/withdrawal`, { method: "POST", body: JSON.stringify({ evidence_item_id: evidenceItemId, quote, acknowledge: true }), signal }),
   newsMarketContext: (id, payload, signal) => jsonRequest(`/api/news/items/${encodeURIComponent(id)}/market/context`, { method: "POST", body: JSON.stringify(payload), signal }),
-  newsMarketOptions: (roomId, signal) => jsonRequest(`/api/news/market/options?${new URLSearchParams({ room_id: roomId })}`, { signal }),
-  newsMarketAnalyze: (id, contextId, signal) => jsonRequest(`/api/news/items/${encodeURIComponent(id)}/market/analyze`, { method: "POST", body: JSON.stringify({ context_id: contextId }), signal }),
+  newsMarketOptions: (roomId, signal, { as_of, limit, offset } = {}) => {
+    const query = new URLSearchParams({ room_id: roomId });
+    if (as_of !== undefined) query.set("as_of", as_of);
+    if (limit !== undefined) query.set("limit", String(limit));
+    if (offset !== undefined) query.set("offset", String(offset));
+    return jsonRequest(`/api/news/market/options?${query}`, { signal });
+  },
+  newsMarketReplays: (id, versionId, signal, { limit = 50, offset = 0 } = {}) => jsonRequest(`/api/news/items/${encodeURIComponent(id)}/market/replays?${new URLSearchParams({ version_id: versionId, limit: String(limit), offset: String(offset) })}`, { signal }),
+  newsMarketSavedContext: (id, contextId, signal) => jsonRequest(`/api/news/items/${encodeURIComponent(id)}/market/context?${new URLSearchParams({ context_id: contextId })}`, { signal }),
+  newsMarketAnalyze: (id, contextId, signal, { acknowledge_historical = false } = {}) => jsonRequest(`/api/news/items/${encodeURIComponent(id)}/market/analyze`, { method: "POST", body: JSON.stringify({ context_id: contextId, ...(acknowledge_historical ? { acknowledge_historical: true } : {}) }), signal }),
   newsControl: (enabled, signal) => jsonRequest("/api/news/control", { method: "POST", body: JSON.stringify({ enabled }), signal }),
   newsRefresh: (signal) => jsonRequest("/api/news/refresh", { method: "POST", body: JSON.stringify({}), signal }),
   newsStartup: (payload, signal) => jsonRequest("/api/news/startup", { method: "POST", body: JSON.stringify(payload), signal }),

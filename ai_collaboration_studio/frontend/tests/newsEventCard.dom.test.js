@@ -35,7 +35,7 @@ test.after(async () => { dom.window.close(); await vite.close(); });
 test("renders distinct content, attachment, source count, update and queue facts without automatic fetching", async () => {
   await render();
   assert.match(host.textContent, /正文不完整/);
-  assert.match(host.textContent, /0 \/ 1 已读/);
+  assert.match(host.textContent, /0 \/ 1 已取得文本（完整性另列）/);
   assert.match(host.textContent, /2 处来源 · 1 份原始依据/);
   assert.match(host.textContent, /合成收入 90.*合成收入 100/s);
   assert.match(host.textContent, /125 待处理.*1 结果未确认/s);
@@ -83,20 +83,23 @@ test("new source remains disabled until chosen explicitly and reading does not e
 });
 
 test("research handoff retains version, evidence locators, attachment scope and known symbols", () => {
+  item.evidence.content_hash = "a".repeat(64);
+  const segments = item.evidence.segments.map(row => ({ ...row, source_segment_id: row.id, document_id: "article:synthetic", url: item.url, start: 0, end: Array.from(row.text).length, truncated: false }));
+  const groups = segments.map(row => ({ id: `article:synthetic:${row.id}`, document_id: row.document_id, kind: "paragraph", url: item.url, required_segment_ids: [row.id] }));
+  const pack = { version_id: "v2", content_hash: item.evidence.content_hash, package_hash: "b".repeat(64), groups, selection: segments.map(({ text, ...row }) => row), omitted_group_count: 0 };
+  item.evidence_preview = { schema: "news_evidence_preview_v1", status: "ready", version_id: "v2", content_hash: item.evidence.content_hash, preview_only: true, model_called: false, material: { source_text: { title: item.title, body: segments.map(row => row.text).join("\n") }, evidence_package: pack }, segments };
   const draft = buildNewsResearchDraft(item, { id: "room-a", title: "研究室" }, "handoff1");
   assert.equal(draft._news_research.version_id, "v2"); assert.equal(draft._news_research.event_id, "event1");
   assert.deepEqual(draft.metadata.symbols, ["MU"]);
-  assert.match(draft.content, /\[p1\].*审批后生效/);
+  assert.match(draft.content, /"id":"p1".*审批后生效/);
   assert.match(draft.content, /附件 1：.*未读取/);
   assert.match(draft.content, /来源抽取记录包含截断/);
   assert.match(draft.content, /来源修订时间：未知/);
 });
 
-test("long research evidence records selection and never exceeds the material contract", () => {
+test("body research refuses raw segment fallback when its bound preview is absent", () => {
   item.evidence.segments = [{ id: "p1", text: "有界段落" }, { id: "p2", text: "超长".repeat(15000) }];
-  const draft = buildNewsResearchDraft(item, { id: "room-a", title: "研究室" }, "handoff1");
-  assert.match(draft.content, /草稿长度限制/); assert.ok(draft.content.length < 50000);
-  assert.doesNotMatch(draft.content, /\[p2\]/);
+  assert.throws(() => buildNewsResearchDraft(item, { id: "room-a", title: "研究室" }, "handoff1"), /没有可信的完整证据组预览/);
 });
 
 test("body review requires matching version and exact segment bounds; old result cannot point at new evidence", async () => {

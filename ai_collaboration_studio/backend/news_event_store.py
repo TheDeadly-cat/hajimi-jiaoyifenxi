@@ -46,6 +46,103 @@ def normalized_text(value):
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def _table_rows(rows):
+    """Canonical cell geometry in document order; locator names are not content."""
+    rows = [row for row in rows if isinstance(row, dict) and row.get('kind') == 'table_row']
+    if not any(isinstance(row.get('cells'), list) for row in rows):
+        return None  # Legacy flattened rows do not establish a table layout.
+    tables, previous_id = [], object()
+    for row in rows:
+        table_id = row.get('table_id')
+        if table_id != previous_id:
+            tables.append([])
+            previous_id = table_id
+        cells = row.get('cells')
+        record = {'text': normalized_text(row.get('text')), 'structure_truncated': bool(row.get('structure_truncated'))}
+        if isinstance(cells, list):
+            record['cells'] = []
+            for cell in cells:
+                if not isinstance(cell, dict):
+                    record['cells'].append({'invalid_cell': True})
+                    continue
+                normalized = {'text': normalized_text(cell.get('text')), 'tag': str(cell.get('tag') or 'td').lower()}
+                for key in ('colspan', 'rowspan'):
+                    span = cell.get(key, 1)
+                    try:
+                        integer = int(span)
+                        normalized[key] = integer if not isinstance(span, bool) and str(integer) == str(span) and integer > 0 else {'invalid': str(span)}
+                    except (TypeError, ValueError, OverflowError):
+                        normalized[key] = {'invalid': str(span)}
+                record['cells'].append(normalized)
+        else:
+            record['cells'] = None
+        tables[-1].append(record)
+    return tables
+
+
+def table_structure(evidence):
+    """Do not silently ignore conflicting segment/table views of the same cells."""
+    segments = _table_rows(evidence.get('segments') or [])
+    tables = _table_rows(evidence.get('tables') or [])
+    if segments is not None and tables is not None and segments != tables:
+        return {'status': 'conflicting_views', 'segments': segments, 'tables': tables}
+    rows = segments if segments is not None else tables
+    return {'status': 'observed', 'tables': rows} if rows is not None else None
+
+
+def material_identity(item, evidence):
+    """Reconstruct material from snapshots, including pre-fix saved snapshots."""
+    material = {'title': normalized_text(item.get('title')), 'excerpt': normalized_text(item.get('excerpt')),
+                'url': canonical_url(item.get('url')), 'body_text': normalized_text(evidence.get('body_text')),
+                'content_status': evidence.get('content_status', evidence.get('status')), 'attachments': []}
+    structure = table_structure(evidence)
+    if structure is not None:
+        material['table_structure'] = structure
+    for attachment in evidence.get('attachments', []):
+        if not isinstance(attachment, dict):
+            continue
+        nested = attachment.get('evidence') or {}
+        record = {'url': canonical_url(attachment.get('url')), 'status': attachment.get('status', attachment.get('content_status')),
+                  'text': normalized_text(attachment.get('body_text', attachment.get('text', nested.get('body_text'))))}
+        structure = table_structure(nested) or table_structure(attachment)
+        if structure is not None:
+            record['table_structure'] = structure
+        material['attachments'].append(record)
+    return material
+
+
+def _structures(material):
+    return [material.get('table_structure')] + [a.get('table_structure') for a in material['attachments']]
+
+
+def _without_structures(material):
+    return {**{k: v for k, v in material.items() if k != 'table_structure'},
+            'attachments': [{k: v for k, v in a.items() if k != 'table_structure'} for a in material['attachments']]}
+
+
+def _same_raw_sources(old, new):
+    def same_hash(before, after):
+        value = before.get('raw_content_hash')
+        return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None and value == after.get('raw_content_hash')
+    if not same_hash(old, new):
+        return False
+    before = material_identity({}, old)['attachments']
+    after = material_identity({}, new)['attachments']
+    if len(before) != len(after):
+        return False
+    old_attachments = [a for a in old.get('attachments', []) if isinstance(a, dict)]
+    new_attachments = [a for a in new.get('attachments', []) if isinstance(a, dict)]
+    for index, (a, b) in enumerate(zip(before, after)):
+        if a == b:
+            continue  # Unchanged (including unread) attachments need no new byte proof.
+        if a['url'] != b['url'] or a['status'] != b['status']:
+            return False
+        if not same_hash(old_attachments[index].get('evidence') or old_attachments[index],
+                         new_attachments[index].get('evidence') or new_attachments[index]):
+            return False
+    return True
+
+
 def canonical_url(value):
     """Remove only recognized tracking parameters; preserve semantic query data."""
     try:
@@ -129,6 +226,71 @@ def _version(row):
     return value
 
 
+def saved_market_binding(db, context_id):
+    """Read optional market bindings without creating a table in legacy stores."""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='news_market_contexts'").fetchone():
+        return None
+    row = db.execute('SELECT * FROM news_market_contexts WHERE id=?', (context_id,)).fetchone()
+    if row is None:
+        return None
+    try:
+        context, item = json.loads(row['context']), json.loads(row['item_snapshot'])
+        if not isinstance(context, dict) or not isinstance(item, dict):
+            return None
+        if context.get('context_id') != digest({key: value for key, value in context.items() if key != 'context_id'}):
+            return None
+        if item.get('id') != row['item_id'] or item.get('current_version_id') != row['version_id']:
+            return None
+        return {**dict(row), 'context': context, 'item': item}
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def valid_historical_market_binding(db, context_id, item_id, version_id, now):
+    """A newer current article cannot invalidate evidence frozen before it.
+
+    The saved binding, its hash and the version visible at its cutoff are the
+    authority; a task trigger or a caller-supplied historical flag is not.
+    """
+    saved = saved_market_binding(db, context_id)
+    if not saved or saved['item_id'] != item_id or saved['version_id'] != version_id:
+        return False
+    context, item = saved['context'], saved['item']
+    cutoff = timestamp(context.get('as_of')) if isinstance(context.get('as_of'), str) else None
+    if (context.get('mode') != 'historical_replay' or context.get('article_version_id') != version_id
+            or cutoff is None or cutoff > now):
+        return False
+    original = _current(db, item_id, cutoff)
+    return bool(original and original['id'] == version_id
+                and original['evidence_package_id'] == item.get('evidence_package_id')
+                and original['event_id'] == (item.get('event') or {}).get('event_id'))
+
+
+def _frozen_historical_task(db, task, now):
+    return (task['task_type'] == 'market_impact'
+            and task['id'] == hashlib.sha256(('news_market_impact_v1:' + task['evidence_package_id']).encode()).hexdigest()
+            and valid_historical_market_binding(db, task['evidence_package_id'], task['item_id'], task['version_id'], now))
+
+
+def _claimable_analysis_task(db, task, now):
+    if _frozen_historical_task(db, task, now):
+        return True
+    current = _current(db, task['item_id'])
+    if not current:
+        return False
+    if task['task_type'] != 'market_impact':
+        return current['id'] == task['version_id']
+    saved = saved_market_binding(db, task['evidence_package_id'])
+    if (not saved or saved['context'].get('mode') == 'historical_replay'
+            or saved['item_id'] != task['item_id'] or saved['version_id'] != task['version_id']
+            or task['id'] != hashlib.sha256(('news_market_impact_v1:' + saved['id']).encode()).hexdigest()):
+        return False
+    if saved['item'].get('evidence_package_id') == current['evidence_package_id']:
+        return True
+    return any(version['id'] == task['version_id']
+               for version in equivalent_reading_versions(db, task['item_id'], current['id']))
+
+
 def equivalent_reading_versions(db, item_id, version_id):
     """Follow only this selected version's contiguous same-material ancestry.
 
@@ -142,12 +304,16 @@ def equivalent_reading_versions(db, item_id, version_id):
     content_hash=selected['content_hash']
     if not isinstance(content_hash,str) or re.fullmatch(r'[0-9a-f]{64}',content_hash) is None:
         return []
+    selected_snapshot = _version(dict(selected))
+    selected_material = material_identity(selected_snapshot, selected_snapshot['evidence'])
     result,visited=[],set()
     row=selected
     last_number=selected['version_number']+1
     while row is not None:
-        if (row['id'] in visited or row['item_id']!=item_id or row['content_hash']!=content_hash
-                or row['version_number']>=last_number):
+        snapshot = _version(dict(row))
+        if (row['id'] in visited or row['item_id']!=item_id
+                or material_identity(snapshot, snapshot['evidence']) != selected_material
+                or row['version_number'] != last_number - 1):
             break
         visited.add(row['id'])
         last_number=row['version_number']
@@ -189,6 +355,11 @@ def _association(db, item, evidence, now):
 
 def observe(db, item_id, entry, now):
     record = {key: entry.get(key) for key in ('identity','title','url','excerpt','published','source_updated_at','published_time_source','symbols','filing_date')}
+    # Directory provenance is optional and additive. Absent fields must not
+    # change the exact observation hash of pre-existing RSS records.
+    for key in ('discovery_kind','automatic_reading_eligible','discovery_evidence','reference_period'):
+        if key in entry:
+            record[key]=copy.deepcopy(entry[key])
     record_hash = digest(record)
     previous = db.execute('SELECT record_hash FROM news_article_observations WHERE item_id=? ORDER BY seq DESC LIMIT 1',(item_id,)).fetchone()
     if previous is None or previous['record_hash'] != record_hash:
@@ -196,16 +367,28 @@ def observe(db, item_id, entry, now):
                    (item_id,now,record_hash,_json(record)))
 
 
+def automatic_reading_eligible(version):
+    """Missing legacy policy retains its prior behavior; explicit denial wins."""
+    return isinstance(version,dict) and version.get('automatic_reading_eligible',True) is True
+
+
 def record_version(db, item, now, *, evidence=None, metadata=None, migrated=False, enqueue=True):
     """Snapshot material before the caller overwrites its legacy current row."""
     item, metadata = dict(item), metadata or {}
     previous = _current(db, item["id"])
     old = _version(previous) if previous else None
+    if 'automatic_reading_eligible' in metadata and not isinstance(metadata['automatic_reading_eligible'],bool):
+        raise ValueError('invalid_automatic_reading_eligibility')
+    automatic_eligible=(metadata['automatic_reading_eligible'] if 'automatic_reading_eligible' in metadata
+                        else automatic_reading_eligible(old) if old else True)
+    discovery_evidence=copy.deepcopy(metadata.get('discovery_evidence',old.get('discovery_evidence') if old else None))
+    reference_period=copy.deepcopy(metadata.get('reference_period',old.get('reference_period') if old else None))
     evidence = dict(evidence or {})
     if not evidence:
         # A new RSS revision does not prove a previously read body is current.
         evidence = {"content_status": "excerpt_only" if item.get("excerpt") else "headline_only",
-                    "body_text": "", "segments": [], "attachments": [], "extractor_version": "rss-v1"}
+                    "body_text": "", "segments": [], "attachments": [],
+                    "extractor_version": "micron-quarterly-directory-v1" if discovery_evidence else "rss-v1"}
     if old:
         prior=old.get('evidence') or {}
         existing_origin=canonical_url(old.get('origin_url'))
@@ -235,19 +418,20 @@ def record_version(db, item, now, *, evidence=None, metadata=None, migrated=Fals
     evidence["content_status"] = state
     evidence["canonical_url"] = canonical_url(evidence.get("canonical_url") or item.get("url"))
     association = _association(db, item, evidence, now)
-    material = {"title": normalized_text(item.get("title")), "excerpt": normalized_text(item.get("excerpt")),
-                "url": canonical_url(item.get("url")), "body_text": normalized_text(evidence.get("body_text")),
-                "content_status": state,
-                "attachments": [{"url": canonical_url(a.get("url")), "status": a.get("status", a.get("content_status")),
-                                 "text": normalized_text(a.get("body_text", a.get("text", a.get("evidence", {}).get("body_text"))))}
-                                for a in evidence.get("attachments", []) if isinstance(a, dict)]}
+    material = material_identity(item, evidence)
+    previous_material = material_identity(old, old['evidence']) if old else None
     content_hash = digest(material)
-    if previous and previous["content_hash"] == content_hash and previous["event_id"] == association["event_id"]:
+    if previous and previous_material == material and previous["event_id"] == association["event_id"]:
         return _version(previous), False
     number = previous["version_number"] + 1 if previous else 1
     version_id = digest([item["id"], number, content_hash])
-    package_id = digest(["news_evidence_v1", association["event_id"], material])
+    material_epoch = (old.get('material_epoch') or previous['id']) if old and previous_material == material else version_id
+    has_structure = any(s is not None for s in _structures(material))
+    uses_table_identity = has_structure or bool(old and (old.get('table_identity_version') or any(_structures(previous_material))))
+    package_id = (digest(['news_evidence_tables_v2', association['event_id'], material, material_epoch]) if uses_table_identity
+                  else digest(["news_evidence_v1", association["event_id"], material]))
     changes = []
+    structure_review = None
     if old:
         for field in ("title", "excerpt", "content_status"):
             value = state if field == "content_status" else item.get(field, "")
@@ -255,9 +439,37 @@ def record_version(db, item, now, *, evidence=None, metadata=None, migrated=Fals
                 changes.append({"field": field, "before": old.get(field), "after": value})
         if normalized_text(old.get("evidence", {}).get("body_text")) != material["body_text"]:
             changes.append({"field": "body_text", "before": old.get("evidence", {}).get("body_text", ""), "after": evidence.get("body_text", "")})
+        if _structures(previous_material) != _structures(material):
+            changes.append({'field': 'table_structure', 'before': digest(_structures(previous_material)),
+                            'after': digest(_structures(material))})
+            before_texts = [previous_material['body_text']] + [a['text'] for a in previous_material['attachments']]
+            after_texts = [material['body_text']] + [a['text'] for a in material['attachments']]
+            if any(a_text and b_text and (a is None) != (b is None)
+                   for a, b, a_text, b_text in zip(_structures(previous_material), _structures(material), before_texts, after_texts)):
+                # Existing text with newly available/lost geometry is an unknown
+                # baseline even if extractor separators changed and raw bytes are absent.
+                structure_review = 'table_structure_baseline_unverified'
+            elif _without_structures(previous_material) == _without_structures(material) and _same_raw_sources(old['evidence'], evidence):
+                structure_review = 'table_structure_reinterpreted_same_bytes'
+    if any(s and s['status'] == 'conflicting_views' for s in _structures(material)):
+        structure_review = 'table_structure_conflicting_views'
+    if (old and has_structure and not structure_review and evidence.get('body_text') and old['evidence'].get('body_text')
+            and all(previous_material[k] == material[k] for k in ('title', 'excerpt', 'url', 'content_status'))
+            and _same_raw_sources(old['evidence'], evidence)):
+        structure_review = 'same_source_bytes_reextracted'
+    if old and has_structure and not structure_review and previous_material != material:
+        # A -> B -> A is a new observation, not permission to silently reuse an
+        # old result as a fresh review or automatically pay for A a second time.
+        legacy_hash = digest(_without_structures(material))
+        for row in db.execute('SELECT snapshot FROM news_article_versions WHERE item_id=? AND content_hash IN (?,?)',
+                              (item['id'], content_hash, legacy_hash)):
+            historical = json.loads(row['snapshot'])
+            if material_identity(historical, historical['evidence']) == material:
+                structure_review = 'previous_table_material_reappeared'
+                break
     source_updated = timestamp(metadata.get("source_updated_at", evidence.get("source_updated_at")))
     publication=timestamp(item.get('published'))
-    historical_material=(metadata.get('discovery_kind')=='historical_backfill'
+    historical_material=(not automatic_eligible or metadata.get('discovery_kind')=='historical_backfill'
                          or (not old and publication is not None and publication<now-86400)
                          or (bool(evidence.get('body_text')) and bool(old) and not old.get('evidence',{}).get('body_text')
                              and (old.get('discovery_kind')=='historical_backfill' or old.get('migrated_legacy')
@@ -268,8 +480,13 @@ def record_version(db, item, now, *, evidence=None, metadata=None, migrated=Fals
                 "first_seen_at": iso(timestamp(item.get("discovered", now))), "version_seen_at": iso(now),
                 "fetched_at": iso(timestamp(evidence.get("fetched_at")) or now), "content_status": state,
                 "evidence": evidence, "changes": changes, "migrated_legacy": migrated,
-                "discovery_kind":"historical_backfill" if historical_material else "live_discovery",
-                "time_provenance": {"published_at": metadata.get("published_time_source", "legacy_unqualified" if migrated else "source_publication"),
+                "material_fingerprint_version": "news_material_tables_v2", "structure_review": structure_review,
+                "material_epoch": material_epoch,
+                "table_identity_version": "table_evidence_v2" if uses_table_identity else None,
+                "discovery_kind":"historical_backfill" if historical_material else metadata.get('discovery_kind') or ('directory_change' if old and old.get('discovery_kind')=='directory_change' else 'live_discovery'),
+                "automatic_reading_eligible":automatic_eligible,"discovery_evidence":discovery_evidence,"reference_period":reference_period,
+                "time_provenance": {"published_at": metadata.get("published_time_source", "legacy_unqualified" if migrated else
+                    (old.get('time_provenance',{}).get('published_at','source_publication') if old and not evidence.get('published_at') else 'source_publication')),
                                     "source_updated_at": "source_modified" if source_updated is not None else "unknown",
                                     "version_seen_at": "legacy_snapshot_recorded_now" if migrated else "local_observation"},
                 "origin_url": association["origin_url"], "relation": association["relation"],
@@ -278,13 +495,16 @@ def record_version(db, item, now, *, evidence=None, metadata=None, migrated=Fals
         previous_version_id,version_seen,snapshot) VALUES(?,?,?,?,?,?,?,?,?)""",
                (version_id,item["id"],association["event_id"],number,content_hash,package_id,previous["id"] if previous else None,now,_json(snapshot)))
     if previous:
-        db.execute("UPDATE news_analysis_tasks SET status='skipped',updated_at=?,reason='superseded_version' WHERE item_id=? AND status='pending' AND version_id!=?",
-                   (now,item['id'],version_id))
+        for task in db.execute("SELECT * FROM news_analysis_tasks WHERE item_id=? AND status='pending' AND version_id!=?",
+                               (item['id'], version_id)).fetchall():
+            if not _frozen_historical_task(db, task, now):
+                db.execute("UPDATE news_analysis_tasks SET status='skipped',updated_at=?,reason='superseded_version' WHERE id=? AND status='pending'",
+                           (now, task['id']))
         db.execute("UPDATE news_article_tasks SET status='skipped',updated=?,last_error='superseded_version' WHERE item_id=? AND status='pending' AND version_id!=?",
                    (now,item['id'],version_id))
     analysis = json.loads(item.get('analysis') or '{}') if isinstance(item.get('analysis'),str) else item.get('analysis') or {}
     important = analysis.get('importance') == 'attention' or analysis.get('category') == 'company' or bool(metadata.get('symbols'))
-    if enqueue and important and state in {'headline_only','excerpt_only'} and canonical_url(item.get('url')):
+    if enqueue and automatic_eligible and important and state in {'headline_only','excerpt_only'} and canonical_url(item.get('url')):
         body_task = digest(['news_article_task_v1',version_id])
         db.execute("""INSERT OR IGNORE INTO news_article_tasks(id,item_id,version_id,source_id,priority,created,updated)
             VALUES(?,?,?,?,?,?,?)""",(body_task,item['id'],version_id,item['source_id'],10 if old else 0,now,now))
@@ -299,7 +519,8 @@ def record_version(db, item, now, *, evidence=None, metadata=None, migrated=Fals
         db.execute("""INSERT OR IGNORE INTO news_analysis_tasks(id,item_id,event_id,version_id,evidence_package_id,task_type,
             trigger,version_seen_at,priority,status,updated_at,reason) VALUES(?,?,?,?,?,'fact_reading',?,?,?,?,?,?)""",
                    (task_id,item["id"],association["event_id"],version_id,package_id,trigger,now,10 if old else 0,
-                    'needs_review' if state == 'retracted' else 'pending',now,'source_retracted' if state == 'retracted' else None))
+                    'needs_review' if state == 'retracted' or structure_review else 'pending',now,
+                    'source_retracted' if state == 'retracted' else structure_review))
     return _version(dict(db.execute("SELECT * FROM news_article_versions WHERE id=?", (version_id,)).fetchone())), True
 
 
@@ -469,7 +690,8 @@ def detail(db, item_id, as_of=None):
         'SELECT observed_at,record FROM news_article_observations WHERE item_id=? AND observed_at<=? ORDER BY seq DESC',
         (item_id,timestamp(as_of) if as_of is not None else float('inf')))]
     annotations=relation_annotations(db,item_id,as_of)
-    return {"event_id":current["event_id"], "current_version":current, "version_count":len(history), "versions":history,
+    previous = next((version for version in history if version['id'] == current.get('previous_version_id')), None)
+    return {"event_id":current["event_id"], "current_version":current, "previous_version":previous, "version_count":len(history), "versions":history,
             "sources":list(members.values()), "independent_evidence_count":len({m["origin_url"] or m["item_id"] for m in members.values()}),
             "requires_review":withdrawn or any(c["field"] in {"excerpt", "body_text"} for c in current["changes"]),
             "retracted":withdrawn, "queue":queue_summary(db,current["event_id"]) if as_of is None else None,
@@ -490,10 +712,14 @@ def pending_tasks(db, limit=100, offset=0, after=None):
 def transition(db, task_id, status, now, *, expected_status=None, result_ref=None, reason=None):
     if status not in TERMINAL | {"running"}:
         raise ValueError("invalid_analysis_task_status")
-    row = db.execute("SELECT status FROM news_analysis_tasks WHERE id=?", (task_id,)).fetchone()
+    row = db.execute("SELECT * FROM news_analysis_tasks WHERE id=?", (task_id,)).fetchone()
     if row is None or row["status"] in TERMINAL or (expected_status is not None and row["status"] != expected_status):
         return False
     if status == "running" and row["status"] != "pending":
+        return False
+    if status == 'running' and not _claimable_analysis_task(db, row, now):
+        db.execute("UPDATE news_analysis_tasks SET status='skipped',updated_at=?,reason='context_or_version_no_longer_valid' WHERE id=? AND status='pending'",
+                   (now, task_id))
         return False
     return bool(db.execute("UPDATE news_analysis_tasks SET status=?,updated_at=?,result_ref=?,reason=? WHERE id=? AND status=?",
         (status,now,result_ref,reason,task_id,row["status"])).rowcount)

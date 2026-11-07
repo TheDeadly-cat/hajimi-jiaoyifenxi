@@ -24,10 +24,13 @@ INSTRUCTIONS = (
     'expectation_comparison 可用 evidence_supported，但 claim 必须逐字采用其中系统计算的 claim，'
     '同时引用该项 actual_evidence_id 和 consensus_evidence_id，不自行重算或换口径。行情只能写带时点的已观察记录；'
     '单个行情快照不能证明消息导致涨跌，不能证明市场充分定价。'
+    'mode为historical_replay时只描述as_of截止时点，不把当时的报价、预期或推断说成当前状态。'
+    '有旧新闻版本时，new_information仅能依据已完整选入的article_revision_comparison前后原文；没有完整对照则留空并列为未知。'
     'counter_evidence 列有证据的反向材料；未知和后续验证条件分别列出。仅按 schema 输出。'
 )
 UNKNOWN_EXPECTATION = '尚不能判断是否超预期。'
 UNKNOWN_MARKET = '尚无可用的对应时点行情，市场反应未确认。'
+MAX_MARKET_INPUT_BYTES = 8500
 
 
 def _object(props):
@@ -152,6 +155,8 @@ def resolve_saved_context(store, item, room_id=None, round_id=None, material_ref
             recorded = _milliseconds(material.get('changed_at'))
             if recorded is None or recorded > cutoff:
                 raise ValueError('market_material_not_known_at_as_of')
+            if recorded > checkpoint_time:
+                raise ValueError('market_material_not_known_at_checkpoint')
             metadata = material.get('metadata') if isinstance(material.get('metadata'), dict) else {}
             structured = metadata.get('market_context')
             if not isinstance(structured, dict) or structured.get('kind') not in {'consensus', 'old_guidance', 'reported_actual'}:
@@ -251,18 +256,29 @@ def build_market_input(item, context, checked_at):
     payload = {key: value for key, value in context.items() if key != 'context_id'}
     if _hash(payload) != context.get('context_id'):
         raise ValueError('market_context_changed')
+    historical=context.get('mode')=='historical_replay'
+    if historical and (not context.get('article_version_id')
+                       or context['article_version_id'] != item.get('current_version_id')):
+        raise ValueError('market_replay_article_version_mismatch')
     from .news_article_evidence import evidence_package
+    from .news_evidence_groups import source_url
+    from .news_revision_evidence import candidate as revision_candidate, public as revision_public, UNKNOWN as REVISION_UNKNOWN
+    revision = revision_candidate(item, context['as_of'])
     reading = evidence_package(item, max_bytes=3500)
     evidence = [{'id': 'article:' + row['id'], 'type': 'article', 'text': row['text'],
-                 'url': item.get('url', ''), 'asof': item.get('published_at'),
-                 'known_at': item.get('version_seen_at') or (item.get('event') or {}).get('version_seen_at')} for row in reading['segments']]
-    if not evidence and str(item.get('excerpt') or '').strip():
+                 'url': source_url(row, reading), 'asof': item.get('published_at') if row['document_id'].startswith('article:') else None,
+                 'known_at': item.get('version_seen_at') or (item.get('event') or {}).get('version_seen_at'),
+                 **{key:copy.deepcopy(row[key]) for key in ('document_id','group_id','source_segment_id','table_id','row_index','cells','cell_encoding') if key in row}} for row in reading['segments']]
+    if not evidence and not reading.get('has_table_context') and str(item.get('excerpt') or '').strip():
         evidence = [{'id': 'article:excerpt', 'type': 'article_excerpt', 'text': str(item['excerpt'])[:2500],
                      'url': item.get('url', ''), 'asof': item.get('published_at'), 'known_at': item.get('discovered_at')}]
     captured = _time(context['market'].get('captured_at'))
-    execution_market_ready = context['market']['status'] == 'available' and captured is not None and 0 <= (checked - captured).total_seconds() <= 1200
+    freshness_at=frozen if historical else checked
+    execution_market_ready = context['market']['status'] == 'available' and captured is not None and 0 <= (freshness_at - captured).total_seconds() <= 1200
     evidence.extend(copy.deepcopy([row for row in context['evidence'] if row['type'] != 'market_snapshot' or execution_market_ready]))
     missing = list(context['missing'])
+    if reading.get('omitted_table_groups'):
+        missing.append('完整表格上下文组未进入请求，不能从省略的表格判断数字、期间或单位。')
     if not execution_market_ready and UNKNOWN_MARKET not in missing:
         missing.append(UNKNOWN_MARKET)
     material = {'quality_version': QUALITY_VERSION, 'scope': 'market_impact_from_saved_context',
@@ -274,6 +290,18 @@ def build_market_input(item, context, checked_at):
                 'freshness': {'market_asof': context['market']['captured_at'], 'market_status': context['market']['status'] if execution_market_ready else 'stale_at_execution' if context['market']['status'] == 'available' else context['market']['status']},
                 'unknown_expectation': UNKNOWN_EXPECTATION, 'unknown_market': UNKNOWN_MARKET,
                 'missing': missing, 'boundaries': context['boundaries']}
+    if historical:
+        material.update(mode='historical_replay',article_version_id=context.get('article_version_id'))
+        material['freshness']['evaluated_at']=_iso(frozen)
+        material['freshness']['scope']='historical_cutoff_not_live_market'
+    revision_record = None
+    if revision:
+        material['revision_comparison'] = revision_public(revision, reason='comparison_budget' if revision['status'] == 'available' else None)
+        if revision['status'] == 'available':
+            revision_record = {'id': 'article-revision:' + revision['comparison_id'], 'type': 'article_revision_comparison',
+                               'text': revision['_text'], 'comparison_id': revision['comparison_id'],
+                               'asof': context['as_of'], 'known_at': item.get('version_seen_at')}
+            evidence.append(revision_record)
     # Select complete evidence records. A numerical comparison is admitted only
     # with both original sources plus the deterministic calculation, atomically.
     all_evidence = evidence
@@ -284,7 +312,16 @@ def build_market_input(item, context, checked_at):
         ids = [comparison['actual_evidence_id'], comparison['consensus_evidence_id'], comparison['id']]
         if all(key in by_id for key in ids):
             groups.append([by_id[key] for key in ids])
-    groups.extend([[row] for row in all_evidence if row['type'] != 'deterministic_comparison'])
+    if revision_record:
+        groups.append([revision_record])
+    article_groups = []
+    for group in reading.get('groups', []):
+        ids = ['article:' + key for key in group['required_segment_ids']]
+        if ids and all(key in by_id for key in ids):
+            groups.append([by_id[key] for key in ids])
+            article_groups.append({**group, 'required_evidence_ids': ids})
+    # Article group members never re-enter the second selector as single rows.
+    groups.extend([[row] for row in all_evidence if row['type'] not in {'deterministic_comparison', 'article', 'article_revision_comparison'}])
 
     def selected_material(selected):
         selected_ids = {row['id'] for row in selected}
@@ -299,13 +336,22 @@ def build_market_input(item, context, checked_at):
             selection_missing.append(UNKNOWN_MARKET)
         if omitted_ids:
             selection_missing.append('请求长度限制：部分完整证据未进入本次分析，不能依据未选中的材料判断。')
+        revision_kept = revision_record is not None and revision_record['id'] in selected_ids
+        if revision and not revision_kept:
+            selection_missing.append(REVISION_UNKNOWN)
         return {**material, 'evidence': selected, 'comparisons': selected_comparisons,
+                **({'revision_comparison': revision_public(revision) if revision_kept else material['revision_comparison']} if revision else {}),
                 'has_consensus': has_consensus, 'has_market': has_market, 'missing': selection_missing,
                 'truncated': bool(reading['truncated'] or omitted_ids),
                 'selected_evidence_ids': [row['id'] for row in selected],
                 'omitted_evidence_ids': omitted_ids[:64], 'omitted_evidence_count': len(omitted_ids),
                 'source_segments_omitted': reading.get('omitted_segments', 0),
-                'selection_policy': 'complete_comparison_groups_then_complete_evidence_records',
+                'source_table_groups_omitted': reading.get('omitted_table_groups', 0),
+                'verified_profiles': copy.deepcopy(reading.get('verified_profiles', [])),
+                'compact_cell_fields': copy.deepcopy(reading.get('compact_cell_fields', [])),
+                'selected_article_groups': [group for group in article_groups if set(group['required_evidence_ids']).issubset(selected_ids)],
+                'omitted_article_groups': [group['id'] for group in article_groups if not set(group['required_evidence_ids']).issubset(selected_ids)],
+                'selection_policy': 'complete_comparison_groups_then_complete_article_context_groups',
                 'freshness': {**material['freshness'], 'market_status': material['freshness']['market_status'] if has_market else 'omitted_from_input' if execution_market_ready else material['freshness']['market_status']}}
 
     selected, selected_ids = [], set()
@@ -313,11 +359,11 @@ def build_market_input(item, context, checked_at):
     for group in groups:
         candidate = selected + [row for row in group if row['id'] not in selected_ids]
         proposal = selected_material(candidate)
-        if len(json.dumps(proposal, ensure_ascii=False).encode()) <= 8500:
+        if len(json.dumps(proposal, ensure_ascii=False).encode()) <= MAX_MARKET_INPUT_BYTES:
             selected = candidate
             selected_ids = {row['id'] for row in selected}
             result = proposal
-    if len(json.dumps(result, ensure_ascii=False).encode()) > 8500:
+    if len(json.dumps(result, ensure_ascii=False).encode()) > MAX_MARKET_INPUT_BYTES:
         raise ValueError('market_evidence_metadata_too_large')
     return result
 
@@ -361,7 +407,11 @@ def validate_output(raw, material):
         for row in rows:
             if not isinstance(row, dict) or set(row) != keys:
                 raise ValueError('market_assertion_shape_invalid')
-            citation(row)
+            source = citation(row)
+            if field == 'new_information' and material.get('revision_comparison'):
+                if ((material['revision_comparison'].get('status') != 'available')
+                        or source.get('type') != 'article_revision_comparison'):
+                    raise ValueError('market_revision_comparison_required')
             comparison = comparison_wording(row['claim'])
             if comparison and row['evidence_id'] != comparison['id']:
                 raise ValueError('market_comparison_citation_required')
@@ -411,6 +461,8 @@ def validate_output(raw, material):
         for row in value[field]:
             text(row)
             comparison_wording(row)
+    if material.get('revision_comparison'):
+        value['revision_comparison'] = copy.deepcopy(material['revision_comparison'])
     return value
 
 

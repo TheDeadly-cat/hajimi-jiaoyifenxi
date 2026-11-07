@@ -100,10 +100,13 @@ class ArticleSourceTests(unittest.TestCase):
     def test_evidence_package_utf8_cap_retains_original_segment_locators(self):
         result = extract_article(HTML, URL, 'ir_mu')
         result['segments'] += [{'id':f'long-{i}','text':'收入与条件'*100,'kind':'paragraph'} for i in range(10)]
+        result['body_text'] = '\n'.join(row['text'] for row in result['segments'])
         package = evidence_package(result,max_bytes=1600)
         self.assertLessEqual(len(json.dumps(package,ensure_ascii=False).encode()),1600)
         self.assertTrue(package['truncated'])
         self.assertGreater(package['omitted_segments'],0)
+        self.assertEqual(package['omitted_group_reasons'], {'budget': 1})
+        self.assertEqual(package['segments'], [])
         self.assertTrue(all(row in result['segments'] for row in package['segments']))
 
     def test_attachment_read_is_explicit_and_bounded(self):

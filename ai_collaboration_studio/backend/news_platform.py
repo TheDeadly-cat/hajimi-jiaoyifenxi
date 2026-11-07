@@ -283,7 +283,7 @@ class NewsPlatform:
             """)
             from .news_sources import source_registry
             for source in source_registry():
-                db.execute("INSERT INTO sources(id,name,url,enabled) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,url=excluded.url",
+                db.execute("INSERT INTO sources(id,name,url,enabled) VALUES(?,?,?,?) ON CONFLICT(id) DO NOTHING",
                            (source['id'],source['name'],source['url'],int(source.get('enabled_default',True))))
             columns = {row[1] for row in db.execute('PRAGMA table_info(sources)')}
             additions = {
@@ -316,6 +316,9 @@ class NewsPlatform:
             for source in source_registry():
                 db.execute("INSERT OR IGNORE INTO news_source_coverage(source_id,gap_reason) VALUES(?,?)",
                            (source['id'],'historical_coverage_not_verified'))
+            from .news_source_endpoints import synchronize
+            synchronize(db, source_registry(), self.clock())
+            self._sync_refresh_state(db)
 
     def _ensure_session(self):
         with self._lock:
@@ -562,6 +565,8 @@ class NewsPlatform:
             if response.status not in (200, 304):
                 raise ValueError(f"http_status_{response.status}")
             parsing_feed = response.status == 200
+            if discovered.get('parse_error'):
+                raise FeedValidationError('invalid_feed')
             entries = (discovered['entries'] if discovered.get('entries') is not None else parse_feed(response.body, source)) if parsing_feed else []
             parsing_feed = False
             now = self.clock()
@@ -571,7 +576,22 @@ class NewsPlatform:
                 return value if value and len(value) <= 2000 and not any(ord(c) < 32 for c in value) else None
             with self._db() as db:
                 new_items = updated_items = 0
+                directory_matches={}
+                if any(entry.get('discovery_evidence') for entry in entries):
+                    for saved in db.execute('SELECT * FROM items WHERE source_id=?',(source['id'],)):
+                        directory_matches.setdefault(event_store.canonical_url(saved['url']),[]).append(saved)
                 for entry in entries:
+                    if entry.get('discovery_evidence'):
+                        # Directory labels are not article titles/abstracts.
+                        # Reuse a unique saved URL identity (including RSS GUIDs)
+                        # without erasing its previously read material.
+                        matches=directory_matches.get(event_store.canonical_url(entry['url']),[])
+                        if len(matches)==1:
+                            prior=matches[0]
+                            entry={**entry,**{key:prior[key] for key in ('id','identity','title','url','excerpt','published')}}
+                            prior_version=event_store._current(db,prior['id'])
+                            if prior_version:
+                                entry['published_time_source']=json.loads(prior_version['snapshot']).get('time_provenance',{}).get('published_at','unknown')
                     analysis = analyze(entry["title"], entry["excerpt"], entry["published"], now, source["id"])
                     existing = db.execute('SELECT * FROM items WHERE id=?', (entry['id'],)).fetchone()
                     if existing is not None and event_store._current(db, entry['id']) is None:
@@ -739,6 +759,9 @@ class NewsPlatform:
                          'history_state':json.loads(row['cursor']) if row['cursor'] else None}
                         for row in db.execute('SELECT * FROM news_source_coverage ORDER BY source_id')]
         serialized = []
+        from .news_source_endpoints import latest_change, latest_check
+        with self._db() as db:
+            endpoint_details={source['id']:{'endpoint_change':latest_change(db,source['id']),'last_check':latest_check(db,source['id'])} for source in sources}
         for source in sources:
             serialized.append({"id": source["id"], "name": source["name"], "url": source["url"], "enabled": bool(source["enabled"]), "status": source["status"],
                                "last_success_at": _iso(source["last_success"]), "last_attempt_at": _iso(source["last_attempt"]),
@@ -756,7 +779,8 @@ class NewsPlatform:
                                "overdue": bool(enabled and source['enabled'] and not source['manual_hold'] and source['next_poll'] and now > source['next_poll'] + runtime_evidence.HEARTBEAT_GAP_SECONDS),
                                "overdue_seconds": max(0,round(now-source['next_poll'])) if enabled and source['next_poll'] and not source['manual_hold'] else 0})
             serialized[-1].update({key:definitions.get(source['id'],{}).get(key) for key in
-                                  ('symbols','source_kind','coverage','time_semantics','access_policy','history_capability','continuous_coverage')})
+                                  ('symbols','source_kind','coverage','time_semantics','access_policy','history_capability','continuous_coverage','discovery_method')})
+            serialized[-1].update(endpoint_details[source['id']])
         successes = [source["last_success"] for source in sources if source["last_success"] is not None]
         next_polls = [source["next_poll"] for source in sources if source["next_poll"] and source["enabled"] and not source["manual_hold"]]
         counts.update(sources_ok=sum(s["status"] == "ok" and not s['stale'] for s in serialized), sources_error=sum(s["status"] == "error" for s in sources))
@@ -809,7 +833,23 @@ class NewsPlatform:
         with self._db() as db:
             total = db.execute("SELECT COUNT(*) FROM items i" + where, args).fetchone()[0]
             rows = db.execute("SELECT i.*,s.name AS source_name FROM items i JOIN sources s ON s.id=i.source_id" + where + " ORDER BY COALESCE(i.published,i.discovered) DESC,i.id LIMIT ? OFFSET ?", (*args, limit, offset)).fetchall()
-        return {"items": [self._serialize_item(row) for row in rows], "total": total, "limit": limit, "offset": offset}
+            items=[]
+            for row in rows:
+                item=self._serialize_item(row)
+                version=event_store._current(db,item['id'])
+                if version:self._project_discovery(item,json.loads(version['snapshot']))
+                items.append(item)
+        return {"items":items,"total":total,"limit":limit,"offset":offset}
+
+    @staticmethod
+    def _project_discovery(item, version):
+        for key in ('discovery_kind','reference_period','automatic_reading_eligible','discovery_evidence'):
+            if key in version:item[key]=version[key]
+        item['published_time_source']=(version.get('time_provenance') or {}).get('published_at')
+        # A saved article can supply a qualified publication time even when its
+        # directory listing had none. Do not leave list and detail contradictory.
+        if version.get('published_at') is not None:
+            item['published_at']=version['published_at']
 
     def get_item(self, item_id):
         with self._db() as db:
@@ -827,6 +867,7 @@ class NewsPlatform:
             # Reading and legacy paid-input lookup use the same immutable text;
             # harmless later formatting/URL tracking observations stay separate.
             item.update({key:version[key] for key in ('title','url','excerpt','published_at')})
+            self._project_discovery(item,version)
         return item
 
     def event_detail(self, item_id, as_of=None):
@@ -879,12 +920,17 @@ class NewsPlatform:
             if row is None:
                 return None
             version = event_store._version(dict(row))
+            previous_row = db.execute('SELECT * FROM news_article_versions WHERE item_id=? AND id=?',
+                                      (version['item_id'], version.get('previous_version_id'))).fetchone()
+            previous_version = event_store._version(dict(previous_row)) if previous_row else None
             current_row = db.execute('SELECT i.*,s.name AS source_name FROM items i JOIN sources s ON s.id=i.source_id WHERE i.id=?',(version['item_id'],)).fetchone()
             item = self._serialize_item(current_row)
             for key in ('title','url','excerpt','published_at','source_updated_at','version_seen_at','evidence','evidence_package_id','symbols'):
                 item[key] = version.get(key)
             item.update(current_version_id=version['id'],discovered_at=version['first_seen_at'],updated_at=version['version_seen_at'],
-                        event={'event_id':version['event_id'],'current_version':version,'retracted':version['content_status']=='retracted'})
+                        event={'event_id':version['event_id'],'current_version':version,'previous_version':previous_version,
+                               'retracted':version['content_status']=='retracted'})
+            self._project_discovery(item,version)
             return item
 
     def configure_source(self, source_id, enabled, poll_interval=None):
@@ -898,6 +944,9 @@ class NewsPlatform:
             if not db.execute('SELECT 1 FROM sources WHERE id=?',(source_id,)).fetchone():
                 raise ValueError('news_source_not_found')
             db.execute('UPDATE sources SET enabled=?,poll_interval=COALESCE(?,poll_interval) WHERE id=?',(int(enabled),poll_interval,source_id))
+            if enabled:
+                from .news_source_endpoints import confirm_enabled
+                confirm_enabled(db,source_id,self.clock())
             self._sync_refresh_state(db)
         self._wake.set()
         return self.overview()
@@ -971,9 +1020,21 @@ class NewsPlatform:
             busy_sources=tuple(self._inflight)
             busy_clause=' AND t.source_id NOT IN ('+','.join('?' for _ in busy_sources)+')' if busy_sources else ''
             candidates=db.execute("""SELECT t.* FROM news_article_tasks t JOIN sources s ON s.id=t.source_id
+                JOIN news_article_versions v ON v.id=t.version_id
                 WHERE t.status IN ('pending','completed') AND t.next_attempt<=? AND s.enabled=1 AND s.manual_hold=0 AND s.not_before<=?
+                AND COALESCE(json_extract(v.snapshot,'$.automatic_reading_eligible'),1)!=0
+                AND COALESCE((SELECT json_extract(o.record,'$.automatic_reading_eligible')
+                    FROM news_article_observations o WHERE o.item_id=t.item_id ORDER BY o.seq DESC LIMIT 1),1)!=0
                 """+busy_clause+" ORDER BY t.priority DESC,t.created,t.id LIMIT 100",(self.clock(),self.clock(),*busy_sources)).fetchall()
-        task=next((dict(row) for row in candidates if row['source_id'] not in self._inflight),None)
+        task=None
+        with self._db() as db:
+            for row in candidates:
+                version=db.execute('SELECT snapshot FROM news_article_versions WHERE id=?',(row['version_id'],)).fetchone()
+                observation=db.execute('SELECT record FROM news_article_observations WHERE item_id=? ORDER BY seq DESC LIMIT 1',(row['item_id'],)).fetchone()
+                if (row['source_id'] not in self._inflight and version
+                        and event_store.automatic_reading_eligible(json.loads(version['snapshot']))
+                        and (not observation or json.loads(observation['record']).get('automatic_reading_eligible') is not False)):
+                    task=dict(row);break
         if not task:
             return False
         with self._db() as db:

@@ -1,5 +1,31 @@
 import React from "react";
 import "./NewsContentQuality.css";
+import { evidenceGroupLabel, evidenceScopeLabel, evidenceOmissionLabel, resolveSavedEvidenceLocator } from "../newsEvidence";
+
+export function EvidencePackageScope({ evidencePackage, segments }) {
+  if (!evidencePackage || typeof evidencePackage !== "object") return null;
+  const groups = Array.isArray(evidencePackage.groups) ? evidencePackage.groups : [];
+  const rows = new Map((Array.isArray(segments) ? segments : []).map(row => [row.id, row]));
+  const profiles = Array.isArray(evidencePackage.verified_profiles) ? evidencePackage.verified_profiles : [];
+  const omissions = evidencePackage.omitted_group_reasons && typeof evidencePackage.omitted_group_reasons === "object" ? Object.entries(evidencePackage.omitted_group_reasons) : [];
+  const showRows = ids => <ol className="news-evidence-group-rows">{(ids || []).map(id => {
+    const row = rows.get(id);
+    return <li key={id}><small>{row?.kind === "table_row" ? `表格第 ${row.row_index} 行` : "原段"} · {row?.source_segment_id || id}</small>{row ? <p>{row.text}</p> : <p className="news-event-caption">此记录保留了定位标识，未附原段文本；请核对保存的引文。</p>}</li>;
+  })}</ol>;
+  return <div className="news-evidence-scope">
+    <p>{Array.isArray(evidencePackage.groups) ? `已选 ${groups.length} 组` : "此记录未保存完整组清单"} · 省略{Number.isInteger(evidencePackage.omitted_group_count) ? ` ${evidencePackage.omitted_group_count} 组` : "数量未记录"}。{groups.length ? "表头、期间、单位与脚注随所属组保留；" : ""}省略内容不能用于补足结论。</p>
+    {groups.map(group => <details className="news-evidence-group" key={group.id}>
+      <summary>{evidenceGroupLabel(group)}<span>{evidenceScopeLabel(group.scope)} · {(group.required_segment_ids || []).length} 处原段</span></summary>
+      {sourceHref(group.url) ? <a href={sourceHref(group.url)} target="_blank" rel="noopener noreferrer">查看本组来源原文</a> : null}
+      <h5>核对目标</h5>{showRows(group.targets?.length ? group.targets : group.required_segment_ids)}
+      {group.dependencies?.length ? <><h5>期间、单位与脚注依据</h5>{showRows(group.dependencies)}</> : <p className="news-event-caption">期间和单位按以上完整原文核对；这里不推断缺失口径。</p>}
+    </details>)}
+    {profiles.length ? <div className="news-evidence-profile"><p>配套关系来自对已保存材料的离线核对；仅覆盖所选已报告项目，其他明细、调整项和预测仍需另查。</p>{profiles.map(profile => <p key={profile.id}>原文币种符号：{plain(profile.currency_symbol) || "未标注"}；明确币种：{plain(profile.currency_iso) || "未确认，不能仅凭符号推定"}。</p>)}</div> : null}
+    {omissions.length ? <div className="news-evidence-omissions"><strong>省略原因</strong><ul>{omissions.map(([reason, count]) => <li key={reason}>{evidenceOmissionLabel(reason)}（{count} 组）</li>)}</ul></div> : null}
+    {evidencePackage.excerpt_omitted_for_table_context ? <p>订阅摘录也已省略，避免将缺少配套说明的财务数字作为依据。</p> : null}
+    {evidencePackage.truncated ? <p className="news-event-warning">材料或选择范围存在截断、省略；这里只说明已保留范围。</p> : null}
+  </div>;
+}
 
 export function MaterialQuality({ quality }) {
   if (!quality) return null;
@@ -15,16 +41,27 @@ export function MaterialQuality({ quality }) {
 export function AnalysisEvidence({ analysis }) {
   const evidence = Array.isArray(analysis?.evidence) ? analysis.evidence : [];
   if (analysis?.legacy) return <p className="news-analysis-legacy">这是保留的旧版分析，尚未经过新规则检查。你仍可阅读原结果；切换模型或重新打开页面不会自动重新分析或扣费。</p>;
-  if (!evidence.length) return null;
-  return <details className="news-analysis-evidence">
+  if (!evidence.length && !analysis?.evidence_package && !analysis?.revision_comparison) return null;
+  return <><RevisionComparisonScope comparison={analysis?.revision_comparison} />{analysis?.evidence_package ? <details className="news-analysis-used-scope"><summary>已使用范围（保存的分析记录）</summary><p>这是此分析记录保存的材料范围。当前可用预览不会补入这份旧记录；范围记录不代表分析结论已经核实。</p><EvidencePackageScope evidencePackage={analysis.evidence_package} /></details> : null}{evidence.length ? <details className="news-analysis-evidence">
     <summary>查看 AI 说法与引用原文（{evidence.length}）</summary>
     <p>引文与已保存材料对应，仅说明出处；数字含义、条件与结论仍需人工核对。{analysis?.scope?.kind === "article_evidence" ? "本次使用已保存的正文证据包，具体阅读范围和截断以保存记录为准；附件另行标记。" : "全文尚未读取。"}</p>
     <ol>{evidence.map((entry, index) => <li key={index}>
       <strong>{plain(entry?.claim) || "这条要点的文字未保留"}</strong>
-      <small>{entry?.evidence_field === "title" ? "记录引用的来源标题" : entry?.evidence_field === "excerpt" ? "记录引用的来源摘录" : entry?.evidence_field === "body" ? `记录引用的正文${entry?.locator?.segment_id ? ` · ${entry.locator.segment_id}` : "（具体段落未标注）"}` : "引用位置未确认"}</small>
+      <small>{entry?.evidence_field === "revision" ? `版本对照：${entry?.locator?.revision_role === "before" ? "旧版本原文" : entry?.locator?.revision_role === "after" ? "所选新版本原文" : "具体版本未定位"}${entry?.locator?.source_segment_id ? ` · ${entry.locator.source_segment_id}` : ""}` : entry?.evidence_field === "title" ? "记录引用的来源标题" : entry?.evidence_field === "excerpt" ? "记录引用的来源摘录" : entry?.evidence_field === "body" ? `记录引用的${/^attachment-\d+:/.test(entry?.locator?.segment_id || entry?.locator?.document_id || "") ? "附件" : "正文"}${entry?.locator?.segment_id ? ` · ${entry.locator.segment_id}` : "（具体段落未标注）"}` : "引用位置未确认"}</small>
       <blockquote>{plain(entry?.quote) || "没有可显示的引用原文"}</blockquote>
+      {sourceHref(entry?.locator?.url) ? <a href={sourceHref(entry.locator.url)} target="_blank" rel="noopener noreferrer">查看该引文记录的来源</a> : null}
     </li>)}</ol>
-  </details>;
+  </details> : null}</>;
+}
+
+export function RevisionComparisonScope({ comparison }) {
+  if (!comparison || typeof comparison !== "object") return null;
+  if (comparison.status === "source_text_unchanged") return <p className="news-revision-comparison">已核对两版保存的正文或摘录及其结构，未发现变化；其他来源信息仍需分别核对。</p>;
+  const documents = Array.isArray(comparison.documents) ? comparison.documents : [];
+  const available = comparison.status === "available" && documents.length === 2 && documents.some(row => row.role === "before") && documents.some(row => row.role === "after");
+  return <section className="news-revision-comparison" aria-label="本次版本对照范围"><h4>本次版本对照范围</h4>
+    {available ? <><p>已同时纳入旧版与新版完整的保存材料；只比较以下范围，附件内容不在本次对照中。</p><ul>{documents.map(row => <li key={row.role}>{row.role === "before" ? "旧版本" : "所选新版本"} {Number.isInteger(row.version_number) ? row.version_number : "编号未记录"} · {row.scope === "original_excerpt_only_full_body_unknown" ? "原始摘录，全文未知" : "保存正文，完整表格上下文随原段保留"}{sourceHref(row.url) ? <> · <a href={sourceHref(row.url)} target="_blank" rel="noopener noreferrer">来源链接</a></> : null}</li>)}</ul><p>旧版数值只作为旧版依据，不代表当前结果；对照不等于独立核实。</p></> : <p>没有完整、可比的前后材料进入本次分析，新增或更正尚无法核验。{comparison.reason === "comparison_budget" ? "前后材料超出预算，已整组省略。" : "旧版可能缺失、读取范围不同或尚无法确认。"}</p>}
+  </section>;
 }
 
 // Presentation only: resolve the backend's saved pointers. Do not infer a
@@ -109,18 +146,13 @@ function EvidenceReference({ reference, field, candidate, analysis, source }) {
     const quote = plain(entry?.quote);
     const sourceField = entry?.evidence_field;
     const claim = plain(listAt(candidate?.key_points, index));
-    const bodyEvidence = source?.event?.current_version?.evidence || source?.evidence;
     const locator = object(entry?.locator);
-    const segment = sourceField === "body" && Array.isArray(bodyEvidence?.segments) ? bodyEvidence.segments.find(value => value.id === locator?.segment_id) : null;
-    const sameVersion = plain(analysis.article_version_id || candidate?.article_version_id) && (analysis.article_version_id || candidate?.article_version_id) === source?.current_version_id;
-    // Saved offsets count Unicode code points (Python), not UTF-16 code units.
-    const segmentCharacters = Array.from(plain(segment?.text));
-    const locatedQuote = sameVersion && segment && Number.isInteger(locator?.start) && Number.isInteger(locator?.end) && locator.start >= 0 && locator.end > locator.start && locator.end <= segmentCharacters.length ? segmentCharacters.slice(locator.start, locator.end).join("") : "";
-    const currentSource = ["title", "excerpt"].includes(sourceField) ? plain(source?.[sourceField]) : sourceField === "body" && locatedQuote === quote ? locatedQuote : "";
+    const located = sourceField === "body" ? resolveSavedEvidenceLocator(source, analysis, locator, quote) : null;
+    const currentSource = ["title", "excerpt"].includes(sourceField) ? plain(source?.[sourceField]) : located?.matched ? located.text : "";
     if ((ownIndex >= 0 && ownIndex !== index) || !quote || !claim || claim !== plain(entry?.claim) || !currentSource.includes(quote)) {
       return <p className="news-review-unmapped">记录中的引文无法与当前保存的来源准确对应，暂不并排当作依据；可展开技术详情核对原记录。</p>;
     }
-    return <div className="news-review-support"><h5>记录引用的原句 · {sourceField === "title" ? "来源标题" : sourceField === "body" ? "已保存正文" : "来源摘录"}{entry?.locator?.segment_id ? ` · ${entry.locator.segment_id}` : ""}</h5><blockquote>{quote}</blockquote><p>这段引文可在当前保存的材料中找到；它不代表 AI 对原文的解读正确。</p></div>;
+    return <div className="news-review-support"><h5>记录引用的原句 · {sourceField === "title" ? "来源标题" : sourceField === "body" ? located.label : "来源摘录"}</h5><blockquote>{quote}</blockquote>{located?.url ? <a href={located.url} target="_blank" rel="noopener noreferrer">查看原句所属来源</a> : null}<p>这段引文可在当前保存的材料中找到；它不代表 AI 对原文的解读正确。</p></div>;
   }
   if (reference === "source_text.title" || reference === "source_text.excerpt") {
     const sourceField = reference === "source_text.title" ? "title" : "excerpt";
@@ -162,7 +194,9 @@ export function AnalysisReview({ analysis, source, originalUrl }) {
   const freshness = object(analysis.freshness);
   const href = sourceHref(originalUrl);
   const needsReview = analysis.status === "needs_review";
+  const savedPackage = analysis.evidence_package || candidate?.evidence_package;
   return <div className="news-reading-review">
+    {!["completed", "success"].includes(analysis.status) && savedPackage ? <details className="news-analysis-used-scope"><summary>已使用范围（保存的分析记录）</summary><p>此范围属于已保存记录，结果是否完成或获接纳仍以分析状态为准。</p><EvidencePackageScope evidencePackage={savedPackage} /></details> : null}
     {needsReview ? <section className="news-semantic-review news-review-explanation" aria-label="需要核对的 AI 表述">
       <div role="status"><strong>发现可能误读，请先看这里</strong><p>这些表述暂时不能采信，尚未作为正常分析结果接纳。请先核对来源；本次预约已保留，不会自动重试或重新发起收费请求。</p></div>
       {issues.length ? issues.map((issue, index) => <ReviewIssue key={index} issue={issue} candidate={candidate} analysis={analysis} source={source} index={index} />) : <p className="news-review-unmapped">本次检查未能定位具体问题，不能视为内容已通过。现有记录不足以提供逐句比对。</p>}

@@ -221,7 +221,7 @@ def overview(db, session_id, now):
     recent = []
     for row in db.execute('''SELECT p.*,s.name AS source_name FROM poll_runs p JOIN sources s ON s.id=p.source_id
         ORDER BY p.started DESC,p.rowid DESC LIMIT 10'''):
-        recent.append({**{k:row[k] for k in ('source_id','source_name','outcome','http_status','new_items','updated_items','error_code','trigger_kind')},
+        recent.append({**{k:row[k] for k in ('source_id','source_name','outcome','http_status','parsed_items','new_items','updated_items','error_code','trigger_kind')},
                        'schedule_basis':json.loads(row['schedule_basis']) if row['schedule_basis'] else None,
                        'diagnostics':json.loads(row['diagnostics']) if row['diagnostics'] else None,
                        'started_at':iso(row['started']), 'finished_at':iso(row['finished'])})
