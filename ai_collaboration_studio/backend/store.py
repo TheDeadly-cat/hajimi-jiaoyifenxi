@@ -7825,6 +7825,9 @@ class StudioStore:
         if not title or not content:
             raise ValueError("资料标题和内容不能为空")
         metadata = self._clean_material_metadata(payload.get("metadata"))
+        if "market_context" in metadata:
+            from .news_market_material import validate_market_material_content
+            validate_market_material_content(metadata, content, source_url)
         metadata["prompt_injection_risk"] = self._material_prompt_injection_risk(content)
         timestamp = now_ms()
         material = {
@@ -7917,6 +7920,9 @@ class StudioStore:
                 else self._metadata_from_json(current.get("metadata_json"))
             )
             metadata["prompt_injection_risk"] = self._material_prompt_injection_risk(content)
+            if "market_context" in metadata:
+                from .news_market_material import validate_market_material_content
+                validate_market_material_content(metadata, content, self._clean_source_url(payload.get("source_url", current["source_url"])))
             changed_at = now_ms()
             material = {
                 **current,
@@ -7993,6 +7999,9 @@ class StudioStore:
             "presentation_hub_url", "direct_material_count", "located_metric_count",
         }
         clean: dict[str, Any] = {}
+        if "market_context" in value:
+            from .news_market_material import clean_market_context_metadata
+            clean["market_context"] = clean_market_context_metadata(value["market_context"])
         for key in allowed:
             raw = value.get(key)
             if isinstance(raw, bool):
@@ -28611,6 +28620,20 @@ class StudioStore:
                 if row
                 else None
             )
+
+    def news_market_round_page(self, room_id: str, as_of_ms: int, *, limit: int = 50, offset: int = 0) -> dict[str, Any] | None:
+        """Read checkpoint candidates known at a historical cutoff; no refresh."""
+        if type(as_of_ms) is not int or type(limit) is not int or type(offset) is not int or not 1 <= limit <= 100 or offset < 0:
+            raise ValueError('invalid_saved_round_page')
+        with closing(self._connect()) as connection:
+            if connection.execute('SELECT 1 FROM rooms WHERE id=?',(room_id,)).fetchone() is None:
+                return None
+            clause=' FROM rounds r JOIN round_checkpoints c ON c.round_id=r.id AND c.room_id=r.room_id WHERE r.room_id=? AND r.created_at<=? AND c.updated_at<=?'
+            args=(room_id,as_of_ms,as_of_ms)
+            total=connection.execute('SELECT COUNT(*)'+clause,args).fetchone()[0]
+            rows=connection.execute('SELECT r.id,r.created_at,c.updated_at AS checkpoint_known_at'+clause+
+                ' ORDER BY c.updated_at DESC,r.created_at DESC,r.id LIMIT ? OFFSET ?',(*args,limit,offset)).fetchall()
+        return {'rounds':[dict(row) for row in rows],'total':total,'limit':limit,'offset':offset}
 
     def pending_paused_round(self, room_id: str) -> dict[str, Any] | None:
         """Return the single authoritative paused round that blocks a new round."""

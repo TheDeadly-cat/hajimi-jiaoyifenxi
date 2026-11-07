@@ -277,7 +277,8 @@ class FeedSafetyTests(unittest.TestCase):
         entries = parse_feed(body, SOURCES[0])
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["excerpt"], "Summary")
-        self.assertIsNotNone(entries[0]["published"])
+        self.assertIsNone(entries[0]["published"])
+        self.assertIsNotNone(entries[0]["source_updated_at"])
         self.assertEqual(entries, parse_feed(body, SOURCES[0]))
 
     def test_xml_entity_declarations_and_oversized_bodies_are_rejected(self):

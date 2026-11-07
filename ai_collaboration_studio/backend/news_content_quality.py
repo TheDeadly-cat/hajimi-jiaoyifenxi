@@ -297,7 +297,7 @@ def semantic_evidence(value, material):
     """Classify only recognized evidence claims; unhandled prose stays unassessed."""
     checks = []
     sources = material["source_text"]
-    whole_source = "\n".join(sources[field] for field in _SOURCE_FIELDS)
+    whole_source = "\n".join(sources[field] for field in _reading_fields(material))
     timed = deterministic_time(material)
     def add(code, status, field, topic, evidence_fields):
         item = {"code": code, "status": status, "field": field, "topic": topic, "evidence_fields": evidence_fields}
@@ -459,6 +459,9 @@ def inspect_material(item, checked_at=None):
     """Return a free, deterministic scope/time inspection, never an AI verdict."""
     if type(item) is not dict:
         raise ValueError("invalid_reading_material")
+    from .news_evidence_reading import has_article, inspect
+    if has_article(item):
+        return inspect(item, checked_at)
     checked = _checked_time(checked_at)
     has_title = not _label_only(_text(item.get("title")))
     has_excerpt = not _label_only(_text(item.get("excerpt")))
@@ -540,6 +543,11 @@ def insufficient_result(item, *, checked_at=None):
             "limitations": _SCOPE_WARNING + _MEANING_WARNING}
 
 
+def _reading_fields(material):
+    fields = ("title", "excerpt", "body") if material.get("reading_contract") == "article_evidence_reading_v1" else _SOURCE_FIELDS
+    return (*fields, "revision") if (material.get('revision_comparison') or {}).get('status') == 'available' else fields
+
+
 def validate_output(raw, material):
     """Check structure/provenance and bounded evidence, retaining raw assertions.
 
@@ -571,7 +579,7 @@ def validate_output(raw, material):
     for point in value["key_points"]:
         if (type(point) is not dict or set(point) != {"claim", "evidence_field", "quote"}
                 or not bounded_text(point["claim"], 1000) or not bounded_text(point["quote"], 1000)
-                or type(point["evidence_field"]) is not str or point["evidence_field"] not in _SOURCE_FIELDS):
+                or type(point["evidence_field"]) is not str or point["evidence_field"] not in _reading_fields(material)):
             raise ValueError("invalid_analysis_evidence")
         source = material["source_text"][point["evidence_field"]]
         if point["quote"] not in source:
@@ -582,10 +590,10 @@ def validate_output(raw, material):
     result = {
         "summary": value["summary"], "key_points": [point["claim"] for point in evidence],
         "uncertainties": copy.deepcopy(value["uncertainties"]), "evidence": evidence,
-        "quality_version": QUALITY_VERSION, "scope": copy.deepcopy(material["scope"]),
+        "quality_version": material.get("reading_contract", QUALITY_VERSION), "scope": copy.deepcopy(material["scope"]),
         "freshness": copy.deepcopy(material["freshness"]), "quality_checked_at": material["checked_at"],
         "analysis_performed": True, "semantic_review_required": True,
-        "limitations": _SCOPE_WARNING + _MEANING_WARNING,
+        "limitations": ("仅阅读所选正文证据，未读附件不纳入判断。" if material.get("reading_contract") else _SCOPE_WARNING) + _MEANING_WARNING,
     }
     review = semantic_evidence(value, material)
     result["deterministic_time"] = deterministic_time(material)

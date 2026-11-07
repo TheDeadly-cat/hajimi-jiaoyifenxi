@@ -14,6 +14,9 @@ from datetime import datetime, timezone
 
 from .news_platform import _independent_database_path
 from . import news_analysis_providers as analysis_providers
+from . import news_evidence_reading as article_reading
+from . import news_market_tasks as market_tasks
+from . import news_event_store as event_store
 from .news_content_quality import (
     QUALITY_VERSION, INSTRUCTIONS as READING_INSTRUCTIONS, TEXT_FORMAT,
     RSS_V2_QUALITY_VERSION, RSS_V2_INSTRUCTIONS, RSS_V2_TEXT_FORMAT,
@@ -102,11 +105,14 @@ class NewsAnalysis:
                 raise ValueError("news_analysis_database_must_be_independent")
             db.execute(f"PRAGMA application_id={APPLICATION_ID}")
             db.execute("CREATE TABLE IF NOT EXISTS runs (fingerprint TEXT PRIMARY KEY,item_id TEXT NOT NULL,created REAL NOT NULL,reserved INTEGER NOT NULL,status TEXT NOT NULL,result TEXT NOT NULL DEFAULT '{}')")
+            db.execute('CREATE TABLE IF NOT EXISTS reading_identity_aliases(alias TEXT PRIMARY KEY,target TEXT NOT NULL REFERENCES runs(fingerprint))')
             columns = {row[1] for row in db.execute('PRAGMA table_info(runs)')}
             for name in ('provider', 'model', 'contract', 'rate_version', 'reservation_basis'):
                 if name not in columns:
                     db.execute(f'ALTER TABLE runs ADD COLUMN {name} TEXT')
             db.execute("UPDATE runs SET status='unknown',result=? WHERE status='pending'", (json.dumps({"error": "上次分析被中断，结果未确认，不自动重试。"}),))
+        if hasattr(self.news, 'recover_analysis_tasks'):
+            self.news.recover_analysis_tasks()
 
     @contextmanager
     def _db(self):
@@ -244,6 +250,30 @@ class NewsAnalysis:
         return hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()
 
     def _saved(self, db, item):
+        version_key = self._version_fingerprint(item)
+        if version_key:
+            row = db.execute("SELECT status,result FROM runs WHERE fingerprint=?", (version_key,)).fetchone()
+            if row is None and hasattr(self.news,'equivalent_reading_versions'):
+                # The immutable news history is authoritative across the gap
+                # between its commit and the optional AI alias-cache write.
+                # This walk stops as soon as actual material/scope changes.
+                keys = [self._version_fingerprint({'current_version_id':version['id'],
+                        'evidence_package_id':version['evidence_package_id'],'event':{'event_id':version['event_id']}})
+                        for version in self.news.equivalent_reading_versions(item['id'],item['current_version_id'])]
+                allowed_targets = set(keys)
+                for previous_key in keys:
+                    row=db.execute('SELECT status,result FROM runs WHERE fingerprint=?',(previous_key,)).fetchone()
+                    if row is None:
+                        alias=db.execute('SELECT r.fingerprint,r.status,r.result FROM reading_identity_aliases a JOIN runs r ON r.fingerprint=a.target WHERE a.alias=?',(previous_key,)).fetchone()
+                        row = alias if alias and alias['fingerprint'] in allowed_targets else None
+                    if row:
+                        break
+            if row:
+                return {**json.loads(row['result']), 'status': row['status']}
+            # A newly fetched body is a distinct evidence package; keep the
+            # old RSS result in history instead of mislabelling it as full text.
+            if article_reading.has_article(item):
+                return None
         # Check every supported route before admitting any charge. Switching a
         # provider/model is never authority to analyze the same material again.
         v3, previous, legacy = self._rss_v3_fingerprint(item), self._rss_v2_fingerprint(item), self._legacy_fingerprint(item)
@@ -282,10 +312,59 @@ class NewsAnalysis:
                 legacy_notice="这是已保存的RSS v3分析，未经过v4范围内语义检查；保留原结果，不自动重新付费分析。")
         return value
 
+    def retain_equivalent_reading(self,before,after):
+        old,new=self._version_fingerprint(before),self._version_fingerprint(after)
+        # Only a provenance annotation can use this bridge. Raw material and
+        # scope must be byte-equivalent; meaningful corrections cannot alias.
+        if (not old or not new or old==new or before.get('id') != after.get('id')
+                or event_store.material_identity(before,before.get('evidence') or {}) != event_store.material_identity(after,after.get('evidence') or {})
+                or not hasattr(self.news,'equivalent_reading_versions')):
+            return
+        versions = self.news.equivalent_reading_versions(after['id'],after['current_version_id'])
+        allowed_targets = {self._version_fingerprint({'current_version_id':v['id'], 'evidence_package_id':v['evidence_package_id'],
+                           'event':{'event_id':v['event_id']}}) for v in versions}
+        if old not in allowed_targets:
+            return
+        with self._db() as db:
+            target=db.execute('SELECT fingerprint FROM runs WHERE fingerprint=?',(old,)).fetchone()
+            if target is None:
+                target=db.execute('SELECT target AS fingerprint FROM reading_identity_aliases WHERE alias=?',(old,)).fetchone()
+            if target and target['fingerprint'] in allowed_targets:
+                db.execute('INSERT OR IGNORE INTO reading_identity_aliases(alias,target) VALUES(?,?)',(new,target['fingerprint']))
+
+    def version_result(self,current,version):
+        item=copy.deepcopy(current)
+        for key in ('title','excerpt','url','published_at','source_updated_at','version_seen_at','evidence','evidence_package_id','symbols'):
+            item[key]=copy.deepcopy(version.get(key))
+        item.update(discovered_at=version['first_seen_at'],updated_at=version['version_seen_at'],current_version_id=version['id'],
+                    event={'event_id':version['event_id'],'current_version':version})
+        with self._db() as db:
+            return self._saved(db,item)
+
+    @staticmethod
+    def _version_fingerprint(item):
+        if not item.get('current_version_id'):
+            return None
+        identity = {'task_type':'fact_reading', 'evidence_package_id':item.get('evidence_package_id',item['current_version_id']),
+                    'event_id':(item.get('event') or {}).get('event_id')}
+        return hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()
+
     def result(self, item):
+        if (item.get('evidence') or {}).get('content_status') == 'retracted':
+            return {'status':'needs_review','error':'来源已撤回此材料，请复核旧结论；不会自动生成新的正常摘要。',
+                    'article_version_id':item.get('current_version_id'),'analysis_performed':False}
         with self._db() as db:
             saved = self._saved(db, item)
-        return saved if saved is not None else insufficient_result(item)
+        if saved is None and hasattr(self.news, 'analysis_task_for_item'):
+            task = self.news.analysis_task_for_item(item['id'])
+            if task and task['evidence_package_id'] == item.get('evidence_package_id') and task['status'] in {'failed','unknown','needs_review'}:
+                if task.get('reason') == article_reading.NO_SELECTED_EVIDENCE:
+                    return article_reading.insufficient_article_result(item, reason=task['reason'])
+                return {'status':task['status'],'error':'本版本任务已有未确认或需复核记录，保留原状态，不自动重试。',
+                        'article_version_id':item.get('current_version_id')}
+        if saved is not None:
+            return saved
+        return article_reading.insufficient_article_result(item) if article_reading.has_article(item) else insufficient_result(item)
 
     def request(self, item_id):
         with self._lock:
@@ -302,10 +381,61 @@ class NewsAnalysis:
             if not self._configured():
                 raise ValueError("analysis_session_required")
             try:
-                self._queue.put_nowait((item_id,generation))
+                task = self.news.analysis_task_for_item(item_id) if hasattr(self.news, 'analysis_task_for_item') else None
+                self._queue.put_nowait((item_id,generation,task['id'] if task else None))
             except queue.Full:
                 raise ValueError("analysis_queue_full") from None
         return {"status": "queued"}
+
+    def prepare_market_context(self, item_id, **bindings):
+        return market_tasks.prepare(self.news,getattr(self.news,'research_store',None),item_id,**bindings)
+
+    def market_context(self, item):
+        saved=market_tasks.get(self.news,item['id'])
+        return {**saved['context'],'evidence_context_id':saved['context']['context_id'],'context_id':saved['id']} if saved else None
+
+    def market_result(self, item, context_id=None):
+        saved=market_tasks.get(self.news,item['id'],context_id)
+        if not saved:
+            return None
+        with self._db() as db:
+            row=db.execute('SELECT status,result FROM runs WHERE fingerprint=?',(market_tasks.fingerprint(saved['id']),)).fetchone()
+        if row:
+            return {**json.loads(row['result']),'status':row['status'],'context_id':saved['id']}
+        with self.news._db() as db:
+            task=db.execute('SELECT status,reason FROM news_analysis_tasks WHERE id=?',(market_tasks.fingerprint(saved['id']),)).fetchone()
+        if task:
+            insufficient = task['reason'] == 'market_evidence_unavailable_no_send'
+            return {'status':'queued' if task['status']=='pending' else task['status'],
+                    'context_id':saved['id'],'analysis_performed':False,
+                    'waiting_for_authorized_processing':task['status']=='pending',
+                    **({'error_code':task['reason'],'material_insufficient':True} if insufficient else {}),
+                    'error':'没有可引用的原文证据，只有标题或行情不足以分析新闻影响；未发送模型请求。' if insufficient else task['reason'] or ('待处理；执行前仍会核对当前授权与预算。' if task['status']=='pending' else '已有未确认任务记录，保留状态。')}
+        return None
+
+    def request_market(self,item_id,context_id,*,acknowledge_historical=False):
+        saved=market_tasks.get(self.news,item_id,context_id)
+        historical=bool(saved and saved['context'].get('mode')=='historical_replay')
+        if historical and acknowledge_historical is not True:
+            raise ValueError('historical_market_confirmation_required')
+        if not saved or not (market_tasks.belongs_to_replay(self.news,saved,item_id) if historical else market_tasks.belongs_to_current_evidence(self.news,saved,item_id)):
+            raise ValueError('market_context_missing_or_version_changed')
+        existing=self.market_result(saved['item'],context_id)
+        if existing and existing.get('status') not in {'queued'}:
+            return existing
+        with self._lock:
+            if not self._configured():
+                raise ValueError('analysis_session_required')
+            task_id=market_tasks.task(self.news,saved)
+            with self.news._db() as db:
+                state=db.execute('SELECT status FROM news_analysis_tasks WHERE id=?',(task_id,)).fetchone()['status']
+            if state not in {'pending','running'}:
+                return {'status':state,'context_id':context_id,'error':'已保留本任务状态，不自动重试。'}
+            try:
+                self._queue.put_nowait((item_id,self._generation,task_id,context_id))
+            except queue.Full:
+                raise ValueError('analysis_queue_full') from None
+        return {'status':'queued','context_id':context_id}
 
     def _loop(self):
         while not self._stop.is_set():
@@ -315,14 +445,18 @@ class NewsAnalysis:
                 queued = None
             try:
                 if queued:
-                    item_id, generation = queued
-                    self._analyze(item_id, generation=generation)
+                    item_id, generation, *task_ids = queued
+                    self._analyze(item_id, generation=generation, task_id=task_ids[0] if task_ids else None,
+                                  market_context_id=task_ids[1] if len(task_ids)>1 else None)
                 else:
                     with self._lock:
                         automatic = self._configured() and self._automatic
                         cutoff = self._configured_at
                         generation = self._generation
                     if automatic and self.news.overview()["enabled"]:
+                        if hasattr(self.news, 'pending_analysis_tasks'):
+                            self._next_persistent_task(cutoff, generation)
+                            continue
                         for item in self.news.list_items(limit=100)["items"]:
                             discovered = datetime.fromisoformat(item["discovered_at"].replace("Z", "+00:00")).timestamp()
                             if discovered >= cutoff and self.result(item) is None:
@@ -332,21 +466,50 @@ class NewsAnalysis:
                 with self._lock:
                     self._error = "分析服务暂时无法完成操作；已发送的请求不会自动重试。"
 
-    def _analyze(self, item_id, *, automatic=False, generation=None):
+    def _next_persistent_task(self, cutoff, generation):
+        offset = 0
+        while not self._stop.is_set():
+            page = self.news.pending_analysis_tasks(limit=100, offset=offset, after=cutoff)
+            for task in page['tasks']:
+                if task['task_type'] != 'fact_reading' or task.get('trigger') == 'historical_backfill':
+                    continue
+                if hasattr(self.news,'article_reading_blocks_analysis') and self.news.article_reading_blocks_analysis(task['version_id']):
+                    continue
+                return self._analyze(task['item_id'], automatic=True, generation=generation, task_id=task['id'])
+            offset += len(page['tasks'])
+            if not page['tasks'] or offset >= page['total']:
+                return
+
+    def _analyze(self, item_id, *, automatic=False, generation=None, task_id=None, market_context_id=None):
         if generation is None:
             with self._lock:
                 generation = self._generation
         with self._execution_lock:
-            return self._analyze_once(item_id, automatic=automatic, generation=generation)
+            return self._analyze_once(item_id, automatic=automatic, generation=generation, task_id=task_id,market_context_id=market_context_id)
 
-    def _analyze_once(self, item_id, *, automatic=False, generation=None):
-        item = self.news.get_item(item_id)
+    def _analyze_once(self, item_id, *, automatic=False, generation=None, task_id=None,market_context_id=None):
+        market_saved=market_tasks.get(self.news,item_id,market_context_id) if market_context_id else None
+        if market_context_id and not market_saved:
+            return
+        item = market_saved['item'] if market_saved else self.news.analysis_task_item(task_id) if task_id else self.news.get_item(item_id)
         if not item:
             return
         item = copy.deepcopy(item)
-        if self.result(item) is not None:
+        existing = self.market_result(item,market_context_id) if market_saved else self.result(item)
+        if existing is not None and not (market_saved and existing.get('status') == 'queued'):
+            if task_id:
+                state = existing.get('status')
+                insufficient = existing.get('error_code') == article_reading.NO_SELECTED_EVIDENCE
+                self.news.transition_analysis_task(task_id, 'needs_review' if insufficient else state if state in {'completed','failed','unknown','needs_review'} else 'skipped',
+                    expected_status='pending', reason=article_reading.NO_SELECTED_EVIDENCE if insufficient else None)
             return
-        material = build_input(item, checked_at=time.time())
+        if market_saved:
+            from . import news_market_context as market_contract
+            material=market_contract.build_market_input(item,market_saved['context'],checked_at=datetime.now(timezone.utc).isoformat())
+            material.setdefault('scope',{'kind':'market_impact'})
+            material.setdefault('freshness',{})
+        else:
+            material = article_reading.build_input(item, checked_at=time.time())
         text = json.dumps(material, ensure_ascii=False, sort_keys=True)
         with self._lock:
             if generation is not None and generation != self._generation:
@@ -354,27 +517,58 @@ class NewsAnalysis:
             if not self._configured() or self._stop.is_set():
                 return
             provider, model = self._provider, self._model
-            body = analysis_providers.build_body(provider,model,text,INSTRUCTIONS,TEXT_FORMAT)
+            article = article_reading.has_article(item) and not market_saved
+            revision_reading = (material.get('revision_comparison') or {}).get('status') == 'available'
+            instructions, text_format = (market_contract.INSTRUCTIONS,market_contract.TEXT_FORMAT) if market_saved else (article_reading.INSTRUCTIONS, article_reading.TEXT_FORMAT) if article or revision_reading else (INSTRUCTIONS, TEXT_FORMAT)
+            body = analysis_providers.build_body(provider,model,text,instructions,text_format)
+            if article:
+                for byte_budget in (4000,2000,1000):
+                    if len(analysis_providers.encode_body(body)) <= analysis_providers.MAX_REQUEST_BYTES:
+                        break
+                    material = article_reading.build_input(item, checked_at=time.time(), text_budget=byte_budget)
+                    text = json.dumps(material,ensure_ascii=False,sort_keys=True)
+                    body = analysis_providers.build_body(provider,model,text,instructions,text_format)
+            # Check the final input after every budget reduction. A saved full
+            # body, a title, or a quote snapshot cannot substitute for omitted
+            # source evidence and must not create a paid reservation.
+            no_article = article and not article_reading.has_selected_evidence(material)
+            no_market = market_saved and not any(
+                row.get('type') in {'article','article_excerpt','consensus','old_guidance','reported_actual','article_revision_comparison'}
+                and isinstance(row.get('text'),str) and row['text'].strip()
+                for row in material.get('evidence',[]) if isinstance(row,dict))
+            if no_article or no_market:
+                reason = article_reading.NO_SELECTED_EVIDENCE if no_article else 'market_evidence_unavailable_no_send'
+                self._error = '没有完整可引用的原文证据，未发送；请核对本次读取范围。'
+                if task_id:
+                    self.news.transition_analysis_task(task_id,'needs_review',expected_status='pending',reason=reason)
+                return
             if len(analysis_providers.encode_body(body)) > analysis_providers.MAX_REQUEST_BYTES:
                 self._error = "此条材料过长，未发送；请阅读原文。"
+                if task_id:
+                    self.news.transition_analysis_task(task_id,'needs_review',expected_status='pending',reason='request_size_limit_no_send')
                 return
             reservation, basis = analysis_providers.reservation_for(provider,model,body)
-            fingerprint = self._route_fingerprint(item,provider,model)
+            fingerprint = market_tasks.fingerprint(market_context_id) if market_saved else self._version_fingerprint(item) or self._route_fingerprint(item,provider,model)
             if automatic:
-                discovered = datetime.fromisoformat(item["discovered_at"].replace("Z", "+00:00")).timestamp()
+                if hasattr(self.news,'article_reading_blocks_analysis') and self.news.article_reading_blocks_analysis(item.get('current_version_id')):
+                    return
+                seen = item.get('version_seen_at') or item['discovered_at']
+                discovered = float(seen) if isinstance(seen, (int,float)) else datetime.fromisoformat(seen.replace('Z','+00:00')).timestamp()
                 if not self._automatic or discovered < self._configured_at or not self.news.overview()["enabled"]:
                     return
             with self._db() as db:
                 db.execute("BEGIN IMMEDIATE")
-                if self._saved(db, item) is not None:
+                if (db.execute('SELECT 1 FROM runs WHERE fingerprint=?',(fingerprint,)).fetchone() if market_saved else self._saved(db, item) is not None):
                     return
                 used = db.execute("SELECT COUNT(*) AS calls,COALESCE(SUM(reserved),0) AS reserved FROM runs WHERE created>=?", (time.time() - 86400,)).fetchone()
                 if used["calls"] >= MAX_CALLS or used["reserved"] + reservation > BUDGET_MICRO_CNY:
                     self._error = "近24小时分析额度已用完；抓取仍继续。"
                     self._automatic = False
                     return
+                if task_id and not self.news.transition_analysis_task(task_id,'running',expected_status='pending'):
+                    return
                 db.execute("""INSERT INTO runs(fingerprint,item_id,created,reserved,status,provider,model,contract,rate_version,reservation_basis)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)""", (fingerprint,item_id,time.time(),reservation,"pending",provider,model,QUALITY_VERSION,
+                    VALUES(?,?,?,?,?,?,?,?,?,?)""", (fingerprint,item_id,time.time(),reservation,"pending",provider,model,market_contract.QUALITY_VERSION if market_saved else material.get('reading_contract',QUALITY_VERSION),
                         analysis_providers.RATE_VERSION,json.dumps(basis,ensure_ascii=False)))
             # The reservation committed while holding the configuration lock.
             # A switch cannot race the chosen route, captured key, or busy flag.
@@ -398,7 +592,7 @@ class NewsAnalysis:
             retained = _retained_output(response.content, key)
             if retained.get('raw_output_retention_reason') == 'credential_echo_rejected':
                 raise ValueError('credential_echo_rejected')
-            value = validate_output(response.content, material)
+            value = market_contract.validate_output(response.content,material) if market_saved else article_reading.locate_result(validate_output(response.content, material), material)
             if _contains_credential(value, key):
                 retained = {"raw_output_preserved": False, "raw_output_retention_reason": "credential_echo_rejected"}
                 raise ValueError('credential_echo_rejected')
@@ -418,7 +612,7 @@ class NewsAnalysis:
             # Scoped semantic findings and validator uncertainty cannot enter
             # the ordinary completed-result view. The reservation stays spent.
             review = semantic or (validation_started and not known_invalid and not mismatch)
-            status = 'needs_review' if review else 'failed'
+            status = 'unknown' if isinstance(exc, (TimeoutError, ConnectionError, OSError)) and not validation_started else 'needs_review' if review else 'failed'
             value = {"error": "本次返回的模型身份与已选模型不符或无法确认；预约已保留，不自动重试。" if mismatch else
                      "模型原文需要复核；已保留可安全保存的原输出和预约，不自动重试。" if review else
                      "本次分析失败或内容未通过原句及关系措辞检查；为避免重复扣费，不自动重试。",
@@ -445,8 +639,13 @@ class NewsAnalysis:
         finally:
             key = ""
         try:
+            value.update(article_version_id=item.get('current_version_id'),
+                         evidence_package=copy.deepcopy(material.get('evidence_package')),
+                         analyzed_at=datetime.now(timezone.utc).isoformat())
             with self._db() as db:
                 db.execute("UPDATE runs SET status=?,result=? WHERE fingerprint=?", (status,json.dumps(value, ensure_ascii=False),fingerprint))
+            if task_id:
+                self.news.transition_analysis_task(task_id,status,expected_status='running',result_ref=fingerprint)
         finally:
             with self._lock:
                 self._active = False

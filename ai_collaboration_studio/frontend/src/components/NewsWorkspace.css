@@ -278,3 +278,5 @@
 .news-ai-confirm-title { font-weight: 600; }
 .news-ai-confirm-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
 .news-ai-confirm .news-button, .news-ai-setup-intro .news-button { min-height: 44px; }
+.news-source-capabilities > summary, .news-source-endpoint-change > summary { min-height: 44px; align-content: center; cursor: pointer; }
+.news-item-history { padding: 1px 5px; border-radius: 4px; color: var(--news-warning); background: var(--news-warning-bg); }
