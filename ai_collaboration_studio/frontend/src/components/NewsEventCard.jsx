@@ -40,7 +40,7 @@ function EvidencePreview({ preview, versionId, evidence }) {
   </details>;
 }
 
-export function NewsEventCard({ item, apiClient, busy, onRead, marketImpact, onHistoryChange, onUpdated }) {
+export function NewsEventCard({ item, apiClient, busy, onRead, marketImpact, showMarketImpact = true, onHistoryChange, onUpdated }) {
   const event = item.event;
   const [versions, setVersions] = useState(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -96,12 +96,16 @@ export function NewsEventCard({ item, apiClient, busy, onRead, marketImpact, onH
     {historyOpen ? <div className="news-event-history" aria-busy={historyBusy}>{historyBusy ? <p role="status">正在读取版本…</p> : historyError ? <p role="alert">{historyError}</p> : (versions || event.versions || []).map(row => <button key={row.id} className="news-button" type="button" aria-pressed={(selectedVersion || current.id) === row.id} onClick={() => { setSelectedVersion(row.id); onHistoryChange?.(row.id !== current.id, row.id !== current.id ? row : null); }}>版本 {row.version_number} · {eventTime(row.version_seen_at)}</button>)}</div> : null}
     {historical ? <section className="news-event-history-analysis" aria-label="此历史版本的分析记录"><h4>此历史版本的分析记录</h4>{version.ai_analysis ? <><p>{analysisStateLabel(version.ai_analysis)}</p>{["completed", "success"].includes(version.ai_analysis.status) ? <><p>{version.ai_analysis.summary}</p>{Array.isArray(version.ai_analysis.key_points) ? <ul>{version.ai_analysis.key_points.map((point,index) => <li key={index}>{point}</li>)}</ul> : null}<AnalysisEvidence analysis={version.ai_analysis} /></> : null}<AnalysisReview analysis={version.ai_analysis} source={{ ...version, current_version_id: version.id, evidence: version.evidence }} originalUrl={version.url} /></> : <p>此版本没有可读回的已保存分析记录。查看历史不会补跑模型。</p>}</section> : null}
     {!historical ? <NewsEventActions key={item.current_version_id} item={item} apiClient={apiClient} busy={busy} onUpdated={onUpdated} /> : null}
-    {!historical ? <MarketImpact impact={impact && ["completed", "success"].includes(impact.status) ? impact : null} /> : null}
+    {!historical && showMarketImpact ? <MarketImpact impact={impact && ["completed", "success"].includes(impact.status) ? impact : null} /> : null}
   </section>;
 }
 
 export function MarketImpact({ impact }) {
-  const groups = [["facts", "已提供事实"], ["new_information", "新增信息"], ["inferred_impacts", "可能影响与条件"], ["counter_evidence", "反向解释"], ["unknowns", "仍缺证据"], ["follow_up_conditions", "后续验证条件"]];
+  const sixQuestions = Array.isArray(impact?.research_actions) && Array.isArray(impact?.judgment_change_conditions);
+  const groups = sixQuestions
+    ? [["facts", "1. 发生了什么？", "尚无已确认的可引用事实。"], ["new_information", "2. 与之前相比，新在哪里？", "缺少可确认的完整对照，变化仍待核实。"], ["inferred_impacts", "3. 可能影响谁，影响通过什么条件发生？", "尚无依据充分的影响判断。"], ["unknowns", "4. 哪些资料仍缺失？", "仍需核对证据范围。"], ["counter_evidence", "反向证据与其他解释"]]
+    : [["facts", "已提供事实"], ["new_information", "新增信息"], ["inferred_impacts", "可能影响与条件"], ["counter_evidence", "反向解释"], ["unknowns", "仍缺证据"], ["follow_up_conditions", "后续验证条件"]];
+  const actionLabels = { verify: "核实", collect: "补充", observe: "观察" };
   const comparison = typeof impact?.expectation_comparison === "string" ? impact.expectation_comparison : impact?.expectation_comparison?.claim;
   const reaction = typeof impact?.market_reaction === "string" ? impact.market_reaction : impact?.market_reaction?.claim;
   const lines = key => Array.isArray(impact?.[key]) ? impact[key].filter(value => typeof value === "string" || (value && typeof value.claim === "string")) : [];
@@ -111,7 +115,11 @@ export function MarketImpact({ impact }) {
     <p>{reaction || "尚未提供可用的时点行情，市场反应待确认。"}</p>
     {strings(impact?.direct_symbols).length ? <p>直接关联标的：{impact.direct_symbols.join("、")}</p> : null}
     {impact?.market_asof || impact?.consensus_asof ? <p className="news-event-caption">行情时点：{eventTime(impact.market_asof)} · 预期时点：{eventTime(impact.consensus_asof)}</p> : null}
-    {impact ? groups.map(([key, label]) => lines(key).length ? <div key={key}><h5>{label}</h5><ul>{lines(key).map((line, index) => <li key={index}>{typeof line === "string" ? line : <><p>{line.claim}</p>{line.condition ? <p>判断条件：{line.condition}</p> : null}{line.horizon ? <small>时间范围：{line.horizon}</small> : null}{line.quote ? <details><summary>查看这项判断的依据</summary><blockquote>{line.quote}</blockquote><p className="news-event-caption">引用记录：{line.evidence_id || "位置未标注"}</p></details> : null}</>}</li>)}</ul></div> : null) : null}
+    {impact ? groups.map(([key, label, empty]) => lines(key).length || empty ? <div key={key}><h5>{label}</h5>{lines(key).length ? <ul>{lines(key).map((line, index) => <li key={index}>{typeof line === "string" ? line : <><p>{line.claim}</p>{key === "inferred_impacts" ? <p className="news-event-caption">这是有条件的推断，不是已确认发生的结果。</p> : null}{line.channel ? <p>影响途径：{line.channel}</p> : null}{line.condition ? <p>判断条件：{line.condition}</p> : null}{line.horizon ? <small>时间范围：{line.horizon}</small> : null}{line.quote ? <details><summary>查看这项判断的依据</summary><blockquote>{line.quote}</blockquote><p className="news-event-caption">引用记录：{line.evidence_id || "位置未标注"}</p></details> : null}</>}</li>)}</ul> : <p>{empty}</p>}</div> : null) : null}
+    {sixQuestions ? <>
+      <div><h5>5. 现在应核实什么、补什么、观察什么？</h5><ul>{impact.research_actions.filter(row => row && actionLabels[row.kind] && typeof row.action === "string").map((row, index) => <li key={index}><strong>{actionLabels[row.kind]}：</strong>{row.action}</li>)}</ul></div>
+      <div><h5>6. 什么新证据会改变当前判断？</h5><ul>{strings(impact.judgment_change_conditions).map((line, index) => <li key={index}>{line}</li>)}</ul></div>
+    </> : impact && ["completed", "success"].includes(impact.status) ? <p className="news-event-caption">这是旧版保存结果，尚未分别记录研究动作和改变判断的证据条件；查看不会重新调用模型。</p> : null}
     <p className="news-event-caption">价格变化仅是观察到的反应；不能据此认定该消息已充分定价或造成全部波动。</p>
   </section>;
 }

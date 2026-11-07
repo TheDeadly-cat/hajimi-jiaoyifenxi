@@ -26,6 +26,7 @@ from urllib.parse import urljoin
 from .path_identity import first_reparse_component
 from . import news_runtime_evidence as runtime_evidence
 from . import news_event_store as event_store
+from . import news_analysis_policy as analysis_policy
 
 
 from .news_feed_transport import (
@@ -811,6 +812,27 @@ class NewsPlatform:
         item["analysis_mode"] = "local_rules"
         return item
 
+    def focus(self):
+        with self._db() as db:
+            value=analysis_policy.load(db)
+            row=db.execute("SELECT value FROM settings WHERE key='analysis_focus_updated_at'").fetchone()
+            revision=db.execute("SELECT value FROM settings WHERE key='analysis_focus_revision'").fetchone()
+        return {'focus':value,'catalog':analysis_policy.catalog(),'policy_version':analysis_policy.POLICY_VERSION,
+                'effective_after':float(row[0]) if row else 0.0,'revision':int(revision[0]) if revision else 0}
+
+    def configure_focus(self, value):
+        value=analysis_policy.normalize(value)
+        with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if value != analysis_policy.load(db):
+                db.execute("INSERT OR REPLACE INTO settings VALUES('analysis_focus',?)",(json.dumps(value,sort_keys=True),))
+                db.execute("INSERT OR REPLACE INTO settings VALUES('analysis_focus_updated_at',?)",(str(self.clock()),))
+                revision=db.execute("SELECT value FROM settings WHERE key='analysis_focus_revision'").fetchone()
+                db.execute("INSERT OR REPLACE INTO settings VALUES('analysis_focus_revision',?)",(str(int(revision[0])+1 if revision else 1),))
+        # Choosing a company only filters saved/arriving items. It never enables
+        # its source, accepts SEC identity terms, or overrides source cooldowns.
+        return self.focus()
+
     def list_items(self, query="", source="", category="", unread_only=False, limit=100, offset=0, importance=""):
         limit, offset = max(1, min(200, int(limit))), max(0, int(offset))
         clauses, args = [], []
@@ -831,13 +853,17 @@ class NewsPlatform:
             clauses.append("i.read=0")
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self._db() as db:
+            focus=analysis_policy.load(db)
             total = db.execute("SELECT COUNT(*) FROM items i" + where, args).fetchone()[0]
             rows = db.execute("SELECT i.*,s.name AS source_name FROM items i JOIN sources s ON s.id=i.source_id" + where + " ORDER BY COALESCE(i.published,i.discovered) DESC,i.id LIMIT ? OFFSET ?", (*args, limit, offset)).fetchall()
             items=[]
             for row in rows:
                 item=self._serialize_item(row)
                 version=event_store._current(db,item['id'])
-                if version:self._project_discovery(item,json.loads(version['snapshot']))
+                if version:
+                    version=event_store._version(version)
+                    self._project_discovery(item,version)
+                item['analysis_policy']=analysis_policy.classify({**item,'event':{'current_version':version or {}}},focus,check_selected=True,checked_at=self.clock())
                 items.append(item)
         return {"items":items,"total":total,"limit":limit,"offset":offset}
 
@@ -855,6 +881,7 @@ class NewsPlatform:
         with self._db() as db:
             row = db.execute("SELECT i.*,s.name AS source_name FROM items i JOIN sources s ON s.id=i.source_id WHERE i.id=?", (item_id,)).fetchone()
             detail = event_store.detail(db,item_id) if row else None
+            focus=analysis_policy.load(db)
         if row is None:
             return None
         item = self._serialize_item(row)
@@ -868,6 +895,7 @@ class NewsPlatform:
             # harmless later formatting/URL tracking observations stay separate.
             item.update({key:version[key] for key in ('title','url','excerpt','published_at')})
             self._project_discovery(item,version)
+        item['analysis_policy']=analysis_policy.classify(item,focus,check_selected=True,checked_at=self.clock())
         return item
 
     def event_detail(self, item_id, as_of=None):
@@ -896,6 +924,10 @@ class NewsPlatform:
     def pending_analysis_tasks(self, limit=100, offset=0, after=None):
         with self._db() as db:
             return event_store.pending_tasks(db,limit,offset,after)
+
+    def analysis_task_counts(self):
+        with self._db() as db:
+            return event_store.queue_summary(db)
 
     def transition_analysis_task(self, task_id, status, *, expected_status=None, result_ref=None, reason=None):
         with self._db() as db:
@@ -931,6 +963,7 @@ class NewsPlatform:
                         event={'event_id':version['event_id'],'current_version':version,'previous_version':previous_version,
                                'retracted':version['content_status']=='retracted'})
             self._project_discovery(item,version)
+            item['analysis_policy']=analysis_policy.classify(item,analysis_policy.load(db),check_selected=True,checked_at=self.clock())
             return item
 
     def configure_source(self, source_id, enabled, poll_interval=None):
@@ -1028,10 +1061,16 @@ class NewsPlatform:
                 """+busy_clause+" ORDER BY t.priority DESC,t.created,t.id LIMIT 100",(self.clock(),self.clock(),*busy_sources)).fetchall()
         task=None
         with self._db() as db:
+            focus=analysis_policy.load(db)
             for row in candidates:
                 version=db.execute('SELECT snapshot FROM news_article_versions WHERE id=?',(row['version_id'],)).fetchone()
                 observation=db.execute('SELECT record FROM news_article_observations WHERE item_id=? ORDER BY seq DESC LIMIT 1',(row['item_id'],)).fetchone()
+                saved=json.loads(version['snapshot']) if version else {}
+                local=db.execute('SELECT analysis FROM items WHERE id=?',(row['item_id'],)).fetchone()
+                decision=analysis_policy.classify({**saved,**(json.loads(local['analysis']) if local else {}),
+                    'event':{'current_version':saved}},focus)
                 if (row['source_id'] not in self._inflight and version
+                        and decision['relevance']!='unrelated' and decision['importance']=='important'
                         and event_store.automatic_reading_eligible(json.loads(version['snapshot']))
                         and (not observation or json.loads(observation['record']).get('automatic_reading_eligible') is not False)):
                     task=dict(row);break

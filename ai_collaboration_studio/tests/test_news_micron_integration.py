@@ -168,7 +168,7 @@ class MicronIntegrationTests(unittest.TestCase):
             for index in range(102):
                 name=f'pending-{index:03d}'
                 db.execute('INSERT INTO items(id,source_id,identity,title,url,excerpt,published,discovered,updated,analysis) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                    (name,'ir_mu',name,'Saved release',ROOT_URL+name,'',None,NOW-100+index,NOW-100+index,json.dumps(analyze('Saved release','',None,NOW,'ir_mu'))))
+                    (name,'ir_mu',name,'Saved financial results',ROOT_URL+name,'',None,NOW-100+index,NOW-100+index,json.dumps(analyze('Saved financial results','',None,NOW,'ir_mu'))))
                 item=dict(db.execute('SELECT * FROM items WHERE id=?',(name,)).fetchone())
                 version,_=store.record_version(db,item,NOW-100+index,metadata={'symbols':['US.MU']})
                 if index<101:store.observe(db,name,{'automatic_reading_eligible':False},NOW)

@@ -49,6 +49,8 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
                 raise ValueError("不支持的查询参数")
             if path == "/api/news/overview":
                 return {"ok": True, "overview": overview()}, 200
+            if path == "/api/news/focus":
+                return {"ok": True, **runtime.focus()}, 200
             if path == "/api/news/ai" and ai is not None:
                 return {"ok": True, "ai": ai.status()}, 200
             if path == "/api/news/startup" and startup is not None:
@@ -139,6 +141,30 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
         elif method == "POST":
             if query or type(payload) is not dict:
                 raise ValueError("请求格式不正确")
+            if path == "/api/news/focus":
+                expected = {"all_registered", "companies", "symbols", "industries", "macro_topics", "automatic_scope"}
+                if set(payload) != expected:
+                    raise ValueError("关注设置格式不正确")
+                return {"ok": True, **runtime.configure_focus(payload)}, 200
+            if path == "/api/news/ai/mode" and ai is not None:
+                if (set(payload) != {"automatic", "acknowledge_budget"}
+                        or type(payload["automatic"]) is not bool
+                        or type(payload["acknowledge_budget"]) is not bool):
+                    raise ValueError("分析模式格式不正确")
+                return {"ok": True, "ai": ai.set_mode(**payload)}, 200
+            if path == "/api/news/ai/backlog/preview" and ai is not None:
+                if (set(payload) != {"limit", "max_cost_cny", "task_type"}
+                        or type(payload["limit"]) is not int or not 1 <= payload["limit"] <= 10
+                        or type(payload["max_cost_cny"]) not in (int, float)
+                        or not 0 < payload["max_cost_cny"] <= 3
+                        or payload["task_type"] not in {"fact_reading", "market_impact"}):
+                    raise ValueError("补处理范围不正确")
+                return {"ok": True, **ai.preview_backlog(**payload)}, 200
+            if path == "/api/news/ai/backlog/confirm" and ai is not None:
+                if (set(payload) != {"token"} or type(payload["token"]) is not str
+                        or not re.fullmatch(r"[a-zA-Z0-9_-]{16,256}", payload["token"])):
+                    raise ValueError("请先预览补处理范围")
+                return {"ok": True, **ai.confirm_backlog(payload["token"])}, 202
             if path == "/api/news/startup" and startup is not None:
                 if set(payload) != {"enabled"} or type(payload["enabled"]) is not bool:
                     raise ValueError("登录恢复设置格式不正确")
@@ -167,7 +193,7 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
                     raise ValueError("市场资料格式不正确")
                 if historical and (not isinstance(payload['version_id'],str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,128}',payload['version_id']) or not isinstance(payload['as_of'],str)):
                     raise ValueError('market_replay_requires_version_and_as_of')
-                if not (historical and payload['room_id'] is None) and (not isinstance(payload["room_id"], str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", payload["room_id"])):
+                if payload['room_id'] is not None and (not isinstance(payload["room_id"], str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", payload["room_id"])):
                     raise ValueError("请选择资料房间")
                 if payload["round_id"] is not None and (not isinstance(payload["round_id"], str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", payload["round_id"])):
                     raise ValueError("请选择已保存轮次")
@@ -179,8 +205,9 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
                             or type(ref["material_id"]) is not str or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", ref["material_id"])
                             or type(ref["version"]) is not int or ref["version"] < 1):
                         raise ValueError("资料版本不正确")
-                if historical and ((payload['room_id'] is None)!=(payload['round_id'] is None) or payload['room_id'] is None and refs):
-                    raise ValueError('历史回放需明确房间和轮次，或仅准备新闻版本')
+                if ((payload['room_id'] is None) != (payload['round_id'] is None)
+                        or payload['room_id'] is None and refs):
+                    raise ValueError('market_context_requires_pair_or_news_only')
                 if ai is not None:
                     context = ai.prepare_market_context(context_match.group(1), **payload)
                 else:
@@ -251,6 +278,22 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
         return {"ok": False, "error": "没有这个消息操作。"}, 404
     except (ValueError, TypeError) as error:
         reasons = {
+            "market_context_requires_pair_or_news_only": "可直接解释这条新闻；深入分析需同时选择已有房间和轮次。",
+            "invalid_news_focus": "关注设置不完整，请核对公司、主题和分析方式。",
+            "invalid_news_focus_symbol": "请使用股票代码，例如 MU 或 US.MU。",
+            "invalid_news_focus_choice": "这个关注选项不在已登记范围内，请重新选择。",
+            "news_focus_selection_required": "请至少选择一个关注对象，或选择全部已登记来源。",
+            "invalid_analysis_mode": "开启自动解释前，请确认本次会使用原有分析额度。",
+            "analysis_session_required": "AI 设置尚未就绪或已经到期。请重新设置密钥；保存的消息和旧结果仍可阅读。",
+            "analysis_in_progress": "当前分析尚未结束，请等结果保存后再更换模型。",
+            "analysis_configuration_changed": "AI 配置已改变，原请求尚未发送。请核对当前设置和消息状态。",
+            "invalid_backlog_bounds": "请将补处理限定为 1 至 10 条，并填写不超过 3 元的预约上限。",
+            "invalid_backlog_token": "请先预览待补处理的消息、数量和费用上限。",
+            "backlog_preview_expired_or_changed": "补处理预览已失效或已确认，请先查看任务状态；需要继续时重新预览。",
+            "backlog_preview_evidence_changed": "预览后的消息证据发生变化，本次未补处理。请核对新版本后重新预览。",
+            "backlog_preview_already_consumed": "部分消息已经处理或结果未确认，原记录保留。请查看任务状态后重新预览。",
+            "backlog_budget_changed": "可用额度已变化，本次补处理未排队。请缩小范围或等待额度释放后重新预览。",
+            "analysis_queue_full": "当前待处理任务较多，请先等待已排队任务完成，再查看状态。",
             "market_as_of_requires_timezone": "请提供带时区的历史截止时间。",
             "market_as_of_in_future": "历史截止时间不能晚于当前时间。",
             "market_replay_requires_version_and_as_of": "历史回放必须同时明确新闻版本和截止时间。",

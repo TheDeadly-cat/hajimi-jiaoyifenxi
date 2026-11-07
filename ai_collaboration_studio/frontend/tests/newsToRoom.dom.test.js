@@ -174,6 +174,7 @@ function installAppApi({ roomRequest, saveRequest, snapshotRequest, professional
     reads.push(path);
     if (path === "/api/bootstrap") return respond({ ok: true, rooms, active: roomData(initialRoom, professional), providers: [], templates: [], member_templates: [] });
     if (path === "/api/news/overview") return respond({ overview });
+    if (path === "/api/news/focus") return respond({ focus: { all_registered: true, companies: [], symbols: [], industries: [], macro_topics: [], automatic_scope: "facts" }, catalog: { companies: [], industries: [], macro_topics: [] }, policy_version: "news_focus_policy_v1" });
     if (path === "/api/news/items") return respond({ items: [item], total: 1 });
     if (path === `/api/news/items/${item.id}`) return respond({ item });
     if (path === "/api/rooms/room-b") return roomRequest ? roomRequest() : respond(roomData("room-b", professional));

@@ -259,6 +259,7 @@ class FeedHTTPScheduledRecoveryTests(OfflineFeedCase):
     def test_due_http_200_recovers_and_retains_old_read_item_and_404_history(self):
         self.seed_then_fail_at_normal_due_time()
         self.assert_failed_state_preserved()
+        saved_versions = self.app.event_versions(self.saved_item_id)
         modified = "Thu, 15 Oct 2026 10:15:00 GMT"
         response = FakeResponse(feed(guid="later", title="Synthetic later release"),
                                 {"ETag": '"v2"', "Last-Modified": modified})
@@ -267,7 +268,12 @@ class FeedHTTPScheduledRecoveryTests(OfflineFeedCase):
 
         self.assertTrue(response.closed)
         self.assertEqual(self.app.list_items()["total"], 2)
-        self.assertEqual(self.app.get_item(self.saved_item_id), self.saved_items["items"][0])
+        old_detail = self.app.get_item(self.saved_item_id)
+        saved_row = self.saved_items["items"][0]
+        self.assertEqual({key: old_detail[key] for key in saved_row}, saved_row)
+        self.assertTrue(old_detail["read"])
+        self.assertEqual(self.app.event_versions(self.saved_item_id), saved_versions)
+        self.assertEqual(old_detail["event"]["current_version"]["id"], saved_versions[0]["id"])
         self.assertEqual(self.source()["etag"], '"v2"')
         self.assertEqual(self.source()["last_modified"], modified)
         self.assertEqual(recovered["outcome"], "success")

@@ -4,8 +4,10 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import queue
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -17,6 +19,7 @@ from . import news_analysis_providers as analysis_providers
 from . import news_evidence_reading as article_reading
 from . import news_market_tasks as market_tasks
 from . import news_event_store as event_store
+from . import news_analysis_policy as analysis_policy
 from .news_content_quality import (
     QUALITY_VERSION, INSTRUCTIONS as READING_INSTRUCTIONS, TEXT_FORMAT,
     RSS_V2_QUALITY_VERSION, RSS_V2_INSTRUCTIONS, RSS_V2_TEXT_FORMAT,
@@ -83,13 +86,16 @@ class NewsAnalysis:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         _independent_database_path(path)
         self._generate = generate
-        self._provider, self._model = "doubao", MODEL
+        # New sessions recommend the existing DeepSeek adapter. Explicit legacy
+        # configure() calls retain their default Doubao route and saved identity.
+        self._provider, self._model = "deepseek", "deepseek-flash"
         self._generation = 0
         self._lock = threading.RLock()
         self._execution_lock = threading.Lock()
         self._key = ""
         self._automatic = False
         self._configured_at = 0.0
+        self._automatic_since = 0.0
         self._deadline = 0.0
         self._expires_at = 0.0
         self._error = ""
@@ -97,6 +103,8 @@ class NewsAnalysis:
         self._stop = threading.Event()
         self._queue = queue.Queue(maxsize=36)
         self._thread = None
+        self._backlog_previews = {}
+        self._backlog_grants = {}
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             app_id = db.execute("PRAGMA application_id").fetchone()[0]
@@ -156,8 +164,14 @@ class NewsAnalysis:
 
     def status(self):
         with self._lock, self._db() as db:
-            row = db.execute("SELECT COUNT(*) AS calls,COALESCE(SUM(reserved),0) AS reserved FROM runs WHERE created>=?", (time.time() - 86400,)).fetchone()
-            return {"configured": self._configured(), "automatic": self._automatic,
+            configured=self._configured()
+            row = db.execute("SELECT COUNT(*) AS calls,COALESCE(SUM(reserved),0) AS reserved,MIN(created) AS oldest FROM runs WHERE created>=?", (time.time() - 86400,)).fetchone()
+            remaining_calls=max(0,MAX_CALLS-row['calls'])
+            remaining_cny=max(0,(BUDGET_MICRO_CNY-row['reserved'])/1_000_000)
+            pause_reason=('authorization_expired' if not configured and self._expires_at and time.time()>=self._expires_at else 'authorization_required' if not configured else
+                          'budget_exhausted' if not remaining_calls or not remaining_cny or self._error=='近24小时分析额度已用完；抓取仍继续。' else 'manual_mode' if not self._automatic else
+                          'monitor_paused' if not self.news.overview().get('enabled') else None)
+            return {"configured": configured, "automatic": self._automatic,
                 "calls_reserved": row["calls"], "max_calls": MAX_CALLS,
                 "reserved_cny": round(row["reserved"] / 1_000_000, 6), "budget_cny": 3,
                 "provider":self._provider, "model": self._model,
@@ -167,6 +181,10 @@ class NewsAnalysis:
                 "budget_estimate_notice":analysis_providers.BUDGET_ESTIMATE_NOTICE,
                 "busy": self._active, "error": self._error,
                 "expires_at": datetime.fromtimestamp(self._expires_at, timezone.utc).isoformat() if self._key else None,
+                'automatic_since':event_store.iso(self._automatic_since) if self._automatic_since else None,
+                'pause_reason':pause_reason,'remaining_calls':remaining_calls,'remaining_cny':round(remaining_cny,6),
+                'budget_resets_at':event_store.iso(row['oldest']+86400) if row['oldest'] is not None else None,
+                'budget_reset_semantics':'next_reservation_leaves_rolling_window','pending':self._pending_summary(),
                 "supplier_bill_verified": False, "credential_persisted": False}
 
     def configure(self, api_key, automatic, acknowledge_budget, *, provider="doubao", model=None):
@@ -183,11 +201,204 @@ class NewsAnalysis:
             self._generation += 1
             self._drain_queue()
             self._configured_at = time.time()
+            self._automatic_since = self._configured_at
             self._expires_at = self._configured_at + 86400
             self._deadline = time.monotonic() + 86400
         return self.status()
 
+    def set_mode(self, automatic, acknowledge_budget):
+        if type(automatic) is not bool or (automatic and acknowledge_budget is not True):
+            raise ValueError('invalid_analysis_mode')
+        with self._lock:
+            if not self._configured():
+                raise ValueError('analysis_session_required')
+            if automatic and not self._automatic:
+                self._automatic_since=time.time()
+            self._automatic=automatic
+        return self.status()
+
+    def _focus(self):
+        return self.news.focus() if hasattr(self.news,'focus') else {'focus':copy.deepcopy(analysis_policy.DEFAULT_FOCUS),'effective_after':0}
+
+    def _automatic_cutoff(self):
+        return max(self._configured_at,self._automatic_since,float(self._focus().get('effective_after') or 0))
+
+    def _focus_binding(self):
+        profile=self._focus()
+        return (analysis_policy.fingerprint(profile['focus']),profile.get('revision',0),profile.get('effective_after',0))
+
+    def _decision(self, item):
+        return analysis_policy.classify(item,self._focus()['focus'],check_selected=True,checked_at=time.time())
+
+    def _prior_main_result(self,item):
+        reading=self.result(item)
+        if reading is not None:return reading
+        market=self.market_result(item) if hasattr(self.news,'_db') else None
+        return market if market and market.get('status')!='queued' else None
+
+    def _pending_summary(self):
+        counts=self.news.analysis_task_counts() if hasattr(self.news,'analysis_task_counts') else {}
+        result={'eligible':0,'held':0,'backlog':0,'unknown':counts.get('unknown',0),'failed':counts.get('failed',0),
+                'total':0,'raw_pending':counts.get('pending',0),'already_analyzed':0,'explicit_market':0,
+                'count_unit':'message_evidence'}
+        if not hasattr(self.news,'pending_analysis_tasks'):
+            return result
+        with self._db() as db:
+            outcomes={state:{r[0] for r in db.execute('SELECT fingerprint FROM runs WHERE status=?',(state,))} for state in ('unknown','failed')}
+        with self.news._db() as db:
+            # Fact and market tasks can refer to the same saved message. Count
+            # that evidence once in the user-facing total while preserving the
+            # physical task count for diagnostics. Distinct revisions stay distinct.
+            market_keys={(row['event_id'],row['evidence_package_id']) for row in db.execute(
+                "SELECT t.event_id,COALESCE(v.evidence_package_id,'task:'||t.id) AS evidence_package_id "
+                "FROM news_analysis_tasks t LEFT JOIN news_article_versions v ON v.id=t.version_id "
+                "WHERE t.status='pending' AND t.task_type='market_impact'")}
+            for task in db.execute("SELECT * FROM news_analysis_tasks WHERE status IN ('unknown','failed')"):
+                identity=task['result_ref'] or (self._version_fingerprint({'current_version_id':task['version_id'],
+                    'evidence_package_id':task['evidence_package_id'],'event':{'event_id':task['event_id']}})
+                    if task['task_type']=='fact_reading' else task['id'])
+                outcomes[task['status']].add(identity)
+        result.update({state:len(values) for state,values in outcomes.items()})
+        result['explicit_market']=len(market_keys)
+        cutoff=self._automatic_cutoff()
+        offset=0
+        seen=set(market_keys)
+        while True:
+            page=self.news.pending_analysis_tasks(limit=100,offset=offset)
+            for task in page['tasks']:
+                if task['task_type']!='fact_reading':
+                    continue
+                identity=(task['event_id'],task['evidence_package_id'])
+                if identity in seen:continue
+                seen.add(identity)
+                item=self.news.analysis_task_item(task['id'])
+                decision=self._decision(item) if item else {}
+                prior=self._prior_main_result(item) if item else None
+                if prior and prior.get('analysis_performed') is not False and prior.get('status')!='material_insufficient':
+                    result['already_analyzed']+=1
+                    continue
+                if not decision.get('automatic_eligible'):
+                    result['held']+=1
+                elif task['version_seen_at']<=cutoff:
+                    result['backlog']+=1
+                else:
+                    result['eligible']+=1
+            offset+=len(page['tasks'])
+            if not page['tasks'] or offset>=page['total']:
+                result['total']=result['eligible']+result['held']+result['backlog']+result['explicit_market']
+                return result
+
+    def _eligible_pending_item(self, task):
+        if task.get('task_type')!='fact_reading' or task.get('status')!='pending':
+            return None
+        item=self.news.analysis_task_item(task['id'])
+        current=self.news.get_item(task['item_id'])
+        if (not item or not current or current.get('current_version_id')!=task['version_id']
+                or not self._decision(item)['automatic_eligible'] or self._prior_main_result(item) is not None):
+            return None
+        if hasattr(self.news,'article_reading_blocks_analysis') and self.news.article_reading_blocks_analysis(task['version_id']):
+            return None
+        return item
+
+    def preview_backlog(self, limit, max_cost_cny, task_type='fact_reading'):
+        if (type(limit) is not int or not 1<=limit<=10 or type(max_cost_cny) not in {int,float}
+                or not math.isfinite(max_cost_cny) or not 0<max_cost_cny<=3
+                or not isinstance(task_type,str) or task_type not in {'fact_reading','market_impact'}):
+            raise ValueError('invalid_backlog_bounds')
+        with self._lock:
+            if not self._configured():raise ValueError('analysis_session_required')
+            if not hasattr(self.news,'pending_analysis_tasks'):raise ValueError('persistent_backlog_required')
+            with self._db() as db:
+                used=db.execute('SELECT COUNT(*) AS calls,COALESCE(SUM(reserved),0) AS reserved FROM runs WHERE created>=?',(time.time()-86400,)).fetchone()
+            # Maximum wire size yields a conservative per-request reservation.
+            # Actual input is rebuilt and measured again immediately before spend.
+            upper,_=analysis_providers.reservation_for(self._provider,self._model,
+                {'input':'x'*(analysis_providers.MAX_REQUEST_BYTES-13)})
+            bound=min(int(max_cost_cny*1_000_000),max(0,BUDGET_MICRO_CNY-used['reserved']))
+            count=min(limit,max(0,MAX_CALLS-used['calls']),bound//upper)
+            tasks=[];offset=0
+            while len(tasks)<count:
+                page=self.news.pending_analysis_tasks(limit=100,offset=offset)
+                for task in page['tasks']:
+                    item=self._eligible_pending_item(task)
+                    if not item:continue
+                    context_id=None
+                    if task_type=='market_impact':
+                        context=market_tasks.prepare(self.news,None,item['id'],room_id=None,round_id=None,material_refs=[])
+                        context_id=context['context_id']
+                        if (self.market_result(item,context_id) or {}).get('status') not in {None,'queued'}:continue
+                    tasks.append({'task_id':market_tasks.fingerprint(context_id) if context_id else task['id'],
+                        'source_task_id':task['id'],'item_id':item['id'],'title':item['title'],
+                        'version_id':item['current_version_id'],'evidence_package_id':item['evidence_package_id'],
+                        'context_id':context_id,'task_type':task_type,'estimated_cost_cny':upper/1_000_000})
+                    if len(tasks)>=count:break
+                offset+=len(page['tasks'])
+                if not page['tasks'] or offset>=page['total']:break
+            expires=min(time.time()+300,self._expires_at)
+            token=secrets.token_urlsafe(24) if tasks else None
+            value={'token':token,'expires_at':event_store.iso(expires),'tasks':tasks,'count':len(tasks),
+                   'max_cost_cny':max_cost_cny,'estimated_cost_cny':round(len(tasks)*upper/1_000_000,6),
+                   'reasons':[] if tasks else ['no_eligible_backlog_within_budget'],'confirmation_required':True,
+                   'cost_basis':'maximum_request_reservation_not_supplier_bill'}
+            if token:
+                self._backlog_previews={key:v for key,v in self._backlog_previews.items() if v['expires']>time.time()}
+                if len(self._backlog_previews)>=10:self._backlog_previews.pop(next(iter(self._backlog_previews)))
+                self._backlog_previews[token]={'public':copy.deepcopy(value),'generation':self._generation,
+                    'policy':self._focus_binding(),'expires':expires,'deadline':min(time.monotonic()+300,self._deadline),
+                    'budget':bound,'per_task_limit':upper}
+            return value
+
+    def confirm_backlog(self, token):
+        if not isinstance(token,str):raise ValueError('invalid_backlog_token')
+        with self._lock:
+            preview=self._backlog_previews.get(token)
+            if (not self._configured() or not preview or preview['generation']!=self._generation
+                    or preview['expires']<=time.time() or preview['deadline']<=time.monotonic() or preview['policy']!=self._focus_binding()):
+                raise ValueError('backlog_preview_expired_or_changed')
+            selected=preview['public']['tasks']
+            if self._queue.qsize()+len(selected)>self._queue.maxsize:raise ValueError('analysis_queue_full')
+            for entry in selected:
+                with self.news._db() as db:
+                    row=db.execute('SELECT * FROM news_analysis_tasks WHERE id=?',(entry['source_task_id'],)).fetchone()
+                item=self._eligible_pending_item(dict(row)) if row else None
+                if (not item or item['current_version_id']!=entry['version_id']
+                        or item['evidence_package_id']!=entry['evidence_package_id']):
+                    raise ValueError('backlog_preview_evidence_changed')
+                if entry['context_id'] and (self.market_result(item,entry['context_id']) or {}).get('status') not in {None,'queued'}:
+                    raise ValueError('backlog_preview_already_consumed')
+            with self._db() as db:
+                used=db.execute('SELECT COUNT(*) AS calls,COALESCE(SUM(reserved),0) AS reserved FROM runs WHERE created>=?',(time.time()-86400,)).fetchone()
+            if used['calls']+len(selected)>MAX_CALLS or used['reserved']+len(selected)*preview['per_task_limit']>BUDGET_MICRO_CNY:
+                raise ValueError('backlog_budget_changed')
+            for entry in selected:
+                if entry['context_id']:
+                    saved=market_tasks.get(self.news,entry['item_id'],entry['context_id'])
+                    if not saved:raise ValueError('market_context_missing_or_version_changed')
+                    market_tasks.task(self.news,saved)
+            self._backlog_previews.pop(token)
+            self._backlog_grants[token]={**preview,'remaining_budget':preview['budget'],
+                'remaining':{entry['task_id']:entry for entry in selected}}
+            for entry in selected:
+                self._queue.put_nowait((entry['item_id'],self._generation,entry['task_id'],entry['context_id'],token))
+        return {'status':'queued','count':len(selected),'task_ids':[e['task_id'] for e in selected]}
+
+    def _recovery_admission(self, token, task_id, item, reservation):
+        grant=self._backlog_grants.get(token)
+        entry=(grant or {}).get('remaining',{}).get(task_id)
+        if (not grant or not entry or grant['generation']!=self._generation or grant['expires']<=time.time()
+                or grant['deadline']<=time.monotonic() or grant['policy']!=self._focus_binding()
+                or entry['version_id']!=item.get('current_version_id')
+                or entry['evidence_package_id']!=item.get('evidence_package_id')
+                or reservation>grant['per_task_limit'] or reservation>grant['remaining_budget']):
+            return None
+        current=self.news.get_item(item['id'])
+        if not current or current.get('current_version_id')!=entry['version_id'] or not self._decision(item)['automatic_eligible']:
+            return None
+        return grant
+
     def _drain_queue(self):
+        self._backlog_previews.clear()
+        self._backlog_grants.clear()
         while True:
             try:
                 self._queue.get_nowait()
@@ -447,11 +658,12 @@ class NewsAnalysis:
                 if queued:
                     item_id, generation, *task_ids = queued
                     self._analyze(item_id, generation=generation, task_id=task_ids[0] if task_ids else None,
-                                  market_context_id=task_ids[1] if len(task_ids)>1 else None)
+                                  market_context_id=task_ids[1] if len(task_ids)>1 else None,
+                                  recovery_token=task_ids[2] if len(task_ids)>2 else None)
                 else:
                     with self._lock:
                         automatic = self._configured() and self._automatic
-                        cutoff = self._configured_at
+                        cutoff = self._automatic_cutoff()
                         generation = self._generation
                     if automatic and self.news.overview()["enabled"]:
                         if hasattr(self.news, 'pending_analysis_tasks'):
@@ -459,7 +671,7 @@ class NewsAnalysis:
                             continue
                         for item in self.news.list_items(limit=100)["items"]:
                             discovered = datetime.fromisoformat(item["discovered_at"].replace("Z", "+00:00")).timestamp()
-                            if discovered >= cutoff and self.result(item) is None:
+                            if discovered > cutoff and self._decision(item)['automatic_eligible'] and self.result(item) is None:
                                 self._analyze(item["id"], automatic=True, generation=generation)
                                 break
             except Exception:
@@ -467,27 +679,34 @@ class NewsAnalysis:
                     self._error = "分析服务暂时无法完成操作；已发送的请求不会自动重试。"
 
     def _next_persistent_task(self, cutoff, generation):
+        cutoff=max(cutoff,self._automatic_cutoff())
         offset = 0
         while not self._stop.is_set():
             page = self.news.pending_analysis_tasks(limit=100, offset=offset, after=cutoff)
             for task in page['tasks']:
-                if task['task_type'] != 'fact_reading' or task.get('trigger') == 'historical_backfill':
-                    continue
-                if hasattr(self.news,'article_reading_blocks_analysis') and self.news.article_reading_blocks_analysis(task['version_id']):
-                    continue
+                if task['version_seen_at']<=cutoff:continue
+                item=self._eligible_pending_item(task)
+                if not item:continue
+                if self._focus()['focus']['automatic_scope']=='market':
+                    context=market_tasks.prepare(self.news,None,item['id'],room_id=None,round_id=None,material_refs=[])
+                    context_id=context['context_id']
+                    if (self.market_result(item,context_id) or {}).get('status') not in {None,'queued'}:continue
+                    saved=market_tasks.get(self.news,item['id'],context_id)
+                    task_id=market_tasks.task(self.news,saved)
+                    return self._analyze(item['id'],automatic=True,generation=generation,task_id=task_id,market_context_id=context_id)
                 return self._analyze(task['item_id'], automatic=True, generation=generation, task_id=task['id'])
             offset += len(page['tasks'])
             if not page['tasks'] or offset >= page['total']:
                 return
 
-    def _analyze(self, item_id, *, automatic=False, generation=None, task_id=None, market_context_id=None):
+    def _analyze(self, item_id, *, automatic=False, generation=None, task_id=None, market_context_id=None,recovery_token=None):
         if generation is None:
             with self._lock:
                 generation = self._generation
         with self._execution_lock:
-            return self._analyze_once(item_id, automatic=automatic, generation=generation, task_id=task_id,market_context_id=market_context_id)
+            return self._analyze_once(item_id, automatic=automatic, generation=generation, task_id=task_id,market_context_id=market_context_id,recovery_token=recovery_token)
 
-    def _analyze_once(self, item_id, *, automatic=False, generation=None, task_id=None,market_context_id=None):
+    def _analyze_once(self, item_id, *, automatic=False, generation=None, task_id=None,market_context_id=None,recovery_token=None):
         market_saved=market_tasks.get(self.news,item_id,market_context_id) if market_context_id else None
         if market_context_id and not market_saved:
             return
@@ -554,8 +773,14 @@ class NewsAnalysis:
                     return
                 seen = item.get('version_seen_at') or item['discovered_at']
                 discovered = float(seen) if isinstance(seen, (int,float)) else datetime.fromisoformat(seen.replace('Z','+00:00')).timestamp()
-                if not self._automatic or discovered < self._configured_at or not self.news.overview()["enabled"]:
+                if (not self._automatic or discovered <= self._automatic_cutoff() or not self.news.overview()["enabled"]
+                        or not self._decision(item)['automatic_eligible']
+                        or (self._focus()['focus']['automatic_scope']=='market')!=bool(market_saved)):
                     return
+            recovery_grant=self._recovery_admission(recovery_token,task_id,item,reservation) if recovery_token else None
+            if recovery_token and recovery_grant is None:
+                self._error='本次补处理范围已到期或变化，未继续发送；请重新核对有限清单。'
+                return
             with self._db() as db:
                 db.execute("BEGIN IMMEDIATE")
                 if (db.execute('SELECT 1 FROM runs WHERE fingerprint=?',(fingerprint,)).fetchone() if market_saved else self._saved(db, item) is not None):
@@ -570,6 +795,10 @@ class NewsAnalysis:
                 db.execute("""INSERT INTO runs(fingerprint,item_id,created,reserved,status,provider,model,contract,rate_version,reservation_basis)
                     VALUES(?,?,?,?,?,?,?,?,?,?)""", (fingerprint,item_id,time.time(),reservation,"pending",provider,model,market_contract.QUALITY_VERSION if market_saved else material.get('reading_contract',QUALITY_VERSION),
                         analysis_providers.RATE_VERSION,json.dumps(basis,ensure_ascii=False)))
+            if recovery_grant:
+                recovery_grant['remaining'].pop(task_id)
+                recovery_grant['remaining_budget']-=reservation
+                if not recovery_grant['remaining']:self._backlog_grants.pop(recovery_token,None)
             # The reservation committed while holding the configuration lock.
             # A switch cannot race the chosen route, captured key, or busy flag.
             key = self._key
@@ -597,6 +826,7 @@ class NewsAnalysis:
                 retained = {"raw_output_preserved": False, "raw_output_retention_reason": "credential_echo_rejected"}
                 raise ValueError('credential_echo_rejected')
             value.update(provider=provider,model=reported_model or model,requested_model=model,reported_model=reported_model)
+            if market_saved:value['quality_version']=material['quality_version']
             status = "completed"
         except Exception as exc:
             mismatch = isinstance(exc,analysis_providers.NewsModelMismatch) or getattr(response,'error_code',None)=='model_mismatch'

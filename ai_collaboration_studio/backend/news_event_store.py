@@ -503,11 +503,15 @@ def record_version(db, item, now, *, evidence=None, metadata=None, migrated=Fals
         db.execute("UPDATE news_article_tasks SET status='skipped',updated=?,last_error='superseded_version' WHERE item_id=? AND status='pending' AND version_id!=?",
                    (now,item['id'],version_id))
     analysis = json.loads(item.get('analysis') or '{}') if isinstance(item.get('analysis'),str) else item.get('analysis') or {}
-    important = analysis.get('importance') == 'attention' or analysis.get('category') == 'company' or bool(metadata.get('symbols'))
+    from . import news_analysis_policy as policy
+    decision=policy.classify({**item,**analysis,'published_at':snapshot['published_at'],
+        'event':{'current_version':{**snapshot,'previous_version_id':previous['id'] if previous else None},
+                 'previous_version':old or {}}},policy.load(db))
+    important = decision['importance']=='important' and decision['relevance']!='unrelated'
     if enqueue and automatic_eligible and important and state in {'headline_only','excerpt_only'} and canonical_url(item.get('url')):
         body_task = digest(['news_article_task_v1',version_id])
         db.execute("""INSERT OR IGNORE INTO news_article_tasks(id,item_id,version_id,source_id,priority,created,updated)
-            VALUES(?,?,?,?,?,?,?)""",(body_task,item['id'],version_id,item['source_id'],10 if old else 0,now,now))
+            VALUES(?,?,?,?,?,?,?)""",(body_task,item['id'],version_id,item['source_id'],decision['priority'],now,now))
     # Reprints preserve their own versions/attribution, but do not constitute new
     # independent evidence or silently authorize another explanation of one origin.
     prior_event_task = db.execute("SELECT 1 FROM news_analysis_tasks WHERE event_id=? LIMIT 1", (association["event_id"],)).fetchone()
@@ -518,7 +522,7 @@ def record_version(db, item, now, *, evidence=None, metadata=None, migrated=Fals
         task_id = digest(["news_task_v1", association["event_id"], package_id, "fact_reading"])
         db.execute("""INSERT OR IGNORE INTO news_analysis_tasks(id,item_id,event_id,version_id,evidence_package_id,task_type,
             trigger,version_seen_at,priority,status,updated_at,reason) VALUES(?,?,?,?,?,'fact_reading',?,?,?,?,?,?)""",
-                   (task_id,item["id"],association["event_id"],version_id,package_id,trigger,now,10 if old else 0,
+                   (task_id,item["id"],association["event_id"],version_id,package_id,trigger,now,decision['priority'],
                     'needs_review' if state == 'retracted' or structure_review else 'pending',now,
                     'source_retracted' if state == 'retracted' else structure_review))
     return _version(dict(db.execute("SELECT * FROM news_article_versions WHERE id=?", (version_id,)).fetchone())), True

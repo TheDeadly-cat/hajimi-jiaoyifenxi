@@ -101,7 +101,7 @@ test("history distinguishes a normal restart from unknown exit and reports sourc
   assert.doesNotMatch(history().textContent, /上次退出未确认/);
   assert.match(history().textContent, /这段记录不能证明抓取一直在运行/);
   assert.deepEqual([...host.querySelectorAll(".news-run-counts dd")].map((entry) => entry.textContent), ["12", "2", "1", "4"]);
-  assert.match(host.querySelector(".news-check-records").textContent, /来源未更新.*新增 0 · 更新 0.*中断，结果未确认/);
+  assert.match(host.querySelector(".news-check-records").textContent, /来源未更新.*新入库条目 0 · 更新 0.*中断，结果未确认/);
   assert.equal(host.querySelectorAll(".news-check-records time").length, 2);
   assert.match(history().textContent, /当前记录不能确认连续 24 小时稳定运行/);
 });
