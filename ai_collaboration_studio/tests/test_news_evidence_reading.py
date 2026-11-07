@@ -72,7 +72,7 @@ class EvidenceReadingTests(unittest.TestCase):
         self.ai.configure('PUBLIC_FAKE_TEST_ONLY',True,True)
         self.news.control(True)
         self.now=time.time()+1
-        self.excerpt='An important corrected condition from the same older announcement.'
+        self.excerpt='An important corrected inflation condition from the same older announcement.'
         self.fetch()
         task=self.news.analysis_task_for_item(self.item_id)
         self.ai._next_persistent_task(self.ai._configured_at,self.ai._generation)

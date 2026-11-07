@@ -176,7 +176,7 @@ test("a draft model change leaves the active analysis route and shared usage unc
   await render(); await click(host.querySelector(".news-item"));
   await chooseModel("deepseek:deepseek-flash");
   assert.match(host.querySelector("#news-ai-model-help").textContent, /当前仍启用豆包/);
-  assert.ok(button("用豆包分析这条"));
+  assert.ok(button("可选：用豆包单独阅读事实"));
   assert.equal(button("保存并切换设置").disabled, true);
   assert.match(host.querySelector(".news-ai-configured").textContent, /已预约 12 \/ 36 次.*0.80 \/ 3.00 元/);
   assert.deepEqual(calls.ai, []);
@@ -186,7 +186,7 @@ test("saved analysis identity belongs to its original model and selecting anothe
   records = [fixture("a", { ai_analysis: { status: "completed", provider: "doubao", model: "doubao-seed-2-1-pro-260915", summary: "旧模型保存的摘要" } })];
   currentOverview.ai = { ...currentOverview.ai, configured: true, provider: "deepseek", model: "deepseek-flash" };
   await render(); await click(host.querySelector(".news-item"));
-  assert.match(host.querySelector(".news-ai-reading h3").textContent, /豆包 · 分析记录/);
+  assert.match(host.querySelector(".news-ai-reading h3").textContent, /豆包 · 事实阅读记录/);
   assert.match(host.querySelector(".news-ai-provenance").textContent, /doubao-seed-2-1-pro-260915.*不会自动重新分析或扣费/);
   assert.doesNotMatch(host.querySelector(".news-ai-reading h3").textContent, /DeepSeek/);
   await chooseModel("deepseek:deepseek-v4-pro");
@@ -234,8 +234,8 @@ test("manual AI dispatch is explicit and its queued state is not shown as a comp
   records = [fixture()]; currentOverview.ai.configured = true;
   await render(); await click(host.querySelector(".news-item"));
   assert.equal(calls.ai.length, 0);
-  await click(button("用豆包分析这条"));
-  assert.equal(calls.ai.length, 0, "preview does not dispatch"); await click(button("确认发送这一条"));
+  await click(button("可选：用豆包单独阅读事实"));
+  assert.equal(calls.ai.length, 0, "preview does not dispatch"); await click(button("确认发送事实阅读"));
   assert.deepEqual(calls.ai, ["a"]);
   assert.match(host.querySelector(".news-ai-reading").textContent, /已加入分析队列/);
   assert.doesNotMatch(host.querySelector(".news-ai-reading").textContent, /分析已完成/);
@@ -248,7 +248,7 @@ test("clearing a queued request unlocks model setup only after polling confirms 
   try {
     records = [fixture("a", { ai_analysis: null })]; currentOverview.ai.configured = true;
     client.newsAIClear = async () => { currentOverview.ai = { ...currentOverview.ai, configured: false, busy: false, error: "" }; return { ai: currentOverview.ai }; };
-    await render(); await click(host.querySelector(".news-item")); await click(button("用豆包分析这条")); await click(button("确认发送这一条"));
+    await render(); await click(host.querySelector(".news-item")); await click(button("可选：用豆包单独阅读事实")); await click(button("确认发送事实阅读"));
     assert.match(host.querySelector(".news-ai-reading").textContent, /已加入分析队列/);
     await click(button("清除密钥并停止 AI"));
     assert.equal(host.querySelector('select[aria-label="新闻分析模型"]').disabled, true, "clear acknowledgement alone must not discard an unverified request");
@@ -261,7 +261,7 @@ test("clearing a queued request unlocks model setup only after polling confirms 
     await click(aiCheckbox("我确认")); await click(button("保存AI设置"));
     assert.match(host.querySelector(".news-ai-configured").textContent, /当前设置：DeepSeek Flash/);
     assert.deepEqual(calls.ai.map((entry) => typeof entry === "string" ? entry : entry.model), ["a", "deepseek-flash"], "reconfiguration must not automatically resend the cancelled analysis");
-    assert.ok(button("用DeepSeek Flash分析这条"));
+    assert.ok(button("可选：用DeepSeek Flash单独阅读事实"));
   } finally { window.setInterval = originalInterval; }
 });
 
@@ -271,7 +271,7 @@ test("unconfirmed busy or missing result fields cannot cancel a queued request",
   window.setInterval = (callback, milliseconds, ...args) => { if (milliseconds === 2500) { poll = callback; return 999999; } return originalInterval(callback, milliseconds, ...args); };
   try {
     records = [fixture("a", { ai_analysis: null })]; currentOverview.ai.configured = true;
-    await render(); await click(host.querySelector(".news-item")); await click(button("用豆包分析这条")); await click(button("确认发送这一条"));
+    await render(); await click(host.querySelector(".news-item")); await click(button("可选：用豆包单独阅读事实")); await click(button("确认发送事实阅读"));
     currentOverview.ai = { ...currentOverview.ai, configured: false };
     delete currentOverview.ai.busy;
     await act(async () => poll());
@@ -325,8 +325,8 @@ test("material checks block title-only dispatch even when AI was configured", as
   const quality = host.querySelector('[aria-label="阅读前核对"]');
   assert.match(quality.textContent, /仅有标题/);
   assert.match(quality.textContent, /不消耗模型额度/);
-  assert.equal(button("用豆包分析这条").disabled, true);
-  await click(button("用豆包分析这条"));
+  assert.equal(button("可选：用豆包单独阅读事实").disabled, true);
+  await click(button("可选：用豆包单独阅读事实"));
   assert.equal(calls.ai.length, 0); assert.equal(calls.refresh, 0);
 });
 
@@ -351,10 +351,10 @@ test("legacy completed and failed records stay readable without an implicit retr
   await render(); await click(host.querySelectorAll(".news-item")[0]);
   assert.match(host.querySelector(".news-ai-reading").textContent, /保留的旧版摘要/);
   assert.match(host.querySelector(".news-analysis-legacy").textContent, /不会自动重新分析或扣费/);
-  assert.equal(button("用豆包分析这条"), undefined);
+  assert.equal(button("可选：用豆包单独阅读事实"), undefined);
   await click(host.querySelectorAll(".news-item")[1]);
   assert.match(host.querySelector(".news-ai-reading").textContent, /原失败记录/);
-  assert.equal(button("用豆包分析这条"), undefined);
+  assert.equal(button("可选：用豆包单独阅读事实"), undefined);
   assert.equal(calls.ai.length, 0);
 });
 

@@ -237,6 +237,8 @@ class NewsAnalysisTests(unittest.TestCase):
         self.news.items["old"] = item("old", discovered=time.time() - 100)
         self.configure(automatic=True)
         self.news.items["new"] = item("new", discovered=time.time() + 0.1)
+        for identifier in ('old','new'):
+            self.news.items[identifier].update(source_id='fed',category='inflation',importance='attention')
         self.app.start()
         # Wake the loop without depending on a fixed sleep; automatic path remains gated.
         self.app._queue.put_nowait(None)
@@ -256,6 +258,7 @@ class NewsAnalysisTests(unittest.TestCase):
         self.configure(automatic=True)
         self.news.enabled = True
         self.news.items = {"new": item("new", discovered=time.time() + 0.1)}
+        self.news.items['new'].update(source_id='fed',category='inflation',importance='attention')
         def pause_during_scan(limit=100):
             self.news.enabled = False
             return {"items": list(self.news.items.values())}

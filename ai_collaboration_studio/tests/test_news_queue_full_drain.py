@@ -105,7 +105,7 @@ class NewsQueueFullDrainTests(unittest.TestCase):
         self._advance(1)
         publication = format_datetime(datetime.fromtimestamp(self.now, timezone.utc), usegmt=True)
         entries = [f"<item><guid>queue-{number:03d}</guid>"
-                   f"<title>Synthetic queue announcement {number:03d}</title>"
+                   f"<title>Synthetic inflation report {number:03d}</title>"
                    f"<link>https://www.federalreserve.gov/queue-{number:03d}.htm</link>"
                    f"<pubDate>{publication}</pubDate>"
                    f"<description>{escape(excerpt)}</description></item>" for number in numbers]

@@ -277,9 +277,10 @@ class NewsProviderAdmissionTests(unittest.TestCase):
 
     def test_old_queued_or_dequeued_job_never_runs_with_new_key_or_route(self):
         self.configure();self.app.request('one')
-        old_item,old_generation=self.app._queue.get_nowait()
+        old_item,old_generation,*old_task_ids=self.app._queue.get_nowait()
         self.configure('doubao',MODEL)
-        self.app._analyze(old_item,generation=old_generation)
+        self.app._analyze(old_item,generation=old_generation,task_id=old_task_ids[0] if old_task_ids else None,
+                          market_context_id=old_task_ids[1] if len(old_task_ids)>1 else None)
         self.assertEqual(self.calls,[])
         self.assertTrue(self.app._queue.empty())
         self.app.request('one');self.app.clear()

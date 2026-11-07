@@ -26,6 +26,9 @@ def prepare(news, store, item_id, *, room_id=None, round_id=None, material_refs=
         raise ValueError('versioned_news_item_required')
     context = resolve_saved_context(store,item,room_id=room_id,round_id=round_id,
                                     material_refs=material_refs,as_of=cutoff)
+    if not historical and room_id is None:
+        context.update(mode='current_news_only', article_version_id=item['current_version_id'])
+        context['context_id']=_hash({key:value for key,value in context.items() if key!='context_id'})
     references={(v.get('id') or v.get('material_id'),v['version']) for v in material_refs}
     if historical:
         version=item['event']['current_version']

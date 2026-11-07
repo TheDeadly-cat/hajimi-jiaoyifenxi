@@ -57,25 +57,41 @@ test("saving configuration does not analyze, and a single item needs an explicit
   assert.equal(calls.configure.length, 1); assert.equal(calls.configure[0].automatic, false);
   assert.equal(calls.configure[0].model, "doubao-seed-2-1-pro-260915"); assert.deepEqual(calls.analyze, []);
   assert.match(host.querySelector(".news-notice").textContent, /配置已保存.*没有验证/);
-  await click(host.querySelector(".news-item")); await click(button("用豆包分析这条"));
+  await click(host.querySelector(".news-item")); await click(button("可选：用豆包单独阅读事实"));
   assert.deepEqual(calls.analyze, []); assert.match(host.querySelector(".news-ai-confirm").textContent, /保留消息a/);
   assert.equal(document.activeElement, host.querySelector(".news-ai-confirm h4"), "keyboard focus enters the explicit send confirmation");
   await click(button("暂不发送")); assert.deepEqual(calls.analyze, []);
-  await click(button("用豆包分析这条"));
+  await click(button("可选：用豆包单独阅读事实"));
   const request = deferred(); client.newsAIAnalyze = id => { calls.analyze.push(id); return request.promise; };
-  const confirm = button("确认发送这一条"); await act(async () => { confirm.click(); confirm.click(); });
+  const confirm = button("确认发送事实阅读"); await act(async () => { confirm.click(); confirm.click(); });
   assert.deepEqual(calls.analyze, ["a"]);
   await act(async () => request.resolve({ ai_analysis: { status: "queued" } }));
-  assert.equal(button("确认发送这一条"), undefined); assert.match(host.querySelector(".news-ai-reading").textContent, /已加入分析队列/);
+  assert.equal(button("确认发送事实阅读"), undefined); assert.match(host.querySelector(".news-ai-reading").textContent, /已加入分析队列/);
 });
 
 test("changing the selected item discards the previous manual-send confirmation", async () => {
   overview.ai.configured = true;
   await render(); const rows = host.querySelectorAll(".news-item");
-  await click(rows[0]); await click(button("用豆包分析这条")); assert.ok(button("确认发送这一条"));
-  await click(rows[1]); assert.equal(button("确认发送这一条"), undefined);
-  await click(button("用豆包分析这条")); assert.match(host.querySelector(".news-ai-confirm-title").textContent, /保留消息b/);
-  await click(button("确认发送这一条")); assert.deepEqual(calls.analyze, ["b"]);
+  await click(rows[0]); await click(button("可选：用豆包单独阅读事实")); assert.ok(button("确认发送事实阅读"));
+  await click(rows[1]); assert.equal(button("确认发送事实阅读"), undefined);
+  await click(button("可选：用豆包单独阅读事实")); assert.match(host.querySelector(".news-ai-confirm-title").textContent, /保留消息b/);
+  await click(button("确认发送事实阅读")); assert.deepEqual(calls.analyze, ["b"]);
+});
+
+test("single fact reading is a separate optional request and its extra reservation is explained before sending", async () => {
+  overview.ai.configured = true;
+  items = [item("a", { market_impact: { status: "completed", new_information: [], uncertainties: ["合成综合解释已保存"] } })];
+  await render(); await click(host.querySelector(".news-item"));
+  const reading = host.querySelector(".news-ai-reading");
+  assert.match(reading.querySelector("h3").textContent, /单独事实阅读（可选）/);
+  assert.match(reading.querySelector(".news-fact-option-note").textContent, /综合解释已包含事实.*另安排一次模型请求并计入共享额度.*已保存结果直接读回/s);
+  assert.deepEqual(calls.analyze, []);
+  await click(button("可选：用豆包单独阅读事实"));
+  assert.match(host.querySelector(".news-ai-confirm").textContent, /这次只发送单独事实阅读/);
+  assert.deepEqual(calls.analyze, []);
+  await click(button("暂不发送")); assert.deepEqual(calls.analyze, []);
+  await click(button("可选：用豆包单独阅读事实")); await click(button("确认发送事实阅读"));
+  assert.deepEqual(calls.analyze, ["a"]);
 });
 
 test("source restrictions explain affected coverage while healthy sources and saved reading remain available", async () => {

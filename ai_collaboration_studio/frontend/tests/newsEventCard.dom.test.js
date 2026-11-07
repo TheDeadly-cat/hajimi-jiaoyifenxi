@@ -12,6 +12,7 @@ for (const key of ["window", "document", "navigator", "HTMLElement", "Node", "Ev
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const { createRoot } = await import("react-dom/client");
 const { NewsWorkspace } = await vite.ssrLoadModule("/src/components/NewsWorkspace.jsx");
+const { NewsEventCard } = await vite.ssrLoadModule("/src/components/NewsEventCard.jsx");
 const { AnalysisReview, AnalysisEvidence } = await vite.ssrLoadModule("/src/components/NewsContentQuality.jsx");
 const { NewsMarketMaterial, marketSourceTime } = await vite.ssrLoadModule("/src/components/NewsMarketMaterial.jsx");
 let host, root, item, client, calls, overview;
@@ -31,6 +32,50 @@ test.beforeEach(() => {
 });
 test.afterEach(async () => { await act(async () => root.unmount()); assert.equal(calls.network, 0); document.body.replaceChildren(); globalThis.fetch = originalFetch; });
 test.after(async () => { dom.window.close(); await vite.close(); });
+
+function savedSixQuestionImpact() {
+  return { status: "completed", context_id: "saved-market", facts: [{ claim: "已保存的合成事实", quote: "saved source quote", evidence_id: "article:p1" }],
+    new_information: [], inferred_impacts: [], unknowns: ["尚缺预期"], counter_evidence: [],
+    research_actions: [{ kind: "verify", action: "核对合成审批条件" }], judgment_change_conditions: ["若官方更正，则需重新核对判断"] };
+}
+
+test("saved market answers render once through the real parent after cold reopening", async () => {
+  item.market_context = { context_id: "saved-market", room_id: null, round_id: null, consensus: [], market: {}, missing: [] };
+  item.market_impact = savedSixQuestionImpact();
+  const saved = JSON.stringify(item.market_impact);
+  client.newsMarketContext = async () => assert.fail("Reading saved answers must not prepare a new context");
+  client.newsMarketAnalyze = async () => assert.fail("Reading saved answers must not send a model request");
+  const assertSingle = () => {
+    assert.equal(host.querySelectorAll(".news-event-market").length, 1);
+    assert.equal([...host.querySelectorAll("h5")].filter(node => node.textContent === "1. 发生了什么？").length, 1);
+    assert.equal([...host.querySelectorAll("h5")].filter(node => node.textContent === "6. 什么新证据会改变当前判断？").length, 1);
+    assert.equal(host.querySelector(".news-event-card .news-event-market"), null);
+    assert.ok(host.querySelector(".news-market-context .news-event-market"));
+    assert.equal(JSON.stringify(item.market_impact), saved);
+  };
+  await render(); assertSingle();
+  await act(async () => root.unmount()); root = createRoot(host);
+  await render(); assertSingle();
+  await click(button("查看版本历史（2）"));
+  await click([...host.querySelectorAll(".news-event-history button")].find(node => node.textContent.includes("版本 1")));
+  assert.equal(host.querySelector(".news-event-market"), null, "current market answers must not appear in historical reading");
+  await click(button("返回当前版本")); assertSingle();
+});
+
+test("standalone event cards retain their saved market answers by default", async () => {
+  item.market_impact = savedSixQuestionImpact();
+  await act(async () => root.render(React.createElement(NewsEventCard, { item, apiClient: client, busy: false, onRead() {} })));
+  assert.equal(host.querySelectorAll(".news-event-card .news-event-market").length, 1);
+  assert.match(host.textContent, /核对合成审批条件/);
+});
+
+test("a parent client without the direct analysis capability retains the card fallback", async () => {
+  item.market_impact = savedSixQuestionImpact();
+  await render();
+  assert.equal(host.querySelectorAll(".news-event-market").length, 1);
+  assert.ok(host.querySelector(".news-event-card .news-event-market"));
+  assert.equal(host.querySelector(".news-market-context"), null);
+});
 
 test("renders distinct content, attachment, source count, update and queue facts without automatic fetching", async () => {
   await render();
