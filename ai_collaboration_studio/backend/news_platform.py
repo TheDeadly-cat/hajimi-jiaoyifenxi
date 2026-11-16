@@ -776,7 +776,7 @@ class NewsPlatform:
                                "recovery_pending": bool(source['cooldown_level'] or source['access_denied_level']),
                                "recovery_successes": source['recovery_successes'] if source['cooldown_level'] else source['access_recovery_successes'],
                                "refresh_queued": bool(source['refresh_queued'] and source['enabled'] and not source['manual_hold']), "manual_hold": bool(source['manual_hold']),
-                               "stale": source['last_success'] is None or now - source['last_success'] > self.poll_interval + runtime_evidence.HEARTBEAT_GAP_SECONDS,
+                               "stale": source['last_success'] is None or now - source['last_success'] > (source['poll_interval'] or self.poll_interval) + runtime_evidence.HEARTBEAT_GAP_SECONDS,
                                "overdue": bool(enabled and source['enabled'] and not source['manual_hold'] and source['next_poll'] and now > source['next_poll'] + runtime_evidence.HEARTBEAT_GAP_SECONDS),
                                "overdue_seconds": max(0,round(now-source['next_poll'])) if enabled and source['next_poll'] and not source['manual_hold'] else 0})
             serialized[-1].update({key:definitions.get(source['id'],{}).get(key) for key in

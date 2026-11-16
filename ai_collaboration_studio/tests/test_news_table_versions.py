@@ -84,6 +84,8 @@ class TableVersionTests(unittest.TestCase):
         for item in (b, c):
             self.assertIn('table_structure', [d['field'] for d in item['event']['current_version']['changes']])
             self.assertEqual(len(self.news.equivalent_reading_versions(self.item_id, item['current_version_id'])), 1)
+            self.assertTrue(item['event']['requires_review'])
+        self.assertFalse(self.news.event_detail(self.item_id, as_of=a['version_seen_at'])['requires_review'])
 
     def test_cosmetic_locators_versions_and_whitespace_are_unchanged(self):
         value = table_evidence(); first = self.save(value); count = self.task_count()
@@ -151,6 +153,7 @@ class TableVersionTests(unittest.TestCase):
         second = self.save(full)
         self.assertNotEqual(first['current_version_id'], second['current_version_id'])
         self.assertNotEqual(first['evidence_package_id'], second['evidence_package_id'])
+        self.assertTrue(second['event']['requires_review'])
 
     def test_conflicting_cached_table_view_requires_review(self):
         full = json.loads(json.dumps(table_evidence()))

@@ -158,6 +158,36 @@ class NewsPlatformReliabilityTests(unittest.TestCase):
         self.assertEqual(source['overdue_seconds'], 100)
         self.assertEqual(state['counts']['sources_ok'], 0)
 
+    def test_longer_source_interval_remains_fresh_until_its_own_deadline(self):
+        self.app.control(True)
+        self.app.configure_source('fed', True, poll_interval=3600)
+        self.fetch()
+        self.now += 1800
+        state = self.app.overview()
+        source = next(s for s in state['sources'] if s['id']=='fed')
+        self.assertEqual(source['poll_interval'], 3600)
+        self.assertFalse(source['stale'])
+        self.assertFalse(source['overdue'])
+        self.assertEqual(state['counts']['sources_ok'], 1)
+        self.now = NOW + 3600 + evidence.HEARTBEAT_GAP_SECONDS + 1
+        state = self.app.overview()
+        source = next(s for s in state['sources'] if s['id']=='fed')
+        self.assertTrue(source['stale'])
+        self.assertTrue(source['overdue'])
+        self.assertEqual(state['counts']['sources_ok'], 0)
+
+    def test_shorter_source_interval_does_not_hide_a_stale_success(self):
+        self.app.control(True)
+        self.app.configure_source('fed', True, poll_interval=60)
+        self.fetch()
+        self.now += 60 + evidence.HEARTBEAT_GAP_SECONDS + 1
+        state = self.app.overview()
+        source = next(s for s in state['sources'] if s['id']=='fed')
+        self.assertEqual(source['poll_interval'], 60)
+        self.assertTrue(source['stale'])
+        self.assertTrue(source['overdue'])
+        self.assertEqual(state['counts']['sources_ok'], 0)
+
     def test_transient_database_failure_keeps_worker_alive_and_recovers(self):
         original = self.app._db
         failures = []
