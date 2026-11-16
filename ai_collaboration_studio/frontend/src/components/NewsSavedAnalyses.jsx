@@ -103,7 +103,7 @@ export function NewsSavedAnalyses({ item, versionId = null, apiClient, busy = fa
         {saved.is_shared ? <p className="news-event-caption">这份分析最初保存于同源消息记录；当前展示的是所选消息中证据一致的版本，原分析归属和内容保持不变。</p> : null}
         {saved.title ? <p>{saved.title}</p> : null}
         <p>资料保存：{eventTime(saved.created_at)} · 分析材料截止：{eventTime(saved.as_of)}</p>
-        <p className="news-event-caption">这是按当时材料保存的记录。与当前新闻证据相同，也不代表当时的行情或预期仍然有效。</p>
+        <p className="news-event-caption">这是按当时材料保存的记录。即使与当前新闻证据相同，也不代表当时的行情或预期仍然有效。</p>
         {saved.evidence_matches_current === false ? <p className="news-event-warning">消息已有不同版本。以下是当时保存的分析，不能作为当前结论。</p>
           : saved.evidence_matches_current !== true ? <p className="news-event-warning">这份记录与当前消息版本的关系尚未确认。</p> : null}
         {saved.requires_review ? <p className="news-event-warning">相关材料已有变化，此前判断需要重新核对；原结果和引用保持原样。</p> : null}

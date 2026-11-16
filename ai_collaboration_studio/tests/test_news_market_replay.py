@@ -150,6 +150,82 @@ class MarketReplayTests(unittest.TestCase):
             'room_id': room, 'round_id': round_id, 'material_refs': list(refs),
             'version_id': version or self.v1['current_version_id'], 'as_of': as_of})
 
+    def test_submicrosecond_first_visible_time_round_trips_without_future_correction(self):
+        observed = 1794847815.2474852
+        self.now = observed
+        saved = self.save_body('Offline fractional-time version: revenue USD 12 million.')
+        version_id = saved['current_version_id']
+        self.now = observed + 5
+        version = next(v for v in self.news.event_versions(self.item_id) if v['id'] == version_id)
+        first_visible = version['version_seen_at']
+        self.assertGreaterEqual(seconds(first_visible), observed)
+        self.assertLess(seconds(first_visible) - observed, 0.000001)
+
+        # A correction after the exposed cutoff must remain outside the replay,
+        # even when nearest-microsecond formatting would round it onto that cutoff.
+        self.now = 1794847815.2474864
+        corrected = self.save_body('Offline later correction: revenue USD 13 million.')
+        self.now = observed + 5
+        before = event_store.iso(seconds(first_visible) - 0.000001)
+        payload, code = self.request(version=version_id, as_of=before)
+        self.assertEqual(code, 400, payload)
+        payload, code = self.request(version=version_id, as_of=first_visible)
+        self.assertEqual(code, 200, payload)
+        self.assertEqual(payload['market_context']['article_version_id'], version_id)
+        historical = self.news.event_detail(self.item_id, as_of=first_visible)
+        self.assertEqual(historical['current_version']['id'], version_id)
+        self.assertNotIn(corrected['current_version_id'], [v['id'] for v in historical['versions']])
+
+    def test_legacy_rounded_snapshot_exposes_safe_time_without_rewriting_saved_evidence(self):
+        observed = 1794847815.2474852
+        self.now = observed
+        saved = self.save_body('Offline legacy fractional-time version: revenue USD 12 million.')
+        version_id = saved['current_version_id']
+        with self.news._db() as db:
+            row = db.execute('SELECT snapshot FROM news_article_versions WHERE id=?', (version_id,)).fetchone()
+            legacy = json.loads(row['snapshot'])
+            legacy['version_seen_at'] = event_store.iso(observed)
+            legacy_json = json.dumps(legacy)
+            db.execute('UPDATE news_article_versions SET snapshot=? WHERE id=?', (legacy_json, version_id))
+        self.now = observed + 5
+        version = next(v for v in self.news.event_versions(self.item_id) if v['id'] == version_id)
+        payload, code = self.request(version=version_id, as_of=version['version_seen_at'])
+        self.assertEqual(code, 200, payload)
+        with self.news._db() as db:
+            row = db.execute('SELECT version_seen,snapshot FROM news_article_versions WHERE id=?', (version_id,)).fetchone()
+        self.assertEqual(row['version_seen'], observed)
+        self.assertEqual(row['snapshot'], legacy_json)
+
+    def test_same_microsecond_correction_does_not_silently_replace_selected_version(self):
+        self.now = 1794847815.2474852
+        first = self.save_body('Offline submicrosecond first version: revenue USD 12 million.')
+        first_id = first['current_version_id']
+        first_visible = self.news.event_versions(self.item_id)[0]['version_seen_at']
+        self.now = 1794847815.2474854
+        corrected = self.save_body('Offline submicrosecond correction: revenue USD 13 million.')
+        self.now += 5
+        before = self.news_state()
+        payload, code = self.request(version=first_id, as_of=first_visible)
+        self.assertEqual(code, 400, payload)
+        self.assertEqual(self.news_state(), before)
+        payload, code = self.request(version=corrected['current_version_id'], as_of=first_visible)
+        self.assertEqual(code, 200, payload)
+        self.assertEqual(payload['market_context']['article_version_id'], corrected['current_version_id'])
+
+    def test_current_prepare_at_raw_observation_time_still_rejects_submicrosecond_future_version(self):
+        self.now = 1794847815.2474852
+        saved = self.save_body('Offline same-instant current version: revenue USD 12 million.')
+        context = tasks.prepare(self.news, self.store, self.item_id)
+        self.assertEqual(context['mode'], 'current_news_only')
+        self.assertEqual(context['article_version_id'], saved['current_version_id'])
+        self.now = 1794847815.2474854
+        self.save_body('Offline future-clock correction: revenue USD 13 million.')
+        self.now = 1794847815.2474852
+        before = self.news_state()
+        with self.assertRaisesRegex(ValueError, 'news_version_not_known_at_as_of'):
+            tasks.prepare(self.news, self.store, self.item_id)
+        self.assertEqual(self.news_state(), before)
+
     def options(self, *, cutoff=CUTOFF, limit=50, offset=0):
         return news_response(self.news, '/api/news/market/options', query={'room_id': ['room_plan'],
             'as_of': [cutoff], 'limit': [str(limit)], 'offset': [str(offset)]})

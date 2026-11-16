@@ -10,7 +10,7 @@ import copy
 import json
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
@@ -32,6 +32,19 @@ def timestamp(value):
 
 def iso(value):
     return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z") if value is not None else None
+
+
+def first_visible_iso(value):
+    """Expose a usable microsecond cutoff without moving evidence into the past.
+
+    SQLite retains submicrosecond clock values, while ISO datetime serialization
+    rounds them. Round availability upward only; the original REAL value and
+    exact historical query predicates remain authoritative.
+    """
+    observed = datetime.fromtimestamp(value, timezone.utc)
+    if observed.timestamp() < value:
+        observed += timedelta(microseconds=1)
+    return observed.isoformat().replace("+00:00", "Z")
 
 
 def _json(value):
@@ -222,7 +235,8 @@ def _current(db, item_id, as_of=None):
 def _version(row):
     value = json.loads(row["snapshot"])
     value.update(id=row["id"], event_id=row["event_id"], version_number=row["version_number"],
-                 evidence_package_id=row["evidence_package_id"], previous_version_id=row["previous_version_id"])
+                 evidence_package_id=row["evidence_package_id"], previous_version_id=row["previous_version_id"],
+                 version_seen_at=first_visible_iso(row["version_seen"]))
     return value
 
 
@@ -477,7 +491,7 @@ def record_version(db, item, now, *, evidence=None, metadata=None, migrated=Fals
     snapshot = {"item_id": item["id"], "title": item.get("title", ""), "url": item.get("url", ""),
                 "excerpt": item.get("excerpt", ""), "source_id": item["source_id"],
                 "published_at": iso(timestamp(evidence.get("published_at")) or timestamp(item.get("published"))), "source_updated_at": iso(source_updated),
-                "first_seen_at": iso(timestamp(item.get("discovered", now))), "version_seen_at": iso(now),
+                "first_seen_at": iso(timestamp(item.get("discovered", now))), "version_seen_at": first_visible_iso(now),
                 "fetched_at": iso(timestamp(evidence.get("fetched_at")) or now), "content_status": state,
                 "evidence": evidence, "changes": changes, "migrated_legacy": migrated,
                 "material_fingerprint_version": "news_material_tables_v2", "structure_review": structure_review,

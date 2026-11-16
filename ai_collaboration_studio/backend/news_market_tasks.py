@@ -20,8 +20,18 @@ def prepare(news, store, item_id, *, room_id=None, round_id=None, material_refs=
         cutoff=cutoff_time(as_of,news.clock()).isoformat()
         item=historical_item(news,item_id,version_id,cutoff)
     else:
-        cutoff=datetime.fromtimestamp(news.clock(),timezone.utc).isoformat()
+        from . import news_event_store as events
+        now=news.clock()
+        cutoff=events.first_visible_iso(now)
         item = news.get_item(item_id)
+        if item and item.get('current_version_id'):
+            # The formatted live cutoff shares the article's microsecond
+            # precision. Prove availability against the unrounded clock first,
+            # so a later version within that microsecond is still rejected.
+            with news._db() as db:
+                current=events._current(db,item_id,now)
+            if not current or current['id']!=item['current_version_id']:
+                raise ValueError('news_version_not_known_at_as_of')
     if not item or not item.get('current_version_id'):
         raise ValueError('versioned_news_item_required')
     context = resolve_saved_context(store,item,room_id=room_id,round_id=round_id,
