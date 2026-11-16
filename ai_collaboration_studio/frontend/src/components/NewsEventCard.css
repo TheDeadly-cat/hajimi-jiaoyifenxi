@@ -103,3 +103,16 @@
 .news-replay-quote-time { grid-column: 1 / -1; }
 .news-replay-number { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .news-market-material-insufficient { margin: 12px 0; padding: 12px; border: 1px solid var(--news-border); border-radius: 6px; background: var(--news-soft); }
+
+.news-saved-analyses { margin: 16px 0; padding: 14px; border: 1px solid var(--news-border); border-radius: 8px; overflow-wrap: anywhere; }
+.news-saved-analyses h4 { margin: 0 0 9px; font-size: 14px; }
+.news-saved-analyses p { font-size: 13px; line-height: 1.75; }
+.news-saved-analyses ul { padding-left: 20px; }
+.news-saved-analyses li { margin: 8px 0; }
+.news-saved-analyses .news-button { width: 100%; min-height: 44px; justify-content: flex-start; text-align: left; white-space: normal; font-size: 13px; }
+.news-saved-analyses .news-inline-button { min-height: 44px; }
+.news-saved-analyses button[aria-pressed="true"] { border-color: var(--news-accent); background: var(--news-soft); }
+.news-saved-analysis { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--news-border); }
+.news-saved-analysis > h5 { margin: 0 0 8px; font-size: 13px; }
+.news-saved-analysis a { color: var(--news-accent); text-underline-offset: 3px; }
+.news-saved-analysis blockquote { margin: 6px 0; padding: 9px 12px; border-left: 3px solid var(--news-border); background: var(--news-soft); white-space: pre-wrap; }

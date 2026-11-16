@@ -77,6 +77,41 @@ test("a parent client without the direct analysis capability retains the card fa
   assert.equal(host.querySelector(".news-market-context"), null);
 });
 
+test("the full news workspace exposes an ordinary saved explanation from an older article version", async () => {
+  const record = { context_id: "old-ordinary", article_version_id: "v1", article_version_number: 1,
+    mode: "current_news_only", created_at: "2026-10-28T01:10:00Z", as_of: "2026-10-28T01:10:00Z",
+    evidence_matches_current: false, requires_review: true };
+  const historyReads = [];
+  client.newsMarketHistory = async (id, versionId, signal, options) => {
+    historyReads.push({ id, versionId }); return { contexts: [record], total: 1, ...options };
+  };
+  client.newsMarketSavedContext = async () => ({ saved_record: record,
+    market_context: { context_id: record.context_id, mode: record.mode },
+    market_impact: { ...savedSixQuestionImpact(), context_id: record.context_id } });
+  client.newsMarketAnalyze = async () => assert.fail("Reopening an old result must not send a model request");
+  await render();
+  await click(button("查看版本历史（2）"));
+  await click([...host.querySelectorAll(".news-event-history button")].find(node => node.textContent.includes("版本 1")));
+  assert.match(host.querySelector(".news-saved-analyses").textContent, /此版本保存的分析/);
+  await click(button("查看已保存的分析"));
+  await click(host.querySelector(".news-saved-analyses li button"));
+  assert.deepEqual(historyReads, [{ id: item.id, versionId: "v1" }]);
+  assert.match(host.querySelector(".news-saved-analysis").textContent, /当时的消息解释.*已保存的合成事实/s);
+  assert.match(host.querySelector(".news-saved-analysis").textContent, /不能作为当前结论/);
+  assert.equal(host.querySelector(".news-market-context"), null);
+});
+
+test("a confirmed original update is visible on its reprint without rewriting the saved reading", async () => {
+  item.event.original_update = { original_url: "https://example.test/original", version_seen_at: "2026-10-29T01:30:00Z" };
+  const before = JSON.stringify(item.ai_analysis);
+  await render();
+  assert.match(host.querySelector(".news-event-card").textContent, /已关联原稿出现材料更新.*重新核对此前分析/s);
+  const link = [...host.querySelectorAll(".news-event-card a")].find(node => node.textContent === "查看已关联原稿");
+  assert.equal(link.href, "https://example.test/original");
+  assert.equal(JSON.stringify(item.ai_analysis), before);
+  assert.deepEqual(calls.read, []);
+});
+
 test("renders distinct content, attachment, source count, update and queue facts without automatic fetching", async () => {
   await render();
   assert.match(host.textContent, /正文不完整/);

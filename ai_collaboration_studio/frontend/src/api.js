@@ -47,7 +47,16 @@ export const api = {
     return jsonRequest(`/api/news/market/options?${query}`, { signal });
   },
   newsMarketReplays: (id, versionId, signal, { limit = 50, offset = 0 } = {}) => jsonRequest(`/api/news/items/${encodeURIComponent(id)}/market/replays?${new URLSearchParams({ version_id: versionId, limit: String(limit), offset: String(offset) })}`, { signal }),
-  newsMarketSavedContext: (id, contextId, signal) => jsonRequest(`/api/news/items/${encodeURIComponent(id)}/market/context?${new URLSearchParams({ context_id: contextId })}`, { signal }),
+  newsMarketHistory: (id, versionId, signal, { limit = 50, offset = 0 } = {}) => {
+    const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (versionId) query.set("version_id", versionId);
+    return jsonRequest(`/api/news/items/${encodeURIComponent(id)}/market/history?${query}`, { signal });
+  },
+  newsMarketSavedContext: (id, contextId, signal, { version_id } = {}) => {
+    const query = new URLSearchParams({ context_id: contextId });
+    if (version_id) query.set("version_id", version_id);
+    return jsonRequest(`/api/news/items/${encodeURIComponent(id)}/market/context?${query}`, { signal });
+  },
   newsMarketAnalyze: (id, contextId, signal, { acknowledge_historical = false } = {}) => jsonRequest(`/api/news/items/${encodeURIComponent(id)}/market/analyze`, { method: "POST", body: JSON.stringify({ context_id: contextId, ...(acknowledge_historical ? { acknowledge_historical: true } : {}) }), signal }),
   newsControl: (enabled, signal) => jsonRequest("/api/news/control", { method: "POST", body: JSON.stringify({ enabled }), signal }),
   newsRefresh: (signal) => jsonRequest("/api/news/refresh", { method: "POST", body: JSON.stringify({}), signal }),

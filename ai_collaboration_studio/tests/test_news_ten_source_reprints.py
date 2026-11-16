@@ -289,12 +289,28 @@ class TenSourceReprintTests(unittest.TestCase):
         initial_versions = self.immutable_versions()
         self.fixture.link_all(items)
         confirmed = self.news.get_item(reprint['id'])
+        confirmed_at = self.fixture.now
         old_annotation = copy.deepcopy(confirmed['event']['relation_annotations'][0])
         self.fixture.now += 1
         corrected = self.news.save_article_evidence(original['id'], self.fixture.body(
             'Synthetic correction only. Micron FY2026-Q3 reported revenue is 11 million fixture dollars; the prior 10 was corrected.'))
         self.assertNotEqual(corrected['current_version_id'], original['current_version_id'])
         self.assertTrue(corrected['event']['requires_review'])
+        for copy_item in items[1:]:
+            event = self.news.get_item(copy_item['id'])['event']
+            self.assertTrue(event['requires_review'])
+            self.assertEqual(event['original_update'], {
+                'reason': 'confirmed_original_material_changed',
+                'original_item_id': original['id'],
+                'confirmed_original_version_id': original['current_version_id'],
+                'current_original_version_id': corrected['current_version_id'],
+                'first_changed_version_id': corrected['current_version_id'],
+                'original_url': corrected['url'],
+                'version_seen_at': corrected['version_seen_at'],
+            })
+            historical = self.news.event_detail(copy_item['id'], as_of=confirmed_at)
+            self.assertFalse(historical['requires_review'])
+            self.assertIsNone(historical['original_update'])
         copy_before_repeat = self.news.get_item(reprint['id'])
         task_count = len(self.fixture.rows('news_analysis_tasks'))
         repeated = self.fixture.confirm(reprint['id'], original['id'])
@@ -302,6 +318,9 @@ class TenSourceReprintTests(unittest.TestCase):
         self.assertEqual(len(self.fixture.rows('news_analysis_tasks')), task_count)
         self.assertEqual(repeated['event']['relation_annotations'][-1], old_annotation)
         self.assertEqual(repeated['event']['latest_relation_annotation']['confirmation']['original_version_id'], corrected['current_version_id'])
+        # Reconfirming attribution does not review or replace the old analysis.
+        self.assertTrue(repeated['event']['requires_review'])
+        self.assertEqual(repeated['event']['original_update'], copy_before_repeat['event']['original_update'])
         corrected_at = self.fixture.now
         notice_text = 'Synthetic publisher notice: this FY2026-Q3 announcement was withdrawn by its publisher.'
         wrong_notice = self.fixture.add('wrong-publisher-notice', 12, notice_text, event='withdrawal')
@@ -345,6 +364,55 @@ class TenSourceReprintTests(unittest.TestCase):
         self.notes.update(old_annotation=old_annotation, corrected=corrected, withdrawn=withdrawn,
                           original_history_with_saved_results=history, reprint_history_with_saved_results=copy_history,
                           terminal_tasks_preserved=[completed_task, unknown_task])
+
+    def test_another_reprint_change_does_not_mark_unchanged_original_or_copies(self):
+        original = self.fixture.add('original', 1)
+        first_copy = self.fixture.add('first-copy', 2)
+        second_copy = self.fixture.add('second-copy', 3)
+        self.fixture.link_all([original, first_copy, second_copy])
+        self.fixture.now += 1
+        changed = self.news.save_article_evidence(first_copy['id'], self.fixture.body(
+            'Synthetic local reprint edit; no update to its confirmed original.'))
+        self.assertTrue(changed['event']['requires_review'])
+        for item in (original, second_copy):
+            event = self.news.get_item(item['id'])['event']
+            self.assertFalse(event['requires_review'])
+            self.assertIsNone(event['original_update'])
+
+    def test_original_provenance_change_without_material_change_does_not_flag_copy(self):
+        original = self.fixture.add('original', 1)
+        copy_item = self.fixture.add('copy', 2)
+        earlier_origin = self.fixture.add('earlier-origin', 3)
+        self.fixture.confirm(copy_item['id'], original['id'])
+        relinked = self.fixture.confirm(original['id'], earlier_origin['id'])
+        self.assertNotEqual(relinked['current_version_id'], original['current_version_id'])
+        self.assertEqual(relinked['evidence']['body_text'], original['evidence']['body_text'])
+        event = self.news.get_item(copy_item['id'])['event']
+        self.assertFalse(event['requires_review'])
+        self.assertIsNone(event['original_update'])
+
+    def test_original_update_uses_the_relation_and_versions_known_at_cutoff(self):
+        original = self.fixture.add('original', 1)
+        other_original = self.fixture.add('other-original', 2)
+        copy_item = self.fixture.add('copy', 3)
+        self.fixture.confirm(copy_item['id'], original['id'])
+        self.fixture.now += 1
+        correction = self.news.save_article_evidence(original['id'], self.fixture.body(
+            'Synthetic original correction: reported revenue was 11 fixture dollars.'))
+        corrected_at = self.fixture.now
+        rebound = self.fixture.confirm(copy_item['id'], other_original['id'])
+        self.assertFalse(rebound['event']['requires_review'])
+        self.assertIsNone(rebound['event']['original_update'])
+        self.fixture.now += 1
+        self.news.save_article_evidence(other_original['id'], self.fixture.body(
+            'Synthetic later correction from the newly selected original.'))
+        current = self.news.event_detail(copy_item['id'])
+        self.assertTrue(current['requires_review'])
+        self.assertEqual(current['original_update']['original_item_id'], other_original['id'])
+        historical = self.news.event_detail(copy_item['id'], as_of=corrected_at)
+        self.assertTrue(historical['requires_review'])
+        self.assertEqual(historical['original_update']['original_item_id'], original['id'])
+        self.assertEqual(historical['original_update']['current_original_version_id'], correction['current_version_id'])
 
 
 if __name__ == '__main__':

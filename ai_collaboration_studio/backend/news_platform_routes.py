@@ -41,10 +41,11 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
     try:
         if method == "GET":
             replay_match=re.fullmatch(r"/api/news/items/([a-zA-Z0-9_-]{1,128})/market/replays",path)
+            history_match=re.fullmatch(r"/api/news/items/([a-zA-Z0-9_-]{1,128})/market/history",path)
             saved_context_match=re.fullmatch(r"/api/news/items/([a-zA-Z0-9_-]{1,128})/market/context",path)
             allowed = ({"q", "source", "category", "unread", "importance", "limit", "offset"} if path == "/api/news/items" else
                        {"room_id","as_of","limit","offset"} if path == "/api/news/market/options" else
-                       {"version_id","limit","offset"} if replay_match else {"context_id"} if saved_context_match else set())
+                       {"version_id","limit","offset"} if replay_match or history_match else {"context_id","version_id"} if saved_context_match else set())
             if set(query) - allowed or any(len(v) != 1 for v in query.values()):
                 raise ValueError("不支持的查询参数")
             if path == "/api/news/overview":
@@ -55,25 +56,33 @@ def news_response(runtime, path, *, query=None, payload=None, method="GET"):
                 return {"ok": True, "ai": ai.status()}, 200
             if path == "/api/news/startup" and startup is not None:
                 return {"ok": True, "startup": startup.status()}, 200
-            if replay_match:
-                from .news_market_tasks import replay_list
-                item_id=replay_match.group(1)
+            if replay_match or history_match:
+                from .news_market_tasks import history_list,replay_list
+                item_id=(replay_match or history_match).group(1)
                 if runtime.get_item(item_id) is None:return {"ok":False,"error":"这条消息不存在。"},404
                 version_id=query.get('version_id',[None])[0]
                 if version_id is not None and (not isinstance(version_id,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,128}',version_id)):
                     raise ValueError('请明确选择新闻版本')
                 limit,offset=int(query.get('limit',['50'])[0]),int(query.get('offset',['0'])[0])
                 if not 1<=limit<=100 or not 0<=offset<=1_000_000:raise ValueError('分页范围不正确')
-                return {'ok':True,**replay_list(runtime,item_id,version_id,limit,offset)},200
+                listing = replay_list if replay_match else history_list
+                return {'ok':True,**listing(runtime,item_id,version_id,limit,offset)},200
             if saved_context_match:
-                from .news_market_tasks import get,public_context
+                from .news_market_tasks import get,public_context,saved_record
                 context_id=query.get('context_id',[''])[0]
                 if not isinstance(context_id,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,128}',context_id):
-                    raise ValueError('请明确选择已保存回放')
-                saved=get(runtime,saved_context_match.group(1),context_id)
+                    raise ValueError('请明确选择已保存分析资料')
+                version_id=query.get('version_id',[None])[0]
+                if version_id is not None and (not isinstance(version_id,str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,128}',version_id)):
+                    raise ValueError('请明确选择新闻版本')
+                saved=get(runtime,saved_context_match.group(1),context_id,version_id=version_id,
+                          include_historical_equivalents=True)
                 if saved is None:return {'ok':False,'error':'这份已保存材料不存在或不属于该消息。'},404
+                record=saved_record(runtime,saved,saved_context_match.group(1),version_id)
+                if record is None:return {'ok':False,'error':'这份已保存材料的版本归属尚未确认。'},404
                 impact=ai.market_result(saved['item'],context_id) if ai is not None else None
-                return {'ok':True,'market_context':public_context(saved),'market_impact':impact if isinstance(impact,dict) else None},200
+                return {'ok':True,'market_context':public_context(saved),'market_impact':impact if isinstance(impact,dict) else None,
+                        'saved_record':record},200
             if path == "/api/news/market/options":
                 room_id = query.get("room_id", [""])[0]
                 if not isinstance(room_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", room_id):

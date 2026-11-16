@@ -10,7 +10,7 @@ import copy
 import json
 import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
@@ -32,6 +32,19 @@ def timestamp(value):
 
 def iso(value):
     return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z") if value is not None else None
+
+
+def first_visible_iso(value):
+    """Expose a usable microsecond cutoff without moving evidence into the past.
+
+    SQLite retains submicrosecond clock values, while ISO datetime serialization
+    rounds them. Round availability upward only; the original REAL value and
+    exact historical query predicates remain authoritative.
+    """
+    observed = datetime.fromtimestamp(value, timezone.utc)
+    if observed.timestamp() < value:
+        observed += timedelta(microseconds=1)
+    return observed.isoformat().replace("+00:00", "Z")
 
 
 def _json(value):
@@ -222,7 +235,8 @@ def _current(db, item_id, as_of=None):
 def _version(row):
     value = json.loads(row["snapshot"])
     value.update(id=row["id"], event_id=row["event_id"], version_number=row["version_number"],
-                 evidence_package_id=row["evidence_package_id"], previous_version_id=row["previous_version_id"])
+                 evidence_package_id=row["evidence_package_id"], previous_version_id=row["previous_version_id"],
+                 version_seen_at=first_visible_iso(row["version_seen"]))
     return value
 
 
@@ -477,7 +491,7 @@ def record_version(db, item, now, *, evidence=None, metadata=None, migrated=Fals
     snapshot = {"item_id": item["id"], "title": item.get("title", ""), "url": item.get("url", ""),
                 "excerpt": item.get("excerpt", ""), "source_id": item["source_id"],
                 "published_at": iso(timestamp(evidence.get("published_at")) or timestamp(item.get("published"))), "source_updated_at": iso(source_updated),
-                "first_seen_at": iso(timestamp(item.get("discovered", now))), "version_seen_at": iso(now),
+                "first_seen_at": iso(timestamp(item.get("discovered", now))), "version_seen_at": first_visible_iso(now),
                 "fetched_at": iso(timestamp(evidence.get("fetched_at")) or now), "content_status": state,
                 "evidence": evidence, "changes": changes, "migrated_legacy": migrated,
                 "material_fingerprint_version": "news_material_tables_v2", "structure_review": structure_review,
@@ -669,6 +683,50 @@ def quality_metrics(db, now):
             'not_supplier_billing':True,'not_independent_quality_acceptance':True}
 
 
+def _confirmed_original_update(db, current, annotations, as_of=None):
+    """Compare only the original bound to this immutable reprint snapshot.
+
+    A later attribution confirmation is not a review of saved conclusions.
+    Both the confirmation and original versions must be known at the cutoff;
+    edits to other event members and provenance-only versions are irrelevant.
+    """
+    evidence = current.get('evidence') or {}
+    confirmation = evidence.get('relation_confirmation')
+    origin_url = canonical_url(current.get('origin_url'))
+    if (current.get('relation') != 'reprint' or evidence.get('origin_confirmed') is not True
+            or not isinstance(confirmation, dict) or not origin_url
+            or confirmation.get('basis') != 'user_confirmed_same_original'
+            or confirmation.get('original_item_id') == current['item_id']):
+        return None
+    if not any(annotation['event_id'] == current['event_id']
+               and annotation['origin_url'] == origin_url
+               and annotation['confirmation'] == confirmation for annotation in annotations):
+        return None
+    cutoff = timestamp(as_of) if as_of is not None else float('inf')
+    original_id = confirmation.get('original_item_id')
+    bound = db.execute('SELECT * FROM news_article_versions WHERE item_id=? AND id=? AND version_seen<=?',
+                       (original_id, confirmation.get('original_version_id'), cutoff)).fetchone()
+    if bound is None:
+        return None
+    original = _version(dict(bound))
+    if (original['event_id'] != current['event_id']
+            or canonical_url(original.get('origin_url') or original.get('url')) != origin_url):
+        return None
+    later = [_version(dict(row)) for row in db.execute(
+        'SELECT * FROM news_article_versions WHERE item_id=? AND version_number>? AND version_seen<=? ORDER BY version_number',
+        (original_id, original['version_number'], cutoff))]
+    baseline = material_identity(original, original['evidence'])
+    changed = next((version for version in later
+                    if material_identity(version, version['evidence']) != baseline), None)
+    if changed is None:
+        return None
+    latest = later[-1]
+    return {'reason': 'confirmed_original_material_changed', 'original_item_id': original_id,
+            'confirmed_original_version_id': original['id'], 'current_original_version_id': latest['id'],
+            'first_changed_version_id': changed['id'], 'original_url': latest['url'],
+            'version_seen_at': latest['version_seen_at']}
+
+
 def detail(db, item_id, as_of=None):
     history = versions(db, item_id, as_of)
     if not history:
@@ -694,10 +752,12 @@ def detail(db, item_id, as_of=None):
         'SELECT observed_at,record FROM news_article_observations WHERE item_id=? AND observed_at<=? ORDER BY seq DESC',
         (item_id,timestamp(as_of) if as_of is not None else float('inf')))]
     annotations=relation_annotations(db,item_id,as_of)
+    original_update = _confirmed_original_update(db, current, annotations, as_of)
     previous = next((version for version in history if version['id'] == current.get('previous_version_id')), None)
     return {"event_id":current["event_id"], "current_version":current, "previous_version":previous, "version_count":len(history), "versions":history,
             "sources":list(members.values()), "independent_evidence_count":len({m["origin_url"] or m["item_id"] for m in members.values()}),
-            "requires_review":withdrawn or any(c["field"] in {"excerpt", "body_text"} for c in current["changes"]),
+            "requires_review":withdrawn or original_update is not None or any(c["field"] in {"excerpt", "body_text", "table_structure"} for c in current["changes"]),
+            "original_update":original_update,
             "retracted":withdrawn, "queue":queue_summary(db,current["event_id"]) if as_of is None else None,
             "last_fetch_attempt":json.loads(last_fetch["receipt"]) if last_fetch else None,
             "observations":observations,
